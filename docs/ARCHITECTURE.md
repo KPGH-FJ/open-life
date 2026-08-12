@@ -41,11 +41,15 @@ slice. These are migration constraints, not the target product contract.
 
 The first S2 vertical slice now adds `CanonicalTaskRuntimeStore` on the
 provider-generated report path. It owns stable report Task identity, Run
-membership, typed artifact/review/materialization Items, and independent
-ArtifactVersion metadata in `task_runtime.db`. The report Artifact exists before
-its Proposal; Review is a checkpoint relation, and confirmed materialization
-updates the same ArtifactVersion. This is current product code for that path,
-not yet a claim that every Main Chat route has migrated.
+membership, typed instruction/provider-generation/artifact/review/materialization
+Items, and independent ArtifactVersion metadata in `task_runtime.db`. A new
+report Run is admitted only after its Policy-authorized instruction digest and
+completed provider receipt have been validated and durably recorded by their
+existing owners. The canonical store records their identities and bounded
+digests, not prompt or response bodies. The report Artifact exists before its
+Proposal; Review is a checkpoint relation, and confirmed materialization updates
+the same ArtifactVersion. This is current product code for that path, not yet a
+claim that every Main Chat route has migrated.
 
 The existing backend-owned `TasksViewModel` and `WorkspaceViewModel` now read a
 consistent canonical report snapshot and project its Run memberships, typed
@@ -153,9 +157,10 @@ refreshed product read model where one exists.
 
 During the current vertical migration, `AgentRunStore` remains the execution
 and receipt owner while `CanonicalTaskRuntimeStore` owns stable report Task,
-Run membership, Item, and Artifact metadata. It deliberately does not copy
-AgentRun status or TaskSession bodies. Compatibility owners are retired only
-after each migrated path has a replacement read model and recovery proof.
+Run membership, typed execution-fact Item, and Artifact metadata. It
+deliberately does not copy AgentRun status, provider payloads, or TaskSession
+bodies. Compatibility owners are retired only after each migrated path has a
+replacement read model and recovery proof.
 
 ## Personal intelligence boundary
 

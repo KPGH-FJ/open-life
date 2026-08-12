@@ -4,75 +4,71 @@ Status: complete
 
 ## Objective
 
-Complete the S2 report read-model slice. The existing backend-owned
-`TasksViewModel` and `WorkspaceViewModel` must project canonical report Task,
-Run membership, typed Item, Artifact, and ArtifactVersion truth without the
-frontend joining raw stores or treating compatibility TaskSession completion as
-the report Task authority.
+Complete the next S2.3 report-runtime slice. A provider-generated report must
+record the authenticated user instruction and the exact completed provider
+generation as canonical typed Items before any ArtifactDraft or Review
+checkpoint is admitted.
 
 ## Product result
 
 ```text
-task_runtime.db
-  -> backend TasksViewModel composition
-  -> canonical report task status + typed item timeline + artifact summaries
-  -> existing Tauri ViewModel command
-  -> Tasks and Workspace product surfaces
+authenticated instruction digest
+  -> canonical Instruction Item
+validated durable provider receipt
+  -> canonical ProviderGeneration Item
+  -> ArtifactDraft Item
+  -> ReviewCheckpoint / materialization
 ```
 
-The frontend receives bounded metadata and materialized file references only.
-Artifact bodies remain in their files.
+The canonical store persists metadata-safe digests and identities only. It does
+not copy user prompts, provider responses, report bodies, or credentials.
 
 ## In scope
 
-1. Add one consistent read snapshot for canonical report Task, Run membership,
-   Items, Artifacts, and current ArtifactVersions.
-2. Overlay the canonical report Task onto its current compatibility execution
-   session by exact Run membership, avoiding duplicate product tasks.
-3. Derive report lifecycle and delivery proof from canonical Artifact state;
-   compatibility completion cannot override it.
-4. Project bounded typed Item and Artifact summaries through
-   `TasksViewModel`, inherited by `WorkspaceViewModel`.
-5. Show canonical report results/status in the existing Tasks and Workspace
-   surfaces without a broad visual redesign.
-6. Keep report rejection and effect-unknown states truthful in the canonical
-   owner and product read model.
-7. Add store, builder, Tauri composition, TypeScript contract, and product UI
-   tests.
+1. Add `instruction` and `provider_generation` to the canonical report Item
+   contract with a safe schema-v1 to schema-v2 migration.
+2. Create one instruction and one completed provider-generation Item for each
+   newly admitted report Run.
+3. Bind the instruction to the Policy-authorized user-message digest and the
+   generation to one exact provider request and terminal receipt digest.
+4. Move production ArtifactDraft admission after provider receipt validation
+   and durable provider-event persistence.
+5. Preserve exact replay, multiple Artifact drafts per Run, multiple Runs per
+   Task, and existing schema-v1 report records.
+6. Project the new typed Items through the existing backend ViewModels without
+   frontend store joins or report-body copies.
 
 ## Out of scope
 
-- S3 Web or local-document capability expansion;
-- new Results/Changes/Preview information architecture;
-- provider/model routing, fallback, steering, concurrency, or subagents;
+- real Web or local-document capability expansion from S3;
+- canonical Plan, tool-call, Observation, Verification, or FinalResult Items;
+- ItemAttempt, steering, concurrency, or subagents;
+- replacing report task controls in this slice;
 - migrating non-report Main Chat routes;
-- deleting compatibility stores before their remaining read and control uses
-  are replaced;
 - Memory or LifeModel changes;
-- external-live provider or Web credit.
+- external-live or native-desktop evidence credit.
 
 ## Ownership
 
-- `CanonicalTaskRuntimeStore` owns migrated report Task, Run membership, Item,
-  Artifact, version, and lifecycle truth.
-- `AgentRunStore` remains the execution/receipt owner for current Runs.
-- compatibility TaskSession supplies controls and old event activity only; it
-  cannot override canonical report completion or Artifact state.
-- backend ViewModels perform the only product composition. Frontend code only
-  renders the ViewModel contract.
+- Policy owns the authenticated instruction authorization digest.
+- provider lifecycle and durable event owners prove the completed provider
+  attempt before canonical report admission.
+- `CanonicalTaskRuntimeStore` owns the new typed Item identities and ordering.
+- `AgentRunStore` remains the detailed execution and receipt owner during this
+  vertical migration, but it cannot override canonical report product state.
 
 ## Acceptance
 
 | Scenario | Required result |
 | --- | --- |
-| Report waiting for Review | one product Task with `waiting_review`, exact checkpoint and Artifact |
-| Compatibility session says completed | canonical waiting/unknown state still wins |
-| Confirmed ArtifactVersion | Task is completed only with matching observed digest and file reference |
-| Multiple Runs or Artifacts | one Task; all memberships/items visible; partial materialization is not completed |
-| Rejected Review | canonical report Task becomes blocked and does not claim delivery |
-| Effect unknown | Task remains remote/effect unknown and never completed |
-| Store unavailable/read failure | ViewModel is stale/error with warning; no compatibility fallback for migrated truth |
-| Frontend | existing Tasks/Workspace surfaces render canonical artifact status from the backend contract |
+| New report Run | Instruction, ProviderGeneration, then ArtifactDraft Items |
+| Two Artifacts in one Run | one instruction/generation pair and two drafts |
+| Exact replay | no duplicate Item, Run, Task, or Artifact |
+| Same Run with changed instruction or receipt | fail closed with zero partial mutation |
+| Later Run in same Task | new instruction/generation pair under the same Task |
+| Invalid or missing completed provider receipt | no canonical report admission |
+| Existing schema-v1 store | opens through transactional migration with prior identities and facts intact |
+| Product read model | typed Items appear in backend Task/Workspace projections |
 
 ## Checks
 
@@ -90,26 +86,29 @@ corepack pnpm --dir frontend test:e2e
 
 ## Stop condition
 
-Close this slice only when one backend product task represents the canonical
-report lifecycle, Item/Artifact metadata reaches both product ViewModels, the
-frontend renders it without raw-store joins, recovery states remain
-conservative, all gates pass, commits are reviewable, and the tree is clean.
+Close this slice only when provider-generated report admission cannot precede
+its validated durable provider receipt, the new Item order and replay contract
+survive restart and migration, backend ViewModels expose the facts, all gates
+pass, commits are reviewable, and the tree is clean.
 
 ## Closure
 
-- Canonical report Task snapshots now reach both backend product ViewModels.
-- Compatibility completion cannot override canonical Review, rejection,
-  failure, or effect-unknown truth.
-- Tasks and Workspace render canonical Artifact status and materialized file
-  references; task controls remain bound to the compatibility execution session
-  until that control path migrates.
-- Store, builder, rejection reconciliation, Tauri composition, frontend
-  contract, product UI, production build, and browser-shell checks pass.
-- No external-live or native desktop trial credit is claimed by this slice.
+- New provider-generated report Runs record exactly one authenticated
+  Instruction and one completed ProviderGeneration before ArtifactDraft Items.
+- Missing, failed, or conflicting provider truth creates no canonical report
+  Task or Artifact; changed Run facts roll back without partial mutation.
+- Multiple Artifacts reuse one execution-fact pair, exact replay remains
+  idempotent, and later Runs receive their own pair under the same Task.
+- Existing schema-v1 report stores migrate transactionally; legacy identities
+  remain readable without inventing historical execution facts.
+- Backend Task and Workspace projections expose the typed Items. No prompt,
+  response, Artifact body, or credential is copied into the canonical store.
+- Rust, frontend, production-build, absence-guard, and browser-shell gates pass.
+  This slice claims no native-desktop or external-live evidence.
 
 ## Next pointer
 
-Continue S2 with one bounded slice that moves the next report execution fact
-into canonical Items and removes the corresponding compatibility read
-dependency. S3 remains blocked until the report runtime no longer depends on a
-parallel product lifecycle owner for its execution truth.
+Continue S2.3 with the next report execution facts: Plan, governed tool call,
+Observation, Verification, and FinalResult. Do not begin S3 capability
+expansion until those facts have one canonical lifecycle owner on the report
+path.
