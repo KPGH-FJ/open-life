@@ -7,6 +7,15 @@ function read(path: string): string {
 }
 
 describe("release Tauri surface", () => {
+  it("runs frontend hooks inside the frontend working directory supplied by Tauri", () => {
+    const config = JSON.parse(read("../src-tauri/tauri.conf.json")) as {
+      build?: { beforeBuildCommand?: string; beforeDevCommand?: string };
+    };
+
+    expect(config.build?.beforeBuildCommand).toBe("corepack pnpm build");
+    expect(config.build?.beforeDevCommand).toBe("corepack pnpm dev --host 127.0.0.1 --port 5173");
+  });
+
   it("does not expose retired feedback, evolution, proactive, or dev A2A wrappers", () => {
     const releaseClient = read("src/tauri.ts");
     const browserMock = read("src/test/mocks/tauri.ts");
