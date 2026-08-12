@@ -2276,6 +2276,42 @@ where
             "Main Chat kernel rejected a user message that did not match its PolicyDecision".into(),
         );
     }
+    let report_run_is_authorized = main_chat_agent_turn
+        .decision
+        .policy_decision
+        .allows(AllowedCapability::ProviderGeneration)
+        && main_chat_agent_turn
+            .decision
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal);
+    if report_run_is_authorized {
+        if let Some(artifact_specs) = generated_artifact_specs(&user_text) {
+            let plan_digest = canonical_report_plan_digest(
+                &main_chat_agent_turn
+                    .decision
+                    .policy_decision
+                    .authorized_user_message_digest,
+                &artifact_specs,
+            )?;
+            state
+                .canonical_task_runtime_store
+                .as_ref()
+                .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
+                .lock()
+                .await
+                .begin_report_run(openlife_core::task_runtime::BeginReportRunInput {
+                    conversation_id: session_id,
+                    execution_session_id: &task_session_id,
+                    run_id: canonical_run_id,
+                    outcome_digest: &main_chat_agent_turn
+                        .decision
+                        .policy_decision
+                        .authorized_user_message_digest,
+                    plan_digest: &plan_digest,
+                })
+                .map_err(|error| format!("begin canonical report run failed: {error}"))?;
+        }
+    }
     let sanitized_selected_skill_id =
         sanitize_main_chat_selected_skill_id(selected_skill_id.as_deref());
     let mut execution_transcript = main_chat_agent_turn.transcript_entries.clone();
@@ -2580,6 +2616,10 @@ where
         ),
     })
     .with_canonical_run_id(canonical_run_id)
+    .with_canonical_steering_sources(
+        state.canonical_task_runtime_store.clone(),
+        Arc::clone(&state.memory_store),
+    )
     .with_replayed_read_observations(replayed_read_observations)
     .with_read_tool_executor(Arc::new(AppStateMainChatReadToolExecutor::new(
         Arc::clone(state),
@@ -5701,6 +5741,9 @@ pub struct MainChatKernel<C = SchedulerMainChatModelClient> {
     context_config: MainChatKernelContextConfig,
     read_tool_executor: Option<Arc<dyn MainChatKernelReadToolExecutor>>,
     canonical_run_id: Option<String>,
+    canonical_task_store:
+        Option<Arc<tokio::sync::Mutex<openlife_core::task_runtime::CanonicalTaskRuntimeStore>>>,
+    memory_store: Option<Arc<tokio::sync::Mutex<openlife_core::memory::MemoryStore>>>,
     replayed_read_observations: Vec<MainChatReplayedReadObservation>,
 }
 
@@ -5722,12 +5765,78 @@ impl<C> MainChatKernel<C>
 where
     C: MainChatModelClient,
 {
+    async fn consume_report_steering_at_provider_checkpoint(
+        &self,
+        session_id: &str,
+        system_prompt: &mut String,
+    ) -> Result<(), String> {
+        let (Some(task_store), Some(memory_store), Some(run_id)) = (
+            self.canonical_task_store.as_ref(),
+            self.memory_store.as_ref(),
+            self.canonical_run_id.as_deref(),
+        ) else {
+            return Ok(());
+        };
+        let task_id = task_store
+            .lock()
+            .await
+            .resolve_report_task_id_for_conversation(session_id, run_id)
+            .map_err(|error| format!("load steering task failed: {error}"))?;
+        let Some(task_id) = task_id else {
+            return Ok(());
+        };
+        let pending = task_store
+            .lock()
+            .await
+            .consume_pending_report_steering(&task_id, run_id)
+            .map_err(|error| format!("consume report steering failed: {error}"))?;
+        let mut steering = task_store
+            .lock()
+            .await
+            .list_consumed_report_steering(&task_id, run_id)
+            .map_err(|error| format!("load consumed report steering failed: {error}"))?;
+        if let Some(pending) = pending {
+            if !steering
+                .iter()
+                .any(|existing| existing.steering_id == pending.steering_id)
+            {
+                steering.push(pending);
+            }
+        }
+        if steering.is_empty() {
+            return Ok(());
+        }
+        system_prompt.push_str(
+            "\n\nThe authenticated user added this in-scope constraint before provider generation. Apply it without expanding tools, data routes, workspace scope, or side-effect authority:\n",
+        );
+        for record in steering {
+            let message = memory_store
+                .lock()
+                .await
+                .load_active_conversation_message_by_ref(&record.source_message_ref)
+                .map_err(|error| format!("load steering body failed: {error}"))?
+                .filter(|message| message.role == "user")
+                .ok_or_else(|| "canonical_report_steering_source_missing".to_string())?;
+            if openlife_core::agent::metadata_safe_text_digest(&message.content).1
+                != record.steering_digest
+            {
+                return Err("canonical_report_steering_source_digest_drift".into());
+            }
+            system_prompt.push_str("- ");
+            system_prompt.push_str(&bounded_text(&message.content, 4_000));
+            system_prompt.push('\n');
+        }
+        Ok(())
+    }
+
     pub fn new(model_client: C) -> Self {
         Self {
             model_client,
             context_config: MainChatKernelContextConfig::default(),
             read_tool_executor: None,
             canonical_run_id: None,
+            canonical_task_store: None,
+            memory_store: None,
             replayed_read_observations: Vec::new(),
         }
     }
@@ -5748,6 +5857,18 @@ where
     fn with_canonical_run_id(mut self, canonical_run_id: impl Into<String>) -> Self {
         let canonical_run_id = canonical_run_id.into();
         self.canonical_run_id = (!canonical_run_id.trim().is_empty()).then_some(canonical_run_id);
+        self
+    }
+
+    fn with_canonical_steering_sources(
+        mut self,
+        task_store: Option<
+            Arc<tokio::sync::Mutex<openlife_core::task_runtime::CanonicalTaskRuntimeStore>>,
+        >,
+        memory_store: Arc<tokio::sync::Mutex<openlife_core::memory::MemoryStore>>,
+    ) -> Self {
+        self.canonical_task_store = task_store;
+        self.memory_store = Some(memory_store);
         self
     }
 
@@ -7567,6 +7688,26 @@ where
             }
             None => (None, Vec::new()),
         };
+        if let Err(code) = self
+            .consume_report_steering_at_provider_checkpoint(&input.session_id, &mut system_prompt)
+            .await
+        {
+            event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });
+            return MainChatTurnResult {
+                assistant_message: None,
+                blockers: vec![code],
+                proposals: Vec::new(),
+                tool_calls,
+                write_outcome: None,
+                memory_governance: None,
+                route_metadata: Some(route_metadata),
+                context_metadata: Some(context_metadata),
+                direct_writes_executed: false,
+                legacy_fallback_used: false,
+                canonical_tool_graphs,
+                canonical_supplemental_observations: Vec::new(),
+            };
+        }
         let instruction = generated_artifact_provider_instruction(&specs);
         let base_limit = MAX_SYSTEM_PROMPT_CHARS.saturating_sub(
             instruction.chars().count()
@@ -9645,6 +9786,7 @@ struct CanonicalReportArtifactBatchInput<'a> {
     conversation_id: &'a str,
     execution_session_id: &'a str,
     run_id: &'a str,
+    user_text: &'a str,
     instruction_digest: &'a str,
     provider_receipt: Option<&'a ProviderInvocationReceipt>,
     tool_observations: &'a [CanonicalReportToolObservationFact],
@@ -9775,33 +9917,23 @@ fn canonical_report_provider_receipt_digest(
 
 fn canonical_report_plan_digest(
     instruction_digest: &str,
-    tool_observations: &[CanonicalReportToolObservationFact],
-    outcomes: &[MainChatKernelWriteOutcome],
+    artifact_specs: &[Value],
 ) -> Result<String, String> {
-    let mut artifact_contracts = outcomes
+    let mut artifact_contracts = artifact_specs
         .iter()
-        .filter(|outcome| {
-            outcome
-                .governed_input
-                .get("generatedByProvider")
-                .and_then(Value::as_bool)
-                == Some(true)
-        })
-        .map(|outcome| {
-            let artifact_kind = outcome
-                .governed_input
-                .get("artifactKind")
+        .map(|spec| {
+            let artifact_kind = spec
+                .get("kind")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "canonical_report_artifact_kind_missing".to_string())?;
-            let target_reference = outcome
-                .governed_input
-                .get("path")
+            let file_name = spec
+                .get("fileName")
                 .and_then(Value::as_str)
                 .ok_or_else(|| "canonical_report_artifact_target_missing".to_string())?;
             Ok(serde_json::json!({
                 "artifactKind": artifact_kind,
                 "targetReferenceDigest":
-                    openlife_core::agent::metadata_safe_text_digest(target_reference).1,
+                    openlife_core::agent::metadata_safe_text_digest(file_name).1,
                 "reviewRequired": true,
             }))
         })
@@ -9823,7 +9955,6 @@ fn canonical_report_plan_digest(
                 "verification",
                 "final_result",
             ],
-            "toolObservationCount": tool_observations.len(),
             "artifactContracts": artifact_contracts,
             "directWritesExecuted": false,
         }))
@@ -9849,8 +9980,9 @@ async fn prepare_canonical_report_artifacts_after_provider_receipt(
         .provider_receipt
         .ok_or_else(|| "canonical_report_provider_receipt_missing".to_string())?;
     let receipt_digest = canonical_report_provider_receipt_digest(receipt)?;
-    let plan_digest =
-        canonical_report_plan_digest(input.instruction_digest, input.tool_observations, outcomes)?;
+    let artifact_specs = generated_artifact_specs(input.user_text)
+        .ok_or_else(|| "canonical_report_plan_has_no_artifact_contract".to_string())?;
+    let plan_digest = canonical_report_plan_digest(input.instruction_digest, &artifact_specs)?;
     let context = CanonicalReportAdmissionContext {
         conversation_id: input.conversation_id,
         execution_session_id: input.execution_session_id,
@@ -11547,6 +11679,7 @@ async fn build_kernel_write_outcome_command_surface_result(
             conversation_id: session_id,
             execution_session_id: task_session_id,
             run_id: canonical_run_id,
+            user_text,
             instruction_digest: &main_chat_agent_turn
                 .decision
                 .policy_decision
@@ -23043,6 +23176,7 @@ mod tests {
                 conversation_id: "conversation-canonical-report",
                 execution_session_id: "execution-session-canonical-report",
                 run_id: "run-canonical-report",
+                user_text: prompt,
                 instruction_digest: &ingress.policy_decision.authorized_user_message_digest,
                 provider_receipt: Some(&provider_receipt),
                 tool_observations: &[],
@@ -23157,6 +23291,7 @@ mod tests {
                 conversation_id: "conversation-missing-receipt",
                 execution_session_id: "execution-missing-receipt",
                 run_id: "run-missing-receipt",
+                user_text: "Create a Markdown report",
                 instruction_digest: &instruction_digest,
                 provider_receipt: None,
                 tool_observations: &[],
@@ -23178,6 +23313,7 @@ mod tests {
                 conversation_id: "conversation-failed-receipt",
                 execution_session_id: "execution-failed-receipt",
                 run_id: "run-failed-receipt",
+                user_text: "Create a Markdown report",
                 instruction_digest: &instruction_digest,
                 provider_receipt: Some(&failed_receipt),
                 tool_observations: &[],

@@ -15,6 +15,7 @@ const mocks = vi.hoisted(() => ({
   selectMarkdownMemoryRoot: vi.fn(),
   draftMarkdownMemoryFileProposal: vi.fn(),
   deactivateMarkdownMemoryFileProposal: vi.fn(),
+  submitMainChatTaskSteering: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -43,6 +44,7 @@ vi.mock("@/tauri", () => ({
   selectMarkdownMemoryRoot: mocks.selectMarkdownMemoryRoot,
   draftMarkdownMemoryFileProposal: mocks.draftMarkdownMemoryFileProposal,
   deactivateMarkdownMemoryFileProposal: mocks.deactivateMarkdownMemoryFileProposal,
+  submitMainChatTaskSteering: mocks.submitMainChatTaskSteering,
 }));
 
 import { tauriWorkspaceConversationDataSource } from "./workspaceConversationDataSource";
@@ -62,6 +64,7 @@ describe("workspace conversation Tauri stream adapter", () => {
     mocks.selectMarkdownMemoryRoot.mockReset();
     mocks.draftMarkdownMemoryFileProposal.mockReset();
     mocks.deactivateMarkdownMemoryFileProposal.mockReset();
+    mocks.submitMainChatTaskSteering.mockReset();
   });
 
   it("keeps Markdown Memory reads, root selection, writes, and deactivation on backend bridges", async () => {

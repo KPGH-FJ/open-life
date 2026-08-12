@@ -39,15 +39,15 @@ task sessions, Agent runs, action queues, event streams, and a separate
 PlanExecute session. A current Main Chat operation is also effectively one task
 slice. These are migration constraints, not the target product contract.
 
-The first S2 vertical slice now adds `CanonicalTaskRuntimeStore` on the
+The first S2 vertical slice adds `CanonicalTaskRuntimeStore` on the
 provider-generated report path. It owns stable report Task identity, Run
 membership, typed instruction/plan/tool/observation/provider-generation/
 artifact/review/materialization/verification/final-result Items, and independent
-ArtifactVersion metadata in `task_runtime.db`. A new
-report Run is admitted only after its Policy-authorized instruction digest and
-completed provider receipt have been validated and durably recorded by their
-existing owners. The canonical store records their identities and bounded
-digests, not prompt or response bodies. The report Artifact exists before its
+ArtifactVersion metadata in `task_runtime.db`. A report Task and Run begin
+before governed reads or provider work with the Policy-authorized instruction
+and deterministic plan digest. Completed tool and provider receipts append
+later in the same Run before ArtifactDraft. The canonical store records their
+identities and bounded digests, not prompt or response bodies. The report Artifact exists before its
 Proposal; Review is a checkpoint relation, and confirmed materialization updates
 the same ArtifactVersion. The Task becomes delivered only after each current
 ArtifactVersion has an exact expected/observed digest match and the store writes
@@ -73,6 +73,23 @@ replay metadata contains only the selected chunk count and stable selection
 digest. Restart replay reselects the exact task-bound ResourceStore content and
 must reproduce that digest before provider synthesis; it does not redispatch the
 ToolGateway read or persist a document-body preview.
+
+S4 extends the same report Run with typed Steering Items and a monotonic plan
+revision. Workspace submits authenticated steering while work is active.
+Conversation remains the only body owner; `CanonicalTaskRuntimeStore` keeps the
+exact message reference and digests. One pending in-scope Steering Item is
+consumed exactly once before the next report provider generation and survives
+restart. Steering that asks for a new workspace, provider, network route, tool,
+destructive action, or other scope is recorded blocked and grants nothing. The
+process also bounds independent Main Chat executions before any message or task
+persistence, while the cancellation registry retains one execution owner per
+task.
+
+Review approval can use one inline approve-and-continue command. The backend
+first proves acceptance and, when required, materialization; it then reloads
+task truth and resumes only when the existing control owner says the same task
+is resumable. Approval, effect confirmation, and continuation remain separate
+facts even though the product presents one action.
 
 The existing backend-owned `TasksViewModel` and `WorkspaceViewModel` now read a
 consistent canonical report snapshot and project its Run memberships, typed

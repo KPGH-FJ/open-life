@@ -4116,7 +4116,7 @@ pub(crate) async fn retry_main_chat_agent_action(
     load_main_chat_agent_task_state(&task_session_id, &state).await
 }
 
-async fn load_main_chat_agent_task_state(
+pub(crate) async fn load_main_chat_agent_task_state(
     task_session_id: &str,
     state: &Arc<AppState>,
 ) -> Result<MainChatAgentTaskState, String> {

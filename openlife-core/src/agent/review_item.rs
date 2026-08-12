@@ -394,8 +394,14 @@ fn allowed_actions_for(
 ) -> Vec<ReviewAction> {
     let mut actions = Vec::new();
     let approve_blocker = approve_blocker(proposal, decision_context, input);
+    let approve = action(item_id, "approve", "Approve", ReviewActionKind::Approve);
+    let approve = if let Some(relation) = task_resume_relation {
+        approve.for_task(relation.task_session_id.clone())
+    } else {
+        approve
+    };
     actions.push(
-        action(item_id, "approve", "Approve", ReviewActionKind::Approve)
+        approve
             .with_expected_materialization_status(ReviewItemMaterializationStatus::Unknown)
             .requiring_confirmation()
             .maybe_disabled(approve_blocker),

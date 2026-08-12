@@ -67,6 +67,7 @@ function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationContr
       targetRef: "workspace",
     }),
     send: vi.fn().mockResolvedValue(undefined),
+    steer: vi.fn().mockResolvedValue(undefined),
     cancel: vi.fn().mockResolvedValue(undefined),
     renameSelected: vi.fn().mockResolvedValue(true),
     deleteSelected: vi.fn().mockResolvedValue(true),
@@ -129,5 +130,22 @@ describe("WorkspaceConversationPanel Markdown Memory", () => {
       screen.getByText("OpenLife 没有展示无法在你指定资料范围内核对的回答。")
     ).toBeInTheDocument();
     expect(screen.queryByText("本轮按限定资料回答")).not.toBeInTheDocument();
+  });
+
+  it("keeps the composer available for an exact in-flight task adjustment", () => {
+    const controller = controllerWhileMarkdownMemoryIsSubmitting();
+    controller.draft = "把风险结论放在最前面";
+    controller.activeTaskSessionId = "task-steer";
+    controller.turnState = {
+      phase: "streaming",
+      sessionId: "conversation-1",
+      taskSessionId: "task-steer",
+      runId: "run-steer",
+    };
+
+    render(<WorkspaceConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
+
+    expect(screen.getByPlaceholderText("告诉 OpenLife 你现在要处理什么")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "调整当前任务" })).toBeEnabled();
   });
 });

@@ -160,6 +160,8 @@ pub struct ReviewAction {
     pub requires_confirmation: bool,
     pub target_review_item_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_task_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_materialization_status_after_dispatch: Option<ReviewItemMaterializationStatus>,
     #[serde(default)]
     pub completion_proof_after_dispatch: bool,
@@ -181,9 +183,15 @@ impl ReviewAction {
             disabled_reason: None,
             requires_confirmation: false,
             target_review_item_id: target_review_item_id.into(),
+            target_task_session_id: None,
             expected_materialization_status_after_dispatch: None,
             completion_proof_after_dispatch: false,
         }
+    }
+
+    pub fn for_task(mut self, task_session_id: impl Into<String>) -> Self {
+        self.target_task_session_id = Some(task_session_id.into());
+        self
     }
 
     pub fn validate(&self) -> Result<(), ProductReadModelContractError> {

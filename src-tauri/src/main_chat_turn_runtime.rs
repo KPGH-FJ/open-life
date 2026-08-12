@@ -2340,6 +2340,16 @@ impl<'a> OpenLifeTurnRuntime<'a> {
         // AgentRun creation, cancellation ownership, or durable events so an
         // invalid request cannot leave a plausible partial turn behind.
         validate_openlife_turn_admission(&input).map_err(|error| error.to_string())?;
+        let execution_slots = self
+            .state
+            .main_chat_runtime_state
+            .lock()
+            .await
+            .execution_slots
+            .clone();
+        let _execution_slot = execution_slots
+            .try_acquire_owned()
+            .map_err(|_| "main_chat_task_concurrency_limit_reached".to_string())?;
         let OpenLifeTurnInput {
             operation_id,
             session_id,
@@ -10542,6 +10552,61 @@ mod turn_admission_tests {
             .unwrap();
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].id, operation_id);
+    }
+
+    #[tokio::test]
+    async fn concurrency_limit_rejects_before_message_task_or_run_mutation() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let slots = state
+            .main_chat_runtime_state
+            .lock()
+            .await
+            .execution_slots
+            .clone();
+        let _all_slots = slots
+            .acquire_many_owned(3)
+            .await
+            .expect("test owns the configured execution capacity");
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let session_id = "d050-concurrency-limit";
+        let error = crate::main_chat_send::send_message_with_operation_state(
+            operation_id.clone(),
+            session_id.into(),
+            vec![openlife_core::llm::ChatMessage {
+                role: "user".into(),
+                content: "Give one focus tip.".into(),
+            }],
+            None,
+            &state,
+        )
+        .await
+        .expect_err("the fourth concurrent turn must fail before admission mutates truth");
+        assert_eq!(error, "main_chat_task_concurrency_limit_reached");
+        assert!(state
+            .memory_store
+            .lock()
+            .await
+            .export_all_messages()
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_sessions(None, 10, 0)
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_runs_for_session(session_id, 10)
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

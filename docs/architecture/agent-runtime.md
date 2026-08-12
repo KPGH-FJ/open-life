@@ -17,12 +17,14 @@ current source. Superseded execution plans remain in Git history.
 
 ## Last verified
 
-2026-08-10 during Phase 5.5C generic runtime input convergence.
+2026-08-13 during S4 report steering, inline continuation, and bounded
+concurrency closure.
 
 ## Source map
 
 - `src-tauri/src/main_chat_send.rs`
 - `src-tauri/src/main_chat_streaming.rs`
+- `src-tauri/src/main_chat_steering.rs`
 - `src-tauri/src/main_chat_turn_runtime.rs`
 - `src-tauri/src/main_chat_turn_pipeline.rs`
 - `src-tauri/src/main_chat_kernel.rs`
@@ -152,6 +154,22 @@ or body-preview text: it keeps only selection digest/count and a safe summary.
 Restart synthesis reselects from the canonical task-bound ResourceStore and
 fails closed if the selection digest or count has drifted.
 
+For the report path, `CanonicalTaskRuntimeStore` now creates Task, Run,
+Instruction, and Plan before the first governed read or provider call. Active
+Workspace steering is an authenticated Conversation message plus a digest-only
+Steering Item bound to the exact execution session, canonical Run, and base
+plan revision. The kernel consumes one pending in-scope Steering Item at the
+safe checkpoint before provider generation. Consumption is transactional and
+increments the plan revision; restart cannot consume it twice. A scope-
+expanding steering request is recorded blocked and cannot alter policy or mint
+a capability.
+
+Independent Main Chat turns share a process-wide bounded execution semaphore.
+The limit is claimed immediately after request validation and before canonical
+message, task, or run persistence. Per-task cancellation registration remains
+the single-owner guard, so identical concurrent work cannot bypass task
+ownership.
+
 ## Runtime Support And Task Evidence
 
 `src-tauri/src/main_chat_runtime_support.rs` creates task sessions, appends
@@ -162,6 +180,10 @@ policy, and finalizes failures with `directWritesExecuted=false`.
 refresh, resume, cancel, and retry controls. Resume and retry are evidence
 aware: they inspect continuity diagnostics, pending permissions, replay safety,
 tool availability, provider availability, and action metadata before replay.
+Review actions related to a task can use the typed approve-and-continue bridge:
+proposal acceptance/materialization is proven first, then the backend reloads
+task state and invokes the existing replay owner only when `can_resume` is
+true. The UI never treats an approval response as continuation proof.
 
 ## Test And Eval Surfaces
 

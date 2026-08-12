@@ -18,6 +18,7 @@ import {
   selectMainChatSkill,
   clearMainChatSkill,
   startStreamMessage,
+  submitMainChatTaskSteering,
   type ChatSession,
   type ChatLifeModelInfluenceSnapshot,
   type ResourceDetachReceipt,
@@ -34,6 +35,7 @@ import {
   type StreamMessageChunkPayload,
   type StreamMessageDonePayload,
   type StreamMessageStartPayload,
+  type SubmitMainChatSteeringResponse,
 } from "@/tauri";
 import type { ChatMessage } from "@/types";
 
@@ -65,6 +67,13 @@ export interface WorkspaceConversationDataSource {
     events: WorkspaceStreamEvents
   ): Promise<StreamMessageDonePayload>;
   cancelTask(taskSessionId: string): Promise<MainChatAgentTaskState>;
+  steerTask?(request: {
+    steeringId: string;
+    taskSessionId: string;
+    runId: string;
+    sessionId: string;
+    content: string;
+  }): Promise<SubmitMainChatSteeringResponse>;
   listSkills?(sessionId?: string): Promise<MainChatSkillSummary[]>;
   selectSkill?(sessionId: string, skillId: string): Promise<MainChatSelectedSkill>;
   clearSkill?(sessionId: string): Promise<MainChatSelectedSkill>;
@@ -131,6 +140,7 @@ export const tauriWorkspaceConversationDataSource: WorkspaceConversationDataSour
   detachResource: detachResourceFromTurn,
   streamTurn,
   cancelTask: cancelMainChatAgentTask,
+  steerTask: submitMainChatTaskSteering,
   listSkills: listMainChatSkills,
   selectSkill: selectMainChatSkill,
   clearSkill: clearMainChatSkill,

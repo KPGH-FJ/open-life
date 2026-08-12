@@ -680,7 +680,10 @@ export function WorkspaceConversationPanel({
           value={controller.draft}
           rows={3}
           placeholder="告诉 OpenLife 你现在要处理什么"
-          disabled={controller.loadStatus !== "ready" || controller.busy}
+          disabled={
+            controller.loadStatus !== "ready" ||
+            (controller.busy && controller.turnState.phase !== "streaming")
+          }
           aria-describedby={!action.enabled ? "workspace-composer-disabled-reason" : undefined}
           onChange={event => controller.setDraft(event.target.value)}
           onKeyDown={event => {
@@ -697,7 +700,7 @@ export function WorkspaceConversationPanel({
             role="status"
           >
             {controller.turnState.phase === "streaming"
-              ? "正在接收回复；可取消当前任务"
+              ? "正在执行；输入任务内调整后可发送到下一个安全检查点"
               : controller.turnState.phase === "cancelling"
                 ? "正在等待后端确认取消终态"
                 : action.enabled
@@ -707,25 +710,42 @@ export function WorkspaceConversationPanel({
           <div className="ol-workspace-composer__actions">
             {(controller.turnState.phase === "streaming" ||
               controller.turnState.phase === "cancelling") && (
-              <FoundationActionButton
-                label="取消任务"
-                icon={<Square size={16} aria-hidden="true" />}
-                loading={controller.turnState.phase === "cancelling"}
-                loadingLabel="正在取消"
-                disabled={controller.turnState.phase === "cancelling"}
-                disabledReason={
-                  controller.turnState.phase === "cancelling"
-                    ? "取消请求已发送；正在等待真实终态。"
-                    : undefined
-                }
-                data-action-category="product"
-                data-action-id={`workspace.cancel:${controller.activeTaskSessionId ?? "unknown"}`}
-                data-action-kind="cancel"
-                data-action-enabled={String(controller.turnState.phase === "streaming")}
-                data-action-target-ref={controller.activeTaskSessionId ?? "unknown"}
-                type="button"
-                onClick={() => void controller.cancel()}
-              />
+              <>
+                {controller.turnState.phase === "streaming" && (
+                  <FoundationActionButton
+                    label="调整当前任务"
+                    icon={<Send size={16} aria-hidden="true" />}
+                    disabled={!controller.draft.trim()}
+                    disabledReason={!controller.draft.trim() ? "先输入任务内调整。" : undefined}
+                    data-action-category="product"
+                    data-action-id={`workspace.steer:${controller.activeTaskSessionId ?? "unknown"}`}
+                    data-action-kind="continue"
+                    data-action-enabled={String(Boolean(controller.draft.trim()))}
+                    data-action-target-ref={controller.activeTaskSessionId ?? "unknown"}
+                    type="button"
+                    onClick={() => void controller.steer()}
+                  />
+                )}
+                <FoundationActionButton
+                  label="取消任务"
+                  icon={<Square size={16} aria-hidden="true" />}
+                  loading={controller.turnState.phase === "cancelling"}
+                  loadingLabel="正在取消"
+                  disabled={controller.turnState.phase === "cancelling"}
+                  disabledReason={
+                    controller.turnState.phase === "cancelling"
+                      ? "取消请求已发送；正在等待真实终态。"
+                      : undefined
+                  }
+                  data-action-category="product"
+                  data-action-id={`workspace.cancel:${controller.activeTaskSessionId ?? "unknown"}`}
+                  data-action-kind="cancel"
+                  data-action-enabled={String(controller.turnState.phase === "streaming")}
+                  data-action-target-ref={controller.activeTaskSessionId ?? "unknown"}
+                  type="button"
+                  onClick={() => void controller.cancel()}
+                />
+              </>
             )}
             {controller.turnState.phase !== "streaming" &&
               controller.turnState.phase !== "cancelling" && (

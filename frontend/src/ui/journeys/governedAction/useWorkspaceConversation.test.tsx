@@ -806,6 +806,56 @@ describe("workspace conversation journey", () => {
     await waitFor(() => expect(result.current.turnState.phase).toBe("resolved"));
   });
 
+  it("binds an in-flight adjustment to the exact session task and run", async () => {
+    let finishTurn!: (value: StreamMessageDonePayload) => void;
+    const streamTurn = vi.fn(
+      async (
+        _sessionId,
+        _messages,
+        _options,
+        events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
+      ) => {
+        events.onStart({
+          session_id: "conversation-1",
+          operation_id: "operation-steer",
+          task_session_id: "task-steer",
+          run_id: "run-steer",
+          reasoning_trace: {},
+          tool_calls: [],
+        });
+        return new Promise<StreamMessageDonePayload>(resolve => {
+          finishTurn = resolve;
+        });
+      }
+    );
+    const steerTask = vi.fn().mockResolvedValue({
+      steering: { steeringId: "steering-1", status: "pending" },
+      scopeExpansionBlocked: false,
+    });
+    const dataSource = source({ streamTurn, steerTask });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.setDraft("生成访谈报告"));
+    act(() => void result.current.send());
+    await waitFor(() => expect(result.current.activeTaskSessionId).toBe("task-steer"));
+
+    act(() => result.current.setDraft("把风险结论放在最前面"));
+    await act(async () => result.current.steer());
+
+    expect(steerTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskSessionId: "task-steer",
+        runId: "run-steer",
+        sessionId: "conversation-1",
+        content: "把风险结论放在最前面",
+      })
+    );
+    expect(result.current.draft).toBe("");
+    await act(async () => finishTurn(turnResult("completed")));
+  });
+
   it("cancels the exact active task and waits for the stream terminal state", async () => {
     let finishTurn!: (value: StreamMessageDonePayload) => void;
     const streamTurn = vi.fn(

@@ -54,6 +54,7 @@ pub(crate) mod main_chat_runtime_support;
 pub(crate) mod main_chat_send;
 pub(crate) mod main_chat_skills_tools;
 pub(crate) mod main_chat_source_bound;
+pub(crate) mod main_chat_steering;
 pub(crate) mod main_chat_streaming;
 pub(crate) mod main_chat_task_controls;
 #[allow(dead_code)]
@@ -171,9 +172,9 @@ use commands::memory::{
     run_memory_tier_maintenance, search_memory,
 };
 use commands::proposal::{
-    accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_memory_asset,
-    get_pending_proposals, list_memory_assets, list_proposals, postpone_proposal, reject_proposal,
-    rollback_memory_asset,
+    accept_proposal, accept_proposal_and_continue, batch_accept_low_risk_proposals, edit_proposal,
+    get_memory_asset, get_pending_proposals, list_memory_assets, list_proposals, postpone_proposal,
+    reject_proposal, rollback_memory_asset,
 };
 use commands::router::get_model_router_status;
 use commands::settings::{
@@ -188,6 +189,7 @@ use commands::state::{get_daily_goals, get_state_alerts, get_state_history};
 use life_state_projection::get_life_state_projection;
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
 use main_chat_memory_proposals::draft_edit_memory_proposal;
+use main_chat_steering::submit_main_chat_task_steering;
 use main_chat_task_controls::{
     cancel_main_chat_agent_task, get_main_chat_agent_task_detail, get_main_chat_agent_task_state,
     list_main_chat_agent_tasks, refresh_main_chat_agent_task_context, resume_main_chat_agent_task,
@@ -988,6 +990,7 @@ pub fn run() {
             list_proposals,
             batch_accept_low_risk_proposals,
             accept_proposal,
+            accept_proposal_and_continue,
             reject_proposal,
             edit_proposal,
             draft_edit_memory_proposal,
@@ -1014,6 +1017,7 @@ pub fn run() {
             resume_main_chat_agent_task,
             cancel_main_chat_agent_task,
             retry_main_chat_agent_action,
+            submit_main_chat_task_steering,
             get_chat_history,
             get_chat_life_model_influence,
             save_chat_message,

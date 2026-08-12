@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 4;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -56,6 +56,7 @@ impl CanonicalTaskStatus {
 pub enum CanonicalTaskItemKind {
     Instruction,
     Plan,
+    Steering,
     ToolCall,
     Observation,
     ProviderGeneration,
@@ -71,6 +72,7 @@ impl CanonicalTaskItemKind {
         match self {
             Self::Instruction => "instruction",
             Self::Plan => "plan",
+            Self::Steering => "steering",
             Self::ToolCall => "tool_call",
             Self::Observation => "observation",
             Self::ProviderGeneration => "provider_generation",
@@ -86,6 +88,7 @@ impl CanonicalTaskItemKind {
         match value {
             "instruction" => Ok(Self::Instruction),
             "plan" => Ok(Self::Plan),
+            "steering" => Ok(Self::Steering),
             "tool_call" => Ok(Self::ToolCall),
             "observation" => Ok(Self::Observation),
             "provider_generation" => Ok(Self::ProviderGeneration),
@@ -230,7 +233,51 @@ pub struct CanonicalTaskRunRecord {
     pub execution_session_id: String,
     pub ordinal: u64,
     pub execution_facts_version: u64,
+    pub plan_revision: u64,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalSteeringStatus {
+    Pending,
+    Consumed,
+    Blocked,
+}
+
+impl CanonicalSteeringStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Consumed => "consumed",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "consumed" => Ok(Self::Consumed),
+            "blocked" => Ok(Self::Blocked),
+            _ => anyhow::bail!("canonical_steering_status_invalid:{value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalReportSteeringRecord {
+    pub steering_id: String,
+    pub item_id: String,
+    pub task_id: String,
+    pub run_id: String,
+    pub source_message_ref: String,
+    pub source_message_digest: String,
+    pub steering_digest: String,
+    pub base_plan_revision: u64,
+    pub status: CanonicalSteeringStatus,
+    pub created_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +308,32 @@ pub struct ReportArtifactDraftInput<'a> {
     pub target_reference: &'a str,
     pub content_digest: &'a str,
     pub media_type: &'a str,
+}
+
+pub struct BeginReportRunInput<'a> {
+    pub conversation_id: &'a str,
+    pub execution_session_id: &'a str,
+    pub run_id: &'a str,
+    pub outcome_digest: &'a str,
+    pub plan_digest: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BegunReportRun {
+    pub task_id: String,
+    pub run_id: String,
+    pub plan_revision: u64,
+}
+
+pub struct SubmitReportSteeringInput<'a> {
+    pub steering_id: &'a str,
+    pub task_id: &'a str,
+    pub run_id: &'a str,
+    pub source_message_ref: &'a str,
+    pub source_message_digest: &'a str,
+    pub steering_digest: &'a str,
+    pub base_plan_revision: u64,
+    pub scope_expansion_blocked: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -346,6 +419,7 @@ impl CanonicalTaskRuntimeStore {
                 "canonical_tasks",
                 "canonical_task_runs",
                 "canonical_task_items",
+                "canonical_report_steering",
                 "canonical_artifacts",
                 "canonical_artifact_versions",
             ],
@@ -393,8 +467,9 @@ impl CanonicalTaskRuntimeStore {
                 run_id TEXT NOT NULL UNIQUE,
                 execution_session_id TEXT NOT NULL,
                 ordinal INTEGER NOT NULL CHECK(ordinal > 0),
-                execution_facts_version INTEGER NOT NULL DEFAULT 4
-                    CHECK(execution_facts_version IN (1, 2, 3, 4)),
+                execution_facts_version INTEGER NOT NULL DEFAULT 5
+                    CHECK(execution_facts_version IN (1, 2, 3, 4, 5)),
+                plan_revision INTEGER NOT NULL DEFAULT 1 CHECK(plan_revision > 0),
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(task_id, run_id),
                 FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
@@ -405,7 +480,7 @@ impl CanonicalTaskRuntimeStore {
                 run_id TEXT NOT NULL,
                 sequence INTEGER NOT NULL CHECK(sequence > 0),
                 kind TEXT NOT NULL CHECK(kind IN (
-                    'instruction', 'plan', 'tool_call', 'observation',
+                    'instruction', 'plan', 'steering', 'tool_call', 'observation',
                     'provider_generation', 'artifact_draft',
                     'review_checkpoint', 'artifact_materialized',
                     'verification', 'final_result'
@@ -418,6 +493,22 @@ impl CanonicalTaskRuntimeStore {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 UNIQUE(task_id, sequence),
+                FOREIGN KEY(task_id, run_id)
+                    REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+             );
+             CREATE TABLE IF NOT EXISTS canonical_report_steering (
+                steering_id TEXT PRIMARY KEY,
+                item_id TEXT NOT NULL UNIQUE,
+                task_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                source_message_ref TEXT NOT NULL UNIQUE,
+                source_message_digest TEXT NOT NULL,
+                steering_digest TEXT NOT NULL,
+                base_plan_revision INTEGER NOT NULL CHECK(base_plan_revision > 0),
+                status TEXT NOT NULL CHECK(status IN ('pending', 'consumed', 'blocked')),
+                created_at TEXT NOT NULL,
+                consumed_at TEXT,
+                FOREIGN KEY(item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT,
                 FOREIGN KEY(task_id, run_id)
                     REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
              );
@@ -457,7 +548,7 @@ impl CanonicalTaskRuntimeStore {
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '4')
+             VALUES ('schema_version', '5')
              ON CONFLICT(key) DO NOTHING;",
         )?;
         if Self::schema_version(&conn)? == 1 {
@@ -468,6 +559,9 @@ impl CanonicalTaskRuntimeStore {
         }
         if Self::schema_version(&conn)? == 3 {
             Self::migrate_v3_to_v4(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 4 {
+            Self::migrate_v4_to_v5(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -712,12 +806,563 @@ impl CanonicalTaskRuntimeStore {
         Ok(())
     }
 
+    fn migrate_v4_to_v5(conn: &mut Connection) -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;")?;
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "DROP TABLE IF EXISTS canonical_report_steering;
+                 ALTER TABLE canonical_task_items RENAME TO canonical_task_items_v4;
+                 ALTER TABLE canonical_task_runs RENAME TO canonical_task_runs_v4;
+                 CREATE TABLE canonical_task_runs (
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL UNIQUE,
+                    execution_session_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+                    execution_facts_version INTEGER NOT NULL DEFAULT 5
+                        CHECK(execution_facts_version IN (1, 2, 3, 4, 5)),
+                    plan_revision INTEGER NOT NULL DEFAULT 1 CHECK(plan_revision > 0),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(task_id, run_id),
+                    FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
+                 ) WITHOUT ROWID;
+                 INSERT INTO canonical_task_runs (
+                    task_id, run_id, execution_session_id, ordinal,
+                    execution_facts_version, plan_revision, created_at
+                 ) SELECT task_id, run_id, execution_session_id, ordinal,
+                          execution_facts_version, 1, created_at
+                   FROM canonical_task_runs_v4;
+                 CREATE TABLE canonical_task_items (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK(sequence > 0),
+                    kind TEXT NOT NULL CHECK(kind IN (
+                        'instruction', 'plan', 'steering', 'tool_call', 'observation',
+                        'provider_generation', 'artifact_draft',
+                        'review_checkpoint', 'artifact_materialized',
+                        'verification', 'final_result'
+                    )),
+                    status TEXT NOT NULL CHECK(status IN (
+                        'waiting', 'completed', 'blocked', 'failed', 'effect_unknown'
+                    )),
+                    summary_code TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(task_id, sequence),
+                    FOREIGN KEY(task_id, run_id)
+                        REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+                 );
+                 INSERT INTO canonical_task_items (
+                    id, task_id, run_id, sequence, kind, status, summary_code,
+                    payload_digest, created_at, updated_at
+                 ) SELECT id, task_id, run_id, sequence, kind, status, summary_code,
+                          payload_digest, created_at, updated_at
+                   FROM canonical_task_items_v4;
+                 DROP TABLE canonical_task_items_v4;
+                 DROP TABLE canonical_task_runs_v4;
+                 CREATE TABLE canonical_report_steering (
+                    steering_id TEXT PRIMARY KEY,
+                    item_id TEXT NOT NULL UNIQUE,
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    source_message_ref TEXT NOT NULL UNIQUE,
+                    source_message_digest TEXT NOT NULL,
+                    steering_digest TEXT NOT NULL,
+                    base_plan_revision INTEGER NOT NULL CHECK(base_plan_revision > 0),
+                    status TEXT NOT NULL CHECK(status IN ('pending', 'consumed', 'blocked')),
+                    created_at TEXT NOT NULL,
+                    consumed_at TEXT,
+                    FOREIGN KEY(item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(task_id, run_id)
+                        REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+                 );
+                 CREATE INDEX idx_canonical_task_items_run
+                    ON canonical_task_items(run_id, sequence);",
+            )?;
+            let changed = tx.execute(
+                "UPDATE canonical_task_runtime_metadata SET value = '5'
+                 WHERE key = 'schema_version' AND value = '4'",
+                [],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("canonical_task_runtime_v4_migration_version_conflict");
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        let pragma_restore =
+            conn.execute_batch("PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON;");
+        migration?;
+        pragma_restore?;
+        let violation = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_row([], |_| Ok(()))
+            .optional()?;
+        if violation.is_some() {
+            anyhow::bail!("canonical_task_runtime_v4_migration_foreign_key_violation");
+        }
+        Ok(())
+    }
+
     fn validate_schema(conn: &Connection) -> Result<()> {
         let version = Self::schema_version(conn)?;
         if version != TASK_RUNTIME_SCHEMA_VERSION {
             anyhow::bail!("canonical_task_runtime_schema_version_unsupported:{version}");
         }
         Ok(())
+    }
+
+    pub fn begin_report_run(&self, input: BeginReportRunInput<'_>) -> Result<BegunReportRun> {
+        validate_nonempty("conversation_id", input.conversation_id, 512)?;
+        validate_nonempty("execution_session_id", input.execution_session_id, 512)?;
+        validate_nonempty("run_id", input.run_id, 512)?;
+        validate_digest("outcome_digest", input.outcome_digest)?;
+        validate_digest("plan_digest", input.plan_digest)?;
+        let task_id = stable_id("task", &["report", input.conversation_id]);
+        let instruction_item_id = stable_id("item", &["instruction", &task_id, input.run_id]);
+        let plan_item_id = stable_id("item", &["plan", &task_id, input.run_id]);
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO canonical_tasks (
+                id, conversation_id, task_kind, initial_outcome_digest,
+                status, created_at, updated_at
+             ) VALUES (?1, ?2, 'report', ?3, 'running', ?4, ?4)
+             ON CONFLICT(conversation_id) DO NOTHING",
+            params![task_id, input.conversation_id, input.outcome_digest, now],
+        )?;
+        let stored_task: (String, String, String) = tx.query_row(
+            "SELECT id, initial_outcome_digest, status FROM canonical_tasks
+             WHERE conversation_id = ?1",
+            [input.conversation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if stored_task.0 != task_id {
+            anyhow::bail!("canonical_report_task_identity_conflict");
+        }
+        let existing_run = tx
+            .query_row(
+                "SELECT task_id, execution_session_id, execution_facts_version, plan_revision
+                 FROM canonical_task_runs WHERE run_id = ?1",
+                [input.run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let plan_revision =
+            if let Some((stored_task, stored_session, version, revision)) = existing_run {
+                if stored_task != task_id
+                    || stored_session != input.execution_session_id
+                    || version != 5
+                {
+                    anyhow::bail!("canonical_report_run_membership_conflict");
+                }
+                revision
+            } else {
+                let ordinal: i64 = tx.query_row(
+                    "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM canonical_task_runs
+                 WHERE task_id = ?1",
+                    [&task_id],
+                    |row| row.get(0),
+                )?;
+                tx.execute(
+                    "INSERT INTO canonical_task_runs (
+                    task_id, run_id, execution_session_id, ordinal,
+                    execution_facts_version, plan_revision, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, 5, 1, ?5)",
+                    params![
+                        task_id,
+                        input.run_id,
+                        input.execution_session_id,
+                        ordinal,
+                        now
+                    ],
+                )?;
+                1
+            };
+        ensure_completed_item(
+            &tx,
+            CompletedItemInput {
+                item_id: &instruction_item_id,
+                task_id: &task_id,
+                run_id: input.run_id,
+                kind: CanonicalTaskItemKind::Instruction,
+                summary_code: "report_instruction_bound",
+                payload_digest: input.outcome_digest,
+                now: &now,
+            },
+        )?;
+        ensure_completed_item(
+            &tx,
+            CompletedItemInput {
+                item_id: &plan_item_id,
+                task_id: &task_id,
+                run_id: input.run_id,
+                kind: CanonicalTaskItemKind::Plan,
+                summary_code: "report_execution_plan_bound",
+                payload_digest: input.plan_digest,
+                now: &now,
+            },
+        )?;
+        tx.execute(
+            "UPDATE canonical_tasks SET status = 'running', updated_at = ?2 WHERE id = ?1",
+            params![task_id, now],
+        )?;
+        tx.commit()?;
+        Ok(BegunReportRun {
+            task_id,
+            run_id: input.run_id.to_string(),
+            plan_revision: u64::try_from(plan_revision)?,
+        })
+    }
+
+    pub fn submit_report_steering(
+        &self,
+        input: SubmitReportSteeringInput<'_>,
+    ) -> Result<CanonicalReportSteeringRecord> {
+        validate_nonempty("steering_id", input.steering_id, 512)?;
+        validate_nonempty("task_id", input.task_id, 512)?;
+        validate_nonempty("run_id", input.run_id, 512)?;
+        validate_nonempty("source_message_ref", input.source_message_ref, 1024)?;
+        validate_digest("source_message_digest", input.source_message_digest)?;
+        validate_digest("steering_digest", input.steering_digest)?;
+        if input.base_plan_revision == 0 {
+            anyhow::bail!("canonical_report_steering_plan_revision_invalid");
+        }
+        let item_id = stable_id(
+            "item",
+            &["steering", input.task_id, input.run_id, input.steering_id],
+        );
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = load_steering_in_tx(&tx, input.steering_id)? {
+            if existing.item_id != item_id
+                || existing.task_id != input.task_id
+                || existing.run_id != input.run_id
+                || existing.source_message_ref != input.source_message_ref
+                || existing.source_message_digest != input.source_message_digest
+                || existing.steering_digest != input.steering_digest
+                || existing.base_plan_revision != input.base_plan_revision
+                || (existing.status == CanonicalSteeringStatus::Blocked)
+                    != input.scope_expansion_blocked
+            {
+                anyhow::bail!("canonical_report_steering_identity_conflict");
+            }
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let (task_status, plan_revision, run_finalized): (String, i64, bool) = tx
+            .query_row(
+                "SELECT task.status, run.plan_revision,
+                        EXISTS(SELECT 1 FROM canonical_task_items terminal
+                               WHERE terminal.task_id = task.id
+                                 AND terminal.run_id = run.run_id
+                                 AND terminal.kind = 'final_result'
+                                 AND terminal.status = 'completed')
+                 FROM canonical_tasks task
+                 JOIN canonical_task_runs run ON run.task_id = task.id
+                 WHERE task.id = ?1 AND run.run_id = ?2",
+                params![input.task_id, input.run_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .with_context(|| "canonical_report_steering_target_missing")?;
+        if run_finalized || !matches!(task_status.as_str(), "running" | "waiting_review") {
+            anyhow::bail!("canonical_report_steering_target_terminal");
+        }
+        if u64::try_from(plan_revision)? != input.base_plan_revision {
+            anyhow::bail!("canonical_report_steering_plan_revision_stale");
+        }
+        if !input.scope_expansion_blocked {
+            let pending: Option<String> = tx
+                .query_row(
+                    "SELECT steering_id FROM canonical_report_steering
+                     WHERE task_id = ?1 AND run_id = ?2 AND status = 'pending'",
+                    params![input.task_id, input.run_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if pending.is_some() {
+                anyhow::bail!("canonical_report_steering_pending_conflict");
+            }
+        }
+        let item_status = if input.scope_expansion_blocked {
+            CanonicalTaskItemStatus::Blocked
+        } else {
+            CanonicalTaskItemStatus::Waiting
+        };
+        let steering_status = if input.scope_expansion_blocked {
+            CanonicalSteeringStatus::Blocked
+        } else {
+            CanonicalSteeringStatus::Pending
+        };
+        let sequence: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM canonical_task_items WHERE task_id = ?1",
+            [input.task_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO canonical_task_items (
+                id, task_id, run_id, sequence, kind, status, summary_code,
+                payload_digest, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 'steering', ?5, ?6, ?7, ?8, ?8)",
+            params![
+                item_id,
+                input.task_id,
+                input.run_id,
+                sequence,
+                item_status.as_str(),
+                if input.scope_expansion_blocked {
+                    "report_steering_scope_expansion_blocked"
+                } else {
+                    "report_steering_pending"
+                },
+                input.steering_digest,
+                now
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO canonical_report_steering (
+                steering_id, item_id, task_id, run_id, source_message_ref,
+                source_message_digest, steering_digest, base_plan_revision,
+                status, created_at, consumed_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, NULL)",
+            params![
+                input.steering_id,
+                item_id,
+                input.task_id,
+                input.run_id,
+                input.source_message_ref,
+                input.source_message_digest,
+                input.steering_digest,
+                i64::try_from(input.base_plan_revision)?,
+                steering_status.as_str(),
+                now
+            ],
+        )?;
+        let record = load_steering_in_tx(&tx, input.steering_id)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_report_steering_missing_after_insert"))?;
+        tx.commit()?;
+        Ok(record)
+    }
+
+    pub fn consume_pending_report_steering(
+        &self,
+        task_id: &str,
+        run_id: &str,
+    ) -> Result<Option<CanonicalReportSteeringRecord>> {
+        validate_nonempty("task_id", task_id, 512)?;
+        validate_nonempty("run_id", run_id, 512)?;
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let steering_id = tx
+            .query_row(
+                "SELECT steering_id FROM canonical_report_steering
+                 WHERE task_id = ?1 AND run_id = ?2 AND status = 'pending'
+                 ORDER BY created_at ASC, steering_id ASC LIMIT 1",
+                params![task_id, run_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(steering_id) = steering_id else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        let record = load_steering_in_tx(&tx, &steering_id)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_report_steering_missing_before_consume"))?;
+        let (task_status, plan_revision): (String, i64) = tx.query_row(
+            "SELECT task.status, run.plan_revision
+             FROM canonical_tasks task
+             JOIN canonical_task_runs run ON run.task_id = task.id
+             WHERE task.id = ?1 AND run.run_id = ?2",
+            params![task_id, run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if task_status != "running" {
+            anyhow::bail!("canonical_report_steering_consume_target_not_running");
+        }
+        if u64::try_from(plan_revision)? != record.base_plan_revision {
+            anyhow::bail!("canonical_report_steering_consume_revision_conflict");
+        }
+        let changed = tx.execute(
+            "UPDATE canonical_report_steering
+             SET status = 'consumed', consumed_at = ?2
+             WHERE steering_id = ?1 AND status = 'pending'",
+            params![steering_id, now],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("canonical_report_steering_consume_conflict");
+        }
+        tx.execute(
+            "UPDATE canonical_task_items
+             SET status = 'completed', summary_code = 'report_steering_consumed', updated_at = ?2
+             WHERE id = ?1 AND kind = 'steering' AND status = 'waiting'",
+            params![record.item_id, now],
+        )?;
+        tx.execute(
+            "UPDATE canonical_task_runs SET plan_revision = plan_revision + 1
+             WHERE task_id = ?1 AND run_id = ?2 AND plan_revision = ?3",
+            params![task_id, run_id, plan_revision],
+        )?;
+        let consumed = load_steering_in_tx(&tx, &record.steering_id)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_report_steering_missing_after_consume"))?;
+        tx.commit()?;
+        Ok(Some(consumed))
+    }
+
+    pub fn load_report_steering(
+        &self,
+        steering_id: &str,
+    ) -> Result<Option<CanonicalReportSteeringRecord>> {
+        validate_nonempty("steering_id", steering_id, 512)?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let record = load_steering_in_tx(&tx, steering_id)?;
+        tx.commit()?;
+        Ok(record)
+    }
+
+    pub fn resolve_report_task_id(
+        &self,
+        execution_session_id: &str,
+        run_id: &str,
+    ) -> Result<Option<String>> {
+        validate_nonempty("execution_session_id", execution_session_id, 512)?;
+        validate_nonempty("run_id", run_id, 512)?;
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT task_id FROM canonical_task_runs
+             WHERE execution_session_id = ?1 AND run_id = ?2",
+            params![execution_session_id, run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn resolve_report_run_target(
+        &self,
+        execution_session_id: &str,
+        run_id: &str,
+    ) -> Result<Option<(String, u64)>> {
+        validate_nonempty("execution_session_id", execution_session_id, 512)?;
+        validate_nonempty("run_id", run_id, 512)?;
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT task_id, plan_revision FROM canonical_task_runs
+             WHERE execution_session_id = ?1 AND run_id = ?2",
+            params![execution_session_id, run_id],
+            |row| {
+                let revision = u64::try_from(row.get::<_, i64>(1)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Integer,
+                        error.into(),
+                    )
+                })?;
+                Ok((row.get(0)?, revision))
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn resolve_report_run_target_for_conversation(
+        &self,
+        execution_session_id: &str,
+        run_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<(String, u64)>> {
+        validate_nonempty("execution_session_id", execution_session_id, 512)?;
+        validate_nonempty("run_id", run_id, 512)?;
+        validate_nonempty("conversation_id", conversation_id, 512)?;
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT run.task_id, run.plan_revision
+             FROM canonical_task_runs run
+             JOIN canonical_tasks task ON task.id = run.task_id
+             WHERE run.execution_session_id = ?1
+               AND run.run_id = ?2
+               AND task.conversation_id = ?3",
+            params![execution_session_id, run_id, conversation_id],
+            |row| {
+                let revision = u64::try_from(row.get::<_, i64>(1)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        1,
+                        rusqlite::types::Type::Integer,
+                        error.into(),
+                    )
+                })?;
+                Ok((row.get(0)?, revision))
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn resolve_report_task_id_for_conversation(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+    ) -> Result<Option<String>> {
+        validate_nonempty("conversation_id", conversation_id, 512)?;
+        validate_nonempty("run_id", run_id, 512)?;
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT task.id FROM canonical_tasks task
+             JOIN canonical_task_runs run ON run.task_id = task.id
+             WHERE task.conversation_id = ?1 AND run.run_id = ?2",
+            params![conversation_id, run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn list_consumed_report_steering(
+        &self,
+        task_id: &str,
+        run_id: &str,
+    ) -> Result<Vec<CanonicalReportSteeringRecord>> {
+        validate_nonempty("task_id", task_id, 512)?;
+        validate_nonempty("run_id", run_id, 512)?;
+        let conn = self.lock_conn()?;
+        let ids = {
+            let mut statement = conn.prepare(
+                "SELECT steering_id FROM canonical_report_steering
+                 WHERE task_id = ?1 AND run_id = ?2 AND status = 'consumed'
+                 ORDER BY consumed_at ASC, steering_id ASC",
+            )?;
+            let rows =
+                statement.query_map(params![task_id, run_id], |row| row.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut records = Vec::with_capacity(ids.len());
+        for steering_id in ids {
+            let record = conn
+                .query_row(
+                    "SELECT steering_id, item_id, task_id, run_id, source_message_ref,
+                            source_message_digest, steering_digest, base_plan_revision,
+                            status, created_at, consumed_at
+                     FROM canonical_report_steering WHERE steering_id = ?1",
+                    [steering_id],
+                    row_to_steering,
+                )
+                .optional()?
+                .ok_or_else(|| anyhow::anyhow!("canonical_report_steering_missing_during_list"))?;
+            records.push(record);
+        }
+        Ok(records)
     }
 
     pub fn prepare_report_artifact(
@@ -835,8 +1480,8 @@ impl CanonicalTaskRuntimeStore {
             tx.execute(
                 "INSERT INTO canonical_task_runs (
                     task_id, run_id, execution_session_id, ordinal,
-                    execution_facts_version, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, 4, ?5)",
+                    execution_facts_version, plan_revision, created_at
+                 ) VALUES (?1, ?2, ?3, ?4, 5, 1, ?5)",
                 params![
                     task_id,
                     input.run_id,
@@ -845,11 +1490,11 @@ impl CanonicalTaskRuntimeStore {
                     now_text
                 ],
             )?;
-            4
+            5
         };
 
-        if execution_facts_version == 4 {
-            if !is_new_run {
+        if matches!(execution_facts_version, 4 | 5) {
+            if !is_new_run && execution_facts_version == 4 {
                 validate_report_execution_items_v4(
                     &tx,
                     &task_id,
@@ -936,6 +1581,17 @@ impl CanonicalTaskRuntimeStore {
                     now: &now_text,
                 },
             )?;
+            if execution_facts_version == 5 {
+                validate_report_execution_items_v4(
+                    &tx,
+                    &task_id,
+                    input.run_id,
+                    &instruction_item_id,
+                    &plan_item_id,
+                    &provider_generation_item_id,
+                    input.tool_observations,
+                )?;
+            }
         } else if execution_facts_version == 3 {
             validate_report_execution_items_v3(
                 &tx,
@@ -978,7 +1634,7 @@ impl CanonicalTaskRuntimeStore {
                 anyhow::bail!("canonical_report_artifact_identity_conflict");
             }
         } else {
-            if execution_facts_version != 4 {
+            if !matches!(execution_facts_version, 4 | 5) {
                 anyhow::bail!("canonical_report_legacy_run_cannot_add_artifact");
             }
             let finalized_item_id = report_final_result_item_id(&task_id, input.run_id);
@@ -1577,7 +2233,7 @@ impl CanonicalTaskRuntimeStore {
             let runs = {
                 let mut statement = tx.prepare(
                     "SELECT task_id, run_id, execution_session_id, ordinal,
-                            execution_facts_version, created_at
+                            execution_facts_version, plan_revision, created_at
                      FROM canonical_task_runs WHERE task_id = ?1
                      ORDER BY ordinal ASC, run_id ASC",
                 )?;
@@ -1718,6 +2374,56 @@ fn validate_report_execution_items_v3(
         anyhow::bail!("canonical_report_execution_items_missing_or_conflicting");
     }
     Ok(())
+}
+
+fn load_steering_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    steering_id: &str,
+) -> Result<Option<CanonicalReportSteeringRecord>> {
+    tx.query_row(
+        "SELECT steering_id, item_id, task_id, run_id, source_message_ref,
+                source_message_digest, steering_digest, base_plan_revision,
+                status, created_at, consumed_at
+         FROM canonical_report_steering WHERE steering_id = ?1",
+        [steering_id],
+        row_to_steering,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn row_to_steering(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalReportSteeringRecord> {
+    let status = CanonicalSteeringStatus::from_db(&row.get::<_, String>(8)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, error.into())
+    })?;
+    let base_plan_revision = u64::try_from(row.get::<_, i64>(7)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Integer, error.into())
+    })?;
+    Ok(CanonicalReportSteeringRecord {
+        steering_id: row.get(0)?,
+        item_id: row.get(1)?,
+        task_id: row.get(2)?,
+        run_id: row.get(3)?,
+        source_message_ref: row.get(4)?,
+        source_message_digest: row.get(5)?,
+        steering_digest: row.get(6)?,
+        base_plan_revision,
+        status,
+        created_at: parse_timestamp(row.get(9)?, "steering_created_at").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, error.into())
+        })?,
+        consumed_at: row
+            .get::<_, Option<String>>(10)?
+            .map(|value| parse_timestamp(value, "steering_consumed_at"))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    10,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?,
+    })
 }
 
 fn validate_report_execution_items_v4(
@@ -2049,14 +2755,18 @@ fn row_to_task_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalTaskRun
     let execution_facts_version = u64::try_from(row.get::<_, i64>(4)?).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Integer, error.into())
     })?;
+    let plan_revision = u64::try_from(row.get::<_, i64>(5)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Integer, error.into())
+    })?;
     Ok(CanonicalTaskRunRecord {
         task_id: row.get(0)?,
         run_id: row.get(1)?,
         execution_session_id: row.get(2)?,
         ordinal,
         execution_facts_version,
-        created_at: parse_timestamp(row.get(5)?, "task_run_created_at").map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, error.into())
+        plan_revision,
+        created_at: parse_timestamp(row.get(6)?, "task_run_created_at").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, error.into())
         })?,
     })
 }
@@ -2385,6 +3095,234 @@ mod tests {
                 .status,
             CanonicalArtifactStatus::WaitingReview
         );
+    }
+
+    fn begin_steerable_report(store: &CanonicalTaskRuntimeStore) -> BegunReportRun {
+        store
+            .begin_report_run(BeginReportRunInput {
+                conversation_id: "conversation-steering",
+                execution_session_id: "execution-steering",
+                run_id: "run-steering",
+                outcome_digest: &digest_of("report instruction"),
+                plan_digest: &digest_of("report plan"),
+            })
+            .unwrap()
+    }
+
+    #[test]
+    fn report_run_begins_before_provider_and_steering_consumes_once() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let begun = begin_steerable_report(&store);
+        assert_eq!(
+            store
+                .resolve_report_run_target_for_conversation(
+                    "execution-steering",
+                    "run-steering",
+                    "conversation-steering"
+                )
+                .unwrap(),
+            Some((begun.task_id.clone(), 1))
+        );
+        assert!(store
+            .resolve_report_run_target_for_conversation(
+                "execution-steering",
+                "run-steering",
+                "another-conversation"
+            )
+            .unwrap()
+            .is_none());
+        assert_eq!(begun.plan_revision, 1);
+        assert_eq!(store.list_items(&begun.task_id).unwrap().len(), 2);
+        let steering_digest = digest_of("focus on privacy risks");
+        let steering = store
+            .submit_report_steering(SubmitReportSteeringInput {
+                steering_id: "steering-1",
+                task_id: &begun.task_id,
+                run_id: &begun.run_id,
+                source_message_ref: "conversation://conversation-steering/message/2",
+                source_message_digest: &steering_digest,
+                steering_digest: &steering_digest,
+                base_plan_revision: 1,
+                scope_expansion_blocked: false,
+            })
+            .unwrap();
+        assert_eq!(steering.status, CanonicalSteeringStatus::Pending);
+        let consumed = store
+            .consume_pending_report_steering(&begun.task_id, &begun.run_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(consumed.status, CanonicalSteeringStatus::Consumed);
+        assert!(consumed.consumed_at.is_some());
+        assert!(store
+            .consume_pending_report_steering(&begun.task_id, &begun.run_id)
+            .unwrap()
+            .is_none());
+        let snapshot = store.list_task_snapshots(10).unwrap().pop().unwrap();
+        assert_eq!(snapshot.runs[0].plan_revision, 2);
+        assert_eq!(snapshot.items[2].kind, CanonicalTaskItemKind::Steering);
+        assert_eq!(snapshot.items[2].status, CanonicalTaskItemStatus::Completed);
+    }
+
+    #[test]
+    fn report_steering_is_idempotent_and_conflicting_reuse_is_atomic() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let begun = begin_steerable_report(&store);
+        let steering_digest = digest_of("shorter summary");
+        let input = || SubmitReportSteeringInput {
+            steering_id: "steering-replay",
+            task_id: &begun.task_id,
+            run_id: &begun.run_id,
+            source_message_ref: "conversation://conversation-steering/message/2",
+            source_message_digest: &steering_digest,
+            steering_digest: &steering_digest,
+            base_plan_revision: 1,
+            scope_expansion_blocked: false,
+        };
+        let first = store.submit_report_steering(input()).unwrap();
+        assert_eq!(store.submit_report_steering(input()).unwrap(), first);
+        let changed_digest = digest_of("longer summary");
+        let error = store
+            .submit_report_steering(SubmitReportSteeringInput {
+                steering_id: "steering-replay",
+                task_id: &begun.task_id,
+                run_id: &begun.run_id,
+                source_message_ref: "conversation://conversation-steering/message/2",
+                source_message_digest: &changed_digest,
+                steering_digest: &changed_digest,
+                base_plan_revision: 1,
+                scope_expansion_blocked: false,
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("canonical_report_steering_identity_conflict"));
+        assert_eq!(store.list_items(&begun.task_id).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn scope_expanding_steering_is_recorded_blocked_and_never_consumed() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let begun = begin_steerable_report(&store);
+        let steering_digest = digest_of("use another workspace");
+        let steering = store
+            .submit_report_steering(SubmitReportSteeringInput {
+                steering_id: "steering-blocked",
+                task_id: &begun.task_id,
+                run_id: &begun.run_id,
+                source_message_ref: "conversation://conversation-steering/message/2",
+                source_message_digest: &steering_digest,
+                steering_digest: &steering_digest,
+                base_plan_revision: 1,
+                scope_expansion_blocked: true,
+            })
+            .unwrap();
+        assert_eq!(steering.status, CanonicalSteeringStatus::Blocked);
+        assert!(store
+            .consume_pending_report_steering(&begun.task_id, &begun.run_id)
+            .unwrap()
+            .is_none());
+        let items = store.list_items(&begun.task_id).unwrap();
+        assert_eq!(items[2].status, CanonicalTaskItemStatus::Blocked);
+    }
+
+    #[test]
+    fn pending_steering_survives_restart_and_terminal_task_refuses_new_input() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("steering.db");
+        let (task_id, run_id) = {
+            let store = CanonicalTaskRuntimeStore::new(&path).unwrap();
+            let begun = begin_steerable_report(&store);
+            let digest = digest_of("use a table");
+            store
+                .submit_report_steering(SubmitReportSteeringInput {
+                    steering_id: "steering-restart",
+                    task_id: &begun.task_id,
+                    run_id: &begun.run_id,
+                    source_message_ref: "conversation://conversation-steering/message/2",
+                    source_message_digest: &digest,
+                    steering_digest: &digest,
+                    base_plan_revision: 1,
+                    scope_expansion_blocked: false,
+                })
+                .unwrap();
+            (begun.task_id, begun.run_id)
+        };
+        let restarted = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        assert_eq!(
+            restarted
+                .consume_pending_report_steering(&task_id, &run_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            CanonicalSteeringStatus::Consumed
+        );
+        restarted
+            .lock_conn()
+            .unwrap()
+            .execute(
+                "UPDATE canonical_tasks SET status = 'completed' WHERE id = ?1",
+                [&task_id],
+            )
+            .unwrap();
+        let digest = digest_of("late input");
+        let error = restarted
+            .submit_report_steering(SubmitReportSteeringInput {
+                steering_id: "steering-late",
+                task_id: &task_id,
+                run_id: &run_id,
+                source_message_ref: "conversation://conversation-steering/message/3",
+                source_message_digest: &digest,
+                steering_digest: &digest,
+                base_plan_revision: 2,
+                scope_expansion_blocked: false,
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("canonical_report_steering_target_terminal"));
+    }
+
+    #[test]
+    fn completed_report_task_can_begin_a_new_run_without_reopening_the_old_run() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let prepared = prepare_test_artifact(&store, "conversation-new-run", "run-old");
+        store
+            .bind_report_review(&prepared.artifact_id, "proposal-old")
+            .unwrap();
+        store
+            .confirm_artifact_materialized(
+                "proposal-old",
+                "/tmp/openlife/report.md",
+                &digest_of("# Report"),
+            )
+            .unwrap();
+        let new_run = store
+            .begin_report_run(BeginReportRunInput {
+                conversation_id: "conversation-new-run",
+                execution_session_id: "execution-new",
+                run_id: "run-new",
+                outcome_digest: &digest_of("new instruction"),
+                plan_digest: &digest_of("new plan"),
+            })
+            .unwrap();
+        assert_eq!(new_run.task_id, prepared.task_id);
+        assert_eq!(store.run_count(&prepared.task_id).unwrap(), 2);
+        let late_digest = digest_of("late old run steering");
+        let error = store
+            .submit_report_steering(SubmitReportSteeringInput {
+                steering_id: "old-run-late",
+                task_id: &prepared.task_id,
+                run_id: "run-old",
+                source_message_ref: "conversation://conversation-new-run/message/3",
+                source_message_digest: &late_digest,
+                steering_digest: &late_digest,
+                base_plan_revision: 1,
+                scope_expansion_blocked: false,
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("canonical_report_steering_target_terminal"));
     }
 
     #[test]
@@ -2967,7 +3905,7 @@ mod tests {
         let migrated = store.list_task_snapshots(100).unwrap();
         assert_eq!(migrated[0].runs.len(), 2);
         assert_eq!(migrated[0].runs[0].execution_facts_version, 1);
-        assert_eq!(migrated[0].runs[1].execution_facts_version, 4);
+        assert_eq!(migrated[0].runs[1].execution_facts_version, 5);
         assert_eq!(migrated[0].items.len(), 5);
     }
 
@@ -3046,7 +3984,7 @@ mod tests {
         );
         let new_run = prepare_test_artifact(&store, "conversation-v2", "run-v3");
         let snapshots = store.list_task_snapshots(100).unwrap();
-        assert_eq!(snapshots[0].runs[1].execution_facts_version, 4);
+        assert_eq!(snapshots[0].runs[1].execution_facts_version, 5);
         assert_eq!(new_run.task_id, task_id);
     }
 
@@ -3184,7 +4122,7 @@ mod tests {
         );
         let new_run = prepare_test_artifact(&store, "conversation-v3", "run-v4");
         let snapshots = store.list_task_snapshots(100).unwrap();
-        assert_eq!(snapshots[0].runs[1].execution_facts_version, 4);
+        assert_eq!(snapshots[0].runs[1].execution_facts_version, 5);
         assert_eq!(new_run.task_id, task_id);
     }
 

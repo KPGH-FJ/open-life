@@ -1526,6 +1526,37 @@ export async function retryMainChatAgentAction(
   });
 }
 
+export type MainChatSteeringStatus = "pending" | "consumed" | "blocked";
+
+export interface MainChatSteeringRecord {
+  steeringId: string;
+  itemId: string;
+  taskId: string;
+  runId: string;
+  sourceMessageRef: string;
+  sourceMessageDigest: string;
+  steeringDigest: string;
+  basePlanRevision: number;
+  status: MainChatSteeringStatus;
+  createdAt: string;
+  consumedAt?: string;
+}
+
+export interface SubmitMainChatSteeringResponse {
+  steering: MainChatSteeringRecord;
+  scopeExpansionBlocked: boolean;
+}
+
+export async function submitMainChatTaskSteering(request: {
+  steeringId: string;
+  taskSessionId: string;
+  runId: string;
+  sessionId: string;
+  content: string;
+}): Promise<SubmitMainChatSteeringResponse> {
+  return safeInvoke<SubmitMainChatSteeringResponse>("submit_main_chat_task_steering", request);
+}
+
 export async function listMainChatAgentEvents(
   taskSessionId: string,
   afterSequence: number = 0,
@@ -2141,6 +2172,7 @@ export type ReviewActionBase = {
   disabledReason?: string;
   requiresConfirmation?: boolean;
   targetReviewItemId: string;
+  targetTaskSessionId?: string;
   expectedMaterializationStatusAfterDispatch?: ReviewItemMaterializationStatus;
   completionProofAfterDispatch: boolean;
 };
@@ -2887,6 +2919,7 @@ export type TaskLatestResultPreview = {
 export type CanonicalTaskItemKind =
   | "instruction"
   | "plan"
+  | "steering"
   | "tool_call"
   | "observation"
   | "provider_generation"
@@ -4686,6 +4719,24 @@ export type AcceptProposalResult = ConfirmedAcceptProposalResult | DeferredAccep
 
 export async function acceptProposal(proposalId: string): Promise<AcceptProposalResult> {
   return safeInvoke("accept_proposal", { proposalId, proposal_id: proposalId });
+}
+
+export interface AcceptProposalAndContinueResult {
+  acceptance: AcceptProposalResult;
+  taskState?: MainChatAgentTaskState;
+  continuedSameRun: boolean;
+}
+
+export async function acceptProposalAndContinue(
+  proposalId: string,
+  taskSessionId: string
+): Promise<AcceptProposalAndContinueResult> {
+  return safeInvoke<AcceptProposalAndContinueResult>("accept_proposal_and_continue", {
+    proposalId,
+    proposal_id: proposalId,
+    taskSessionId,
+    task_session_id: taskSessionId,
+  });
 }
 
 export async function rollbackMemoryAsset(

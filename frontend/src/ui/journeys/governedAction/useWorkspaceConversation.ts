@@ -50,7 +50,13 @@ export type WorkspaceTurnState =
   | { phase: "idle" }
   | { phase: "creating_session" }
   | { phase: "sending"; sessionId: string }
-  | { phase: "streaming"; sessionId: string; taskSessionId: string; cancelError?: string }
+  | {
+      phase: "streaming";
+      sessionId: string;
+      taskSessionId: string;
+      runId: string;
+      cancelError?: string;
+    }
   | { phase: "cancelling"; sessionId: string; taskSessionId: string }
   | { phase: "refreshing"; sessionId: string; status: MainChatTurnStatus }
   | {
@@ -158,6 +164,7 @@ export type WorkspaceConversationController = {
   }) => Promise<boolean>;
   sendAction: (disabledReason?: string) => ProductAction;
   send: (disabledReason?: string) => Promise<void>;
+  steer: () => Promise<void>;
   cancel: () => Promise<void>;
   renameSelected: (title: string) => Promise<boolean>;
   deleteSelected: () => Promise<boolean>;
@@ -807,6 +814,7 @@ export function useWorkspaceConversation(
                 phase: "streaming",
                 sessionId: turnSessionId,
                 taskSessionId: payload.task_session_id,
+                runId: payload.run_id,
               });
               announce("OpenLife 正在回复；现在可以取消这一项任务。");
             },
@@ -924,11 +932,43 @@ export function useWorkspaceConversation(
         phase: "streaming",
         sessionId,
         taskSessionId,
+        runId: turnState.runId,
         cancelError: errorText(error),
       });
       announce("取消请求失败；当前不会把任务显示为已取消。");
     }
   }, [announce, dataSource, turnState]);
+
+  const steer = useCallback(async (): Promise<void> => {
+    const text = draft.trim();
+    if (
+      !dataSource?.steerTask ||
+      turnState.phase !== "streaming" ||
+      !selectedSessionId ||
+      !activeTaskSessionId ||
+      !text
+    ) {
+      announce("当前任务尚未到可接收调整的运行状态。");
+      return;
+    }
+    try {
+      const result = await dataSource.steerTask({
+        steeringId: crypto.randomUUID(),
+        taskSessionId: activeTaskSessionId,
+        runId: turnState.runId,
+        sessionId: selectedSessionId,
+        content: text,
+      });
+      setDraft("");
+      announce(
+        result.scopeExpansionBlocked
+          ? "这条调整会扩大权限范围，已记录为阻断项；当前任务不会获得新权限。"
+          : "调整已绑定到当前任务，将在下一次安全的 provider checkpoint 应用。"
+      );
+    } catch (error) {
+      announce(`任务调整未被后端接受：${errorText(error)}`);
+    }
+  }, [activeTaskSessionId, announce, dataSource, draft, selectedSessionId, turnState]);
 
   const renameSelected = useCallback(
     async (title: string): Promise<boolean> => {
@@ -1018,6 +1058,7 @@ export function useWorkspaceConversation(
       proposeMarkdownMemoryDeactivation,
       sendAction,
       send,
+      steer,
       cancel,
       renameSelected,
       deleteSelected,
@@ -1048,6 +1089,7 @@ export function useWorkspaceConversation(
       selectedSkillId,
       sessionMutation,
       send,
+      steer,
       sendAction,
       sessions,
       skills,

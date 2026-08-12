@@ -175,7 +175,9 @@ fn provider_runtime_is_coherent(config: &AppConfig, scheduler: &InferenceSchedul
 }
 
 /// In-memory Main Chat route evidence for the current app process.
-#[derive(Clone, Debug, Default)]
+const DEFAULT_MAIN_CHAT_CONCURRENCY_LIMIT: usize = 3;
+
+#[derive(Clone, Debug)]
 pub struct MainChatRuntimeState {
     pub legacy_fallback_used_count: u64,
     pub last_legacy_fallback_reason_code: Option<String>,
@@ -184,6 +186,24 @@ pub struct MainChatRuntimeState {
     pub latest_turn_route_evidence: Option<MainChatTurnRouteEvidenceSnapshot>,
     pub latest_final_gate_readiness: Option<MainChatFinalGateReadinessSnapshot>,
     pub(crate) cancellation_registry: crate::main_chat_cancellation::MainChatCancellationRegistry,
+    pub(crate) execution_slots: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for MainChatRuntimeState {
+    fn default() -> Self {
+        Self {
+            legacy_fallback_used_count: 0,
+            last_legacy_fallback_reason_code: None,
+            last_legacy_fallback_at: None,
+            last_kernel_event_count: None,
+            latest_turn_route_evidence: None,
+            latest_final_gate_readiness: None,
+            cancellation_registry: Default::default(),
+            execution_slots: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAIN_CHAT_CONCURRENCY_LIMIT,
+            )),
+        }
+    }
 }
 
 impl MainChatRuntimeState {

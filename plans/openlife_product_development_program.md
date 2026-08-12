@@ -4,86 +4,87 @@ Status: complete
 
 ## Objective
 
-Complete S3: make the first canonical report Task use a real governed local-
-document and Web evidence loop before provider synthesis and Review. Ordinary
-knowledge-work language must reach the path without requiring internal tool
-names, while every source remains bounded, cited, replayable, and fail-closed.
+Complete S4 on the canonical report lifecycle: let a user steer active work,
+approve a governed boundary inline and continue the same Run, recover exact
+checkpoints after interruption/restart, and run a bounded number of independent
+tasks concurrently without allowing duplicate owners.
 
 ## Product path
 
 ```text
-user outcome + bound local documents
-  -> canonical Plan
-  -> governed document.read ToolCall -> bound Observation
-  -> governed web.search / web.fetch ToolCall -> bound Observation
-  -> provider synthesis from those exact evidence blocks
-  -> cited Markdown ArtifactDraft
-  -> ReviewCheckpoint
-  -> materialization -> Verification -> FinalResult
+report Task starts before execution
+  -> Run + Instruction + Plan
+  -> governed reads / provider work
+  -> optional Steering Item at a safe checkpoint
+  -> optional Permission or Review checkpoint
+  -> inline decision resumes the same Run
+  -> Artifact / Verification / FinalResult
 ```
 
-A report may use only local documents, only Web evidence, or both. When the
-user requests a source, missing or failed evidence blocks synthesis; OpenLife
-must not silently answer from model knowledge or create a Review proposal.
+Steering is authenticated user input, not permission. It may refine outcome,
+format, emphasis, or constraints inside the existing task grant, but it cannot
+expand workspace, provider, network, tool, write, or destructive authority.
 
 ## In scope
 
-1. Add one bounded production `document.read` capability over resources already
-   imported and bound to the current user message/task operation.
-2. Persist its exact ToolCall and Observation as canonical Items before
-   ProviderGeneration, using metadata-safe identities and digests rather than
-   document bodies.
-3. Compose document reads with existing governed `web.search` and `web.fetch`
-   reads in one deterministic report Run and one evidence contract.
-4. Accept ordinary Chinese and English report delegation language without
-   requiring users to type `file.read`, `web.search`, or other internal names.
-5. Require provider output to cite the request-scoped local-resource and Web
-   citation authorities; backend code renders filenames, provenance, and URLs.
-6. Preserve exact replay, cancellation fences, provider/model binding, Review,
-   ArtifactVersion verification, and canonical FinalResult from S2.
-7. Keep local documents as untrusted evidence. Embedded instructions cannot
-   expand tool, write, Memory, LifeModel, provider, or network authority.
+1. Begin the canonical report Task/Run before tool or provider execution and
+   append typed Items transactionally instead of creating the whole history at
+   ArtifactDraft time.
+2. Add a durable, digest-only Steering Item bound to the exact Task, Run, user
+   message, and base plan revision.
+3. Accept steering only while the target Run is active or waiting; consume it
+   once at a defined safe checkpoint before the next provider generation.
+4. Keep scope-expanding steering blocked behind the existing policy/permission
+   boundary; current instruction never mints capability.
+5. Add one Workspace inline approval-and-continue action for the exact pending
+   proposal/checkpoint. Approval and continuation remain separately evidenced.
+6. Reuse `OpenLifeTurnRuntime.run_replay`, terminal-owner replay epochs, and
+   existing action-bound grants so continuation stays on the same Run.
+7. Make restart recovery reload Steering/checkpoint truth from SQLite and fail
+   closed on missing, stale, conflicting, or already-consumed input.
+8. Bound simultaneous independent Task execution while retaining one owner per
+   Task and preserving cancellation/receipt isolation.
 
 ## Out of scope
 
-- arbitrary filesystem discovery, directory crawling, OCR expansion, or shell;
-- new connectors, email, calendar, browser/computer use, or subagents;
-- S4 steering, inline approval continuation, recovery redesign, or concurrency;
-- S5 Results/Changes/Preview UI redesign;
-- provider auto-routing, cross-provider fallback, or background autonomy;
+- editing a provider request already dispatched remotely;
+- autonomous interpretation of ambiguous scope expansion;
+- new connectors, computer use, shell, subagents, or background schedules;
+- S5 Results/Changes/Preview visual redesign;
+- provider auto-routing or cross-provider fallback;
 - Memory or LifeModel learning changes;
-- deletion of unrelated compatibility owners before their roadmap stage.
+- deleting remaining compatibility paths before S7.
 
 ## Ownership
 
-- `ResourceStore` and the bounded resource selector own imported document bytes,
-  chunks, provenance, and request-scoped local citation issuance.
-- ToolGateway/AgentRun evidence owns the actual governed read execution fact.
-- `CanonicalTaskRuntimeStore` owns the report Task/Run/Item ordering and binds
-  only exact document/Web observation digests.
-- Provider output never owns source identity or provenance. Backend citation
-  authorities validate citations and render source footers.
-- ReviewWorkflow and ArtifactMaterializer retain their S2 responsibilities;
-  neither can turn missing read evidence into completion.
+- `CanonicalTaskRuntimeStore` owns Task/Run/Item order, steering identity,
+  checkpoint state, and consumption revision; it never owns adapter execution.
+- `OpenLifeTurnRuntime` remains the sole execution and continuation owner.
+- PolicyRouter and existing permission/proposal authorities decide scope; a
+  Steering Item cannot alter their grants.
+- ToolGateway/provider receipts remain execution truth. Review acceptance and
+  materialization remain distinct facts.
+- Backend ViewModels own product projection; the frontend does not infer that
+  approval, resume, or completion succeeded.
 
 ## Acceptance
 
 | Scenario | Required result |
 | --- | --- |
-| Bound document only | one document ToolCall/Observation before ProviderGeneration; cited Markdown draft |
-| Web only | governed Web ToolCall/Observation before ProviderGeneration; cited Markdown draft |
-| Bound document plus Web | both exact evidence pairs in deterministic execution order; one report Task |
-| Ordinary user language | report path works without internal tool-name phrases |
-| Multiple bound documents | bounded selection covers relevant files and preserves per-file provenance |
-| Missing requested document | no provider synthesis, ArtifactDraft, or Review proposal |
-| Empty/failed resource extraction | blocked with no model-knowledge fallback |
-| Web permission/challenge/failure | blocked before synthesis and Review |
-| Forged or missing local citation | one bounded retry, then blocked with no ArtifactDraft |
-| Forged or missing Web citation | one bounded retry, then blocked with no ArtifactDraft |
-| Embedded source instruction | treated only as data; no authority expansion or durable write |
-| Exact replay/restart | no duplicate read Items, provider generations, proposals, or effects |
-| Verified acceptance | same S2 ArtifactVersion reaches Verification and FinalResult |
-| Product read model | exposes canonical document/Web Items and never infers missing evidence |
+| Active report receives steering before provider | one Steering Item; same Task/Run; provider sees exact steered constraint |
+| Duplicate steering submission | idempotent same Item; no duplicate generation |
+| Conflicting reuse of steering id | rejected with no partial mutation |
+| Steering after terminal completion | rejected; completed result is not rewritten |
+| Steering requests new scope | stored only as blocked/pending input; no capability or effect |
+| Waiting permission accepted inline | acceptance fact then same Run replay; exact action executes once |
+| Review/materialization accepted inline | same Task advances only after observed materialization |
+| Declined or stale checkpoint | no resume and no effect |
+| Restart before steering consumption | exact pending Steering Item is recovered once |
+| Restart after consumption | no duplicate provider/tool/effect |
+| Same Task concurrent owners | exactly one wins; losing call cannot mutate state |
+| Independent tasks within limit | execute concurrently with isolated cancel/receipts |
+| Independent task above limit | typed busy/queued result; no task/run partial creation |
+| Product read model | exposes steering/checkpoint/continuation states from backend truth |
 
 ## Checks
 
@@ -101,32 +102,25 @@ corepack pnpm --dir frontend test:e2e
 
 ## Stop condition
 
-S3 is complete only when the production report path records real governed
-document and Web evidence through the canonical Task owner, ordinary delegation
-language reaches it, all negative cases fail before synthesis/Review, full
-gates pass, source and stable docs agree, commits are reviewable, and the
-working tree is clean. Native and external-live evidence remain S6 unless an
-S3 contract cannot be proved below that evidence level.
+S4 is complete only when steering and inline continuation are real canonical
+product paths, restart and concurrency negatives fail closed, full gates pass,
+stable docs agree, commits are reviewable, and the working tree is clean.
+Browser-shell evidence does not count as native or external-live evidence.
 
 ## Closure
 
-- Production `document.read` now uses the governed ToolGateway path over exact
-  task-bound resources; document-only, Web-only, and combined reports share one
-  canonical Task/Run/Item lifecycle.
-- Missing, failed, or uncited requested evidence stops before ArtifactDraft and
-  Review. Citation repair is bounded to one provider retry and never redispatches
-  reads.
-- Replay and backend read models expose committed document/Web Items without
-  duplicating provider generations, proposals, or effects.
-- Independent post-implementation review verified the durable boundary and
-  corrected document replay to retain only selection digest/count; restart
-  synthesis reselects canonical ResourceStore content and fails on drift.
-- Rust and frontend format, lint, test, production-build, absence, and browser-
-  shell gates passed on the closing working tree. Native and external-live
-  evidence remain explicitly assigned to S6.
-- S4 has not started; this S3 closure is ready for product and code review.
+- The report Task/Run begins before governed reads or provider work.
+- Digest-only Steering Items are restart-safe, revision-bound, idempotent, and
+  consumed once before provider generation; scope expansion remains blocked.
+- Review can approve and continue through one product action while preserving
+  separate acceptance, materialization, and replay evidence.
+- Independent turns are bounded before any canonical mutation; same-task
+  execution retains one owner.
+- Full Rust and frontend unit suites, production build/absence guard, and
+  proportional static checks pass. Native and external-live evidence remain S6
+  concerns.
 
 ## Next pointer
 
-After S3 review, begin S4: steering, inline approval continuation, recovery,
-and controlled concurrency on this same canonical Task lifecycle.
+After S4 closes, begin S5: Results, Changes, Preview, and Verification product
+surfaces over the same backend read models.

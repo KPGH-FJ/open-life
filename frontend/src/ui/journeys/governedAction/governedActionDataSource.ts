@@ -1,5 +1,6 @@
 import {
   acceptProposal,
+  acceptProposalAndContinue,
   cancelMainChatAgentTask,
   editLifeModelLearningProposal,
   getReviewCenterViewModel,
@@ -129,7 +130,11 @@ async function loadGovernedActionSnapshot(): Promise<GovernedActionSnapshot> {
 async function dispatchReviewAction(action: ReviewAction): Promise<void> {
   switch (action.kind) {
     case "approve":
-      await acceptProposal(action.targetReviewItemId);
+      if (action.targetTaskSessionId) {
+        await acceptProposalAndContinue(action.targetReviewItemId, action.targetTaskSessionId);
+      } else {
+        await acceptProposal(action.targetReviewItemId);
+      }
       return;
     case "reject":
       await rejectProposal(action.targetReviewItemId);
