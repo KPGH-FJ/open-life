@@ -54,6 +54,8 @@ function task(overrides: Partial<TaskViewModelItem> = {}): TaskViewModelItem {
     lifecycleStatus: "completed",
     terminalDeliveryStatus: "delivered",
     finalDeliveryEvidencePresent: true,
+    items: [],
+    artifacts: [],
     pendingBlockers: [],
     pendingReviewItemRefs: [],
     allowedControls: [],

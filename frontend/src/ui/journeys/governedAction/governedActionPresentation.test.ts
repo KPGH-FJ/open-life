@@ -49,6 +49,8 @@ function activeTask(): TaskViewModelItem {
     lifecycleStatus: "waiting_permission",
     terminalDeliveryStatus: "not_terminal",
     finalDeliveryEvidencePresent: false,
+    items: [],
+    artifacts: [],
     pendingBlockers: ["permission required"],
     pendingReviewItemRefs: [],
     allowedControls: [
@@ -137,6 +139,7 @@ function snapshot(status: ViewModelEnvelope<unknown>["status"] = "ready"): Gover
         summary: {
           total: 1,
           activeCount: 1,
+          waitingReviewCount: 0,
           waitingPermissionCount: 1,
           blockedCount: 0,
           pendingReviewCount: 0,

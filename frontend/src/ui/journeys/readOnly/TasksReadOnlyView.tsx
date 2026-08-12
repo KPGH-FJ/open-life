@@ -28,12 +28,15 @@ type TaskFilter = "all" | "attention" | "active" | "terminal";
 function taskMatchesFilter(item: TaskViewModelItem, filter: TaskFilter): boolean {
   if (filter === "all") return true;
   if (filter === "active") {
-    return ["running", "waiting_permission", "blocked"].includes(item.lifecycleStatus);
+    return ["running", "waiting_review", "waiting_permission", "blocked"].includes(
+      item.lifecycleStatus
+    );
   }
   if (filter === "attention") {
     return (
       [
         "waiting_permission",
+        "waiting_review",
         "blocked",
         "failed",
         "remote_unknown",
@@ -62,18 +65,36 @@ function taskSearchText(item: TaskViewModelItem): string {
     item.pendingReviewItemRefs.map(ref => ref.label).join(" "),
     item.latestResultPreview?.label ?? "",
     item.latestResultPreview?.preview ?? "",
+    item.artifacts.map(artifact => artifact.materializedReference ?? artifact.mediaType).join(" "),
   ]
     .join(" ")
     .toLocaleLowerCase("zh-CN");
 }
 
 function statusDetail(item: TaskViewModelItem): string {
+  if (item.lifecycleStatus === "waiting_review") return "报告产物正在等待你的审核，任务尚未完成。";
   if (item.pendingReviewItemRefs.length > 0) return "有事项等待决定，任务尚未完成。";
   if (item.pendingBlockers.length > 0) return item.pendingBlockers[0];
   if (item.latestResultPreview?.preview) return item.latestResultPreview.preview;
   if (item.lifecycleStatus === "running") return "任务仍在执行。";
   if (item.lifecycleStatus === "remote_unknown") return "远端执行结果未知，不能标记为完成。";
   return "查看依据可核对当前生命周期与交付状态。";
+}
+
+function artifactTypeLabel(mediaType: string): string {
+  const normalized = mediaType.split(";")[0]?.trim().toLocaleLowerCase();
+  if (normalized === "text/markdown") return "Markdown 结果";
+  if (normalized === "text/html") return "HTML 结果";
+  if (normalized === "application/pdf") return "PDF 结果";
+  return normalized || "任务产物";
+}
+
+function artifactStatusLabel(status: TaskViewModelItem["artifacts"][number]["status"]): string {
+  if (status === "materialized") return "已物化";
+  if (status === "waiting_review") return "等待审核";
+  if (status === "effect_unknown") return "结果未知";
+  if (status === "failed") return "交付失败";
+  return "草稿";
 }
 
 function actionAttributes(action: ProductAction) {
@@ -337,6 +358,64 @@ export function TasksReadOnlyView({
       )}
 
       {listAvailable && (
+        <section className="ol-readonly-section" aria-labelledby="tasks-results-title">
+          <div className="ol-readonly-section-heading">
+            <div>
+              <span>任务结果</span>
+              <h3 id="tasks-results-title">
+                {selectedTask ? selectedTask.title : "选择任务查看产物"}
+              </h3>
+            </div>
+          </div>
+          {selectedTask && selectedTask.artifacts.length > 0 ? (
+            <div className="ol-readonly-task-list" data-testid="canonical-task-artifacts">
+              {selectedTask.artifacts.map(artifact => (
+                <div className="ol-readonly-task-row" key={artifact.artifactId}>
+                  <span className="ol-readonly-task-row__copy">
+                    <strong>
+                      {artifactTypeLabel(artifact.mediaType)} · v{artifact.version}
+                    </strong>
+                    <span>
+                      {artifact.status === "materialized"
+                        ? (artifact.materializedReference ?? "已物化，但文件引用未知")
+                        : artifact.status === "waiting_review"
+                          ? "等待审核后物化"
+                          : artifact.status === "effect_unknown"
+                            ? "物化结果未知，未自动重放"
+                            : artifact.status === "failed"
+                              ? "产物未交付"
+                              : "产物草稿已记录"}
+                    </span>
+                    <small>{artifact.artifactId}</small>
+                  </span>
+                  <FoundationStatusLabel
+                    label={artifactStatusLabel(artifact.status)}
+                    status={
+                      artifact.status === "materialized"
+                        ? "success"
+                        : artifact.status === "failed"
+                          ? "error"
+                          : artifact.status === "effect_unknown"
+                            ? "unknown"
+                            : "waiting"
+                    }
+                    verified={
+                      artifact.status === "materialized" &&
+                      artifact.observedContentDigest === artifact.contentDigest
+                    }
+                  />
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="ol-readonly-empty-list">
+              {selectedTask ? "该任务还没有 canonical Artifact。" : "选择任务后显示后端产物记录。"}
+            </p>
+          )}
+        </section>
+      )}
+
+      {listAvailable && (
         <section className="ol-readonly-action-area" aria-labelledby="tasks-controls-title">
           <div>
             <span>任务动作</span>
@@ -386,7 +465,12 @@ export function TasksReadOnlyView({
                     data-action-completion-proof-after-dispatch={String(
                       Boolean(control.completionProofAfterDispatch)
                     )}
-                    onClick={() => onRequestTaskControl(control, selectedTask.canonicalTaskId)}
+                    onClick={() =>
+                      onRequestTaskControl(
+                        control,
+                        selectedTask.taskSessionId ?? selectedTask.canonicalTaskId
+                      )
+                    }
                   />
                 );
               })}

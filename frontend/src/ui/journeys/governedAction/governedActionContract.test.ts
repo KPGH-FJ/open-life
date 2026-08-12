@@ -32,6 +32,8 @@ function task(
     lifecycleStatus,
     terminalDeliveryStatus: "not_terminal",
     finalDeliveryEvidencePresent: false,
+    items: [],
+    artifacts: [],
     pendingBlockers: [],
     pendingReviewItemRefs: [],
     allowedControls: [],

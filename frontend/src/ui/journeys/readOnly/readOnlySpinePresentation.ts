@@ -191,6 +191,7 @@ export function tasksContext(envelope: ViewModelEnvelope<TasksViewModel>): Workb
   }
   const needsAttention = envelope.data
     ? envelope.data.summary.waitingPermissionCount +
+      envelope.data.summary.waitingReviewCount +
       envelope.data.summary.blockedCount +
       envelope.data.summary.pendingReviewCount +
       envelope.data.summary.completedNeedsEvidenceCount
@@ -207,6 +208,8 @@ export function taskLifecyclePresentation(item: TaskViewModelItem): ProductStatu
   switch (item.lifecycleStatus) {
     case "running":
       return { label: "运行中", status: "neutral" };
+    case "waiting_review":
+      return { label: "等待审核", status: "waiting" };
     case "waiting_permission":
       return { label: "等待确认", status: "waiting" };
     case "blocked":
@@ -238,6 +241,7 @@ export function taskPrimaryQuestion(envelope: ViewModelEnvelope<TasksViewModel>)
     return "当前没有可展示的任务";
   }
   if (envelope.data?.summary.waitingPermissionCount) return "哪些任务在等待你的确认";
+  if (envelope.data?.summary.waitingReviewCount) return "哪些结果在等待你的审核";
   if (envelope.data?.summary.blockedCount) return "哪些任务需要解除阻塞";
   if (envelope.data?.summary.completedNeedsEvidenceCount) return "哪些结果仍缺少完成证据";
   return "哪些任务需要我或可以继续";

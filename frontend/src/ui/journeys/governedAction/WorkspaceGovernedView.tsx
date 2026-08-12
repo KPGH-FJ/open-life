@@ -269,14 +269,26 @@ export function WorkspaceGovernedView({
           <h3 id="workspace-current-state">
             {task.lifecycleStatus === "waiting_permission"
               ? "任务暂停在一个动作之前"
-              : task.lifecycleStatus === "running"
-                ? "任务正在处理"
-                : "任务状态需要核对"}
+              : task.lifecycleStatus === "waiting_review"
+                ? "任务正在等待你审核报告产物"
+                : task.lifecycleStatus === "running"
+                  ? "任务正在处理"
+                  : "任务状态需要核对"}
           </h3>
         </div>
         {task.latestResultPreview?.preview && <p>{task.latestResultPreview.preview}</p>}
         {!task.latestResultPreview?.preview && (
           <p>页面只呈现后端提供的任务状态，不根据标题或历史记录补写进度。</p>
+        )}
+        {task.artifacts.length > 0 && (
+          <ul data-testid="workspace-canonical-artifacts">
+            {task.artifacts.map(artifact => (
+              <li key={artifact.artifactId}>
+                {artifact.mediaType.split(";")[0]} v{artifact.version} · {artifact.status}
+                {artifact.materializedReference ? ` · ${artifact.materializedReference}` : ""}
+              </li>
+            ))}
+          </ul>
         )}
       </section>
 

@@ -2824,6 +2824,7 @@ export type LifeModelViewModel = {
 // Canonical Rust owner: openlife-core/src/agent/tasks_view_model.rs.
 export type TaskLifecycleStatus =
   | "running"
+  | "waiting_review"
   | "waiting_permission"
   | "blocked"
   | "failed"
@@ -2883,6 +2884,49 @@ export type TaskLatestResultPreview = {
   evidenceRefs: EvidenceRef[];
 };
 
+export type CanonicalTaskItemKind =
+  | "artifact_draft"
+  | "review_checkpoint"
+  | "artifact_materialized";
+
+export type CanonicalTaskItemStatus =
+  | "waiting"
+  | "completed"
+  | "blocked"
+  | "failed"
+  | "effect_unknown";
+
+export type CanonicalArtifactStatus =
+  | "draft"
+  | "waiting_review"
+  | "materialized"
+  | "failed"
+  | "effect_unknown";
+
+export type TaskItemViewModel = {
+  id: string;
+  runId: string;
+  sequence: number;
+  kind: CanonicalTaskItemKind;
+  status: CanonicalTaskItemStatus;
+  summaryCode: string;
+  evidenceRefs: EvidenceRef[];
+};
+
+export type TaskArtifactViewModel = {
+  artifactId: string;
+  version: number;
+  status: CanonicalArtifactStatus;
+  mediaType: string;
+  contentDigest: string;
+  targetReferenceDigest: string;
+  materializedReference?: string;
+  observedContentDigest?: string;
+  proposalRef?: BackendEntityRef;
+  sourceItemRef: BackendEntityRef;
+  evidenceRefs: EvidenceRef[];
+};
+
 export type TaskViewModelItem = {
   canonicalTaskId: string;
   taskSessionId?: string;
@@ -2893,6 +2937,8 @@ export type TaskViewModelItem = {
   lifecycleStatus: TaskLifecycleStatus;
   terminalDeliveryStatus: TaskTerminalDeliveryStatus;
   finalDeliveryEvidencePresent: boolean;
+  items: TaskItemViewModel[];
+  artifacts: TaskArtifactViewModel[];
   pendingBlockers: string[];
   pendingReviewItemRefs: BackendEntityRef[];
   allowedControls: TaskControl[];
@@ -2905,6 +2951,7 @@ export type TaskViewModelItem = {
 export type TasksViewModelSummary = {
   total: number;
   activeCount: number;
+  waitingReviewCount: number;
   waitingPermissionCount: number;
   blockedCount: number;
   pendingReviewCount: number;

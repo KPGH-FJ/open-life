@@ -27,6 +27,8 @@ function task(overrides: Partial<TaskViewModelItem> = {}): TaskViewModelItem {
     lifecycleStatus: "running",
     terminalDeliveryStatus: "not_terminal",
     finalDeliveryEvidencePresent: false,
+    items: [],
+    artifacts: [],
     pendingBlockers: [],
     pendingReviewItemRefs: [],
     allowedControls: [],
@@ -86,6 +88,32 @@ describe("task control dispatch contract", () => {
     expect(resolved).toMatchObject({
       phase: "resolved",
       refreshedTask: { canonicalTaskId: "task-1", lifecycleStatus: "running" },
+    });
+  });
+
+  it("keeps controls bound to the compatibility execution session after canonical projection", () => {
+    const retry = control({ targetTaskId: "execution-session-1" });
+    const dispatching = taskControlDispatchReducer(initialTaskControlDispatchState, {
+      type: "request",
+      control: retry,
+      expectedTaskId: "execution-session-1",
+    });
+    const refreshing = taskControlDispatchReducer(dispatching, { type: "dispatch_succeeded" });
+    const resolved = taskControlDispatchReducer(refreshing, {
+      type: "refresh_succeeded",
+      task: task({
+        canonicalTaskId: "canonical-report-task-1",
+        taskSessionId: "execution-session-1",
+        lifecycleStatus: "running",
+      }),
+    });
+
+    expect(resolved).toMatchObject({
+      phase: "resolved",
+      refreshedTask: {
+        canonicalTaskId: "canonical-report-task-1",
+        taskSessionId: "execution-session-1",
+      },
     });
   });
 

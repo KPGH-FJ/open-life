@@ -6,10 +6,14 @@ use crate::state::AppState;
 use openlife_core::agent::{
     build_tasks_view_model, build_workspace_view_model, AgentRun, BackendEntityKind,
     BackendEntityRef, EvidenceRef, EvidenceSensitivity, EvidenceSource,
-    ProviderPrivacyBoundarySummary, ReviewItem, ReviewItemDecisionStatus, TaskLifecycleStatus,
-    TaskViewModelRunInput, TaskViewModelTaskInput, TasksViewModel, TasksViewModelBuildInput,
-    ViewModelEnvelope, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
-    WorkspaceActivityItem, WorkspaceViewModel, WorkspaceViewModelBuildInput,
+    ProviderPrivacyBoundarySummary, ReviewItem, ReviewItemDecisionStatus, TaskArtifactViewModel,
+    TaskItemViewModel, TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelRunInput,
+    TaskViewModelTaskInput, TasksViewModel, TasksViewModelBuildInput, ViewModelEnvelope,
+    ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity, WorkspaceActivityItem,
+    WorkspaceViewModel, WorkspaceViewModelBuildInput,
+};
+use openlife_core::task_runtime::{
+    CanonicalArtifactSnapshot, CanonicalArtifactStatus, CanonicalTaskSnapshot, CanonicalTaskStatus,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -50,13 +54,14 @@ async fn load_tasks_read_model_snapshot(
     let mut warnings = Vec::new();
     let (review_items, review_projection_authoritative) =
         load_review_items(state, &mut warnings).await;
-    let loaded_tasks = load_task_inputs(
+    let mut loaded_tasks = load_task_inputs(
         state,
         &review_items,
         review_projection_authoritative,
         &mut warnings,
     )
     .await;
+    overlay_canonical_report_tasks(state, &mut loaded_tasks, &mut warnings).await;
     let run_inputs = load_run_inputs(state, &mut warnings).await;
     let model = build_tasks_view_model(TasksViewModelBuildInput {
         task_inputs: loaded_tasks.task_inputs,
@@ -65,11 +70,22 @@ async fn load_tasks_read_model_snapshot(
             source_ref("main_chat_task_controls", "Main Chat task controls"),
             source_ref("agent_run_store", "AgentRun store"),
             source_ref("review_center_view_model", "ReviewCenterViewModel"),
+            source_ref(
+                "canonical_task_runtime_store",
+                "Canonical report Task Runtime store",
+            ),
         ],
         contract_limitations: vec![
             "Resume, retry, cancel, and refresh controls are request eligibility only; completion requires a refreshed backend read model.".into(),
             "Run-only rows without task-session final delivery evidence are not treated as completed task proof.".into(),
+            "Migrated report lifecycle and delivery proof come from canonical Task and ArtifactVersion state; compatibility TaskSession completion cannot override them.".into(),
         ],
+    });
+    let canonical_runtime_degraded = warnings.iter().any(|warning| {
+        matches!(
+            warning.code.as_str(),
+            "canonical_task_runtime_store_unavailable" | "canonical_task_runtime_read_failed"
+        )
     });
     let status = if model.items.is_empty() {
         if warnings.is_empty() {
@@ -77,6 +93,8 @@ async fn load_tasks_read_model_snapshot(
         } else {
             ViewModelStatus::Error
         }
+    } else if canonical_runtime_degraded {
+        ViewModelStatus::Stale
     } else {
         ViewModelStatus::Ready
     };
@@ -104,6 +122,7 @@ pub(crate) async fn get_workspace_view_model_with_state(
         matches!(
             item.lifecycle_status,
             TaskLifecycleStatus::Running
+                | TaskLifecycleStatus::WaitingReview
                 | TaskLifecycleStatus::WaitingPermission
                 | TaskLifecycleStatus::Blocked
         )
@@ -179,6 +198,288 @@ struct LoadedTaskInputs {
     activity_by_task: BTreeMap<String, Vec<WorkspaceActivityItem>>,
 }
 
+async fn overlay_canonical_report_tasks(
+    state: &Arc<AppState>,
+    loaded: &mut LoadedTaskInputs,
+    warnings: &mut Vec<ViewModelWarning>,
+) {
+    let Some(store) = state.canonical_task_runtime_store.as_ref() else {
+        warnings.push(warning(
+            "canonical_task_runtime_store_unavailable",
+            "TasksViewModel cannot prove migrated report Task, Item, or Artifact truth because CanonicalTaskRuntimeStore is unavailable.",
+        ));
+        return;
+    };
+    let snapshots = match store.lock().await.list_task_snapshots(100) {
+        Ok(snapshots) => snapshots,
+        Err(error) => {
+            warnings.push(warning(
+                "canonical_task_runtime_read_failed",
+                format!("TasksViewModel could not load canonical report Task snapshots: {error}"),
+            ));
+            return;
+        }
+    };
+    for snapshot in snapshots {
+        overlay_canonical_report_task(loaded, snapshot);
+    }
+}
+
+fn overlay_canonical_report_task(loaded: &mut LoadedTaskInputs, snapshot: CanonicalTaskSnapshot) {
+    let run_ids = snapshot
+        .runs
+        .iter()
+        .map(|run| run.run_id.clone())
+        .collect::<Vec<_>>();
+    let execution_session_ids = snapshot
+        .runs
+        .iter()
+        .map(|run| run.execution_session_id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let existing_index = loaded.task_inputs.iter().position(|input| {
+        execution_session_ids.contains(input.task_session_id.as_str())
+            || input
+                .related_run_ids
+                .iter()
+                .any(|run_id| run_ids.contains(run_id))
+    });
+    let task_session_id = existing_index
+        .and_then(|index| loaded.task_inputs.get(index))
+        .map(|input| input.task_session_id.clone())
+        .or_else(|| {
+            snapshot
+                .runs
+                .last()
+                .map(|run| run.execution_session_id.clone())
+        })
+        .unwrap_or_else(|| snapshot.task.id.clone());
+    let (lifecycle_status, terminal_status, delivery_proven) =
+        canonical_report_delivery_status(&snapshot);
+    let canonical_items = snapshot
+        .items
+        .iter()
+        .map(|item| TaskItemViewModel {
+            id: item.id.clone(),
+            run_id: item.run_id.clone(),
+            sequence: item.sequence,
+            kind: item.kind,
+            status: item.status,
+            summary_code: item.summary_code.clone(),
+            evidence_refs: vec![EvidenceRef {
+                id: item.id.clone(),
+                label: "Canonical Task Item".into(),
+                source: EvidenceSource::Task,
+                sensitivity: Some(EvidenceSensitivity::LocalPrivate),
+            }],
+        })
+        .collect::<Vec<_>>();
+    let canonical_artifacts = snapshot
+        .artifacts
+        .iter()
+        .map(canonical_artifact_view)
+        .collect::<Vec<_>>();
+    let pending_review_item_refs = snapshot
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.artifact.status == CanonicalArtifactStatus::WaitingReview)
+        .filter_map(|artifact| artifact.artifact.proposal_id.as_ref())
+        .map(|proposal_id| BackendEntityRef {
+            id: proposal_id.clone(),
+            kind: BackendEntityKind::ReviewItem,
+            label: "Report Artifact review".into(),
+            href: None,
+        })
+        .collect::<Vec<_>>();
+    let blockers = snapshot
+        .items
+        .iter()
+        .filter(|item| {
+            matches!(
+                item.status,
+                openlife_core::task_runtime::CanonicalTaskItemStatus::Blocked
+                    | openlife_core::task_runtime::CanonicalTaskItemStatus::Failed
+                    | openlife_core::task_runtime::CanonicalTaskItemStatus::EffectUnknown
+            )
+        })
+        .map(|item| item.summary_code.clone())
+        .collect::<Vec<_>>();
+    let preview = Some(canonical_report_preview(&snapshot));
+    let canonical_evidence = vec![
+        source_ref(snapshot.task.id.clone(), "Canonical report Task snapshot"),
+        source_ref(
+            format!("{}:artifacts", snapshot.task.id),
+            "Canonical report ArtifactVersion snapshot",
+        ),
+    ];
+
+    if let Some(index) = existing_index {
+        let input = &mut loaded.task_inputs[index];
+        let old_activity_key = input.task_session_id.clone();
+        input.canonical_task_id = Some(snapshot.task.id.clone());
+        input.conversation_id = Some(snapshot.task.conversation_id.clone());
+        input.related_run_ids = run_ids;
+        input.canonical_lifecycle_status = Some(lifecycle_status);
+        input.canonical_terminal_delivery_status = Some(terminal_status);
+        input.canonical_final_delivery_evidence_present = Some(delivery_proven);
+        input.canonical_items = canonical_items;
+        input.canonical_artifacts = canonical_artifacts;
+        input
+            .pending_review_item_refs
+            .extend(pending_review_item_refs);
+        input.pending_blockers.extend(blockers);
+        input.latest_result_preview = preview;
+        input.evidence_refs.extend(canonical_evidence);
+        input.updated_at = Some(snapshot.task.updated_at);
+        if let Some(activity) = loaded.activity_by_task.remove(&old_activity_key) {
+            loaded
+                .activity_by_task
+                .insert(snapshot.task.id.clone(), activity);
+        }
+    } else {
+        loaded.task_inputs.push(TaskViewModelTaskInput {
+            task_session_id,
+            canonical_task_id: Some(snapshot.task.id.clone()),
+            conversation_id: Some(snapshot.task.conversation_id),
+            title: "Generated report".into(),
+            strategy: None,
+            session_status: None,
+            related_run_ids: run_ids,
+            final_delivery_present: false,
+            final_delivery_status: None,
+            canonical_lifecycle_status: Some(lifecycle_status),
+            canonical_terminal_delivery_status: Some(terminal_status),
+            canonical_final_delivery_evidence_present: Some(delivery_proven),
+            canonical_items,
+            canonical_artifacts,
+            pending_blockers: blockers,
+            pending_review_item_refs,
+            review_projection_authoritative: true,
+            allowed_control_ids: Vec::new(),
+            retry_action_id: None,
+            next_recommended_control: Some("open_trace".into()),
+            latest_result_preview: preview,
+            evidence_refs: canonical_evidence,
+            updated_at: Some(snapshot.task.updated_at),
+        });
+    }
+}
+
+fn canonical_report_delivery_status(
+    snapshot: &CanonicalTaskSnapshot,
+) -> (TaskLifecycleStatus, TaskTerminalDeliveryStatus, bool) {
+    let delivery_proven = !snapshot.artifacts.is_empty()
+        && snapshot.artifacts.iter().all(|artifact| {
+            artifact.artifact.status == CanonicalArtifactStatus::Materialized
+                && artifact.artifact.content_digest
+                    == artifact
+                        .current_version
+                        .observed_content_digest
+                        .as_deref()
+                        .unwrap_or("")
+                && artifact.artifact.materialized_reference.is_some()
+                && artifact.artifact.materialized_reference
+                    == artifact.current_version.materialized_reference
+        });
+    match snapshot.task.status {
+        CanonicalTaskStatus::Running => (
+            TaskLifecycleStatus::Running,
+            TaskTerminalDeliveryStatus::NotTerminal,
+            false,
+        ),
+        CanonicalTaskStatus::WaitingReview => (
+            TaskLifecycleStatus::WaitingReview,
+            TaskTerminalDeliveryStatus::NotTerminal,
+            false,
+        ),
+        CanonicalTaskStatus::Completed if delivery_proven => (
+            TaskLifecycleStatus::Completed,
+            TaskTerminalDeliveryStatus::Delivered,
+            true,
+        ),
+        CanonicalTaskStatus::Completed => (
+            TaskLifecycleStatus::CompletedNeedsEvidence,
+            TaskTerminalDeliveryStatus::MissingFinalDeliveryEvidence,
+            false,
+        ),
+        CanonicalTaskStatus::Blocked => (
+            TaskLifecycleStatus::Blocked,
+            TaskTerminalDeliveryStatus::Blocked,
+            false,
+        ),
+        CanonicalTaskStatus::Failed => (
+            TaskLifecycleStatus::Failed,
+            TaskTerminalDeliveryStatus::Failed,
+            false,
+        ),
+        CanonicalTaskStatus::EffectUnknown => (
+            TaskLifecycleStatus::RemoteUnknown,
+            TaskTerminalDeliveryStatus::Unknown,
+            false,
+        ),
+    }
+}
+
+fn canonical_artifact_view(snapshot: &CanonicalArtifactSnapshot) -> TaskArtifactViewModel {
+    let proposal_ref = snapshot
+        .artifact
+        .proposal_id
+        .as_ref()
+        .map(|proposal_id| BackendEntityRef {
+            id: proposal_id.clone(),
+            kind: BackendEntityKind::ReviewItem,
+            label: "Artifact Review checkpoint".into(),
+            href: None,
+        });
+    TaskArtifactViewModel {
+        artifact_id: snapshot.artifact.id.clone(),
+        version: snapshot.current_version.version,
+        status: snapshot.artifact.status,
+        media_type: snapshot.artifact.media_type.clone(),
+        content_digest: snapshot.artifact.content_digest.clone(),
+        target_reference_digest: snapshot.artifact.target_reference_digest.clone(),
+        materialized_reference: snapshot.current_version.materialized_reference.clone(),
+        observed_content_digest: snapshot.current_version.observed_content_digest.clone(),
+        proposal_ref,
+        source_item_ref: BackendEntityRef {
+            id: snapshot.artifact.source_item_id.clone(),
+            kind: BackendEntityKind::Evidence,
+            label: "ArtifactDraft Item".into(),
+            href: None,
+        },
+        evidence_refs: vec![EvidenceRef {
+            id: snapshot.artifact.id.clone(),
+            label: "Canonical ArtifactVersion".into(),
+            source: EvidenceSource::Task,
+            sensitivity: Some(EvidenceSensitivity::LocalPrivate),
+        }],
+    }
+}
+
+fn canonical_report_preview(snapshot: &CanonicalTaskSnapshot) -> String {
+    let total = snapshot.artifacts.len();
+    let materialized = snapshot
+        .artifacts
+        .iter()
+        .filter(|artifact| artifact.artifact.status == CanonicalArtifactStatus::Materialized)
+        .count();
+    match snapshot.task.status {
+        CanonicalTaskStatus::WaitingReview => {
+            format!("{total} report artifact(s) are waiting for Review.")
+        }
+        CanonicalTaskStatus::Completed => {
+            format!("{materialized} of {total} report artifact(s) are materialized and verified.")
+        }
+        CanonicalTaskStatus::Blocked => "The report is blocked by a Review decision.".into(),
+        CanonicalTaskStatus::EffectUnknown => {
+            "The report materialization result is unknown and was not replayed.".into()
+        }
+        CanonicalTaskStatus::Failed => "The report task failed before verified delivery.".into(),
+        CanonicalTaskStatus::Running => {
+            format!("The report task has prepared {total} artifact draft(s).")
+        }
+    }
+}
+
 async fn load_task_inputs(
     state: &Arc<AppState>,
     review_items: &[ReviewItem],
@@ -244,6 +545,7 @@ async fn load_task_inputs(
         );
         inputs.push(TaskViewModelTaskInput {
             task_session_id: summary.task_session_id,
+            canonical_task_id: None,
             conversation_id: Some(summary.conversation_id),
             title: summary.title,
             strategy: Some(detail.task_session.selected_strategy),
@@ -251,6 +553,11 @@ async fn load_task_inputs(
             related_run_ids,
             final_delivery_present: detail.final_delivery.is_some(),
             final_delivery_status,
+            canonical_lifecycle_status: None,
+            canonical_terminal_delivery_status: None,
+            canonical_final_delivery_evidence_present: None,
+            canonical_items: Vec::new(),
+            canonical_artifacts: Vec::new(),
             pending_blockers,
             pending_review_item_refs,
             review_projection_authoritative,
@@ -452,7 +759,10 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
 
 #[cfg(test)]
 mod tests {
-    use super::{load_run_inputs, review_refs_for_task, workspace_composition_status};
+    use super::{
+        get_tasks_view_model_with_state, load_run_inputs, review_refs_for_task,
+        workspace_composition_status,
+    };
     use openlife_core::agent::{
         build_review_center_view_model, AgentProposal, ProposalSource, ProposalType,
         ReviewCenterBuildInput, RiskLevel, ViewModelStatus,
@@ -578,5 +888,115 @@ mod tests {
             .persistence_coordinator
             .admit_agent_run_write()
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn tasks_view_model_fails_closed_when_canonical_report_store_is_unavailable() {
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        Arc::get_mut(&mut state)
+            .expect("test state has one outer owner")
+            .canonical_task_runtime_store = None;
+
+        let envelope = get_tasks_view_model_with_state(&state).await.unwrap();
+
+        assert_eq!(envelope.status, ViewModelStatus::Error);
+        assert!(envelope
+            .warnings
+            .iter()
+            .any(|warning| { warning.code == "canonical_task_runtime_store_unavailable" }));
+    }
+
+    #[tokio::test]
+    async fn tasks_view_model_projects_canonical_report_items_and_artifact_delivery() {
+        use sha2::{Digest, Sha256};
+
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let content = "# Canonical report";
+        let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let prepared = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .prepare_report_artifact(openlife_core::task_runtime::ReportArtifactDraftInput {
+                conversation_id: "conversation-report-view",
+                execution_session_id: "execution-report-view",
+                run_id: "run-report-view",
+                outcome_digest: &format!("sha256:{:x}", Sha256::digest(b"report view outcome")),
+                target_reference: "/tmp/openlife/report-view.md",
+                content_digest: &content_digest,
+                media_type: "text/markdown; charset=utf-8",
+            })
+            .unwrap();
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .bind_report_review(&prepared.artifact_id, "proposal-report-view")
+            .unwrap();
+
+        let waiting = get_tasks_view_model_with_state(&state).await.unwrap();
+        assert_eq!(waiting.status, ViewModelStatus::Ready);
+        let waiting = waiting.data.unwrap();
+        assert_eq!(waiting.items.len(), 1);
+        let task = &waiting.items[0];
+        assert_eq!(task.canonical_task_id, prepared.task_id);
+        assert_eq!(
+            task.task_session_id.as_deref(),
+            Some("execution-report-view")
+        );
+        assert_eq!(
+            task.lifecycle_status,
+            openlife_core::agent::TaskLifecycleStatus::WaitingReview
+        );
+        assert_eq!(task.items.len(), 2);
+        assert_eq!(task.artifacts.len(), 1);
+        assert_eq!(
+            task.artifacts[0].status,
+            openlife_core::task_runtime::CanonicalArtifactStatus::WaitingReview
+        );
+        assert!(!task.final_delivery_evidence_present);
+        assert!(task
+            .latest_result_preview
+            .as_ref()
+            .is_some_and(|preview| preview.final_delivery_ref.is_none()));
+
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .confirm_artifact_materialized(
+                "proposal-report-view",
+                "/tmp/openlife/report-view.md",
+                &content_digest,
+            )
+            .unwrap();
+        let completed = get_tasks_view_model_with_state(&state).await.unwrap();
+        let completed = completed.data.unwrap();
+        assert_eq!(completed.items.len(), 1);
+        let task = &completed.items[0];
+        assert_eq!(
+            task.lifecycle_status,
+            openlife_core::agent::TaskLifecycleStatus::Completed
+        );
+        assert_eq!(
+            task.terminal_delivery_status,
+            openlife_core::agent::TaskTerminalDeliveryStatus::Delivered
+        );
+        assert!(task.final_delivery_evidence_present);
+        assert!(task
+            .latest_result_preview
+            .as_ref()
+            .is_some_and(|preview| preview.final_delivery_ref.is_some()));
+        assert_eq!(task.items.len(), 3);
+        assert_eq!(
+            task.artifacts[0].materialized_reference.as_deref(),
+            Some("/tmp/openlife/report-view.md")
+        );
     }
 }

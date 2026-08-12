@@ -67,6 +67,14 @@ describe("Workbench desktop read-only journey", () => {
     ).toHaveFocus();
     expect(permissionTask).toHaveAttribute("aria-pressed", "true");
     expect(screen.queryByRole("button", { name: /恢复|重试|取消任务/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /生成周末出行的行前清单/ }));
+    const artifacts = screen.getByTestId("canonical-task-artifacts");
+    expect(within(artifacts).getByText(/Markdown 结果 · v1/)).toBeInTheDocument();
+    expect(
+      within(artifacts).getByText(/\/OpenLife\/Results\/travel-checklist\.md/)
+    ).toBeInTheDocument();
+    expect(within(artifacts).getByText("已物化")).toBeInTheDocument();
   });
 
   it("fails stale state closed and exposes complete product action attributes", async () => {

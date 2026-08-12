@@ -314,6 +314,8 @@ export function createMockTasksViewModelEnvelope(
           finalDeliveryEvidencePresent: false,
           pendingBlockers: ["terminal_no_resume"],
           pendingReviewItemRefs: [],
+          items: [],
+          artifacts: [],
           allowedControls: [
             {
               id: "mainchat_task_mock:open_trace",
@@ -339,6 +341,7 @@ export function createMockTasksViewModelEnvelope(
       summary: {
         total: 1,
         activeCount: 0,
+        waitingReviewCount: 0,
         waitingPermissionCount: 0,
         blockedCount: 0,
         pendingReviewCount: 0,
@@ -391,6 +394,8 @@ export function createMockWorkspaceViewModelEnvelope(
         finalDeliveryEvidencePresent: false,
         pendingBlockers: [],
         pendingReviewItemRefs: [],
+        items: [],
+        artifacts: [],
         allowedControls: [],
         nextRecommendedControl: "open_trace",
         evidenceRefs: [],

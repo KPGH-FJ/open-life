@@ -107,6 +107,8 @@ function task(
     lifecycleStatus: "running",
     terminalDeliveryStatus: "not_terminal",
     finalDeliveryEvidencePresent: false,
+    items: [],
+    artifacts: [],
     pendingBlockers: [],
     pendingReviewItemRefs: [],
     allowedControls: [],
@@ -149,6 +151,29 @@ const readyTasks: TaskViewModelItem[] = [
     lifecycleStatus: "completed",
     terminalDeliveryStatus: "delivered",
     finalDeliveryEvidencePresent: true,
+    artifacts: [
+      {
+        artifactId: "artifact:travel-checklist",
+        version: 1,
+        status: "materialized",
+        mediaType: "text/markdown; charset=utf-8",
+        contentDigest: "sha256:travel-checklist-v1",
+        targetReferenceDigest: "sha256:travel-checklist-target",
+        materializedReference: "/OpenLife/Results/travel-checklist.md",
+        observedContentDigest: "sha256:travel-checklist-v1",
+        proposalRef: {
+          id: "proposal:travel-checklist-v1",
+          kind: "review_item",
+          label: "清单写入审核",
+        },
+        sourceItemRef: {
+          id: "item:travel-checklist-delivery",
+          kind: "evidence",
+          label: "清单产物草稿",
+        },
+        evidenceRefs: [taskEvidence("artifact:travel-checklist:v1", "清单产物版本")],
+      },
+    ],
     latestResultPreview: {
       status: "delivered",
       label: "清单已交付",
@@ -205,8 +230,11 @@ function tasksEnvelope(
     summary: {
       total: items.length,
       activeCount: items.filter(item =>
-        ["running", "waiting_permission", "blocked"].includes(item.lifecycleStatus)
+        ["running", "waiting_review", "waiting_permission", "blocked"].includes(
+          item.lifecycleStatus
+        )
       ).length,
+      waitingReviewCount: items.filter(item => item.lifecycleStatus === "waiting_review").length,
       waitingPermissionCount: items.filter(item => item.lifecycleStatus === "waiting_permission")
         .length,
       blockedCount: items.filter(item => item.lifecycleStatus === "blocked").length,

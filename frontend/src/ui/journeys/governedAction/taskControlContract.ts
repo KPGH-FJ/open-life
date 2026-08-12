@@ -70,15 +70,15 @@ function contractBlocker(control: TaskControl, expectedTaskId: string): string |
 }
 
 function identityMatches(control: TaskControl, task: TaskViewModelItem): boolean {
-  return (
-    task.canonicalTaskId === control.targetTaskId && task.taskSessionId === control.targetTaskId
-  );
+  return task.taskSessionId === control.targetTaskId;
 }
 
 function refreshedStateConfirmsRequest(control: TaskControl, task: TaskViewModelItem): boolean {
   if (control.kind === "cancel") return task.lifecycleStatus === "cancelled";
   if (control.kind === "resume") {
-    return !["waiting_permission", "blocked", "unknown"].includes(task.lifecycleStatus);
+    return !["waiting_review", "waiting_permission", "blocked", "unknown"].includes(
+      task.lifecycleStatus
+    );
   }
   if (control.kind === "retry") {
     return !["failed", "remote_unknown", "unknown"].includes(task.lifecycleStatus);

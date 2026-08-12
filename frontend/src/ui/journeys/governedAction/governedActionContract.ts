@@ -54,13 +54,13 @@ function taskResumeContractBlocker(control: TaskControl, expectedTaskId: string)
 }
 
 function refreshedTaskIdentityMatches(control: TaskControl, task: TaskViewModelItem): boolean {
-  return (
-    task.canonicalTaskId === control.targetTaskId && task.taskSessionId === control.targetTaskId
-  );
+  return task.taskSessionId === control.targetTaskId;
 }
 
 function refreshedTaskConfirmsResume(task: TaskViewModelItem): boolean {
-  return !["waiting_permission", "blocked", "unknown"].includes(task.lifecycleStatus);
+  return !["waiting_review", "waiting_permission", "blocked", "unknown"].includes(
+    task.lifecycleStatus
+  );
 }
 
 export function taskResumeReducer(state: TaskResumeState, event: TaskResumeEvent): TaskResumeState {

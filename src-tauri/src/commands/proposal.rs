@@ -1420,6 +1420,25 @@ async fn mark_canonical_report_artifact_effect_failure(
     }
 }
 
+async fn project_canonical_report_review_rejection(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<(), String> {
+    if canonical_report_artifact_id(proposal).is_none() {
+        return Ok(());
+    }
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    store
+        .lock()
+        .await
+        .mark_artifact_review_rejected(&proposal.id)
+        .map(|_| ())
+        .map_err(|error| format!("canonical report Review rejection projection failed: {error}"))
+}
+
 fn confirmed_effect_reconciliation_response(
     proposal: &AgentProposal,
     projection_confirmed: bool,
@@ -4376,6 +4395,7 @@ pub(crate) async fn reject_proposal_with_state(
     require_persistence_write(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     if proposal.status == ProposalStatus::Rejected {
+        project_canonical_report_review_rejection(state, &proposal).await?;
         crate::life_model_learning::record_lifemodel_learning_review_rejected_with_state(
             state, &proposal,
         )
@@ -4399,6 +4419,7 @@ pub(crate) async fn reject_proposal_with_state(
     let expected_status = proposal.status;
     proposal.reject();
     update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
+    project_canonical_report_review_rejection(state, &proposal).await?;
     crate::life_model_learning::record_lifemodel_learning_review_rejected_with_state(
         state, &proposal,
     )
@@ -7293,6 +7314,112 @@ mod tests {
             "confirmed"
         );
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), content);
+    }
+
+    #[tokio::test]
+    async fn rejected_report_proposal_blocks_the_preexisting_canonical_artifact_task() {
+        use sha2::{Digest, Sha256};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let file_path = temp_dir.path().join("rejected-report.md");
+        let content = "# Rejected canonical report";
+        let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let prepared = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .prepare_report_artifact(openlife_core::task_runtime::ReportArtifactDraftInput {
+                conversation_id: "conversation-rejected-report",
+                execution_session_id: "execution-session-rejected-report",
+                run_id: "run-rejected-report",
+                outcome_digest: &format!(
+                    "sha256:{:x}",
+                    Sha256::digest(b"rejected canonical report outcome")
+                ),
+                target_reference: &file_path.to_string_lossy(),
+                content_digest: &content_digest,
+                media_type: "text/markdown; charset=utf-8",
+            })
+            .unwrap();
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.{}", file_path.display()),
+            serde_json::json!({
+                "path": file_path.to_string_lossy(),
+                "content": content,
+                "content_hash": content_digest,
+                "operation": "propose_write",
+                "expected_target_absent": true,
+                "expected_target_digest": null,
+                "artifactId": prepared.artifact_id,
+                "canonicalTaskId": prepared.task_id,
+                "artifactDraftItemId": prepared.artifact_draft_item_id,
+                "artifactVersion": 1,
+                "generatedByProvider": true,
+            }),
+            "Reject a generated report in Review",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::ChatConversation,
+        );
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .bind_report_review(&prepared.artifact_id, &proposal.id)
+            .unwrap();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        reject_proposal_with_state(proposal.id.clone(), &state)
+            .await
+            .unwrap();
+
+        let store = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await;
+        assert_eq!(
+            store
+                .load_artifact(&prepared.artifact_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            openlife_core::task_runtime::CanonicalArtifactStatus::Failed
+        );
+        assert_eq!(
+            store.load_task(&prepared.task_id).unwrap().unwrap().status,
+            openlife_core::task_runtime::CanonicalTaskStatus::Blocked
+        );
+        assert!(store
+            .list_items(&prepared.task_id)
+            .unwrap()
+            .iter()
+            .any(|item| {
+                item.kind == openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint
+                    && item.status == openlife_core::task_runtime::CanonicalTaskItemStatus::Blocked
+                    && item.summary_code == "report_artifact_review_rejected"
+            }));
+        assert!(!file_path.exists());
+        drop(store);
+
+        reject_proposal_with_state(proposal.id, &state)
+            .await
+            .unwrap();
+        assert!(!file_path.exists());
     }
 
     #[test]

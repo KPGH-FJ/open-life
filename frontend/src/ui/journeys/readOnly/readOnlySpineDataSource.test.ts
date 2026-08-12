@@ -46,6 +46,7 @@ function tasksEnvelope(): ViewModelEnvelope<TasksViewModel> {
       summary: {
         total: 0,
         activeCount: 0,
+        waitingReviewCount: 0,
         waitingPermissionCount: 0,
         blockedCount: 0,
         pendingReviewCount: 0,

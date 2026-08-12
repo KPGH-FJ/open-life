@@ -219,12 +219,12 @@ pub use strategy_runtime::{
     RuntimeStrategyRegistryReadinessReport, RuntimeStrategySideEffectBudget,
 };
 pub use tasks_view_model::{
-    build_tasks_view_model, build_workspace_view_model, TaskControl, TaskControlEffect,
-    TaskControlKind, TaskLatestResultPreview, TaskLifecycleStatus, TaskTerminalDeliveryStatus,
-    TaskViewModelContractError, TaskViewModelItem, TaskViewModelRunInput, TaskViewModelTaskInput,
-    TasksViewModel, TasksViewModelBuildInput, TasksViewModelSummary, WorkspaceActivityItem,
-    WorkspaceActivityKind, WorkspaceActivityStatus, WorkspaceViewModel,
-    WorkspaceViewModelBuildInput,
+    build_tasks_view_model, build_workspace_view_model, TaskArtifactViewModel, TaskControl,
+    TaskControlEffect, TaskControlKind, TaskItemViewModel, TaskLatestResultPreview,
+    TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelContractError, TaskViewModelItem,
+    TaskViewModelRunInput, TaskViewModelTaskInput, TasksViewModel, TasksViewModelBuildInput,
+    TasksViewModelSummary, WorkspaceActivityItem, WorkspaceActivityKind, WorkspaceActivityStatus,
+    WorkspaceViewModel, WorkspaceViewModelBuildInput,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use tool_execution_owner::AgentRunToolExecutionFaultPoint;

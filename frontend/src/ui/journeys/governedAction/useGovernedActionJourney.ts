@@ -37,7 +37,9 @@ function findRefreshedTask(
   targetTaskId: string
 ): TaskViewModelItem | null {
   return (
-    snapshot.tasksEnvelope.data?.items.find(task => task.canonicalTaskId === targetTaskId) ?? null
+    snapshot.tasksEnvelope.data?.items.find(
+      task => task.taskSessionId === targetTaskId || task.canonicalTaskId === targetTaskId
+    ) ?? null
   );
 }
 

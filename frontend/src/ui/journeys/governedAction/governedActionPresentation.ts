@@ -239,11 +239,13 @@ export function workspaceInspector(
         ? "WorkspaceViewModel 未能建立，当前没有可执行产品结论。"
         : task?.lifecycleStatus === "waiting_permission"
           ? "任务暂停在一个明确动作之前；被请求的动作尚未执行。"
-          : task?.lifecycleStatus === "running"
-            ? "刷新后的任务读模型确认同一任务正在处理。"
-            : task
-              ? `后端将当前任务标记为 ${task.lifecycleStatus}。`
-              : "后端没有提供当前活动任务。",
+          : task?.lifecycleStatus === "waiting_review"
+            ? "报告产物已经生成，但任务要等你审核后才能确认交付。"
+            : task?.lifecycleStatus === "running"
+              ? "刷新后的任务读模型确认同一任务正在处理。"
+              : task
+                ? `后端将当前任务标记为 ${task.lifecycleStatus}。`
+                : "后端没有提供当前活动任务。",
     risk: permissionItem
       ? permissionItem.decisionContext.permission?.status === "ready"
         ? "批准只创建一次精确授权；任务恢复和后续结果仍需独立刷新。"

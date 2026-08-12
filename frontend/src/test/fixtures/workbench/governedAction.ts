@@ -230,6 +230,8 @@ function activeTask(stage: FixtureStage): TaskViewModelItem {
     lifecycleStatus: running ? "running" : rejected ? "blocked" : "waiting_permission",
     terminalDeliveryStatus: rejected ? "blocked" : "not_terminal",
     finalDeliveryEvidencePresent: false,
+    items: [],
+    artifacts: [],
     pendingBlockers: pending
       ? ["读取本地访谈记录前需要你的决定；当前尚未访问文件。"]
       : rejected
@@ -261,8 +263,9 @@ function taskSummary(items: TaskViewModelItem[]): TasksViewModel["summary"] {
   return {
     total: items.length,
     activeCount: items.filter(item =>
-      ["running", "waiting_permission", "blocked"].includes(item.lifecycleStatus)
+      ["running", "waiting_review", "waiting_permission", "blocked"].includes(item.lifecycleStatus)
     ).length,
+    waitingReviewCount: items.filter(item => item.lifecycleStatus === "waiting_review").length,
     waitingPermissionCount: items.filter(item => item.lifecycleStatus === "waiting_permission")
       .length,
     blockedCount: items.filter(item => item.lifecycleStatus === "blocked").length,
