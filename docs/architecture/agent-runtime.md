@@ -147,7 +147,10 @@ only, Web-only, or combined reports, the kernel records ordered read Items,
 then invokes the user-selected provider once with exact request-scoped source
 contracts. A rejected local-resource or Web citation receives at most one
 provider retry; read tools are not redispatched, and a second failure produces
-no ArtifactDraft or Proposal.
+no ArtifactDraft or Proposal. Durable document-read metadata never stores body
+or body-preview text: it keeps only selection digest/count and a safe summary.
+Restart synthesis reselects from the canonical task-bound ResourceStore and
+fails closed if the selection digest or count has drifted.
 
 ## Runtime Support And Task Evidence
 

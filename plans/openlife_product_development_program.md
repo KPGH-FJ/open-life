@@ -118,6 +118,9 @@ S3 contract cannot be proved below that evidence level.
   reads.
 - Replay and backend read models expose committed document/Web Items without
   duplicating provider generations, proposals, or effects.
+- Independent post-implementation review verified the durable boundary and
+  corrected document replay to retain only selection digest/count; restart
+  synthesis reselects canonical ResourceStore content and fails on drift.
 - Rust and frontend format, lint, test, production-build, absence, and browser-
   shell gates passed on the closing working tree. Native and external-live
   evidence remain explicitly assigned to S6.

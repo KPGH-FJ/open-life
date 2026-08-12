@@ -1833,6 +1833,23 @@ fn typed_kernel_read_failure_code(result: &ActionExecutionResult) -> Option<Stri
     }
 }
 
+fn kernel_read_output_preview(tool_name: &str, observation_content: &str) -> String {
+    if tool_name == "document.read" {
+        serde_json::from_str::<Value>(observation_content)
+            .ok()
+            .map(|receipt| {
+                let count = receipt
+                    .get("selectedChunkCount")
+                    .and_then(Value::as_u64)
+                    .unwrap_or_default();
+                format!("document.read selected {count} task-bound chunks")
+            })
+            .unwrap_or_else(|| "document.read completed with metadata-safe evidence".into())
+    } else {
+        preview_text(observation_content, MAX_TOOL_OBSERVATION_PREVIEW_CHARS)
+    }
+}
+
 fn kernel_read_tool_execution_from_action_result(
     decision: MainChatKernelReadToolDecision,
     result: ActionExecutionResult,
@@ -1861,10 +1878,7 @@ fn kernel_read_tool_execution_from_action_result(
     let status_label = action_execution_status_label(&result.status);
     let blocker_reason = typed_kernel_read_failure_code(&result);
     let output_preview = if result.status == ActionExecutionStatus::Succeeded {
-        preview_text(
-            &result.observation.content,
-            MAX_TOOL_OBSERVATION_PREVIEW_CHARS,
-        )
+        kernel_read_output_preview(&decision.tool_name, &result.observation.content)
     } else {
         blocker_reason
             .clone()
@@ -12306,8 +12320,7 @@ fn validate_kernel_tool_call_observation_bindings(
                 action, receipt, &run.id,
             )
             .ok_or_else(|| "kernel_tool_observation_live_projection_invalid".to_string())?;
-        let expected_preview =
-            preview_text(&observation.content, MAX_TOOL_OBSERVATION_PREVIEW_CHARS);
+        let expected_preview = kernel_read_output_preview(&call.name, &observation.content);
         if call.product_projection.as_ref() != Some(&expected_projection)
             || call.output_preview.as_deref() != Some(expected_preview.as_str())
             || action.runtime_execution_receipt.as_ref() != Some(receipt)

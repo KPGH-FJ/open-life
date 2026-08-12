@@ -68,8 +68,11 @@ must match the ToolCall selection digest, and receives newly issued
 request-scoped citations. Local-resource and Web citation authorities validate
 model output before a report ArtifactDraft or ReviewCheckpoint can exist.
 Missing/failed reads or a failed one-shot citation repair therefore stop before
-provider-backed completion and durable effects. Restart replay reuses committed
-read observations without creating fresh read graphs.
+provider-backed completion and durable effects. For document reads, durable
+replay metadata contains only the selected chunk count and stable selection
+digest. Restart replay reselects the exact task-bound ResourceStore content and
+must reproduce that digest before provider synthesis; it does not redispatch the
+ToolGateway read or persist a document-body preview.
 
 The existing backend-owned `TasksViewModel` and `WorkspaceViewModel` now read a
 consistent canonical report snapshot and project its Run memberships, typed

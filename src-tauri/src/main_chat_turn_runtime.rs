@@ -4913,6 +4913,168 @@ struct OpenLifeReplayAggregateProjection {
     blockers: Vec<String>,
 }
 
+fn revalidate_document_replay_selection(
+    state: &Arc<AppState>,
+    metadata: &serde_json::Value,
+    synthesis: &serde_json::Value,
+) -> Result<String, String> {
+    let governed_input = metadata
+        .get("governedInput")
+        .ok_or_else(|| "replay_synthesis_governed_input_missing".to_string())?;
+    let required = |key: &str| {
+        governed_input
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| format!("replay_synthesis_document_{key}_missing"))
+    };
+    let message_id = required("message_id")?;
+    let query = required("query")?;
+    let privacy_decision_id = required("privacy_decision_id")?;
+    let expected_digest = synthesis
+        .get("selectionDigest")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "replay_synthesis_document_digest_missing".to_string())?;
+    let expected_count = synthesis
+        .get("selectedChunkCount")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|count| usize::try_from(count).ok())
+        .filter(|count| *count > 0)
+        .ok_or_else(|| "replay_synthesis_document_count_missing".to_string())?;
+    let store = state
+        .resource_runtime
+        .as_ref()
+        .ok_or_else(|| "replay_synthesis_document_resource_store_unavailable".to_string())?
+        .gateway()
+        .store();
+    let selected = openlife_core::resource_selection::DeterministicResourceSelector
+        .select_for_message(
+            store,
+            &uuid::Uuid::new_v4().to_string(),
+            privacy_decision_id,
+            message_id,
+            query,
+            vec![openlife_core::llm::ProviderPayloadCategory::CurrentUserConversation],
+        )
+        .map_err(|_| "replay_synthesis_document_reselection_failed".to_string())?;
+    let observed_digest = selected.citation_set.selection_digest();
+    if selected.context_blocks.len() != expected_count || observed_digest != expected_digest {
+        return Err("replay_synthesis_document_selection_drift".into());
+    }
+    Ok(serde_json::json!({
+        "schemaVersion": 1,
+        "messageId": message_id,
+        "selectionDigest": observed_digest,
+        "selectedChunkCount": expected_count,
+    })
+    .to_string())
+}
+
+#[cfg(test)]
+mod document_replay_selection_tests {
+    use super::*;
+
+    fn state_with_bound_document(
+        message_id: &str,
+        body: &str,
+    ) -> (Arc<AppState>, String, serde_json::Value) {
+        let store = openlife_core::resource::ResourceStore::new_in_memory()
+            .expect("document replay ResourceStore");
+        let runtime = crate::resource_commands::ResourceRuntime::new(
+            openlife_core::resource_gateway::ResourceGateway::new(
+                store,
+                openlife_core::resource_gateway::ResourceParserProcess::for_current_executable()
+                    .expect("document replay parser process"),
+            ),
+        );
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        Arc::get_mut(&mut state)
+            .expect("isolated document replay state")
+            .resource_runtime = Some(Arc::new(runtime));
+        state
+            .resource_runtime
+            .as_ref()
+            .expect("document replay runtime")
+            .gateway()
+            .store()
+            .commit_import_batch(openlife_core::resource::ResourceImportBatch {
+                operation_id: uuid::Uuid::new_v4().to_string(),
+                message_id: message_id.into(),
+                resources: vec![openlife_core::resource::ResourceImportCandidate {
+                    resource_id: uuid::Uuid::new_v4().to_string(),
+                    filename: "private-replay.md".into(),
+                    declared_mime: "text/markdown".into(),
+                    detected_mime: "text/markdown".into(),
+                    format: openlife_core::resource::ResourceFormat::Markdown,
+                    bytes: body.as_bytes().to_vec(),
+                    chunks: vec![openlife_core::resource::ResourceChunkDraft {
+                        content: body.into(),
+                        provenance: openlife_core::resource::ResourceProvenance::Text {
+                            start_line: 1,
+                            end_line: 1,
+                        },
+                    }],
+                }],
+            })
+            .expect("bind replay resource");
+        let privacy_decision_id = "privacy-document-replay";
+        let query = "根据附件生成报告";
+        let selected = openlife_core::resource_selection::DeterministicResourceSelector
+            .select_for_message(
+                state
+                    .resource_runtime
+                    .as_ref()
+                    .expect("document replay runtime")
+                    .gateway()
+                    .store(),
+                &uuid::Uuid::new_v4().to_string(),
+                privacy_decision_id,
+                message_id,
+                query,
+                vec![openlife_core::llm::ProviderPayloadCategory::CurrentUserConversation],
+            )
+            .expect("select replay resource");
+        let metadata = serde_json::json!({
+            "governedInput": {
+                "message_id": message_id,
+                "query": query,
+                "privacy_decision_id": privacy_decision_id,
+            }
+        });
+        let synthesis = serde_json::json!({
+            "selectionDigest": selected.citation_set.selection_digest(),
+            "selectedChunkCount": selected.context_blocks.len(),
+        });
+        (state, body.into(), serde_json::json!([metadata, synthesis]))
+    }
+
+    #[test]
+    fn replay_reselects_exact_resource_without_returning_body() {
+        let (state, private_body, pair) = state_with_bound_document(
+            "task-document-replay-exact",
+            "PRIVATE_REPLAY_BODY_MUST_NOT_BE_DURABLE",
+        );
+        let receipt = revalidate_document_replay_selection(&state, &pair[0], &pair[1])
+            .expect("exact document replay selection");
+
+        assert!(!receipt.contains(&private_body));
+        assert!(receipt.contains("selectionDigest"));
+        assert!(receipt.contains("selectedChunkCount"));
+    }
+
+    #[test]
+    fn replay_fails_closed_when_selection_proof_drifts() {
+        let (state, _, mut pair) =
+            state_with_bound_document("task-document-replay-drift", "PRIVATE_REPLAY_DRIFT_BODY");
+        pair[1]["selectedChunkCount"] = serde_json::json!(2);
+
+        assert_eq!(
+            revalidate_document_replay_selection(&state, &pair[0], &pair[1]),
+            Err("replay_synthesis_document_selection_drift".into())
+        );
+    }
+}
+
 async fn load_openlife_replay_synthesis_observations(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -4975,6 +5137,10 @@ async fn load_openlife_replay_synthesis_observations(
                             .map_err(|_| "replay_synthesis_web_observation_invalid".to_string())?,
                     )
                 }
+                Some("document") => (
+                    "document.read".to_string(),
+                    revalidate_document_replay_selection(state, &metadata, synthesis)?,
+                ),
                 Some("read") => (
                     metadata
                         .get("toolName")

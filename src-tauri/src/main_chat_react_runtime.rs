@@ -71,7 +71,28 @@ pub(crate) fn attach_main_chat_replay_synthesis_observation(
     let Some(object) = metadata.as_object_mut() else {
         return;
     };
-    let observation = if matches!(queue_action_type, "web.search" | "web.fetch") {
+    let observation = if queue_action_type == "document.read" {
+        let parsed = serde_json::from_str::<serde_json::Value>(observation_content)
+            .map_err(|_| "replay_synthesis_document_observation_invalid".to_string());
+        parsed.and_then(|parsed| {
+            let selection_digest = parsed
+                .get("selectionDigest")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| value.starts_with("sha256:") && value.len() == 71)
+                .ok_or_else(|| "replay_synthesis_document_digest_missing".to_string())?;
+            let selected_chunk_count = parsed
+                .get("selectedChunkCount")
+                .and_then(serde_json::Value::as_u64)
+                .filter(|count| *count > 0)
+                .ok_or_else(|| "replay_synthesis_document_count_missing".to_string())?;
+            Ok(serde_json::json!({
+                "schemaVersion": REPLAY_SYNTHESIS_OBSERVATION_SCHEMA,
+                "kind": "document",
+                "selectionDigest": selection_digest,
+                "selectedChunkCount": selected_chunk_count,
+            }))
+        })
+    } else if matches!(queue_action_type, "web.search" | "web.fetch") {
         normalized_replay_web_observation(queue_action_type, observation_content).map(|observed| {
             serde_json::json!({
                 "schemaVersion": REPLAY_SYNTHESIS_OBSERVATION_SCHEMA,
@@ -1934,6 +1955,37 @@ mod canonical_delta_tests {
                 .chars()
                 .count(),
             MAX_REPLAY_SYNTHESIS_TEXT_CHARS
+        );
+    }
+
+    #[test]
+    fn replay_synthesis_document_observation_keeps_only_selection_proof() {
+        const PRIVATE_BODY: &str = "PRIVATE_DOCUMENT_BODY_MUST_NOT_BE_DURABLE";
+        let mut metadata = serde_json::json!({});
+        attach_main_chat_replay_synthesis_observation(
+            &mut metadata,
+            "document.read",
+            &serde_json::json!({
+                "schemaVersion": 1,
+                "messageId": "task-document-replay",
+                "selectionDigest": "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                "selectedChunkCount": 2,
+                "chunks": [{"sourceRef": "resource://private", "content": PRIVATE_BODY}],
+            })
+            .to_string(),
+        );
+
+        let serialized = metadata.to_string();
+        assert!(!serialized.contains(PRIVATE_BODY));
+        assert!(!serialized.contains("resource://private"));
+        assert_eq!(metadata["replaySynthesisObservation"]["kind"], "document");
+        assert_eq!(
+            metadata["replaySynthesisObservation"]["selectedChunkCount"],
+            2
+        );
+        assert_eq!(
+            metadata["replaySynthesisObservation"]["selectionDigest"],
+            "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
         );
     }
 
