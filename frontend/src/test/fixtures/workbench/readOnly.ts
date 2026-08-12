@@ -172,6 +172,21 @@ const readyTasks: TaskViewModelItem[] = [
           label: "清单产物草稿",
         },
         evidenceRefs: [taskEvidence("artifact:travel-checklist:v1", "清单产物版本")],
+        change: {
+          kind: "create",
+          status: "materialized",
+          targetReference: "/OpenLife/Results/travel-checklist.md",
+        },
+        preview: {
+          status: "available",
+          content: "# 周末出行清单\n\n- 证件\n- 交通\n- 天气",
+        },
+        verification: {
+          status: "verified",
+          expectedContentDigest: "sha256:travel-checklist-v1",
+          observedContentDigest: "sha256:travel-checklist-v1",
+          verificationItemPresent: true,
+        },
       },
     ],
     latestResultPreview: {

@@ -219,8 +219,10 @@ pub use strategy_runtime::{
     RuntimeStrategyRegistryReadinessReport, RuntimeStrategySideEffectBudget,
 };
 pub use tasks_view_model::{
-    build_tasks_view_model, build_workspace_view_model, TaskArtifactViewModel, TaskControl,
-    TaskControlEffect, TaskControlKind, TaskItemViewModel, TaskLatestResultPreview,
+    build_tasks_view_model, build_workspace_view_model, TaskArtifactChangeKind,
+    TaskArtifactChangeViewModel, TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel,
+    TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel, TaskArtifactViewModel,
+    TaskControl, TaskControlEffect, TaskControlKind, TaskItemViewModel, TaskLatestResultPreview,
     TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelContractError, TaskViewModelItem,
     TaskViewModelRunInput, TaskViewModelTaskInput, TasksViewModel, TasksViewModelBuildInput,
     TasksViewModelSummary, WorkspaceActivityItem, WorkspaceActivityKind, WorkspaceActivityStatus,

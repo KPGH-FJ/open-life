@@ -2965,6 +2965,24 @@ export type TaskArtifactViewModel = {
   proposalRef?: BackendEntityRef;
   sourceItemRef: BackendEntityRef;
   evidenceRefs: EvidenceRef[];
+  change: {
+    kind: "create" | "replace" | "unknown";
+    status: CanonicalArtifactStatus;
+    targetReference?: string;
+    expectedPriorDigest?: string;
+  };
+  preview: {
+    status: "available" | "truncated" | "unavailable";
+    content?: string;
+    reasonCode?: string;
+  };
+  verification: {
+    status: "pending" | "verified" | "failed" | "unknown";
+    expectedContentDigest: string;
+    observedContentDigest?: string;
+    verificationItemPresent: boolean;
+    reasonCode?: string;
+  };
 };
 
 export type TaskViewModelItem = {

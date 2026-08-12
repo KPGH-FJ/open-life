@@ -98,8 +98,18 @@ effect-unknown states. Exact Run membership overlays the migrated report onto
 its compatibility execution session instead of showing two tasks. Canonical
 report lifecycle wins when compatibility TaskSession state disagrees; the
 compatibility session remains only the current control target until that control
-path is migrated. The frontend renders this bounded metadata and materialized
-file reference without reading `task_runtime.db` or joining stores itself.
+path is migrated.
+
+S5 adds backend-owned Result, Change, Preview, and Verification projections to
+each report ArtifactVersion. A pending preview is admitted only from the exact
+proposal whose Artifact id, version, target digest, content digest, and body
+digest all match. A materialized preview is reread only from a regular file
+inside the configured safe paths and is shown only when its current byte digest,
+the stored observed digest, and the canonical Verification Item agree. File
+drift, disappearance, symlinks, oversize content, or non-UTF-8 bytes remove the
+preview and prevent the Task from retaining delivered product credit. React
+renders these typed projections; it does not read files, proposals, or
+`task_runtime.db` itself.
 
 ## Canonical task runtime target
 

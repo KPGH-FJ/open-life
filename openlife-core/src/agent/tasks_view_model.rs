@@ -250,6 +250,67 @@ pub struct TaskArtifactViewModel {
     pub source_item_ref: BackendEntityRef,
     #[serde(default)]
     pub evidence_refs: Vec<EvidenceRef>,
+    pub change: TaskArtifactChangeViewModel,
+    pub preview: TaskArtifactPreviewViewModel,
+    pub verification: TaskArtifactVerificationViewModel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskArtifactChangeKind {
+    Create,
+    Replace,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactChangeViewModel {
+    pub kind: TaskArtifactChangeKind,
+    pub status: CanonicalArtifactStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_prior_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskArtifactPreviewStatus {
+    Available,
+    Truncated,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactPreviewViewModel {
+    pub status: TaskArtifactPreviewStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskArtifactVerificationStatus {
+    Pending,
+    Verified,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactVerificationViewModel {
+    pub status: TaskArtifactVerificationStatus,
+    pub expected_content_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_content_digest: Option<String>,
+    pub verification_item_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1197,6 +1258,24 @@ mod tests {
                 href: None,
             },
             evidence_refs: Vec::new(),
+            change: TaskArtifactChangeViewModel {
+                kind: TaskArtifactChangeKind::Create,
+                status: CanonicalArtifactStatus::WaitingReview,
+                target_reference: Some("/tmp/report.md".into()),
+                expected_prior_digest: None,
+            },
+            preview: TaskArtifactPreviewViewModel {
+                status: TaskArtifactPreviewStatus::Available,
+                content: Some("# Report".into()),
+                reason_code: None,
+            },
+            verification: TaskArtifactVerificationViewModel {
+                status: TaskArtifactVerificationStatus::Pending,
+                expected_content_digest: "sha256:content".into(),
+                observed_content_digest: None,
+                verification_item_present: false,
+                reason_code: Some("artifact_waiting_materialization".into()),
+            },
         };
         let model = build_tasks_view_model(TasksViewModelBuildInput {
             task_inputs: vec![TaskViewModelTaskInput {

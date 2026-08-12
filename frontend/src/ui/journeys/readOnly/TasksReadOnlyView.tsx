@@ -97,6 +97,23 @@ function artifactStatusLabel(status: TaskViewModelItem["artifacts"][number]["sta
   return "草稿";
 }
 
+function artifactVerificationLabel(
+  status: TaskViewModelItem["artifacts"][number]["verification"]["status"]
+): string {
+  if (status === "verified") return "内容已核验";
+  if (status === "pending") return "等待物化核验";
+  if (status === "failed") return "核验失败";
+  return "核验结果未知";
+}
+
+function artifactChangeLabel(
+  kind: TaskViewModelItem["artifacts"][number]["change"]["kind"]
+): string {
+  if (kind === "create") return "创建文件";
+  if (kind === "replace") return "替换文件";
+  return "变更范围未知";
+}
+
 function actionAttributes(action: ProductAction) {
   return {
     "data-action-category": "product",
@@ -368,43 +385,81 @@ export function TasksReadOnlyView({
             </div>
           </div>
           {selectedTask && selectedTask.artifacts.length > 0 ? (
-            <div className="ol-readonly-task-list" data-testid="canonical-task-artifacts">
+            <div className="ol-task-result-grid" data-testid="canonical-task-artifacts">
               {selectedTask.artifacts.map(artifact => (
-                <div className="ol-readonly-task-row" key={artifact.artifactId}>
-                  <span className="ol-readonly-task-row__copy">
-                    <strong>
-                      {artifactTypeLabel(artifact.mediaType)} · v{artifact.version}
-                    </strong>
-                    <span>
-                      {artifact.status === "materialized"
-                        ? (artifact.materializedReference ?? "已物化，但文件引用未知")
-                        : artifact.status === "waiting_review"
-                          ? "等待审核后物化"
-                          : artifact.status === "effect_unknown"
-                            ? "物化结果未知，未自动重放"
-                            : artifact.status === "failed"
-                              ? "产物未交付"
-                              : "产物草稿已记录"}
-                    </span>
-                    <small>{artifact.artifactId}</small>
-                  </span>
-                  <FoundationStatusLabel
-                    label={artifactStatusLabel(artifact.status)}
-                    status={
-                      artifact.status === "materialized"
-                        ? "success"
-                        : artifact.status === "failed"
-                          ? "error"
-                          : artifact.status === "effect_unknown"
-                            ? "unknown"
-                            : "waiting"
-                    }
-                    verified={
-                      artifact.status === "materialized" &&
-                      artifact.observedContentDigest === artifact.contentDigest
-                    }
-                  />
-                </div>
+                <article className="ol-task-result-card" key={artifact.artifactId}>
+                  <header className="ol-task-result-card__header">
+                    <div>
+                      <span>Result</span>
+                      <h4>
+                        {artifactTypeLabel(artifact.mediaType)} · v{artifact.version}
+                      </h4>
+                    </div>
+                    <FoundationStatusLabel
+                      label={artifactStatusLabel(artifact.status)}
+                      status={
+                        artifact.status === "materialized"
+                          ? "success"
+                          : artifact.status === "failed"
+                            ? "error"
+                            : artifact.status === "effect_unknown"
+                              ? "unknown"
+                              : "waiting"
+                      }
+                      verified={artifact.verification.status === "verified"}
+                    />
+                  </header>
+
+                  <section className="ol-task-result-card__section" aria-label="Changes">
+                    <span>Changes</span>
+                    <strong>{artifactChangeLabel(artifact.change.kind)}</strong>
+                    <p>{artifact.change.targetReference ?? "后端尚未确认目标引用。"}</p>
+                    {artifact.change.expectedPriorDigest && (
+                      <small>替换基线：{artifact.change.expectedPriorDigest}</small>
+                    )}
+                  </section>
+
+                  <section className="ol-task-result-card__section" aria-label="Preview">
+                    <span>Preview</span>
+                    {artifact.preview.content ? (
+                      <pre>{artifact.preview.content}</pre>
+                    ) : (
+                      <p>预览不可用：{artifact.preview.reasonCode ?? "来源未确认"}</p>
+                    )}
+                    {artifact.preview.status === "truncated" && <small>预览已由后端截断。</small>}
+                  </section>
+
+                  <section className="ol-task-result-card__section" aria-label="Verification">
+                    <span>Verification</span>
+                    <FoundationStatusLabel
+                      label={artifactVerificationLabel(artifact.verification.status)}
+                      status={
+                        artifact.verification.status === "verified"
+                          ? "success"
+                          : artifact.verification.status === "failed"
+                            ? "error"
+                            : artifact.verification.status === "unknown"
+                              ? "unknown"
+                              : "waiting"
+                      }
+                      verified={artifact.verification.status === "verified"}
+                    />
+                    <dl>
+                      <div>
+                        <dt>期望摘要</dt>
+                        <dd>{artifact.verification.expectedContentDigest}</dd>
+                      </div>
+                      <div>
+                        <dt>实测摘要</dt>
+                        <dd>{artifact.verification.observedContentDigest ?? "尚未观测"}</dd>
+                      </div>
+                    </dl>
+                    {artifact.verification.reasonCode && (
+                      <small>{artifact.verification.reasonCode}</small>
+                    )}
+                  </section>
+                  <small className="ol-task-result-card__id">{artifact.artifactId}</small>
+                </article>
               ))}
             </div>
           ) : (

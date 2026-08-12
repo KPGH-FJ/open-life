@@ -17,8 +17,7 @@ current source. Superseded execution plans remain in Git history.
 
 ## Last verified
 
-2026-08-13 during S4 report steering, inline continuation, and bounded
-concurrency closure.
+2026-08-13 during S5 report Results, Changes, Preview, and Verification closure.
 
 ## Source map
 
@@ -60,6 +59,13 @@ starts or resumes an Agent task session through `start_main_chat_agent_turn`,
 decides a route, invokes the Main Chat kernel, records route evidence, and
 finalizes the task state. Its canonical delivery view separates answer text,
 completed actions, observations, proposals, blockers, and pending user actions.
+
+For canonical report Tasks, `src-tauri/src/read_models/tasks.rs` is the product
+presentation boundary. It joins the canonical ArtifactVersion to an exact
+proposal while waiting for Review, or to a digest-matching regular file after
+materialization. It exposes bounded change, preview, and verification fields to
+`TasksViewModel`. A stored completion label alone cannot preserve delivery when
+the current file is missing or its bytes drift.
 
 `src-tauri/src/main_chat_turn_pipeline.rs` is a compatibility wrapper around
 `OpenLifeTurnRuntime`. It does not make the older route family authoritative.

@@ -4,87 +4,69 @@ Status: complete
 
 ## Objective
 
-Complete S4 on the canonical report lifecycle: let a user steer active work,
-approve a governed boundary inline and continue the same Run, recover exact
-checkpoints after interruption/restart, and run a bounded number of independent
-tasks concurrently without allowing duplicate owners.
+Complete S5 by turning the canonical report lifecycle into a reviewable product
+result: users can see Results, proposed or applied Changes, a bounded Preview,
+and independent Verification without the frontend reconstructing truth.
 
 ## Product path
 
 ```text
-report Task starts before execution
-  -> Run + Instruction + Plan
-  -> governed reads / provider work
-  -> optional Steering Item at a safe checkpoint
-  -> optional Permission or Review checkpoint
-  -> inline decision resumes the same Run
-  -> Artifact / Verification / FinalResult
+canonical Task/Run/Item/ArtifactVersion
+  -> backend TasksViewModel presentation projection
+  -> Result summary
+  -> exact Change target and create/replace state
+  -> bounded Markdown/CSV Preview
+  -> expected versus observed digest Verification
 ```
-
-Steering is authenticated user input, not permission. It may refine outcome,
-format, emphasis, or constraints inside the existing task grant, but it cannot
-expand workspace, provider, network, tool, write, or destructive authority.
 
 ## In scope
 
-1. Begin the canonical report Task/Run before tool or provider execution and
-   append typed Items transactionally instead of creating the whole history at
-   ArtifactDraft time.
-2. Add a durable, digest-only Steering Item bound to the exact Task, Run, user
-   message, and base plan revision.
-3. Accept steering only while the target Run is active or waiting; consume it
-   once at a defined safe checkpoint before the next provider generation.
-4. Keep scope-expanding steering blocked behind the existing policy/permission
-   boundary; current instruction never mints capability.
-5. Add one Workspace inline approval-and-continue action for the exact pending
-   proposal/checkpoint. Approval and continuation remain separately evidenced.
-6. Reuse `OpenLifeTurnRuntime.run_replay`, terminal-owner replay epochs, and
-   existing action-bound grants so continuation stays on the same Run.
-7. Make restart recovery reload Steering/checkpoint truth from SQLite and fail
-   closed on missing, stale, conflicting, or already-consumed input.
-8. Bound simultaneous independent Task execution while retaining one owner per
-   Task and preserving cancellation/receipt isolation.
+1. Extend `TaskArtifactViewModel` with backend-owned change, preview, and
+   verification projections.
+2. For a pending draft, read preview/change facts only from the exact proposal
+   bound to the Artifact id, version, target, and content digest.
+3. For a materialized Artifact, read preview bytes only from the exact regular
+   file reference and expose them only when the observed digest matches the
+   canonical content digest.
+4. Keep preview bounded and UTF-8/text-only; never follow symlinks or infer
+   content from filenames, status prose, or frontend state.
+5. Show Results, Changes, Preview, and Verification as distinct sections on the
+   Tasks product surface, including truthful pending, failed, and unknown states.
+6. Preserve Review and task controls as separate actions; viewing a preview
+   does not approve, apply, retry, or complete anything.
 
 ## Out of scope
 
-- editing a provider request already dispatched remotely;
-- autonomous interpretation of ambiguous scope expansion;
-- new connectors, computer use, shell, subagents, or background schedules;
-- S5 Results/Changes/Preview visual redesign;
-- provider auto-routing or cross-provider fallback;
-- Memory or LifeModel learning changes;
-- deleting remaining compatibility paths before S7.
+- rich document editing, PDF rendering, image preview, or diff algorithms;
+- opening arbitrary local paths or adding shell/computer-use capability;
+- a second artifact store or frontend-owned lifecycle state;
+- provider routing, Memory, LifeModel, connectors, or old-path deletion;
+- native/external-live behavior-matrix closure, which belongs to S6.
 
 ## Ownership
 
-- `CanonicalTaskRuntimeStore` owns Task/Run/Item order, steering identity,
-  checkpoint state, and consumption revision; it never owns adapter execution.
-- `OpenLifeTurnRuntime` remains the sole execution and continuation owner.
-- PolicyRouter and existing permission/proposal authorities decide scope; a
-  Steering Item cannot alter their grants.
-- ToolGateway/provider receipts remain execution truth. Review acceptance and
-  materialization remain distinct facts.
-- Backend ViewModels own product projection; the frontend does not infer that
-  approval, resume, or completion succeeded.
+- `CanonicalTaskRuntimeStore` remains Task/Run/Item/ArtifactVersion authority.
+- ProposalStore may supply an exact pending draft and target precondition only
+  after all canonical artifact bindings match.
+- The verified materialized file may supply preview bytes only after type,
+  size, path, and digest checks.
+- `TasksViewModel` owns product presentation facts. React only renders its typed
+  status and never compares raw stores or computes completion.
 
 ## Acceptance
 
 | Scenario | Required result |
 | --- | --- |
-| Active report receives steering before provider | one Steering Item; same Task/Run; provider sees exact steered constraint |
-| Duplicate steering submission | idempotent same Item; no duplicate generation |
-| Conflicting reuse of steering id | rejected with no partial mutation |
-| Steering after terminal completion | rejected; completed result is not rewritten |
-| Steering requests new scope | stored only as blocked/pending input; no capability or effect |
-| Waiting permission accepted inline | acceptance fact then same Run replay; exact action executes once |
-| Review/materialization accepted inline | same Task advances only after observed materialization |
-| Declined or stale checkpoint | no resume and no effect |
-| Restart before steering consumption | exact pending Steering Item is recovered once |
-| Restart after consumption | no duplicate provider/tool/effect |
-| Same Task concurrent owners | exactly one wins; losing call cannot mutate state |
-| Independent tasks within limit | execute concurrently with isolated cancel/receipts |
-| Independent task above limit | typed busy/queued result; no task/run partial creation |
-| Product read model | exposes steering/checkpoint/continuation states from backend truth |
+| Pending new report | Change says create; bounded draft Preview; Verification pending |
+| Pending replacement | Change says replace and identifies expected prior digest |
+| Materialized matching file | Result delivered; applied Change; verified Preview and digest |
+| Materialized file drift | no Preview; Verification failed; no delivered claim |
+| Missing materialized file | no Preview; Verification failed/unknown, never empty success |
+| Effect unknown | Change and Verification remain unknown; no automatic replay |
+| Failed artifact | failed result with no fabricated preview or verification |
+| Oversized or non-UTF-8 content | preview unavailable/truncated by backend contract |
+| Multiple artifacts | each version has independent Change, Preview, and Verification |
+| Frontend refresh | same backend projection is rendered without local inference |
 
 ## Checks
 
@@ -102,25 +84,25 @@ corepack pnpm --dir frontend test:e2e
 
 ## Stop condition
 
-S4 is complete only when steering and inline continuation are real canonical
-product paths, restart and concurrency negatives fail closed, full gates pass,
-stable docs agree, commits are reviewable, and the working tree is clean.
-Browser-shell evidence does not count as native or external-live evidence.
+S5 closes only when all four surfaces are driven by backend truth, negative
+preview/digest cases fail closed, full gates pass, docs agree, the commit is
+reviewable, and the working tree is clean. Then move to S6 exact native and
+required live evidence.
 
 ## Closure
 
-- The report Task/Run begins before governed reads or provider work.
-- Digest-only Steering Items are restart-safe, revision-bound, idempotent, and
-  consumed once before provider generation; scope expansion remains blocked.
-- Review can approve and continue through one product action while preserving
-  separate acceptance, materialization, and replay evidence.
-- Independent turns are bounded before any canonical mutation; same-task
-  execution retains one owner.
-- Full Rust and frontend unit suites, production build/absence guard, and
-  proportional static checks pass. Native and external-live evidence remain S6
-  concerns.
+- Each canonical report ArtifactVersion now exposes backend-owned Result,
+  Change, Preview, and Verification projections.
+- Pending preview content is accepted only from an exact proposal binding;
+  materialized preview content is accepted only from a regular file inside the
+  configured safe paths whose current digest matches canonical observation and
+  Verification Item truth.
+- Drift, missing files, unsafe file types, oversize content, and invalid UTF-8
+  fail closed and remove delivered product credit.
+- The Tasks surface renders all four states without reading files, joining raw
+  stores, or treating Review acceptance as delivery.
 
 ## Next pointer
 
-After S4 closes, begin S5: Results, Changes, Preview, and Verification product
-surfaces over the same backend read models.
+After S5 closes, begin S6: run the accepted behavior matrix with exact native
+evidence and only the required explicitly authorized live-provider checks.

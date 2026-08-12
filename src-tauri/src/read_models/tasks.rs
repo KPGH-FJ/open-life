@@ -6,7 +6,9 @@ use crate::state::AppState;
 use openlife_core::agent::{
     build_tasks_view_model, build_workspace_view_model, AgentRun, BackendEntityKind,
     BackendEntityRef, EvidenceRef, EvidenceSensitivity, EvidenceSource,
-    ProviderPrivacyBoundarySummary, ReviewItem, ReviewItemDecisionStatus, TaskArtifactViewModel,
+    ProviderPrivacyBoundarySummary, ReviewItem, ReviewItemDecisionStatus, TaskArtifactChangeKind,
+    TaskArtifactChangeViewModel, TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel,
+    TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel, TaskArtifactViewModel,
     TaskItemViewModel, TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelRunInput,
     TaskViewModelTaskInput, TasksViewModel, TasksViewModelBuildInput, ViewModelEnvelope,
     ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity, WorkspaceActivityItem,
@@ -16,11 +18,15 @@ use openlife_core::task_runtime::{
     CanonicalArtifactSnapshot, CanonicalArtifactStatus, CanonicalTaskSnapshot, CanonicalTaskStatus,
 };
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use tauri::State;
 
 use super::provider_privacy::get_provider_privacy_boundary_summary_with_state;
 use super::review_center::get_review_center_view_model_with_state;
+
+const TASK_ARTIFACT_PREVIEW_MAX_CHARS: usize = 12_000;
+const TASK_ARTIFACT_READ_MAX_BYTES: u64 = 100 * 1024;
 
 #[tauri::command]
 pub async fn get_tasks_view_model(
@@ -221,11 +227,15 @@ async fn overlay_canonical_report_tasks(
         }
     };
     for snapshot in snapshots {
-        overlay_canonical_report_task(loaded, snapshot);
+        overlay_canonical_report_task(state, loaded, snapshot).await;
     }
 }
 
-fn overlay_canonical_report_task(loaded: &mut LoadedTaskInputs, snapshot: CanonicalTaskSnapshot) {
+async fn overlay_canonical_report_task(
+    state: &Arc<AppState>,
+    loaded: &mut LoadedTaskInputs,
+    snapshot: CanonicalTaskSnapshot,
+) {
     let run_ids = snapshot
         .runs
         .iter()
@@ -253,8 +263,6 @@ fn overlay_canonical_report_task(loaded: &mut LoadedTaskInputs, snapshot: Canoni
                 .map(|run| run.execution_session_id.clone())
         })
         .unwrap_or_else(|| snapshot.task.id.clone());
-    let (lifecycle_status, terminal_status, delivery_proven) =
-        canonical_report_delivery_status(&snapshot);
     let canonical_items = snapshot
         .items
         .iter()
@@ -273,11 +281,12 @@ fn overlay_canonical_report_task(loaded: &mut LoadedTaskInputs, snapshot: Canoni
             }],
         })
         .collect::<Vec<_>>();
-    let canonical_artifacts = snapshot
-        .artifacts
-        .iter()
-        .map(canonical_artifact_view)
-        .collect::<Vec<_>>();
+    let mut canonical_artifacts = Vec::with_capacity(snapshot.artifacts.len());
+    for artifact in &snapshot.artifacts {
+        canonical_artifacts.push(canonical_artifact_view(state, &snapshot, artifact).await);
+    }
+    let (lifecycle_status, terminal_status, delivery_proven) =
+        canonical_report_delivery_status(&snapshot, &canonical_artifacts);
     let pending_review_item_refs = snapshot
         .artifacts
         .iter()
@@ -366,6 +375,7 @@ fn overlay_canonical_report_task(loaded: &mut LoadedTaskInputs, snapshot: Canoni
 
 fn canonical_report_delivery_status(
     snapshot: &CanonicalTaskSnapshot,
+    artifact_views: &[TaskArtifactViewModel],
 ) -> (TaskLifecycleStatus, TaskTerminalDeliveryStatus, bool) {
     let final_result_present = snapshot.items.iter().any(|item| {
         let expected_id = openlife_core::task_runtime::report_final_result_item_id(
@@ -377,6 +387,10 @@ fn canonical_report_delivery_status(
             && item.status == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
     });
     let delivery_proven = !snapshot.artifacts.is_empty()
+        && artifact_views.len() == snapshot.artifacts.len()
+        && artifact_views.iter().all(|artifact| {
+            artifact.verification.status == TaskArtifactVerificationStatus::Verified
+        })
         && snapshot.artifacts.iter().all(|artifact| {
             let observed_digest = artifact
                 .current_version
@@ -441,7 +455,11 @@ fn canonical_report_delivery_status(
     }
 }
 
-fn canonical_artifact_view(snapshot: &CanonicalArtifactSnapshot) -> TaskArtifactViewModel {
+async fn canonical_artifact_view(
+    state: &Arc<AppState>,
+    task: &CanonicalTaskSnapshot,
+    snapshot: &CanonicalArtifactSnapshot,
+) -> TaskArtifactViewModel {
     let proposal_ref = snapshot
         .artifact
         .proposal_id
@@ -452,6 +470,24 @@ fn canonical_artifact_view(snapshot: &CanonicalArtifactSnapshot) -> TaskArtifact
             label: "Artifact Review checkpoint".into(),
             href: None,
         });
+    let verification_item_present = snapshot
+        .current_version
+        .observed_content_digest
+        .as_deref()
+        .is_some_and(|observed| {
+            let expected = openlife_core::task_runtime::report_verification_item_id(
+                &snapshot.artifact.id,
+                snapshot.current_version.version,
+                observed,
+            );
+            task.items.iter().any(|item| {
+                item.id == expected
+                    && item.kind == openlife_core::task_runtime::CanonicalTaskItemKind::Verification
+                    && item.status
+                        == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+            })
+        });
+    let presentation = artifact_presentation(state, snapshot, verification_item_present).await;
     TaskArtifactViewModel {
         artifact_id: snapshot.artifact.id.clone(),
         version: snapshot.current_version.version,
@@ -474,7 +510,237 @@ fn canonical_artifact_view(snapshot: &CanonicalArtifactSnapshot) -> TaskArtifact
             source: EvidenceSource::Task,
             sensitivity: Some(EvidenceSensitivity::LocalPrivate),
         }],
+        change: presentation.change,
+        preview: presentation.preview,
+        verification: presentation.verification,
     }
+}
+
+struct ArtifactPresentation {
+    change: TaskArtifactChangeViewModel,
+    preview: TaskArtifactPreviewViewModel,
+    verification: TaskArtifactVerificationViewModel,
+}
+
+async fn artifact_presentation(
+    state: &Arc<AppState>,
+    snapshot: &CanonicalArtifactSnapshot,
+    verification_item_present: bool,
+) -> ArtifactPresentation {
+    let unavailable = |reason: &str| TaskArtifactPreviewViewModel {
+        status: TaskArtifactPreviewStatus::Unavailable,
+        content: None,
+        reason_code: Some(reason.to_string()),
+    };
+    let mut change = TaskArtifactChangeViewModel {
+        kind: TaskArtifactChangeKind::Unknown,
+        status: snapshot.artifact.status,
+        target_reference: snapshot.current_version.materialized_reference.clone(),
+        expected_prior_digest: None,
+    };
+    let mut preview = unavailable("artifact_preview_source_unavailable");
+    let mut verification = TaskArtifactVerificationViewModel {
+        status: match snapshot.artifact.status {
+            CanonicalArtifactStatus::Draft | CanonicalArtifactStatus::WaitingReview => {
+                TaskArtifactVerificationStatus::Pending
+            }
+            CanonicalArtifactStatus::Materialized | CanonicalArtifactStatus::Failed => {
+                TaskArtifactVerificationStatus::Failed
+            }
+            CanonicalArtifactStatus::EffectUnknown => TaskArtifactVerificationStatus::Unknown,
+        },
+        expected_content_digest: snapshot.artifact.content_digest.clone(),
+        observed_content_digest: snapshot.current_version.observed_content_digest.clone(),
+        verification_item_present,
+        reason_code: None,
+    };
+
+    if let Some(proposal_id) = snapshot.artifact.proposal_id.as_deref() {
+        let proposal = if let Some(store) = state.proposal_store.as_ref() {
+            store.lock().await.get_proposal(proposal_id).ok().flatten()
+        } else {
+            None
+        };
+        if let Some(proposal) = proposal {
+            let after = &proposal.after;
+            let target = after.get("path").and_then(serde_json::Value::as_str);
+            let artifact_id = after.get("artifactId").and_then(serde_json::Value::as_str);
+            let version = after
+                .get("artifactVersion")
+                .and_then(serde_json::Value::as_u64);
+            let digest = after
+                .get("contentDigest")
+                .and_then(serde_json::Value::as_str);
+            if artifact_id == Some(snapshot.artifact.id.as_str())
+                && version == Some(snapshot.current_version.version)
+                && digest == Some(snapshot.artifact.content_digest.as_str())
+                && target.is_some_and(|value| {
+                    openlife_core::agent::metadata_safe_text_digest(value).1
+                        == snapshot.artifact.target_reference_digest
+                })
+            {
+                change.kind = if after
+                    .get("expected_target_absent")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                {
+                    TaskArtifactChangeKind::Create
+                } else {
+                    TaskArtifactChangeKind::Replace
+                };
+                change.target_reference = target.map(str::to_string);
+                change.expected_prior_digest = after
+                    .get("expected_target_digest")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string);
+            }
+        }
+    }
+
+    if matches!(
+        snapshot.artifact.status,
+        CanonicalArtifactStatus::Draft | CanonicalArtifactStatus::WaitingReview
+    ) {
+        if let Some(proposal_id) = snapshot.artifact.proposal_id.as_deref() {
+            let proposal = if let Some(store) = state.proposal_store.as_ref() {
+                store.lock().await.get_proposal(proposal_id).ok().flatten()
+            } else {
+                None
+            };
+            if let Some(proposal) = proposal {
+                let after = &proposal.after;
+                let target = after.get("path").and_then(serde_json::Value::as_str);
+                let content = after.get("content").and_then(serde_json::Value::as_str);
+                let artifact_id = after.get("artifactId").and_then(serde_json::Value::as_str);
+                let version = after
+                    .get("artifactVersion")
+                    .and_then(serde_json::Value::as_u64);
+                let digest = after
+                    .get("contentDigest")
+                    .and_then(serde_json::Value::as_str);
+                let exact = artifact_id == Some(snapshot.artifact.id.as_str())
+                    && version == Some(snapshot.current_version.version)
+                    && digest == Some(snapshot.artifact.content_digest.as_str())
+                    && target.is_some_and(|value| {
+                        openlife_core::agent::metadata_safe_text_digest(value).1
+                            == snapshot.artifact.target_reference_digest
+                    })
+                    && content.is_some_and(|value| {
+                        openlife_core::agent::metadata_safe_text_digest(value).1
+                            == snapshot.artifact.content_digest
+                    });
+                if exact {
+                    preview = bounded_artifact_preview(content.unwrap_or_default());
+                } else {
+                    preview = unavailable("artifact_proposal_binding_mismatch");
+                }
+            }
+        }
+        verification.reason_code = Some("artifact_waiting_materialization".to_string());
+        return ArtifactPresentation {
+            change,
+            preview,
+            verification,
+        };
+    }
+
+    if snapshot.artifact.status == CanonicalArtifactStatus::Materialized {
+        let Some(path) = snapshot.current_version.materialized_reference.as_deref() else {
+            verification.reason_code = Some("artifact_materialized_reference_missing".to_string());
+            return ArtifactPresentation {
+                change,
+                preview,
+                verification,
+            };
+        };
+        let safe_paths = state.config.lock().await.system.safe_paths.clone();
+        match read_verified_artifact(path, &safe_paths) {
+            Ok((digest, content)) => {
+                verification.observed_content_digest = Some(digest.clone());
+                if digest == snapshot.artifact.content_digest
+                    && snapshot.current_version.observed_content_digest.as_deref()
+                        == Some(digest.as_str())
+                    && verification_item_present
+                {
+                    verification.status = TaskArtifactVerificationStatus::Verified;
+                    preview = bounded_artifact_preview(&content);
+                } else {
+                    verification.reason_code = Some("artifact_content_digest_drift".to_string());
+                }
+            }
+            Err(reason) => verification.reason_code = Some(reason),
+        }
+    } else {
+        verification.reason_code = Some(
+            match snapshot.artifact.status {
+                CanonicalArtifactStatus::EffectUnknown => "artifact_effect_unknown",
+                CanonicalArtifactStatus::Failed => "artifact_delivery_failed",
+                CanonicalArtifactStatus::Draft | CanonicalArtifactStatus::WaitingReview => {
+                    "artifact_waiting_materialization"
+                }
+                CanonicalArtifactStatus::Materialized => unreachable!(),
+            }
+            .to_string(),
+        );
+    }
+    ArtifactPresentation {
+        change,
+        preview,
+        verification,
+    }
+}
+
+fn bounded_artifact_preview(content: &str) -> TaskArtifactPreviewViewModel {
+    let char_count = content.chars().count();
+    let bounded = content
+        .chars()
+        .take(TASK_ARTIFACT_PREVIEW_MAX_CHARS)
+        .collect::<String>();
+    TaskArtifactPreviewViewModel {
+        status: if char_count > TASK_ARTIFACT_PREVIEW_MAX_CHARS {
+            TaskArtifactPreviewStatus::Truncated
+        } else {
+            TaskArtifactPreviewStatus::Available
+        },
+        content: Some(bounded),
+        reason_code: (char_count > TASK_ARTIFACT_PREVIEW_MAX_CHARS)
+            .then(|| "artifact_preview_truncated".to_string()),
+    }
+}
+
+fn read_verified_artifact(path: &str, safe_paths: &[String]) -> Result<(String, String), String> {
+    let path = Path::new(path);
+    let parent = path
+        .parent()
+        .ok_or_else(|| "artifact_materialized_parent_missing".to_string())?
+        .canonicalize()
+        .map_err(|_| "artifact_materialized_parent_unavailable".to_string())?;
+    let within_safe_path = safe_paths.iter().any(|safe| {
+        let safe = Path::new(safe);
+        safe.is_absolute()
+            && safe
+                .canonicalize()
+                .is_ok_and(|canonical_safe| parent.starts_with(canonical_safe))
+    });
+    if !within_safe_path {
+        return Err("artifact_materialized_path_outside_safe_scope".to_string());
+    }
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| "artifact_materialized_file_missing".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("artifact_materialized_file_type_invalid".to_string());
+    }
+    if metadata.len() > TASK_ARTIFACT_READ_MAX_BYTES {
+        return Err("artifact_materialized_file_too_large".to_string());
+    }
+    let bytes = std::fs::read(path).map_err(|_| "artifact_materialized_read_failed".to_string())?;
+    let digest = {
+        use sha2::{Digest, Sha256};
+        format!("sha256:{:x}", Sha256::digest(&bytes))
+    };
+    let content = String::from_utf8(bytes)
+        .map_err(|_| "artifact_materialized_preview_not_utf8".to_string())?;
+    Ok((digest, content))
 }
 
 fn canonical_report_preview(snapshot: &CanonicalTaskSnapshot) -> String {
@@ -933,6 +1199,11 @@ mod tests {
         use sha2::{Digest, Sha256};
 
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let artifact_dir = tempfile::tempdir().unwrap();
+        let artifact_path = artifact_dir.path().join("report-view.md");
+        let artifact_path_text = artifact_path.to_string_lossy().into_owned();
+        state.config.lock().await.system.safe_paths =
+            vec![artifact_dir.path().to_string_lossy().into_owned()];
         let content = "# Canonical report";
         let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
         let prepared = state
@@ -953,10 +1224,36 @@ mod tests {
                     Sha256::digest(b"provider receipt report view")
                 ),
                 tool_observations: &[],
-                target_reference: "/tmp/openlife/report-view.md",
+                target_reference: &artifact_path_text,
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",
             })
+            .unwrap();
+        let mut proposal = openlife_core::agent::AgentProposal::new(
+            openlife_core::agent::ProposalType::ExternalWriteAction,
+            &format!("filesystem.{artifact_path_text}"),
+            serde_json::json!({
+                "path": artifact_path_text,
+                "content": content,
+                "contentDigest": content_digest,
+                "expected_target_absent": true,
+                "expected_target_digest": null,
+                "artifactId": prepared.artifact_id,
+                "artifactVersion": prepared.version,
+            }),
+            "test exact report preview",
+            1.0,
+            openlife_core::agent::RiskLevel::High,
+            openlife_core::agent::ProposalSource::ChatConversation,
+        );
+        proposal.id = "proposal-report-view".into();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
             .unwrap();
         state
             .canonical_task_runtime_store
@@ -998,11 +1295,24 @@ mod tests {
             openlife_core::task_runtime::CanonicalArtifactStatus::WaitingReview
         );
         assert!(!task.final_delivery_evidence_present);
+        assert_eq!(
+            task.artifacts[0].change.kind,
+            openlife_core::agent::TaskArtifactChangeKind::Create
+        );
+        assert_eq!(
+            task.artifacts[0].preview.content.as_deref(),
+            Some("# Canonical report")
+        );
+        assert_eq!(
+            task.artifacts[0].verification.status,
+            openlife_core::agent::TaskArtifactVerificationStatus::Pending
+        );
         assert!(task
             .latest_result_preview
             .as_ref()
             .is_some_and(|preview| preview.final_delivery_ref.is_none()));
 
+        std::fs::write(&artifact_path, content).unwrap();
         state
             .canonical_task_runtime_store
             .as_ref()
@@ -1011,7 +1321,7 @@ mod tests {
             .await
             .confirm_artifact_materialized(
                 "proposal-report-view",
-                "/tmp/openlife/report-view.md",
+                &artifact_path_text,
                 &content_digest,
             )
             .unwrap();
@@ -1028,8 +1338,16 @@ mod tests {
         incomplete_snapshot.items.retain(|item| {
             item.kind != openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult
         });
+        let mut incomplete_artifact_views = Vec::new();
+        for artifact in &incomplete_snapshot.artifacts {
+            incomplete_artifact_views
+                .push(super::canonical_artifact_view(&state, &incomplete_snapshot, artifact).await);
+        }
         assert_eq!(
-            super::canonical_report_delivery_status(&incomplete_snapshot),
+            super::canonical_report_delivery_status(
+                &incomplete_snapshot,
+                &incomplete_artifact_views
+            ),
             (
                 openlife_core::agent::TaskLifecycleStatus::CompletedNeedsEvidence,
                 openlife_core::agent::TaskTerminalDeliveryStatus::MissingFinalDeliveryEvidence,
@@ -1069,7 +1387,30 @@ mod tests {
         );
         assert_eq!(
             task.artifacts[0].materialized_reference.as_deref(),
-            Some("/tmp/openlife/report-view.md")
+            Some(artifact_path_text.as_str())
         );
+        assert_eq!(
+            task.artifacts[0].verification.status,
+            openlife_core::agent::TaskArtifactVerificationStatus::Verified
+        );
+        assert_eq!(
+            task.artifacts[0].preview.content.as_deref(),
+            Some("# Canonical report")
+        );
+
+        std::fs::write(&artifact_path, "# Tampered after delivery").unwrap();
+        let drifted = get_tasks_view_model_with_state(&state).await.unwrap();
+        let drifted = drifted.data.unwrap();
+        let task = &drifted.items[0];
+        assert_eq!(
+            task.lifecycle_status,
+            openlife_core::agent::TaskLifecycleStatus::CompletedNeedsEvidence
+        );
+        assert_eq!(
+            task.artifacts[0].verification.status,
+            openlife_core::agent::TaskArtifactVerificationStatus::Failed
+        );
+        assert!(task.artifacts[0].preview.content.is_none());
+        assert!(!task.final_delivery_evidence_present);
     }
 }

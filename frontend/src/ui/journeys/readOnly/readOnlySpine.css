@@ -260,6 +260,92 @@
   line-height: var(--ol-line-body);
 }
 
+.ol-task-result-grid {
+  display: grid;
+  gap: var(--ol-space-5);
+  margin-top: var(--ol-space-4);
+}
+
+.ol-task-result-card {
+  display: grid;
+  gap: var(--ol-space-4);
+  padding: var(--ol-space-5);
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: var(--ol-radius-3);
+  background: var(--ol-surface);
+}
+
+.ol-task-result-card__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--ol-space-4);
+}
+
+.ol-task-result-card__header span,
+.ol-task-result-card__section > span {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.ol-task-result-card__header h4,
+.ol-task-result-card__section p,
+.ol-task-result-card__section dl {
+  margin: 0;
+}
+
+.ol-task-result-card__section {
+  display: grid;
+  gap: var(--ol-space-2);
+  min-width: 0;
+  padding-top: var(--ol-space-3);
+  border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-task-result-card__section pre {
+  max-height: 320px;
+  margin: 0;
+  padding: var(--ol-space-4);
+  overflow: auto;
+  border-radius: var(--ol-radius-2);
+  background: var(--ol-surface-sunken);
+  color: var(--ol-ink);
+  font: inherit;
+  line-height: var(--ol-line-body);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ol-task-result-card__section dl {
+  display: grid;
+  gap: var(--ol-space-2);
+}
+
+.ol-task-result-card__section dl > div {
+  display: grid;
+  grid-template-columns: 88px minmax(0, 1fr);
+  gap: var(--ol-space-3);
+}
+
+.ol-task-result-card__section dt,
+.ol-task-result-card__section small,
+.ol-task-result-card__id {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-task-result-card__section dd {
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--ol-font-mono);
+  font-size: var(--ol-type-caption);
+}
+
 @media (prefers-reduced-motion: reduce) {
   .ol-readonly-task-row {
     transition: none;

@@ -71,6 +71,10 @@ describe("Workbench desktop read-only journey", () => {
     await user.click(screen.getByRole("button", { name: /生成周末出行的行前清单/ }));
     const artifacts = screen.getByTestId("canonical-task-artifacts");
     expect(within(artifacts).getByText(/Markdown 结果 · v1/)).toBeInTheDocument();
+    expect(within(artifacts).getByText("Changes")).toBeInTheDocument();
+    expect(within(artifacts).getByText("Preview")).toBeInTheDocument();
+    expect(within(artifacts).getByText("Verification")).toBeInTheDocument();
+    expect(within(artifacts).getByText("内容已核验")).toBeInTheDocument();
     expect(
       within(artifacts).getByText(/\/OpenLife\/Results\/travel-checklist\.md/)
     ).toBeInTheDocument();
