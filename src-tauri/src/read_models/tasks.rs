@@ -929,6 +929,7 @@ mod tests {
                     "sha256:{:x}",
                     Sha256::digest(b"provider receipt report view")
                 ),
+                tool_observations: &[],
                 target_reference: "/tmp/openlife/report-view.md",
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",

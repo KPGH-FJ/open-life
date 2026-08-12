@@ -9339,6 +9339,24 @@ struct CanonicalReportAdmissionContext<'a> {
     instruction_digest: &'a str,
     provider_request_id: &'a str,
     provider_receipt_digest: &'a str,
+    tool_observations: &'a [CanonicalReportToolObservationFact],
+}
+
+struct CanonicalReportArtifactBatchInput<'a> {
+    conversation_id: &'a str,
+    execution_session_id: &'a str,
+    run_id: &'a str,
+    instruction_digest: &'a str,
+    provider_receipt: Option<&'a ProviderInvocationReceipt>,
+    tool_observations: &'a [CanonicalReportToolObservationFact],
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CanonicalReportToolObservationFact {
+    action_id: String,
+    tool_call_digest: String,
+    observation_id: String,
+    observation_digest: String,
 }
 
 async fn prepare_canonical_report_artifact_for_review(
@@ -9379,6 +9397,18 @@ async fn prepare_canonical_report_artifact_for_review(
         .canonical_task_runtime_store
         .as_ref()
         .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let tool_observations = context
+        .tool_observations
+        .iter()
+        .map(
+            |fact| openlife_core::task_runtime::ReportToolObservationFactInput {
+                action_id: &fact.action_id,
+                tool_call_digest: &fact.tool_call_digest,
+                observation_id: &fact.observation_id,
+                observation_digest: &fact.observation_digest,
+            },
+        )
+        .collect::<Vec<_>>();
     let prepared = store
         .lock()
         .await
@@ -9389,6 +9419,7 @@ async fn prepare_canonical_report_artifact_for_review(
             outcome_digest: context.instruction_digest,
             provider_request_id: context.provider_request_id,
             provider_receipt_digest: context.provider_receipt_digest,
+            tool_observations: &tool_observations,
             target_reference,
             content_digest,
             media_type,
@@ -9444,11 +9475,7 @@ fn canonical_report_provider_receipt_digest(
 
 async fn prepare_canonical_report_artifacts_after_provider_receipt(
     state: &Arc<AppState>,
-    conversation_id: &str,
-    execution_session_id: &str,
-    run_id: &str,
-    instruction_digest: &str,
-    provider_receipt: Option<&ProviderInvocationReceipt>,
+    input: CanonicalReportArtifactBatchInput<'_>,
     outcomes: &mut [MainChatKernelWriteOutcome],
 ) -> Result<(), String> {
     if !outcomes.iter().any(|outcome| {
@@ -9460,16 +9487,18 @@ async fn prepare_canonical_report_artifacts_after_provider_receipt(
     }) {
         return Ok(());
     }
-    let receipt =
-        provider_receipt.ok_or_else(|| "canonical_report_provider_receipt_missing".to_string())?;
+    let receipt = input
+        .provider_receipt
+        .ok_or_else(|| "canonical_report_provider_receipt_missing".to_string())?;
     let receipt_digest = canonical_report_provider_receipt_digest(receipt)?;
     let context = CanonicalReportAdmissionContext {
-        conversation_id,
-        execution_session_id,
-        run_id,
-        instruction_digest,
+        conversation_id: input.conversation_id,
+        execution_session_id: input.execution_session_id,
+        run_id: input.run_id,
+        instruction_digest: input.instruction_digest,
         provider_request_id: &receipt.request_id,
         provider_receipt_digest: &receipt_digest,
+        tool_observations: input.tool_observations,
     };
     for outcome in outcomes {
         prepare_canonical_report_artifact_for_review(state, &context, outcome).await?;
@@ -11096,19 +11125,6 @@ async fn build_kernel_write_outcome_command_surface_result(
     if provider_generated_draft != selected_provider_receipt.is_some() {
         return Err("generated_artifact_provider_receipt_mismatch".into());
     }
-    prepare_canonical_report_artifacts_after_provider_receipt(
-        state,
-        session_id,
-        task_session_id,
-        canonical_run_id,
-        &main_chat_agent_turn
-            .decision
-            .policy_decision
-            .authorized_user_message_digest,
-        selected_provider_receipt,
-        &mut expanded_outcomes,
-    )
-    .await?;
     let provider_generated = selected_provider_receipt.is_some();
     let provider_live_invoked = selected_provider_receipt.is_some_and(|receipt| !receipt.simulated)
         && !route_metadata.scripted_response_configured;
@@ -11138,6 +11154,46 @@ async fn build_kernel_write_outcome_command_surface_result(
         KernelReviewRelationContext::Product(terminal_owner_review_origin),
         execution_epoch,
         &mut execution_transcript,
+    )
+    .await?;
+    let canonical_tool_observations = if provider_generated_draft {
+        let canonical_run = crate::terminal_owner_write_gateway::project_main_chat_tool_evidence(
+            state,
+            &agent_run.id,
+            task_session_id,
+            execution_epoch,
+            agent_run.actions.clone(),
+            agent_run.observations.clone(),
+        )
+        .await
+        .map_err(|error| {
+            format!("persist report tool evidence before admission failed: {error}")
+        })?;
+        let facts = canonical_report_tool_observation_facts(
+            &agent_run,
+            &tool_calls,
+            &kernel_result.tool_calls,
+        )?;
+        agent_run.actions = canonical_run.actions;
+        agent_run.observations = canonical_run.observations;
+        facts
+    } else {
+        Vec::new()
+    };
+    prepare_canonical_report_artifacts_after_provider_receipt(
+        state,
+        CanonicalReportArtifactBatchInput {
+            conversation_id: session_id,
+            execution_session_id: task_session_id,
+            run_id: canonical_run_id,
+            instruction_digest: &main_chat_agent_turn
+                .decision
+                .policy_decision
+                .authorized_user_message_digest,
+            provider_receipt: selected_provider_receipt,
+            tool_observations: &canonical_tool_observations,
+        },
+        &mut expanded_outcomes,
     )
     .await?;
 
@@ -11921,6 +11977,125 @@ fn validate_kernel_tool_call_observation_bindings(
         }
     }
     Ok(())
+}
+
+fn canonical_report_tool_observation_facts(
+    run: &openlife_core::agent::AgentRun,
+    calls: &[ToolCallResult],
+    kernel_calls: &[MainChatKernelToolCall],
+) -> Result<Vec<CanonicalReportToolObservationFact>, String> {
+    if kernel_calls.iter().any(|call| call.status != "succeeded") {
+        return Err("canonical_report_tool_execution_not_successful".into());
+    }
+    let successful_kernel_call_count = kernel_calls
+        .iter()
+        .filter(|call| call.status == "succeeded")
+        .count();
+    if calls.len() != successful_kernel_call_count {
+        return Err("canonical_report_tool_execution_proof_incomplete".into());
+    }
+    let mut facts = Vec::with_capacity(calls.len());
+    let mut seen_actions = std::collections::HashSet::new();
+    let mut seen_observations = std::collections::HashSet::new();
+    for call in calls {
+        if !call.success || call.status != ToolCallStatus::Success {
+            return Err("canonical_report_tool_execution_not_successful".into());
+        }
+        let action_id = call
+            .action_id
+            .as_deref()
+            .ok_or_else(|| "canonical_report_tool_action_identity_missing".to_string())?;
+        if call.run_id.as_deref() != Some(run.id.as_str()) || !seen_actions.insert(action_id) {
+            return Err("canonical_report_tool_action_owner_mismatch".into());
+        }
+        let action = run
+            .actions
+            .iter()
+            .find(|action| action.id == action_id)
+            .ok_or_else(|| "canonical_report_tool_action_missing".to_string())?;
+        let receipt = call
+            .execution_receipt
+            .as_ref()
+            .ok_or_else(|| "canonical_report_tool_receipt_missing".to_string())?;
+        if !receipt.proves_success()
+            || !receipt.is_runtime_bound_to_action(
+                &run.id,
+                &action.id,
+                &action.action_type,
+                action.target.as_deref(),
+                &action.input,
+            )
+        {
+            return Err("canonical_report_tool_receipt_binding_mismatch".into());
+        }
+        let has_exact_live_projection =
+            call.product_projection.as_ref().is_some_and(|projection| {
+                projection.authorizes_exact_current_envelope(call, &run.id, action_id, receipt)
+            });
+        let has_exact_replay_projection = kernel_calls.iter().any(|kernel_call| {
+            kernel_call.status == "succeeded"
+                && kernel_call.durable_replayed_projection.is_some()
+                && kernel_call.execution_receipt.as_ref() == Some(receipt)
+        });
+        if !has_exact_live_projection && !has_exact_replay_projection {
+            return Err("canonical_report_tool_projection_unverified".into());
+        }
+        let trace = action
+            .react_trace
+            .as_ref()
+            .ok_or_else(|| "canonical_report_tool_trace_missing".to_string())?;
+        let observation_id = trace
+            .observation_id
+            .as_deref()
+            .ok_or_else(|| "canonical_report_tool_observation_identity_missing".to_string())?;
+        if !seen_observations.insert(observation_id) {
+            return Err("canonical_report_tool_observation_identity_duplicate".into());
+        }
+        let observation = run
+            .observations
+            .iter()
+            .find(|observation| {
+                observation.id == observation_id
+                    && observation.action_id.as_deref() == Some(action_id)
+            })
+            .ok_or_else(|| "canonical_report_tool_observation_missing".to_string())?;
+        let output_receipt = trace
+            .output_receipt
+            .as_ref()
+            .ok_or_else(|| "canonical_report_tool_output_receipt_missing".to_string())?;
+        let tool_call_digest =
+            openlife_core::agent::metadata_safe_value_digest(&serde_json::json!({
+                "actionId": action.id,
+                "actionType": action.action_type,
+                "targetDigest": action.target.as_deref().map(|target| {
+                    openlife_core::agent::metadata_safe_text_digest(target).1
+                }),
+                "inputDigest": openlife_core::agent::metadata_safe_value_digest(&action.input).1,
+                "receiptDigest": openlife_core::agent::metadata_safe_value_digest(
+                    &serde_json::json!(receipt)
+                ).1,
+                "stepIndex": trace.step_index,
+                "toolCallIndex": trace.tool_call_index,
+            }))
+            .1;
+        let observation_digest =
+            openlife_core::agent::metadata_safe_value_digest(&serde_json::json!({
+                "observationId": observation.id,
+                "actionId": action.id,
+                "sourceDigest": openlife_core::agent::metadata_safe_text_digest(
+                    &observation.source
+                ).1,
+                "outputReceiptDigest": output_receipt.public_digest(),
+            }))
+            .1;
+        facts.push(CanonicalReportToolObservationFact {
+            action_id: action.id.clone(),
+            tool_call_digest,
+            observation_id: observation.id.clone(),
+            observation_digest,
+        });
+    }
+    Ok(facts)
 }
 
 async fn load_durable_replayed_tool_call(
@@ -22440,11 +22615,14 @@ mod tests {
         let mut outcomes = vec![outcome];
         prepare_canonical_report_artifacts_after_provider_receipt(
             &state,
-            "conversation-canonical-report",
-            "execution-session-canonical-report",
-            "run-canonical-report",
-            &ingress.policy_decision.authorized_user_message_digest,
-            Some(&provider_receipt),
+            CanonicalReportArtifactBatchInput {
+                conversation_id: "conversation-canonical-report",
+                execution_session_id: "execution-session-canonical-report",
+                run_id: "run-canonical-report",
+                instruction_digest: &ingress.policy_decision.authorized_user_message_digest,
+                provider_receipt: Some(&provider_receipt),
+                tool_observations: &[],
+            },
             &mut outcomes,
         )
         .await
@@ -22550,11 +22728,14 @@ mod tests {
         let mut missing_receipt_outcomes = vec![generated_outcome()];
         let missing = prepare_canonical_report_artifacts_after_provider_receipt(
             &state,
-            "conversation-missing-receipt",
-            "execution-missing-receipt",
-            "run-missing-receipt",
-            &instruction_digest,
-            None,
+            CanonicalReportArtifactBatchInput {
+                conversation_id: "conversation-missing-receipt",
+                execution_session_id: "execution-missing-receipt",
+                run_id: "run-missing-receipt",
+                instruction_digest: &instruction_digest,
+                provider_receipt: None,
+                tool_observations: &[],
+            },
             &mut missing_receipt_outcomes,
         )
         .await
@@ -22568,11 +22749,14 @@ mod tests {
         let mut failed_receipt_outcomes = vec![generated_outcome()];
         let failed = prepare_canonical_report_artifacts_after_provider_receipt(
             &state,
-            "conversation-failed-receipt",
-            "execution-failed-receipt",
-            "run-failed-receipt",
-            &instruction_digest,
-            Some(&failed_receipt),
+            CanonicalReportArtifactBatchInput {
+                conversation_id: "conversation-failed-receipt",
+                execution_session_id: "execution-failed-receipt",
+                run_id: "run-failed-receipt",
+                instruction_digest: &instruction_digest,
+                provider_receipt: Some(&failed_receipt),
+                tool_observations: &[],
+            },
             &mut failed_receipt_outcomes,
         )
         .await

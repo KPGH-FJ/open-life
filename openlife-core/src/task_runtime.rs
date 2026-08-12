@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 2;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,6 +55,8 @@ impl CanonicalTaskStatus {
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalTaskItemKind {
     Instruction,
+    ToolCall,
+    Observation,
     ProviderGeneration,
     ArtifactDraft,
     ReviewCheckpoint,
@@ -65,6 +67,8 @@ impl CanonicalTaskItemKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Instruction => "instruction",
+            Self::ToolCall => "tool_call",
+            Self::Observation => "observation",
             Self::ProviderGeneration => "provider_generation",
             Self::ArtifactDraft => "artifact_draft",
             Self::ReviewCheckpoint => "review_checkpoint",
@@ -75,6 +79,8 @@ impl CanonicalTaskItemKind {
     fn from_db(value: &str) -> Result<Self> {
         match value {
             "instruction" => Ok(Self::Instruction),
+            "tool_call" => Ok(Self::ToolCall),
+            "observation" => Ok(Self::Observation),
             "provider_generation" => Ok(Self::ProviderGeneration),
             "artifact_draft" => Ok(Self::ArtifactDraft),
             "review_checkpoint" => Ok(Self::ReviewCheckpoint),
@@ -241,9 +247,18 @@ pub struct ReportArtifactDraftInput<'a> {
     pub outcome_digest: &'a str,
     pub provider_request_id: &'a str,
     pub provider_receipt_digest: &'a str,
+    pub tool_observations: &'a [ReportToolObservationFactInput<'a>],
     pub target_reference: &'a str,
     pub content_digest: &'a str,
     pub media_type: &'a str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ReportToolObservationFactInput<'a> {
+    pub action_id: &'a str,
+    pub tool_call_digest: &'a str,
+    pub observation_id: &'a str,
+    pub observation_digest: &'a str,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -348,8 +363,8 @@ impl CanonicalTaskRuntimeStore {
                 run_id TEXT NOT NULL UNIQUE,
                 execution_session_id TEXT NOT NULL,
                 ordinal INTEGER NOT NULL CHECK(ordinal > 0),
-                execution_facts_version INTEGER NOT NULL DEFAULT 2
-                    CHECK(execution_facts_version IN (1, 2)),
+                execution_facts_version INTEGER NOT NULL DEFAULT 3
+                    CHECK(execution_facts_version IN (1, 2, 3)),
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(task_id, run_id),
                 FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
@@ -360,7 +375,8 @@ impl CanonicalTaskRuntimeStore {
                 run_id TEXT NOT NULL,
                 sequence INTEGER NOT NULL CHECK(sequence > 0),
                 kind TEXT NOT NULL CHECK(kind IN (
-                    'instruction', 'provider_generation', 'artifact_draft',
+                    'instruction', 'tool_call', 'observation',
+                    'provider_generation', 'artifact_draft',
                     'review_checkpoint', 'artifact_materialized'
                 )),
                 status TEXT NOT NULL CHECK(status IN (
@@ -410,11 +426,14 @@ impl CanonicalTaskRuntimeStore {
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '2')
+             VALUES ('schema_version', '3')
              ON CONFLICT(key) DO NOTHING;",
         )?;
         if Self::schema_version(&conn)? == 1 {
             Self::migrate_v1_to_v2(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 2 {
+            Self::migrate_v2_to_v3(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -496,6 +515,87 @@ impl CanonicalTaskRuntimeStore {
         Ok(())
     }
 
+    fn migrate_v2_to_v3(conn: &mut Connection) -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;")?;
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "ALTER TABLE canonical_task_items RENAME TO canonical_task_items_v2;
+                 ALTER TABLE canonical_task_runs RENAME TO canonical_task_runs_v2;
+                 CREATE TABLE canonical_task_runs (
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL UNIQUE,
+                    execution_session_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+                    execution_facts_version INTEGER NOT NULL DEFAULT 3
+                        CHECK(execution_facts_version IN (1, 2, 3)),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(task_id, run_id),
+                    FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
+                 ) WITHOUT ROWID;
+                 INSERT INTO canonical_task_runs (
+                    task_id, run_id, execution_session_id, ordinal,
+                    execution_facts_version, created_at
+                 ) SELECT task_id, run_id, execution_session_id, ordinal,
+                          execution_facts_version, created_at
+                   FROM canonical_task_runs_v2;
+                 CREATE TABLE canonical_task_items (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK(sequence > 0),
+                    kind TEXT NOT NULL CHECK(kind IN (
+                        'instruction', 'tool_call', 'observation',
+                        'provider_generation', 'artifact_draft',
+                        'review_checkpoint', 'artifact_materialized'
+                    )),
+                    status TEXT NOT NULL CHECK(status IN (
+                        'waiting', 'completed', 'blocked', 'failed', 'effect_unknown'
+                    )),
+                    summary_code TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(task_id, sequence),
+                    FOREIGN KEY(task_id, run_id)
+                        REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+                 );
+                 INSERT INTO canonical_task_items (
+                    id, task_id, run_id, sequence, kind, status, summary_code,
+                    payload_digest, created_at, updated_at
+                 ) SELECT id, task_id, run_id, sequence, kind, status, summary_code,
+                          payload_digest, created_at, updated_at
+                   FROM canonical_task_items_v2;
+                 DROP TABLE canonical_task_items_v2;
+                 DROP TABLE canonical_task_runs_v2;
+                 CREATE INDEX idx_canonical_task_items_run
+                    ON canonical_task_items(run_id, sequence);",
+            )?;
+            let changed = tx.execute(
+                "UPDATE canonical_task_runtime_metadata SET value = '3'
+                 WHERE key = 'schema_version' AND value = '2'",
+                [],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("canonical_task_runtime_v2_migration_version_conflict");
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        let pragma_restore =
+            conn.execute_batch("PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON;");
+        migration?;
+        pragma_restore?;
+        let violation = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_row([], |_| Ok(()))
+            .optional()?;
+        if violation.is_some() {
+            anyhow::bail!("canonical_task_runtime_v2_migration_foreign_key_violation");
+        }
+        Ok(())
+    }
+
     fn validate_schema(conn: &Connection) -> Result<()> {
         let version = Self::schema_version(conn)?;
         if version != TASK_RUNTIME_SCHEMA_VERSION {
@@ -514,6 +614,20 @@ impl CanonicalTaskRuntimeStore {
         validate_digest("outcome_digest", input.outcome_digest)?;
         validate_nonempty("provider_request_id", input.provider_request_id, 512)?;
         validate_digest("provider_receipt_digest", input.provider_receipt_digest)?;
+        if input.tool_observations.len() > 64 {
+            anyhow::bail!("canonical_report_tool_observation_count_invalid");
+        }
+        let mut action_ids = std::collections::HashSet::new();
+        let mut observation_ids = std::collections::HashSet::new();
+        for fact in input.tool_observations {
+            validate_nonempty("tool_action_id", fact.action_id, 512)?;
+            validate_digest("tool_call_digest", fact.tool_call_digest)?;
+            validate_nonempty("tool_observation_id", fact.observation_id, 512)?;
+            validate_digest("observation_digest", fact.observation_digest)?;
+            if !action_ids.insert(fact.action_id) || !observation_ids.insert(fact.observation_id) {
+                anyhow::bail!("canonical_report_tool_observation_identity_duplicate");
+            }
+        }
         validate_nonempty("target_reference", input.target_reference, 4096)?;
         validate_digest("content_digest", input.content_digest)?;
         validate_nonempty("media_type", input.media_type, 256)?;
@@ -604,7 +718,7 @@ impl CanonicalTaskRuntimeStore {
                 "INSERT INTO canonical_task_runs (
                     task_id, run_id, execution_session_id, ordinal,
                     execution_facts_version, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, 2, ?5)",
+                 ) VALUES (?1, ?2, ?3, ?4, 3, ?5)",
                 params![
                     task_id,
                     input.run_id,
@@ -613,36 +727,19 @@ impl CanonicalTaskRuntimeStore {
                     now_text
                 ],
             )?;
-            2
+            3
         };
 
-        if execution_facts_version == 2 {
+        if execution_facts_version == 3 {
             if !is_new_run {
-                let existing_instruction_id = tx
-                    .query_row(
-                        "SELECT id FROM canonical_task_items
-                         WHERE task_id = ?1 AND run_id = ?2 AND kind = 'instruction'",
-                        params![task_id, input.run_id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?;
-                if existing_instruction_id.as_deref() != Some(instruction_item_id.as_str()) {
-                    anyhow::bail!("canonical_report_instruction_item_missing_or_conflicting");
-                }
-                let existing_generation_id = tx
-                    .query_row(
-                        "SELECT id FROM canonical_task_items
-                         WHERE task_id = ?1 AND run_id = ?2
-                           AND kind = 'provider_generation'",
-                        params![task_id, input.run_id],
-                        |row| row.get::<_, String>(0),
-                    )
-                    .optional()?;
-                if existing_generation_id.as_deref() != Some(provider_generation_item_id.as_str()) {
-                    anyhow::bail!(
-                        "canonical_report_provider_generation_item_missing_or_conflicting"
-                    );
-                }
+                validate_report_execution_items_v3(
+                    &tx,
+                    &task_id,
+                    input.run_id,
+                    &instruction_item_id,
+                    &provider_generation_item_id,
+                    input.tool_observations,
+                )?;
             }
             ensure_completed_item(
                 &tx,
@@ -656,6 +753,46 @@ impl CanonicalTaskRuntimeStore {
                     now: &now_text,
                 },
             )?;
+            for fact in input.tool_observations {
+                let tool_call_item_id = stable_id(
+                    "item",
+                    &["tool_call", &task_id, input.run_id, fact.action_id],
+                );
+                ensure_completed_item(
+                    &tx,
+                    CompletedItemInput {
+                        item_id: &tool_call_item_id,
+                        task_id: &task_id,
+                        run_id: input.run_id,
+                        kind: CanonicalTaskItemKind::ToolCall,
+                        summary_code: "report_governed_tool_call_completed",
+                        payload_digest: fact.tool_call_digest,
+                        now: &now_text,
+                    },
+                )?;
+                let observation_item_id = stable_id(
+                    "item",
+                    &[
+                        "observation",
+                        &task_id,
+                        input.run_id,
+                        fact.action_id,
+                        fact.observation_id,
+                    ],
+                );
+                ensure_completed_item(
+                    &tx,
+                    CompletedItemInput {
+                        item_id: &observation_item_id,
+                        task_id: &task_id,
+                        run_id: input.run_id,
+                        kind: CanonicalTaskItemKind::Observation,
+                        summary_code: "report_governed_observation_bound",
+                        payload_digest: fact.observation_digest,
+                        now: &now_text,
+                    },
+                )?;
+            }
             ensure_completed_item(
                 &tx,
                 CompletedItemInput {
@@ -668,6 +805,8 @@ impl CanonicalTaskRuntimeStore {
                     now: &now_text,
                 },
             )?;
+        } else if !input.tool_observations.is_empty() {
+            anyhow::bail!("canonical_report_legacy_run_cannot_bind_tool_observations");
         }
 
         let existing_artifact = tx
@@ -699,7 +838,7 @@ impl CanonicalTaskRuntimeStore {
                 anyhow::bail!("canonical_report_artifact_identity_conflict");
             }
         } else {
-            if execution_facts_version != 2 {
+            if execution_facts_version != 3 {
                 anyhow::bail!("canonical_report_legacy_run_cannot_add_artifact");
             }
             tx.execute(
@@ -1253,6 +1392,79 @@ impl CanonicalTaskRuntimeStore {
     }
 }
 
+fn validate_report_execution_items_v3(
+    tx: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    run_id: &str,
+    instruction_item_id: &str,
+    provider_generation_item_id: &str,
+    tool_observations: &[ReportToolObservationFactInput<'_>],
+) -> Result<()> {
+    let mut expected = vec![(
+        instruction_item_id.to_string(),
+        CanonicalTaskItemKind::Instruction,
+        "report_instruction_bound",
+    )];
+    for fact in tool_observations {
+        expected.push((
+            stable_id("item", &["tool_call", task_id, run_id, fact.action_id]),
+            CanonicalTaskItemKind::ToolCall,
+            "report_governed_tool_call_completed",
+        ));
+        expected.push((
+            stable_id(
+                "item",
+                &[
+                    "observation",
+                    task_id,
+                    run_id,
+                    fact.action_id,
+                    fact.observation_id,
+                ],
+            ),
+            CanonicalTaskItemKind::Observation,
+            "report_governed_observation_bound",
+        ));
+    }
+    expected.push((
+        provider_generation_item_id.to_string(),
+        CanonicalTaskItemKind::ProviderGeneration,
+        "report_provider_generation_completed",
+    ));
+
+    let actual = {
+        let mut statement = tx.prepare(
+            "SELECT id, kind, status, summary_code
+             FROM canonical_task_items
+             WHERE task_id = ?1 AND run_id = ?2
+               AND kind IN ('instruction', 'tool_call', 'observation', 'provider_generation')
+             ORDER BY sequence ASC",
+        )?;
+        let rows = statement.query_map(params![task_id, run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    if actual.len() != expected.len()
+        || actual.iter().zip(expected.iter()).any(
+            |((id, kind, status, summary), (expected_id, expected_kind, expected_summary))| {
+                id != expected_id
+                    || kind != expected_kind.as_str()
+                    || status != CanonicalTaskItemStatus::Completed.as_str()
+                    || summary != expected_summary
+            },
+        )
+    {
+        anyhow::bail!("canonical_report_execution_items_missing_or_conflicting");
+    }
+    Ok(())
+}
+
 struct CompletedItemInput<'a> {
     item_id: &'a str,
     task_id: &'a str,
@@ -1572,6 +1784,7 @@ mod tests {
                 outcome_digest: &outcome_digest,
                 provider_request_id: &format!("provider-request-{run}"),
                 provider_receipt_digest: &digest_of(&format!("provider-receipt-{run}")),
+                tool_observations: &[],
                 target_reference: "/tmp/openlife/report.md",
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",
@@ -1596,8 +1809,29 @@ mod tests {
             outcome_digest,
             provider_request_id,
             provider_receipt_digest,
+            tool_observations: &[],
             target_reference,
             content_digest,
+            media_type: "text/markdown; charset=utf-8",
+        })
+    }
+
+    fn prepare_artifact_with_tools(
+        store: &CanonicalTaskRuntimeStore,
+        conversation: &str,
+        run: &str,
+        tool_observations: &[ReportToolObservationFactInput<'_>],
+    ) -> Result<PreparedReportArtifact> {
+        store.prepare_report_artifact(ReportArtifactDraftInput {
+            conversation_id: conversation,
+            execution_session_id: run,
+            run_id: run,
+            outcome_digest: &digest_of("report outcome"),
+            provider_request_id: &format!("provider-request-{run}"),
+            provider_receipt_digest: &digest_of(&format!("provider-receipt-{run}")),
+            tool_observations,
+            target_reference: "/tmp/openlife/report.md",
+            content_digest: &digest_of("# Report"),
             media_type: "text/markdown; charset=utf-8",
         })
     }
@@ -1799,6 +2033,80 @@ mod tests {
                 .status,
             CanonicalArtifactStatus::WaitingReview
         );
+    }
+
+    #[test]
+    fn report_records_each_governed_tool_call_before_its_bound_observation() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let first_tool_digest = digest_of("tool-call-1");
+        let first_observation_digest = digest_of("observation-1");
+        let second_tool_digest = digest_of("tool-call-2");
+        let second_observation_digest = digest_of("observation-2");
+        let facts = [
+            ReportToolObservationFactInput {
+                action_id: "action-1",
+                tool_call_digest: &first_tool_digest,
+                observation_id: "observation-1",
+                observation_digest: &first_observation_digest,
+            },
+            ReportToolObservationFactInput {
+                action_id: "action-2",
+                tool_call_digest: &second_tool_digest,
+                observation_id: "observation-2",
+                observation_digest: &second_observation_digest,
+            },
+        ];
+        let prepared =
+            prepare_artifact_with_tools(&store, "conversation-tools", "run-tools", &facts).unwrap();
+        let items = store.list_items(&prepared.task_id).unwrap();
+        assert_eq!(
+            items.iter().map(|item| item.kind).collect::<Vec<_>>(),
+            vec![
+                CanonicalTaskItemKind::Instruction,
+                CanonicalTaskItemKind::ToolCall,
+                CanonicalTaskItemKind::Observation,
+                CanonicalTaskItemKind::ToolCall,
+                CanonicalTaskItemKind::Observation,
+                CanonicalTaskItemKind::ProviderGeneration,
+                CanonicalTaskItemKind::ArtifactDraft,
+            ]
+        );
+        assert_eq!(items[1].payload_digest, first_tool_digest);
+        assert_eq!(items[2].payload_digest, first_observation_digest);
+        assert_eq!(items[3].payload_digest, second_tool_digest);
+        assert_eq!(items[4].payload_digest, second_observation_digest);
+    }
+
+    #[test]
+    fn report_tool_observation_replay_rejects_missing_or_changed_facts_atomically() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let tool_digest = digest_of("tool-call-1");
+        let observation_digest = digest_of("observation-1");
+        let facts = [ReportToolObservationFactInput {
+            action_id: "action-1",
+            tool_call_digest: &tool_digest,
+            observation_id: "observation-1",
+            observation_digest: &observation_digest,
+        }];
+        let prepared =
+            prepare_artifact_with_tools(&store, "conversation-tools", "run-tools", &facts).unwrap();
+        let before = store.list_task_snapshots(100).unwrap();
+        assert!(
+            prepare_artifact_with_tools(&store, "conversation-tools", "run-tools", &[]).is_err()
+        );
+        let changed_tool_digest = digest_of("changed-tool-call");
+        let changed = [ReportToolObservationFactInput {
+            action_id: "action-1",
+            tool_call_digest: &changed_tool_digest,
+            observation_id: "observation-1",
+            observation_digest: &observation_digest,
+        }];
+        assert!(
+            prepare_artifact_with_tools(&store, "conversation-tools", "run-tools", &changed,)
+                .is_err()
+        );
+        assert_eq!(store.list_task_snapshots(100).unwrap(), before);
+        assert_eq!(store.list_items(&prepared.task_id).unwrap().len(), 5);
     }
 
     #[test]
@@ -2184,8 +2492,87 @@ mod tests {
         let migrated = store.list_task_snapshots(100).unwrap();
         assert_eq!(migrated[0].runs.len(), 2);
         assert_eq!(migrated[0].runs[0].execution_facts_version, 1);
-        assert_eq!(migrated[0].runs[1].execution_facts_version, 2);
+        assert_eq!(migrated[0].runs[1].execution_facts_version, 3);
         assert_eq!(migrated[0].items.len(), 4);
+    }
+
+    #[test]
+    fn v2_runtime_migrates_and_keeps_legacy_runs_readable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task_runtime_v2.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE canonical_task_runtime_metadata (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL
+             ) WITHOUT ROWID;
+             INSERT INTO canonical_task_runtime_metadata VALUES ('schema_version', '2');
+             CREATE TABLE canonical_tasks (
+                id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL UNIQUE,
+                task_kind TEXT NOT NULL CHECK(task_kind = 'report'),
+                initial_outcome_digest TEXT NOT NULL, status TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+             );
+             CREATE TABLE canonical_task_runs (
+                task_id TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE,
+                execution_session_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+                execution_facts_version INTEGER NOT NULL DEFAULT 2
+                    CHECK(execution_facts_version IN (1, 2)),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(task_id, run_id),
+                FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
+             ) WITHOUT ROWID;
+             CREATE TABLE canonical_task_items (
+                id TEXT PRIMARY KEY, task_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK(sequence > 0),
+                kind TEXT NOT NULL CHECK(kind IN (
+                    'instruction', 'provider_generation', 'artifact_draft',
+                    'review_checkpoint', 'artifact_materialized'
+                )),
+                status TEXT NOT NULL, summary_code TEXT NOT NULL,
+                payload_digest TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, UNIQUE(task_id, sequence),
+                FOREIGN KEY(task_id, run_id)
+                    REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+             );",
+        )
+        .unwrap();
+        let now = Utc::now().to_rfc3339();
+        let task_id = stable_id("task", &["report", "conversation-v2"]);
+        conn.execute(
+            "INSERT INTO canonical_tasks VALUES (?1, 'conversation-v2', 'report', ?2,
+                                                   'running', ?3, ?3)",
+            params![task_id, digest_of("legacy outcome"), now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO canonical_task_runs VALUES (?1, 'run-v2', 'run-v2', 1, 2, ?2)",
+            params![task_id, now],
+        )
+        .unwrap();
+        let instruction_id = stable_id("item", &["instruction", &task_id, "run-v2"]);
+        conn.execute(
+            "INSERT INTO canonical_task_items VALUES (
+                ?1, ?2, 'run-v2', 1, 'instruction', 'completed',
+                'report_instruction_bound', ?3, ?4, ?4
+             )",
+            params![instruction_id, task_id, digest_of("legacy outcome"), now],
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        let snapshots = store.list_task_snapshots(100).unwrap();
+        assert_eq!(snapshots[0].runs[0].execution_facts_version, 2);
+        assert_eq!(
+            snapshots[0].items[0].kind,
+            CanonicalTaskItemKind::Instruction
+        );
+        let new_run = prepare_test_artifact(&store, "conversation-v2", "run-v3");
+        let snapshots = store.list_task_snapshots(100).unwrap();
+        assert_eq!(snapshots[0].runs[1].execution_facts_version, 3);
+        assert_eq!(new_run.task_id, task_id);
     }
 
     #[test]
@@ -2215,6 +2602,7 @@ mod tests {
                 outcome_digest: &outcome_digest,
                 provider_request_id: "provider-request-run-2",
                 provider_receipt_digest: &digest_of("provider-receipt-run-2"),
+                tool_observations: &[],
                 target_reference: "/tmp/openlife/report.md",
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",

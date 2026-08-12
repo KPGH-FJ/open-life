@@ -1585,6 +1585,28 @@ fn merge_main_chat_action_observation_delta(
     Ok(())
 }
 
+pub(crate) async fn project_main_chat_tool_evidence(
+    state: &Arc<AppState>,
+    run_id: &str,
+    task_session_id: &str,
+    execution_epoch: &MainChatExecutionEpoch,
+    actions: Vec<AgentAction>,
+    observations: Vec<AgentObservation>,
+) -> Result<AgentRun, String> {
+    project_main_chat_agent_run_from_typed_delta(
+        state,
+        run_id,
+        task_session_id,
+        execution_epoch,
+        move |store, run| {
+            merge_main_chat_action_observation_delta(store, run, actions, observations)
+        },
+    )
+    .await?;
+    let store = clone_agent_run_store(state).await?;
+    load_live_agent_run(state, &store, run_id)
+}
+
 pub(crate) async fn project_main_chat_generation_result(
     state: &Arc<AppState>,
     run_id: &str,

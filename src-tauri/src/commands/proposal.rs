@@ -7235,6 +7235,7 @@ mod tests {
                     "sha256:{:x}",
                     Sha256::digest(b"provider receipt report")
                 ),
+                tool_observations: &[],
                 target_reference: &file_path.to_string_lossy(),
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",
@@ -7349,6 +7350,7 @@ mod tests {
                     "sha256:{:x}",
                     Sha256::digest(b"provider receipt rejected report")
                 ),
+                tool_observations: &[],
                 target_reference: &file_path.to_string_lossy(),
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",

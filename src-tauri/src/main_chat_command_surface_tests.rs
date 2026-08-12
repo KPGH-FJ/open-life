@@ -6394,6 +6394,8 @@ async fn roadshow_cc01_exact_prompt_reads_resource_and_web_then_reviews_one_cite
             .collect::<Vec<_>>(),
         vec![
             openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ToolCall,
+            openlife_core::task_runtime::CanonicalTaskItemKind::Observation,
             openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
             openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactDraft,
             openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint,
