@@ -7230,6 +7230,7 @@ mod tests {
                     "sha256:{:x}",
                     Sha256::digest(b"canonical report outcome")
                 ),
+                plan_digest: &format!("sha256:{:x}", Sha256::digest(b"canonical report plan")),
                 provider_request_id: "provider-request-report",
                 provider_receipt_digest: &format!(
                     "sha256:{:x}",
@@ -7344,6 +7345,10 @@ mod tests {
                 outcome_digest: &format!(
                     "sha256:{:x}",
                     Sha256::digest(b"rejected canonical report outcome")
+                ),
+                plan_digest: &format!(
+                    "sha256:{:x}",
+                    Sha256::digest(b"rejected canonical report plan")
                 ),
                 provider_request_id: "provider-request-rejected-report",
                 provider_receipt_digest: &format!(

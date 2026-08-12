@@ -41,14 +41,18 @@ slice. These are migration constraints, not the target product contract.
 
 The first S2 vertical slice now adds `CanonicalTaskRuntimeStore` on the
 provider-generated report path. It owns stable report Task identity, Run
-membership, typed instruction/provider-generation/artifact/review/materialization
-Items, and independent ArtifactVersion metadata in `task_runtime.db`. A new
+membership, typed instruction/plan/tool/observation/provider-generation/
+artifact/review/materialization/verification/final-result Items, and independent
+ArtifactVersion metadata in `task_runtime.db`. A new
 report Run is admitted only after its Policy-authorized instruction digest and
 completed provider receipt have been validated and durably recorded by their
 existing owners. The canonical store records their identities and bounded
 digests, not prompt or response bodies. The report Artifact exists before its
 Proposal; Review is a checkpoint relation, and confirmed materialization updates
-the same ArtifactVersion. This is current product code for that path, not yet a
+the same ArtifactVersion. The Task becomes delivered only after each current
+ArtifactVersion has an exact expected/observed digest match and the store writes
+the completing Run's canonical FinalResult. This is current product code for
+that path, not yet a
 claim that every Main Chat route has migrated.
 
 The existing backend-owned `TasksViewModel` and `WorkspaceViewModel` now read a

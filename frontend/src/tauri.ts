@@ -2886,12 +2886,15 @@ export type TaskLatestResultPreview = {
 
 export type CanonicalTaskItemKind =
   | "instruction"
+  | "plan"
   | "tool_call"
   | "observation"
   | "provider_generation"
   | "artifact_draft"
   | "review_checkpoint"
-  | "artifact_materialized";
+  | "artifact_materialized"
+  | "verification"
+  | "final_result";
 
 export type CanonicalTaskItemStatus =
   | "waiting"

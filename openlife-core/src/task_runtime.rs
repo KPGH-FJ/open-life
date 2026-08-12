@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 3;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -55,36 +55,45 @@ impl CanonicalTaskStatus {
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalTaskItemKind {
     Instruction,
+    Plan,
     ToolCall,
     Observation,
     ProviderGeneration,
     ArtifactDraft,
     ReviewCheckpoint,
     ArtifactMaterialized,
+    Verification,
+    FinalResult,
 }
 
 impl CanonicalTaskItemKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Instruction => "instruction",
+            Self::Plan => "plan",
             Self::ToolCall => "tool_call",
             Self::Observation => "observation",
             Self::ProviderGeneration => "provider_generation",
             Self::ArtifactDraft => "artifact_draft",
             Self::ReviewCheckpoint => "review_checkpoint",
             Self::ArtifactMaterialized => "artifact_materialized",
+            Self::Verification => "verification",
+            Self::FinalResult => "final_result",
         }
     }
 
     fn from_db(value: &str) -> Result<Self> {
         match value {
             "instruction" => Ok(Self::Instruction),
+            "plan" => Ok(Self::Plan),
             "tool_call" => Ok(Self::ToolCall),
             "observation" => Ok(Self::Observation),
             "provider_generation" => Ok(Self::ProviderGeneration),
             "artifact_draft" => Ok(Self::ArtifactDraft),
             "review_checkpoint" => Ok(Self::ReviewCheckpoint),
             "artifact_materialized" => Ok(Self::ArtifactMaterialized),
+            "verification" => Ok(Self::Verification),
+            "final_result" => Ok(Self::FinalResult),
             _ => anyhow::bail!("canonical_task_item_kind_invalid:{value}"),
         }
     }
@@ -245,6 +254,7 @@ pub struct ReportArtifactDraftInput<'a> {
     pub execution_session_id: &'a str,
     pub run_id: &'a str,
     pub outcome_digest: &'a str,
+    pub plan_digest: &'a str,
     pub provider_request_id: &'a str,
     pub provider_receipt_digest: &'a str,
     pub tool_observations: &'a [ReportToolObservationFactInput<'a>],
@@ -267,6 +277,26 @@ pub struct PreparedReportArtifact {
     pub artifact_draft_item_id: String,
     pub artifact_id: String,
     pub version: u64,
+}
+
+pub fn report_verification_item_id(
+    artifact_id: &str,
+    version: u64,
+    observed_content_digest: &str,
+) -> String {
+    stable_id(
+        "item",
+        &[
+            "verification",
+            artifact_id,
+            &version.to_string(),
+            observed_content_digest,
+        ],
+    )
+}
+
+pub fn report_final_result_item_id(task_id: &str, run_id: &str) -> String {
+    stable_id("item", &["final_result", task_id, run_id])
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -363,8 +393,8 @@ impl CanonicalTaskRuntimeStore {
                 run_id TEXT NOT NULL UNIQUE,
                 execution_session_id TEXT NOT NULL,
                 ordinal INTEGER NOT NULL CHECK(ordinal > 0),
-                execution_facts_version INTEGER NOT NULL DEFAULT 3
-                    CHECK(execution_facts_version IN (1, 2, 3)),
+                execution_facts_version INTEGER NOT NULL DEFAULT 4
+                    CHECK(execution_facts_version IN (1, 2, 3, 4)),
                 created_at TEXT NOT NULL,
                 PRIMARY KEY(task_id, run_id),
                 FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
@@ -375,9 +405,10 @@ impl CanonicalTaskRuntimeStore {
                 run_id TEXT NOT NULL,
                 sequence INTEGER NOT NULL CHECK(sequence > 0),
                 kind TEXT NOT NULL CHECK(kind IN (
-                    'instruction', 'tool_call', 'observation',
+                    'instruction', 'plan', 'tool_call', 'observation',
                     'provider_generation', 'artifact_draft',
-                    'review_checkpoint', 'artifact_materialized'
+                    'review_checkpoint', 'artifact_materialized',
+                    'verification', 'final_result'
                 )),
                 status TEXT NOT NULL CHECK(status IN (
                     'waiting', 'completed', 'blocked', 'failed', 'effect_unknown'
@@ -426,7 +457,7 @@ impl CanonicalTaskRuntimeStore {
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '3')
+             VALUES ('schema_version', '4')
              ON CONFLICT(key) DO NOTHING;",
         )?;
         if Self::schema_version(&conn)? == 1 {
@@ -434,6 +465,9 @@ impl CanonicalTaskRuntimeStore {
         }
         if Self::schema_version(&conn)? == 2 {
             Self::migrate_v2_to_v3(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 3 {
+            Self::migrate_v3_to_v4(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -596,6 +630,88 @@ impl CanonicalTaskRuntimeStore {
         Ok(())
     }
 
+    fn migrate_v3_to_v4(conn: &mut Connection) -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;")?;
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "ALTER TABLE canonical_task_items RENAME TO canonical_task_items_v3;
+                 ALTER TABLE canonical_task_runs RENAME TO canonical_task_runs_v3;
+                 CREATE TABLE canonical_task_runs (
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL UNIQUE,
+                    execution_session_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+                    execution_facts_version INTEGER NOT NULL DEFAULT 4
+                        CHECK(execution_facts_version IN (1, 2, 3, 4)),
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(task_id, run_id),
+                    FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
+                 ) WITHOUT ROWID;
+                 INSERT INTO canonical_task_runs (
+                    task_id, run_id, execution_session_id, ordinal,
+                    execution_facts_version, created_at
+                 ) SELECT task_id, run_id, execution_session_id, ordinal,
+                          execution_facts_version, created_at
+                   FROM canonical_task_runs_v3;
+                 CREATE TABLE canonical_task_items (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK(sequence > 0),
+                    kind TEXT NOT NULL CHECK(kind IN (
+                        'instruction', 'plan', 'tool_call', 'observation',
+                        'provider_generation', 'artifact_draft',
+                        'review_checkpoint', 'artifact_materialized',
+                        'verification', 'final_result'
+                    )),
+                    status TEXT NOT NULL CHECK(status IN (
+                        'waiting', 'completed', 'blocked', 'failed', 'effect_unknown'
+                    )),
+                    summary_code TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(task_id, sequence),
+                    FOREIGN KEY(task_id, run_id)
+                        REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+                 );
+                 INSERT INTO canonical_task_items (
+                    id, task_id, run_id, sequence, kind, status, summary_code,
+                    payload_digest, created_at, updated_at
+                 ) SELECT id, task_id, run_id, sequence, kind, status, summary_code,
+                          payload_digest, created_at, updated_at
+                   FROM canonical_task_items_v3;
+                 DROP TABLE canonical_task_items_v3;
+                 DROP TABLE canonical_task_runs_v3;
+                 CREATE INDEX idx_canonical_task_items_run
+                    ON canonical_task_items(run_id, sequence);",
+            )?;
+            let changed = tx.execute(
+                "UPDATE canonical_task_runtime_metadata SET value = '4'
+                 WHERE key = 'schema_version' AND value = '3'",
+                [],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("canonical_task_runtime_v3_migration_version_conflict");
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        let pragma_restore =
+            conn.execute_batch("PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON;");
+        migration?;
+        pragma_restore?;
+        let violation = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_row([], |_| Ok(()))
+            .optional()?;
+        if violation.is_some() {
+            anyhow::bail!("canonical_task_runtime_v3_migration_foreign_key_violation");
+        }
+        Ok(())
+    }
+
     fn validate_schema(conn: &Connection) -> Result<()> {
         let version = Self::schema_version(conn)?;
         if version != TASK_RUNTIME_SCHEMA_VERSION {
@@ -612,6 +728,7 @@ impl CanonicalTaskRuntimeStore {
         validate_nonempty("execution_session_id", input.execution_session_id, 512)?;
         validate_nonempty("run_id", input.run_id, 512)?;
         validate_digest("outcome_digest", input.outcome_digest)?;
+        validate_digest("plan_digest", input.plan_digest)?;
         validate_nonempty("provider_request_id", input.provider_request_id, 512)?;
         validate_digest("provider_receipt_digest", input.provider_receipt_digest)?;
         if input.tool_observations.len() > 64 {
@@ -645,6 +762,7 @@ impl CanonicalTaskRuntimeStore {
         );
         let item_id = stable_id("item", &["artifact_draft", &artifact_id]);
         let instruction_item_id = stable_id("item", &["instruction", &task_id, input.run_id]);
+        let plan_item_id = stable_id("item", &["plan", &task_id, input.run_id]);
         let provider_generation_item_id = stable_id(
             "item",
             &[
@@ -718,7 +836,7 @@ impl CanonicalTaskRuntimeStore {
                 "INSERT INTO canonical_task_runs (
                     task_id, run_id, execution_session_id, ordinal,
                     execution_facts_version, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, 3, ?5)",
+                 ) VALUES (?1, ?2, ?3, ?4, 4, ?5)",
                 params![
                     task_id,
                     input.run_id,
@@ -727,16 +845,17 @@ impl CanonicalTaskRuntimeStore {
                     now_text
                 ],
             )?;
-            3
+            4
         };
 
-        if execution_facts_version == 3 {
+        if execution_facts_version == 4 {
             if !is_new_run {
-                validate_report_execution_items_v3(
+                validate_report_execution_items_v4(
                     &tx,
                     &task_id,
                     input.run_id,
                     &instruction_item_id,
+                    &plan_item_id,
                     &provider_generation_item_id,
                     input.tool_observations,
                 )?;
@@ -750,6 +869,18 @@ impl CanonicalTaskRuntimeStore {
                     kind: CanonicalTaskItemKind::Instruction,
                     summary_code: "report_instruction_bound",
                     payload_digest: input.outcome_digest,
+                    now: &now_text,
+                },
+            )?;
+            ensure_completed_item(
+                &tx,
+                CompletedItemInput {
+                    item_id: &plan_item_id,
+                    task_id: &task_id,
+                    run_id: input.run_id,
+                    kind: CanonicalTaskItemKind::Plan,
+                    summary_code: "report_execution_plan_bound",
+                    payload_digest: input.plan_digest,
                     now: &now_text,
                 },
             )?;
@@ -805,6 +936,15 @@ impl CanonicalTaskRuntimeStore {
                     now: &now_text,
                 },
             )?;
+        } else if execution_facts_version == 3 {
+            validate_report_execution_items_v3(
+                &tx,
+                &task_id,
+                input.run_id,
+                &instruction_item_id,
+                &provider_generation_item_id,
+                input.tool_observations,
+            )?;
         } else if !input.tool_observations.is_empty() {
             anyhow::bail!("canonical_report_legacy_run_cannot_bind_tool_observations");
         }
@@ -838,8 +978,21 @@ impl CanonicalTaskRuntimeStore {
                 anyhow::bail!("canonical_report_artifact_identity_conflict");
             }
         } else {
-            if execution_facts_version != 3 {
+            if execution_facts_version != 4 {
                 anyhow::bail!("canonical_report_legacy_run_cannot_add_artifact");
+            }
+            let finalized_item_id = report_final_result_item_id(&task_id, input.run_id);
+            if tx
+                .query_row(
+                    "SELECT 1 FROM canonical_task_items
+                     WHERE id = ?1 AND kind = 'final_result' AND status = 'completed'",
+                    [&finalized_item_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some()
+            {
+                anyhow::bail!("canonical_report_run_already_finalized");
             }
             tx.execute(
                 "UPDATE canonical_tasks SET status = 'running', updated_at = ?2
@@ -1009,7 +1162,8 @@ impl CanonicalTaskRuntimeStore {
                  materialized_at = ?5
              WHERE artifact_id = ?1 AND version = 1
                AND content_digest = ?2
-               AND (observed_content_digest IS NULL OR observed_content_digest = ?4)",
+               AND observed_content_digest IS NULL
+               AND materialized_reference IS NULL",
             params![
                 artifact_id,
                 expected_digest,
@@ -1019,16 +1173,36 @@ impl CanonicalTaskRuntimeStore {
             ],
         )?;
         if version_changed != 1 {
-            anyhow::bail!("canonical_report_artifact_version_confirm_cas_failed");
+            let existing: (Option<String>, Option<String>) = tx.query_row(
+                "SELECT materialized_reference, observed_content_digest
+                 FROM canonical_artifact_versions
+                 WHERE artifact_id = ?1 AND version = 1 AND content_digest = ?2",
+                params![artifact_id, expected_digest],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if existing.0.as_deref() != Some(materialized_reference)
+                || existing.1.as_deref() != Some(observed_content_digest)
+            {
+                anyhow::bail!("canonical_report_artifact_version_confirm_cas_failed");
+            }
         }
         let artifact_changed = tx.execute(
             "UPDATE canonical_artifacts
              SET status = 'materialized', materialized_reference = ?2, updated_at = ?3
-             WHERE id = ?1 AND status IN ('waiting_review', 'materialized')",
+             WHERE id = ?1 AND status = 'waiting_review'",
             params![artifact_id, materialized_reference, now],
         )?;
         if artifact_changed != 1 {
-            anyhow::bail!("canonical_report_artifact_confirm_cas_failed");
+            let existing: (String, Option<String>) = tx.query_row(
+                "SELECT status, materialized_reference FROM canonical_artifacts WHERE id = ?1",
+                [&artifact_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            if existing.0 != CanonicalArtifactStatus::Materialized.as_str()
+                || existing.1.as_deref() != Some(materialized_reference)
+            {
+                anyhow::bail!("canonical_report_artifact_confirm_cas_failed");
+            }
         }
         let checkpoint_item_id = stable_id("item", &["review_checkpoint", &artifact_id]);
         tx.execute(
@@ -1036,51 +1210,132 @@ impl CanonicalTaskRuntimeStore {
              SET status = 'completed', summary_code = 'report_artifact_review_accepted',
                  updated_at = ?2
              WHERE id = ?1 AND kind = 'review_checkpoint'
-               AND status IN ('waiting', 'completed')",
+               AND status = 'waiting'",
             params![checkpoint_item_id, now],
         )?;
         let materialized_item_id = stable_id("item", &["artifact_materialized", &artifact_id]);
-        let sequence: i64 = tx.query_row(
-            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM canonical_task_items
-             WHERE task_id = ?1",
-            [&task_id],
-            |row| row.get(0),
-        )?;
         let run_id: String = tx.query_row(
             "SELECT run_id FROM canonical_task_items WHERE id = ?1",
             [&source_item_id],
             |row| row.get(0),
         )?;
-        tx.execute(
-            "INSERT INTO canonical_task_items (
-                id, task_id, run_id, sequence, kind, status, summary_code,
-                payload_digest, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, 'artifact_materialized', 'completed',
-                       'report_artifact_materialized', ?5, ?6, ?6)
-             ON CONFLICT(id) DO NOTHING",
-            params![
-                materialized_item_id,
-                task_id,
-                run_id,
-                sequence,
-                sha256_text(&format!(
-                    "{}\0{}",
-                    materialized_reference, observed_content_digest
-                )),
-                now
-            ],
+        let materialized_payload_digest = sha256_text(&format!(
+            "{}\0{}",
+            materialized_reference, observed_content_digest
+        ));
+        ensure_completed_item(
+            &tx,
+            CompletedItemInput {
+                item_id: &materialized_item_id,
+                task_id: &task_id,
+                run_id: &run_id,
+                kind: CanonicalTaskItemKind::ArtifactMaterialized,
+                summary_code: "report_artifact_materialized",
+                payload_digest: &materialized_payload_digest,
+                now: &now,
+            },
         )?;
-        let remaining: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM canonical_artifacts
-             WHERE task_id = ?1 AND status != 'materialized'",
-            [&task_id],
-            |row| row.get(0),
+
+        let verification_item_id =
+            report_verification_item_id(&artifact_id, 1, observed_content_digest);
+        let verification_payload_digest = sha256_text(&format!(
+            "{}\01\0{}\0{}\0{}",
+            artifact_id,
+            sha256_text(materialized_reference),
+            expected_digest,
+            observed_content_digest
+        ));
+        ensure_completed_item(
+            &tx,
+            CompletedItemInput {
+                item_id: &verification_item_id,
+                task_id: &task_id,
+                run_id: &run_id,
+                kind: CanonicalTaskItemKind::Verification,
+                summary_code: "report_artifact_version_verified",
+                payload_digest: &verification_payload_digest,
+                now: &now,
+            },
         )?;
+
+        let artifact_facts = {
+            let mut statement = tx.prepare(
+                "SELECT artifact.id, artifact.content_digest,
+                        artifact.materialized_reference,
+                        version.observed_content_digest
+                 FROM canonical_artifacts artifact
+                 JOIN canonical_artifact_versions version
+                   ON version.artifact_id = artifact.id
+                  AND version.version = artifact.current_version
+                 WHERE artifact.task_id = ?1
+                 ORDER BY artifact.id ASC",
+            )?;
+            let rows = statement.query_map([&task_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                ))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut all_verified = !artifact_facts.is_empty();
+        let mut final_result_facts = Vec::with_capacity(artifact_facts.len());
+        for (candidate_id, content_digest, reference, observed_digest) in &artifact_facts {
+            let (Some(reference), Some(observed_digest)) = (reference, observed_digest) else {
+                all_verified = false;
+                continue;
+            };
+            if observed_digest != content_digest {
+                all_verified = false;
+                continue;
+            }
+            let candidate_verification_id =
+                report_verification_item_id(candidate_id, 1, observed_digest);
+            let verified = tx
+                .query_row(
+                    "SELECT 1 FROM canonical_task_items
+                     WHERE id = ?1 AND task_id = ?2
+                       AND kind = 'verification' AND status = 'completed'",
+                    params![candidate_verification_id, task_id],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if !verified {
+                all_verified = false;
+                continue;
+            }
+            final_result_facts.push(format!(
+                "{}\01\0{}\0{}\0{}",
+                candidate_id,
+                content_digest,
+                sha256_text(reference),
+                candidate_verification_id
+            ));
+        }
+        if all_verified {
+            let final_result_item_id = report_final_result_item_id(&task_id, &run_id);
+            let final_result_payload_digest = sha256_text(&final_result_facts.join("\u{001e}"));
+            ensure_completed_item(
+                &tx,
+                CompletedItemInput {
+                    item_id: &final_result_item_id,
+                    task_id: &task_id,
+                    run_id: &run_id,
+                    kind: CanonicalTaskItemKind::FinalResult,
+                    summary_code: "report_final_result_verified",
+                    payload_digest: &final_result_payload_digest,
+                    now: &now,
+                },
+            )?;
+        }
         tx.execute(
             "UPDATE canonical_tasks SET status = ?2, updated_at = ?3 WHERE id = ?1",
             params![
                 task_id,
-                if remaining == 0 {
+                if all_verified {
                     CanonicalTaskStatus::Completed.as_str()
                 } else {
                     CanonicalTaskStatus::WaitingReview.as_str()
@@ -1465,6 +1720,99 @@ fn validate_report_execution_items_v3(
     Ok(())
 }
 
+fn validate_report_execution_items_v4(
+    tx: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    run_id: &str,
+    instruction_item_id: &str,
+    plan_item_id: &str,
+    provider_generation_item_id: &str,
+    tool_observations: &[ReportToolObservationFactInput<'_>],
+) -> Result<()> {
+    let mut expected = vec![
+        (
+            instruction_item_id.to_string(),
+            CanonicalTaskItemKind::Instruction,
+            "report_instruction_bound",
+        ),
+        (
+            plan_item_id.to_string(),
+            CanonicalTaskItemKind::Plan,
+            "report_execution_plan_bound",
+        ),
+    ];
+    for fact in tool_observations {
+        expected.push((
+            stable_id("item", &["tool_call", task_id, run_id, fact.action_id]),
+            CanonicalTaskItemKind::ToolCall,
+            "report_governed_tool_call_completed",
+        ));
+        expected.push((
+            stable_id(
+                "item",
+                &[
+                    "observation",
+                    task_id,
+                    run_id,
+                    fact.action_id,
+                    fact.observation_id,
+                ],
+            ),
+            CanonicalTaskItemKind::Observation,
+            "report_governed_observation_bound",
+        ));
+    }
+    expected.push((
+        provider_generation_item_id.to_string(),
+        CanonicalTaskItemKind::ProviderGeneration,
+        "report_provider_generation_completed",
+    ));
+
+    validate_report_execution_item_sequence(tx, task_id, run_id, &expected)
+}
+
+fn validate_report_execution_item_sequence(
+    tx: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    run_id: &str,
+    expected: &[(String, CanonicalTaskItemKind, &str)],
+) -> Result<()> {
+    let actual = {
+        let mut statement = tx.prepare(
+            "SELECT id, kind, status, summary_code
+             FROM canonical_task_items
+             WHERE task_id = ?1 AND run_id = ?2
+               AND kind IN (
+                   'instruction', 'plan', 'tool_call', 'observation',
+                   'provider_generation'
+               )
+             ORDER BY sequence ASC",
+        )?;
+        let rows = statement.query_map(params![task_id, run_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    if actual.len() != expected.len()
+        || actual.iter().zip(expected.iter()).any(
+            |((id, kind, status, summary), (expected_id, expected_kind, expected_summary))| {
+                id != expected_id
+                    || kind != expected_kind.as_str()
+                    || status != CanonicalTaskItemStatus::Completed.as_str()
+                    || summary != expected_summary
+            },
+        )
+    {
+        anyhow::bail!("canonical_report_execution_items_missing_or_conflicting");
+    }
+    Ok(())
+}
+
 struct CompletedItemInput<'a> {
     item_id: &'a str,
     task_id: &'a str,
@@ -1782,6 +2130,7 @@ mod tests {
                 execution_session_id: run,
                 run_id: run,
                 outcome_digest: &outcome_digest,
+                plan_digest: &digest_of("report plan"),
                 provider_request_id: &format!("provider-request-{run}"),
                 provider_receipt_digest: &digest_of(&format!("provider-receipt-{run}")),
                 tool_observations: &[],
@@ -1807,6 +2156,7 @@ mod tests {
             execution_session_id: run,
             run_id: run,
             outcome_digest,
+            plan_digest: &digest_of("report plan"),
             provider_request_id,
             provider_receipt_digest,
             tool_observations: &[],
@@ -1827,6 +2177,7 @@ mod tests {
             execution_session_id: run,
             run_id: run,
             outcome_digest: &digest_of("report outcome"),
+            plan_digest: &digest_of("report plan"),
             provider_request_id: &format!("provider-request-{run}"),
             provider_receipt_digest: &digest_of(&format!("provider-receipt-{run}")),
             tool_observations,
@@ -2009,10 +2360,11 @@ mod tests {
         assert!(first.artifact_id.starts_with("artifact:"));
         assert!(!first.artifact_id.contains("proposal"));
         let items = store.list_items(&first.task_id).unwrap();
-        assert_eq!(items.len(), 3);
+        assert_eq!(items.len(), 4);
         assert_eq!(items[0].kind, CanonicalTaskItemKind::Instruction);
-        assert_eq!(items[1].kind, CanonicalTaskItemKind::ProviderGeneration);
-        assert_eq!(items[2].kind, CanonicalTaskItemKind::ArtifactDraft);
+        assert_eq!(items[1].kind, CanonicalTaskItemKind::Plan);
+        assert_eq!(items[2].kind, CanonicalTaskItemKind::ProviderGeneration);
+        assert_eq!(items[3].kind, CanonicalTaskItemKind::ArtifactDraft);
         assert!(items
             .iter()
             .all(|item| item.status == CanonicalTaskItemStatus::Completed));
@@ -2024,7 +2376,7 @@ mod tests {
             .bind_report_review(&first.artifact_id, "proposal-1")
             .unwrap();
         assert_eq!(review, review_replay);
-        assert_eq!(store.list_items(&first.task_id).unwrap().len(), 4);
+        assert_eq!(store.list_items(&first.task_id).unwrap().len(), 5);
         assert_eq!(
             store
                 .load_artifact(&first.artifact_id)
@@ -2063,6 +2415,7 @@ mod tests {
             items.iter().map(|item| item.kind).collect::<Vec<_>>(),
             vec![
                 CanonicalTaskItemKind::Instruction,
+                CanonicalTaskItemKind::Plan,
                 CanonicalTaskItemKind::ToolCall,
                 CanonicalTaskItemKind::Observation,
                 CanonicalTaskItemKind::ToolCall,
@@ -2071,10 +2424,10 @@ mod tests {
                 CanonicalTaskItemKind::ArtifactDraft,
             ]
         );
-        assert_eq!(items[1].payload_digest, first_tool_digest);
-        assert_eq!(items[2].payload_digest, first_observation_digest);
-        assert_eq!(items[3].payload_digest, second_tool_digest);
-        assert_eq!(items[4].payload_digest, second_observation_digest);
+        assert_eq!(items[2].payload_digest, first_tool_digest);
+        assert_eq!(items[3].payload_digest, first_observation_digest);
+        assert_eq!(items[4].payload_digest, second_tool_digest);
+        assert_eq!(items[5].payload_digest, second_observation_digest);
     }
 
     #[test]
@@ -2106,7 +2459,7 @@ mod tests {
                 .is_err()
         );
         assert_eq!(store.list_task_snapshots(100).unwrap(), before);
-        assert_eq!(store.list_items(&prepared.task_id).unwrap().len(), 5);
+        assert_eq!(store.list_items(&prepared.task_id).unwrap().len(), 6);
     }
 
     #[test]
@@ -2118,11 +2471,18 @@ mod tests {
         assert_ne!(first.artifact_id, second.artifact_id);
         assert_eq!(store.run_count(&first.task_id).unwrap(), 2);
         let items = store.list_items(&first.task_id).unwrap();
-        assert_eq!(items.len(), 6);
+        assert_eq!(items.len(), 8);
         assert_eq!(
             items
                 .iter()
                 .filter(|item| item.kind == CanonicalTaskItemKind::Instruction)
+                .count(),
+            2
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::Plan)
                 .count(),
             2
         );
@@ -2168,11 +2528,18 @@ mod tests {
         assert_eq!(first.task_id, second.task_id);
         assert_ne!(first.artifact_id, second.artifact_id);
         let items = store.list_items(&first.task_id).unwrap();
-        assert_eq!(items.len(), 4);
+        assert_eq!(items.len(), 5);
         assert_eq!(
             items
                 .iter()
                 .filter(|item| item.kind == CanonicalTaskItemKind::Instruction)
+                .count(),
+            1
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::Plan)
                 .count(),
             1
         );
@@ -2223,6 +2590,26 @@ mod tests {
         )
         .unwrap_err();
         assert!(changed_instruction
+            .to_string()
+            .contains("canonical_report_execution_item_conflict"));
+        assert_eq!(store.list_task_snapshots(100).unwrap(), before);
+
+        let changed_plan = store
+            .prepare_report_artifact(ReportArtifactDraftInput {
+                conversation_id: "conversation-1",
+                execution_session_id: "run-1",
+                run_id: "run-1",
+                outcome_digest: &outcome_digest,
+                plan_digest: &digest_of("changed report plan"),
+                provider_request_id: "provider-request-1",
+                provider_receipt_digest: &provider_receipt_digest,
+                tool_observations: &[],
+                target_reference: "/tmp/openlife/report.md",
+                content_digest: &content_digest,
+                media_type: "text/markdown; charset=utf-8",
+            })
+            .unwrap_err();
+        assert!(changed_plan
             .to_string()
             .contains("canonical_report_execution_item_conflict"));
         assert_eq!(store.list_task_snapshots(100).unwrap(), before);
@@ -2293,6 +2680,16 @@ mod tests {
                 .status,
             CanonicalTaskItemStatus::Waiting
         );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::Verification)
+                .count(),
+            1
+        );
+        assert!(items
+            .iter()
+            .all(|item| item.kind != CanonicalTaskItemKind::FinalResult));
 
         store
             .confirm_artifact_materialized(
@@ -2304,6 +2701,47 @@ mod tests {
         assert_eq!(
             store.load_task(&first.task_id).unwrap().unwrap().status,
             CanonicalTaskStatus::Completed
+        );
+        let items = store.list_items(&first.task_id).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::Verification)
+                .count(),
+            2
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::FinalResult)
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn digest_mismatch_writes_no_materialization_verification_or_final_result() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let prepared = prepare_test_artifact(&store, "conversation-1", "run-1");
+        store
+            .bind_report_review(&prepared.artifact_id, "proposal-1")
+            .unwrap();
+        let before = store.list_task_snapshots(100).unwrap();
+
+        let error = store
+            .confirm_artifact_materialized(
+                "proposal-1",
+                "/tmp/openlife/report.md",
+                &digest_of("tampered report"),
+            )
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("canonical_report_artifact_observed_digest_mismatch"));
+        assert_eq!(store.list_task_snapshots(100).unwrap(), before);
+        assert_eq!(
+            store.load_task(&prepared.task_id).unwrap().unwrap().status,
+            CanonicalTaskStatus::WaitingReview
         );
     }
 
@@ -2366,6 +2804,26 @@ mod tests {
             store.load_task(&prepared.task_id).unwrap().unwrap().status,
             CanonicalTaskStatus::Completed
         );
+        let items = store.list_items(&prepared.task_id).unwrap();
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::Verification)
+                .count(),
+            1
+        );
+        assert_eq!(
+            items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::FinalResult)
+                .count(),
+            1
+        );
+        let before_replay = items;
+        store
+            .confirm_artifact_materialized("proposal-1", "/tmp/openlife/report.md", &observed)
+            .unwrap();
+        assert_eq!(store.list_items(&prepared.task_id).unwrap(), before_replay);
     }
 
     #[test]
@@ -2390,6 +2848,13 @@ mod tests {
             store.load_task(&prepared.task_id).unwrap().unwrap().status,
             CanonicalTaskStatus::EffectUnknown
         );
+        let items = store.list_items(&prepared.task_id).unwrap();
+        assert!(items.iter().all(|item| {
+            !matches!(
+                item.kind,
+                CanonicalTaskItemKind::Verification | CanonicalTaskItemKind::FinalResult
+            )
+        }));
     }
 
     #[test]
@@ -2414,6 +2879,16 @@ mod tests {
             .unwrap();
         assert_eq!(checkpoint.status, CanonicalTaskItemStatus::Blocked);
         assert_eq!(checkpoint.summary_code, "report_artifact_review_rejected");
+        assert!(store
+            .list_items(&prepared.task_id)
+            .unwrap()
+            .iter()
+            .all(|item| {
+                !matches!(
+                    item.kind,
+                    CanonicalTaskItemKind::Verification | CanonicalTaskItemKind::FinalResult
+                )
+            }));
 
         let replay = store.mark_artifact_review_rejected("proposal-1").unwrap();
         assert_eq!(replay, artifact);
@@ -2492,8 +2967,8 @@ mod tests {
         let migrated = store.list_task_snapshots(100).unwrap();
         assert_eq!(migrated[0].runs.len(), 2);
         assert_eq!(migrated[0].runs[0].execution_facts_version, 1);
-        assert_eq!(migrated[0].runs[1].execution_facts_version, 3);
-        assert_eq!(migrated[0].items.len(), 4);
+        assert_eq!(migrated[0].runs[1].execution_facts_version, 4);
+        assert_eq!(migrated[0].items.len(), 5);
     }
 
     #[test]
@@ -2571,7 +3046,145 @@ mod tests {
         );
         let new_run = prepare_test_artifact(&store, "conversation-v2", "run-v3");
         let snapshots = store.list_task_snapshots(100).unwrap();
-        assert_eq!(snapshots[0].runs[1].execution_facts_version, 3);
+        assert_eq!(snapshots[0].runs[1].execution_facts_version, 4);
+        assert_eq!(new_run.task_id, task_id);
+    }
+
+    #[test]
+    fn v3_runtime_migrates_and_preserves_tool_execution_facts() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task_runtime_v3.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = ON;
+             CREATE TABLE canonical_task_runtime_metadata (
+                key TEXT PRIMARY KEY, value TEXT NOT NULL
+             ) WITHOUT ROWID;
+             INSERT INTO canonical_task_runtime_metadata VALUES ('schema_version', '3');
+             CREATE TABLE canonical_tasks (
+                id TEXT PRIMARY KEY, conversation_id TEXT NOT NULL UNIQUE,
+                task_kind TEXT NOT NULL CHECK(task_kind = 'report'),
+                initial_outcome_digest TEXT NOT NULL, status TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+             );
+             CREATE TABLE canonical_task_runs (
+                task_id TEXT NOT NULL, run_id TEXT NOT NULL UNIQUE,
+                execution_session_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+                execution_facts_version INTEGER NOT NULL DEFAULT 3
+                    CHECK(execution_facts_version IN (1, 2, 3)),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(task_id, run_id),
+                FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
+             ) WITHOUT ROWID;
+             CREATE TABLE canonical_task_items (
+                id TEXT PRIMARY KEY, task_id TEXT NOT NULL, run_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL CHECK(sequence > 0),
+                kind TEXT NOT NULL CHECK(kind IN (
+                    'instruction', 'tool_call', 'observation',
+                    'provider_generation', 'artifact_draft',
+                    'review_checkpoint', 'artifact_materialized'
+                )),
+                status TEXT NOT NULL, summary_code TEXT NOT NULL,
+                payload_digest TEXT NOT NULL, created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL, UNIQUE(task_id, sequence),
+                FOREIGN KEY(task_id, run_id)
+                    REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+             );
+             CREATE INDEX idx_canonical_task_items_run
+                ON canonical_task_items(run_id, sequence);",
+        )
+        .unwrap();
+        let now = Utc::now().to_rfc3339();
+        let task_id = stable_id("task", &["report", "conversation-v3"]);
+        conn.execute(
+            "INSERT INTO canonical_tasks VALUES (?1, 'conversation-v3', 'report', ?2,
+                                                   'running', ?3, ?3)",
+            params![task_id, digest_of("legacy v3 outcome"), now],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO canonical_task_runs VALUES (?1, 'run-v3', 'run-v3', 1, 3, ?2)",
+            params![task_id, now],
+        )
+        .unwrap();
+        let action_id = "action-v3";
+        let observation_id = "observation-v3";
+        let instruction_id = stable_id("item", &["instruction", &task_id, "run-v3"]);
+        let tool_id = stable_id("item", &["tool_call", &task_id, "run-v3", action_id]);
+        let observation_item_id = stable_id(
+            "item",
+            &["observation", &task_id, "run-v3", action_id, observation_id],
+        );
+        let provider_id = stable_id(
+            "item",
+            &[
+                "provider_generation",
+                &task_id,
+                "run-v3",
+                "provider-request-v3",
+            ],
+        );
+        for (sequence, id, kind, summary, payload) in [
+            (
+                1,
+                instruction_id,
+                "instruction",
+                "report_instruction_bound",
+                digest_of("legacy v3 outcome"),
+            ),
+            (
+                2,
+                tool_id,
+                "tool_call",
+                "report_governed_tool_call_completed",
+                digest_of("legacy v3 tool"),
+            ),
+            (
+                3,
+                observation_item_id,
+                "observation",
+                "report_governed_observation_bound",
+                digest_of("legacy v3 observation"),
+            ),
+            (
+                4,
+                provider_id,
+                "provider_generation",
+                "report_provider_generation_completed",
+                digest_of("legacy v3 provider"),
+            ),
+        ] {
+            conn.execute(
+                "INSERT INTO canonical_task_items VALUES (
+                    ?1, ?2, 'run-v3', ?3, ?4, 'completed', ?5, ?6, ?7, ?7
+                 )",
+                params![id, task_id, sequence, kind, summary, payload, now],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        let store = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        let snapshots = store.list_task_snapshots(100).unwrap();
+        assert_eq!(snapshots[0].runs[0].execution_facts_version, 3);
+        assert_eq!(snapshots[0].items.len(), 4);
+        assert_eq!(
+            snapshots[0]
+                .items
+                .iter()
+                .map(|item| item.kind)
+                .collect::<Vec<_>>(),
+            vec![
+                CanonicalTaskItemKind::Instruction,
+                CanonicalTaskItemKind::ToolCall,
+                CanonicalTaskItemKind::Observation,
+                CanonicalTaskItemKind::ProviderGeneration,
+            ]
+        );
+        let new_run = prepare_test_artifact(&store, "conversation-v3", "run-v4");
+        let snapshots = store.list_task_snapshots(100).unwrap();
+        assert_eq!(snapshots[0].runs[1].execution_facts_version, 4);
         assert_eq!(new_run.task_id, task_id);
     }
 
@@ -2600,6 +3213,7 @@ mod tests {
                 execution_session_id: "run-2",
                 run_id: "run-2",
                 outcome_digest: &outcome_digest,
+                plan_digest: &digest_of("report plan run 2"),
                 provider_request_id: "provider-request-run-2",
                 provider_receipt_digest: &digest_of("provider-receipt-run-2"),
                 tool_observations: &[],
@@ -2627,7 +3241,7 @@ mod tests {
         let snapshot = &snapshots[0];
         assert_eq!(snapshot.task.id, first.task_id);
         assert_eq!(snapshot.runs.len(), 2);
-        assert_eq!(snapshot.items.len(), 8);
+        assert_eq!(snapshot.items.len(), 10);
         assert_eq!(snapshot.artifacts.len(), 2);
         assert!(snapshot.artifacts.iter().all(|artifact| {
             artifact.artifact.current_version == artifact.current_version.version

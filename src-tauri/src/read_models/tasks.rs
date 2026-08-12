@@ -367,19 +367,41 @@ fn overlay_canonical_report_task(loaded: &mut LoadedTaskInputs, snapshot: Canoni
 fn canonical_report_delivery_status(
     snapshot: &CanonicalTaskSnapshot,
 ) -> (TaskLifecycleStatus, TaskTerminalDeliveryStatus, bool) {
+    let final_result_present = snapshot.items.iter().any(|item| {
+        let expected_id = openlife_core::task_runtime::report_final_result_item_id(
+            &snapshot.task.id,
+            &item.run_id,
+        );
+        item.id == expected_id
+            && item.kind == openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult
+            && item.status == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+    });
     let delivery_proven = !snapshot.artifacts.is_empty()
         && snapshot.artifacts.iter().all(|artifact| {
+            let observed_digest = artifact
+                .current_version
+                .observed_content_digest
+                .as_deref()
+                .unwrap_or("");
+            let expected_verification_id = openlife_core::task_runtime::report_verification_item_id(
+                &artifact.artifact.id,
+                artifact.current_version.version,
+                observed_digest,
+            );
             artifact.artifact.status == CanonicalArtifactStatus::Materialized
-                && artifact.artifact.content_digest
-                    == artifact
-                        .current_version
-                        .observed_content_digest
-                        .as_deref()
-                        .unwrap_or("")
+                && artifact.artifact.content_digest == observed_digest
                 && artifact.artifact.materialized_reference.is_some()
                 && artifact.artifact.materialized_reference
                     == artifact.current_version.materialized_reference
-        });
+                && snapshot.items.iter().any(|item| {
+                    item.id == expected_verification_id
+                        && item.kind
+                            == openlife_core::task_runtime::CanonicalTaskItemKind::Verification
+                        && item.status
+                            == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+                })
+        })
+        && final_result_present;
     match snapshot.task.status {
         CanonicalTaskStatus::Running => (
             TaskLifecycleStatus::Running,
@@ -924,6 +946,7 @@ mod tests {
                 execution_session_id: "execution-report-view",
                 run_id: "run-report-view",
                 outcome_digest: &format!("sha256:{:x}", Sha256::digest(b"report view outcome")),
+                plan_digest: &format!("sha256:{:x}", Sha256::digest(b"report view plan")),
                 provider_request_id: "provider-request-report-view",
                 provider_receipt_digest: &format!(
                     "sha256:{:x}",
@@ -958,11 +981,12 @@ mod tests {
             task.lifecycle_status,
             openlife_core::agent::TaskLifecycleStatus::WaitingReview
         );
-        assert_eq!(task.items.len(), 4);
+        assert_eq!(task.items.len(), 5);
         assert_eq!(
             task.items.iter().map(|item| item.kind).collect::<Vec<_>>(),
             vec![
                 openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
+                openlife_core::task_runtime::CanonicalTaskItemKind::Plan,
                 openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
                 openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactDraft,
                 openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint,
@@ -991,6 +1015,27 @@ mod tests {
                 &content_digest,
             )
             .unwrap();
+        let mut incomplete_snapshot = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_task_snapshots(100)
+            .unwrap()
+            .pop()
+            .unwrap();
+        incomplete_snapshot.items.retain(|item| {
+            item.kind != openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult
+        });
+        assert_eq!(
+            super::canonical_report_delivery_status(&incomplete_snapshot),
+            (
+                openlife_core::agent::TaskLifecycleStatus::CompletedNeedsEvidence,
+                openlife_core::agent::TaskTerminalDeliveryStatus::MissingFinalDeliveryEvidence,
+                false,
+            )
+        );
         let completed = get_tasks_view_model_with_state(&state).await.unwrap();
         let completed = completed.data.unwrap();
         assert_eq!(completed.items.len(), 1);
@@ -1008,7 +1053,20 @@ mod tests {
             .latest_result_preview
             .as_ref()
             .is_some_and(|preview| preview.final_delivery_ref.is_some()));
-        assert_eq!(task.items.len(), 5);
+        assert_eq!(task.items.len(), 8);
+        assert_eq!(
+            task.items.iter().map(|item| item.kind).collect::<Vec<_>>(),
+            vec![
+                openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
+                openlife_core::task_runtime::CanonicalTaskItemKind::Plan,
+                openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
+                openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactDraft,
+                openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint,
+                openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactMaterialized,
+                openlife_core::task_runtime::CanonicalTaskItemKind::Verification,
+                openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult,
+            ]
+        );
         assert_eq!(
             task.artifacts[0].materialized_reference.as_deref(),
             Some("/tmp/openlife/report-view.md")

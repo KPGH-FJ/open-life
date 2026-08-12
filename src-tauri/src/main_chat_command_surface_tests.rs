@@ -6394,6 +6394,7 @@ async fn roadshow_cc01_exact_prompt_reads_resource_and_web_then_reviews_one_cite
             .collect::<Vec<_>>(),
         vec![
             openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
+            openlife_core::task_runtime::CanonicalTaskItemKind::Plan,
             openlife_core::task_runtime::CanonicalTaskItemKind::ToolCall,
             openlife_core::task_runtime::CanonicalTaskItemKind::Observation,
             openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
@@ -6426,6 +6427,32 @@ async fn roadshow_cc01_exact_prompt_reads_resource_and_web_then_reviews_one_cite
     assert_eq!(
         accepted["artifactMaterialization"]["contentDigest"],
         accepted["artifactMaterialization"]["observedContentDigest"]
+    );
+    let completed_items = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .expect("CC01 canonical Task runtime")
+        .lock()
+        .await
+        .list_items(canonical_task_id)
+        .expect("read completed CC01 canonical report Items");
+    assert_eq!(
+        completed_items
+            .iter()
+            .map(|item| item.kind)
+            .collect::<Vec<_>>(),
+        vec![
+            openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
+            openlife_core::task_runtime::CanonicalTaskItemKind::Plan,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ToolCall,
+            openlife_core::task_runtime::CanonicalTaskItemKind::Observation,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactDraft,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint,
+            openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactMaterialized,
+            openlife_core::task_runtime::CanonicalTaskItemKind::Verification,
+            openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult,
+        ]
     );
     let materialized = std::fs::read_to_string(&report_path).expect("read CC01 report");
     assert!(materialized.contains("cite_"), "{materialized}");

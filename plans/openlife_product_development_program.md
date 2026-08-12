@@ -4,71 +4,87 @@ Status: complete
 
 ## Objective
 
-S2.4 is complete. A report Run that performs governed
-reads must record each exact durable ToolCall and its bound Observation as
-canonical typed Items before any ArtifactDraft or Review checkpoint is
-admitted.
+S2 is complete: the first provider-generated report path now has one canonical
+Task/Run/Item/Artifact lifecycle through Plan, governed evidence, Review,
+materialization, Verification, and FinalResult. Stop before S3 capability
+expansion.
 
-## Product result
+## S2 product lifecycle
 
 ```text
-Instruction
-  -> durable governed ToolCall
-  -> bound Observation
-  -> completed ProviderGeneration
-  -> ArtifactDraft
-  -> ReviewCheckpoint / materialization
+Task
+  -> Run
+    -> Instruction
+    -> Plan
+    -> (ToolCall -> Observation)*
+    -> ProviderGeneration
+    -> ArtifactDraft(s)
+    -> ReviewCheckpoint(s)
+    -> ArtifactMaterialized
+    -> Verification
+    -> FinalResult
 ```
 
-A report without governed reads keeps the existing
-`Instruction -> ProviderGeneration -> ArtifactDraft` path. Canonical Items
-store bounded identities and digests only, never tool input/output bodies.
+The path may wait at Review. `FinalResult` exists only after every Artifact in
+the current report result is materialized and its observed digest equals its
+expected ArtifactVersion digest.
 
-## In scope
+## Completed scope
 
-1. Add `tool_call` and `observation` Item kinds with a transactional schema-v2
-   to schema-v3 migration.
-2. Derive the pair only from the exact durable ActionQueue/tool receipt and its
-   run-bound Observation evidence after existing validation succeeds.
-3. Record deterministic Item identities and metadata-safe digests for zero,
-   one, or multiple governed reads in their actual execution order.
-4. Move canonical report admission after durable tool evidence recording but
-   before Artifact proposal creation.
-5. Preserve exact replay, multiple Artifacts per Run, multiple Runs per Task,
-   schema-v1 history, and schema-v2 execution-fact history.
-6. Project the new typed Items through existing backend ViewModels and the
-   TypeScript contract.
+- one SQLite canonical Task/Run/Item/Artifact metadata owner on the report path;
+- Task and Artifact identities independent of Proposal;
+- backend Task/Workspace projections;
+- Instruction and ProviderGeneration facts;
+- exact governed ToolCall and bound Observation facts;
+- deterministic metadata-safe Plan contract before governed execution facts;
+- canonical Verification bound to ArtifactVersion materialization evidence;
+- canonical FinalResult as the only delivered completion fact;
+- backend Task/Workspace projections that require Verification and FinalResult;
+- transactional v1-v4 migrations and metadata-only persistence;
+- exact replay, multi-Artifact, multi-Run, rejection, digest mismatch,
+  effect-unknown, restart, and legacy-history coverage.
 
 ## Out of scope
 
-- canonical Plan, Verification, or FinalResult Items;
-- S3 expansion of Web, local-document, connector, or write capabilities;
-- ItemAttempt, steering, concurrency, or subagents;
-- copying transcript summaries, tool arguments, observations, or report bodies;
-- replacing compatibility task controls;
+- S3 expansion of local-document, Web, connector, or write capabilities;
+- ItemAttempt and generalized Task contract ownership;
+- steering, inline approval continuation, controlled concurrency, or subagents;
+- Results/Changes/Preview UI redesign from S5;
+- standalone PlanExecute deletion outside the migrated report path;
 - Memory or LifeModel changes;
-- native-desktop or external-live evidence credit.
+- computer use, arbitrary shell, provider routing, or silent fallback;
+- native-desktop or external-live evidence unless required to prove an S2
+  contract that cannot be established below that evidence level.
 
 ## Ownership
 
-- ToolGateway, ActionQueue, receipt ledger, and durable tool events remain the
-  execution/effect owners during migration.
-- `CanonicalTaskRuntimeStore` owns Item identity, order, and digest bindings for
-  the migrated report path; it does not become a second tool executor.
-- Backend ViewModels remain the only product-facing composition owner.
+- `CanonicalTaskRuntimeStore` owns report Task, Run, Item order/status/digests,
+  Artifact identity/version, Verification, and FinalResult.
+- AgentRun, ToolGateway, provider receipt, ReviewWorkflow, and
+  ArtifactMaterializer remain detailed execution/effect proof owners during
+  migration. Canonical Items bind to those facts without copying bodies.
+- Backend ViewModels remain the product-facing composition owner.
+- Proposal acceptance is not materialization; materialization is not verified
+  completion until the canonical Verification and FinalResult transitions
+  succeed.
 
 ## Acceptance
 
-| Scenario | Required result |
+| Scenario | Required canonical result |
 | --- | --- |
-| Report with no governed read | no synthetic ToolCall or Observation Item |
-| One successful governed read | one ToolCall followed by its bound Observation |
-| Multiple governed reads | deterministic ordered pairs before ProviderGeneration and ArtifactDraft |
-| Missing, failed, or unbound tool proof | no canonical report admission |
-| Exact replay or second Artifact | no duplicate execution Items |
-| Same Run with changed tool/observation digest | fail closed with zero partial canonical mutation |
-| Existing schema-v1/v2 store | transactional migration preserves prior identities without invented facts |
-| Product read model | typed Items appear through backend Task/Workspace projections |
+| No-tool report | Instruction, Plan, ProviderGeneration, ArtifactDraft; no synthetic tool pair |
+| Governed-read report | ordered ToolCall/Observation pairs between Plan and ProviderGeneration |
+| Pending Review | checkpoint waits; no Verification or FinalResult |
+| One verified Artifact | materialized and Verification Items are completed |
+| Multi-Artifact partial acceptance | verified Item only for accepted Artifact; Task remains waiting |
+| All Artifacts verified | one FinalResult for the completing Run and Task completed |
+| Rejection | checkpoint/artifact/task blocked; no false Verification or FinalResult |
+| Effect unknown | artifact/task unknown; no automatic replay or FinalResult |
+| Digest mismatch | fail closed; no completed Verification or FinalResult |
+| Exact replay/restart | no duplicate Items, versions, effects, or result facts |
+| Later Run after completion | same Task, new Run/Plan/result lineage without rewriting history |
+| Existing v1-v3 store | transactional migration preserves historical identities and fact versions |
+| Product read model | delivered status requires canonical FinalResult plus verified Artifact evidence |
 
 ## Checks
 
@@ -86,20 +102,19 @@ corepack pnpm --dir frontend test:e2e
 
 ## Completion evidence
 
-- Schema v3 records deterministic `ToolCall -> Observation` pairs before
-  ProviderGeneration and ArtifactDraft; zero-read reports add no synthetic
-  pair.
-- Existing v1 and v2 databases migrate transactionally without rewriting their
-  historical execution-fact versions.
-- Exact replay, changed fact conflicts, and multiple ordered reads are covered
-  in the core store tests.
-- The CC01 product path proves a governed Web read is durable before the
-  canonical report Items and Review checkpoint; its forged-citation negative
-  path remains blocked.
-- Full Rust, frontend, production-build, and browser-shell gates passed on the
-  current source. No native-desktop or external-live claim was made.
+- Core store tests prove Plan ordering, exact evidence binding, partial and full
+  multi-Artifact completion, replay idempotency, negative terminal paths, and
+  v1-v3 migration into schema v4.
+- The CC01 product test proves the complete local-document plus governed Web
+  report path through Review, materialization, Verification, and FinalResult;
+  its forged-citation path remains fail-closed.
+- Backend read-model tests prove Artifact fields alone do not count as delivery
+  when the canonical FinalResult is absent.
+- Full Rust, frontend, production-build, and browser-shell gates pass on the
+  completing source. Native-desktop and external-live evidence remain S6 work,
+  so S2 makes no claim at those evidence levels.
 
 ## Next pointer
 
-Continue S2 with canonical Plan, Verification, and FinalResult facts on the
-same report path. Do not begin S3 capability expansion first.
+After S2 closes, begin S3: strengthen the real local-document and Web report
+tool loop on this canonical foundation. Do not reopen S2 as a parallel runtime.

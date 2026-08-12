@@ -9337,6 +9337,7 @@ struct CanonicalReportAdmissionContext<'a> {
     execution_session_id: &'a str,
     run_id: &'a str,
     instruction_digest: &'a str,
+    plan_digest: &'a str,
     provider_request_id: &'a str,
     provider_receipt_digest: &'a str,
     tool_observations: &'a [CanonicalReportToolObservationFact],
@@ -9417,6 +9418,7 @@ async fn prepare_canonical_report_artifact_for_review(
             execution_session_id: context.execution_session_id,
             run_id: context.run_id,
             outcome_digest: context.instruction_digest,
+            plan_digest: context.plan_digest,
             provider_request_id: context.provider_request_id,
             provider_receipt_digest: context.provider_receipt_digest,
             tool_observations: &tool_observations,
@@ -9473,6 +9475,64 @@ fn canonical_report_provider_receipt_digest(
     )
 }
 
+fn canonical_report_plan_digest(
+    instruction_digest: &str,
+    tool_observations: &[CanonicalReportToolObservationFact],
+    outcomes: &[MainChatKernelWriteOutcome],
+) -> Result<String, String> {
+    let mut artifact_contracts = outcomes
+        .iter()
+        .filter(|outcome| {
+            outcome
+                .governed_input
+                .get("generatedByProvider")
+                .and_then(Value::as_bool)
+                == Some(true)
+        })
+        .map(|outcome| {
+            let artifact_kind = outcome
+                .governed_input
+                .get("artifactKind")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "canonical_report_artifact_kind_missing".to_string())?;
+            let target_reference = outcome
+                .governed_input
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "canonical_report_artifact_target_missing".to_string())?;
+            Ok(serde_json::json!({
+                "artifactKind": artifact_kind,
+                "targetReferenceDigest":
+                    openlife_core::agent::metadata_safe_text_digest(target_reference).1,
+                "reviewRequired": true,
+            }))
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    artifact_contracts.sort_by_key(|contract| contract.to_string());
+    if artifact_contracts.is_empty() {
+        return Err("canonical_report_plan_has_no_artifact_contract".into());
+    }
+    Ok(
+        openlife_core::agent::metadata_safe_value_digest(&serde_json::json!({
+            "schemaVersion": 1,
+            "taskKind": "report",
+            "instructionDigest": instruction_digest,
+            "stages": [
+                "governed_reads",
+                "provider_generation",
+                "artifact_review",
+                "artifact_materialization",
+                "verification",
+                "final_result",
+            ],
+            "toolObservationCount": tool_observations.len(),
+            "artifactContracts": artifact_contracts,
+            "directWritesExecuted": false,
+        }))
+        .1,
+    )
+}
+
 async fn prepare_canonical_report_artifacts_after_provider_receipt(
     state: &Arc<AppState>,
     input: CanonicalReportArtifactBatchInput<'_>,
@@ -9491,11 +9551,14 @@ async fn prepare_canonical_report_artifacts_after_provider_receipt(
         .provider_receipt
         .ok_or_else(|| "canonical_report_provider_receipt_missing".to_string())?;
     let receipt_digest = canonical_report_provider_receipt_digest(receipt)?;
+    let plan_digest =
+        canonical_report_plan_digest(input.instruction_digest, input.tool_observations, outcomes)?;
     let context = CanonicalReportAdmissionContext {
         conversation_id: input.conversation_id,
         execution_session_id: input.execution_session_id,
         run_id: input.run_id,
         instruction_digest: input.instruction_digest,
+        plan_digest: &plan_digest,
         provider_request_id: &receipt.request_id,
         provider_receipt_digest: &receipt_digest,
         tool_observations: input.tool_observations,
@@ -22648,6 +22711,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
+                openlife_core::task_runtime::CanonicalTaskItemKind::Plan,
                 openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
                 openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactDraft,
             ]
