@@ -9332,6 +9332,104 @@ async fn expand_generated_artifact_outcomes(
     Ok(expanded)
 }
 
+async fn prepare_canonical_report_artifact_for_review(
+    state: &Arc<AppState>,
+    conversation_id: &str,
+    execution_session_id: &str,
+    run_id: &str,
+    outcome_digest: &str,
+    outcome: &mut MainChatKernelWriteOutcome,
+) -> Result<(), String> {
+    if outcome.kind != MainChatKernelWriteOutcomeKind::FileWriteProposal
+        || outcome
+            .governed_input
+            .get("generatedByProvider")
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Ok(());
+    }
+    let artifact_kind = outcome
+        .governed_input
+        .get("artifactKind")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "canonical_report_artifact_kind_missing".to_string())?;
+    let media_type = match artifact_kind {
+        "markdown" => "text/markdown; charset=utf-8",
+        "csv" => "text/csv; charset=utf-8",
+        _ => return Err("canonical_report_artifact_kind_unsupported".into()),
+    };
+    let target_reference = outcome
+        .governed_input
+        .get("path")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "canonical_report_artifact_target_missing".to_string())?;
+    let content_digest = outcome
+        .governed_input
+        .get("content_hash")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "canonical_report_artifact_content_digest_missing".to_string())?;
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let prepared = store
+        .lock()
+        .await
+        .prepare_report_artifact(openlife_core::task_runtime::ReportArtifactDraftInput {
+            conversation_id,
+            execution_session_id,
+            run_id,
+            outcome_digest,
+            target_reference,
+            content_digest,
+            media_type,
+        })
+        .map_err(|error| format!("prepare canonical report artifact failed: {error}"))?;
+    let object = outcome
+        .governed_input
+        .as_object_mut()
+        .ok_or_else(|| "canonical_report_artifact_governed_input_invalid".to_string())?;
+    object.insert(
+        "canonicalTaskId".into(),
+        serde_json::json!(prepared.task_id),
+    );
+    object.insert(
+        "artifactDraftItemId".into(),
+        serde_json::json!(prepared.artifact_draft_item_id),
+    );
+    object.insert("artifactId".into(), serde_json::json!(prepared.artifact_id));
+    object.insert(
+        "artifactVersion".into(),
+        serde_json::json!(prepared.version),
+    );
+    Ok(())
+}
+
+async fn bind_canonical_report_artifact_review(
+    state: &Arc<AppState>,
+    outcome: &MainChatKernelWriteOutcome,
+    proposal_id: &str,
+) -> Result<Option<openlife_core::task_runtime::BoundReportReview>, String> {
+    let Some(artifact_id) = outcome
+        .governed_input
+        .get("artifactId")
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    store
+        .lock()
+        .await
+        .bind_report_review(artifact_id, proposal_id)
+        .map(Some)
+        .map_err(|error| format!("bind canonical report Review checkpoint failed: {error}"))
+}
+
 fn resolve_generated_artifact_safe_root(
     safe_paths: &[String],
 ) -> Result<std::path::PathBuf, String> {
@@ -9560,6 +9658,10 @@ async fn prepare_kernel_write_proposal(
                         "operation": "propose_write",
                         "artifactKind": outcome.governed_input.get("artifactKind").cloned(),
                         "artifactBundleDigest": outcome.governed_input.get("artifactBundleDigest").cloned(),
+                        "canonicalTaskId": outcome.governed_input.get("canonicalTaskId").cloned(),
+                        "artifactDraftItemId": outcome.governed_input.get("artifactDraftItemId").cloned(),
+                        "artifactId": outcome.governed_input.get("artifactId").cloned(),
+                        "artifactVersion": outcome.governed_input.get("artifactVersion").cloned(),
                         "generatedByProvider": outcome.governed_input.get("generatedByProvider").and_then(Value::as_bool).unwrap_or(false),
                         "providerMaySelectPath": false,
                         "source": "main_chat_kernel",
@@ -10844,7 +10946,7 @@ async fn build_kernel_write_outcome_command_surface_result(
         .write_outcome
         .clone()
         .ok_or_else(|| "Main Chat kernel write outcome missing".to_string())?;
-    let expanded_outcomes = match expand_generated_artifact_outcomes(state, &outcome).await {
+    let mut expanded_outcomes = match expand_generated_artifact_outcomes(state, &outcome).await {
         Ok(outcomes) => outcomes,
         Err(blocker) => {
             kernel_result.write_outcome = None;
@@ -10870,6 +10972,20 @@ async fn build_kernel_write_outcome_command_surface_result(
             .await;
         }
     };
+    for expanded_outcome in &mut expanded_outcomes {
+        prepare_canonical_report_artifact_for_review(
+            state,
+            session_id,
+            task_session_id,
+            canonical_run_id,
+            &main_chat_agent_turn
+                .decision
+                .policy_decision
+                .authorized_user_message_digest,
+            expanded_outcome,
+        )
+        .await?;
+    }
     let mut agent_run = load_existing_canonical_main_chat_agent_run(
         state,
         canonical_run_id,
@@ -10994,6 +11110,12 @@ async fn build_kernel_write_outcome_command_surface_result(
                     proposal,
                     created_for_turn,
                 } => {
+                    let canonical_review = bind_canonical_report_artifact_review(
+                        state,
+                        expanded_outcome,
+                        &proposal.id,
+                    )
+                    .await?;
                     generated_proposals.push(proposal.id.clone());
                     agent_run.add_generated_proposal(&proposal.id);
                     if created_for_turn {
@@ -11020,6 +11142,9 @@ async fn build_kernel_write_outcome_command_surface_result(
                         "acceptedDurableTruthWritten": false,
                         "fileWritten": false,
                         "externalWritesExecuted": false,
+                        "canonicalTaskId": canonical_review.as_ref().map(|review| review.task_id.as_str()),
+                        "canonicalArtifactId": canonical_review.as_ref().map(|review| review.artifact_id.as_str()),
+                        "reviewCheckpointItemId": canonical_review.as_ref().map(|review| review.checkpoint_item_id.as_str()),
                     });
                     transition_main_chat_action(
                         state,
@@ -22196,6 +22321,109 @@ mod tests {
                 ..
             }
         )));
+    }
+
+    #[tokio::test]
+    async fn generated_report_gets_canonical_artifact_before_proposal_identity() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let directory = tempfile::tempdir().unwrap();
+        let safe_root = directory.path().canonicalize().unwrap();
+        state.config.lock().await.system.safe_paths =
+            vec![safe_root.to_string_lossy().into_owned()];
+        let target = safe_root.join("canonical-report.md");
+        let content = "# Canonical report";
+        let content_digest = openlife_core::agent::metadata_safe_text_digest(content).1;
+        let prompt = "生成一份 Markdown 报告 canonical-report.md，并在我确认后保存。";
+        let ingress = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
+            "canonical-report-policy",
+            prompt,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let mut outcome = MainChatKernelWriteOutcome {
+            kind: MainChatKernelWriteOutcomeKind::FileWriteProposal,
+            action_type: "file.write".into(),
+            target: target.to_string_lossy().into_owned(),
+            reason: "generated report requires Review".into(),
+            payload_summary: "one Markdown report".into(),
+            governed_input: serde_json::json!({
+                "path": target,
+                "content": content,
+                "content_hash": content_digest,
+                "encoding": "utf-8",
+                "operation": "propose_write",
+                "artifactKind": "markdown",
+                "artifactBundleDigest": openlife_core::agent::metadata_safe_text_digest(content).1,
+                "generatedByProvider": true,
+                "providerMaySelectPath": false,
+            }),
+            proposal_type: Some("external_write_action".into()),
+            blocker_code: None,
+            requires_confirmation: false,
+            hard_blocked: false,
+            replayable: false,
+        };
+        prepare_canonical_report_artifact_for_review(
+            &state,
+            "conversation-canonical-report",
+            "execution-session-canonical-report",
+            "run-canonical-report",
+            &ingress.policy_decision.authorized_user_message_digest,
+            &mut outcome,
+        )
+        .await
+        .unwrap();
+        let artifact_id = outcome.governed_input["artifactId"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert!(artifact_id.starts_with("artifact:"));
+
+        let registry = state
+            .main_chat_runtime_state
+            .lock()
+            .await
+            .cancellation_registry
+            .clone();
+        let registration = registry.register("execution-session-canonical-report");
+        let proposal = match create_kernel_write_proposal_without_terminal_owner_for_unit_test(
+            &state,
+            "execution-session-canonical-report",
+            "run-canonical-report",
+            &outcome,
+            prompt,
+            &ingress.policy_decision,
+            &registration.execution_epoch(),
+        )
+        .await
+        .unwrap()
+        {
+            KernelWriteProposalAdmission::Pending { proposal, .. } => proposal,
+            KernelWriteProposalAdmission::AlreadyCanonical { .. } => {
+                panic!("fresh report cannot already be canonical")
+            }
+        };
+        assert_ne!(artifact_id, format!("artifact:{}", proposal.id));
+        assert_eq!(proposal.after["artifactId"], artifact_id);
+        let review = bind_canonical_report_artifact_review(&state, &outcome, &proposal.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(review.artifact_id, artifact_id);
+        assert_eq!(review.proposal_id, proposal.id);
+        let stored = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_artifact(&artifact_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            stored.proposal_id.as_deref(),
+            Some(review.proposal_id.as_str())
+        );
     }
 
     #[tokio::test]

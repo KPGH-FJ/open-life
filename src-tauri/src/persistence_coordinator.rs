@@ -25,6 +25,7 @@ pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
     "FeedbackStore",
     "VectorStore",
     "AgentRunStore",
+    "CanonicalTaskRuntimeStore",
     "EvidenceStore",
     "LifeEventStore",
     "ProposalStore",

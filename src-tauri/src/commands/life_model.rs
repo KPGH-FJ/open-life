@@ -681,6 +681,7 @@ mod tests {
             agent_run_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
             ))),
+            canonical_task_runtime_store: None,
             evidence_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
             )),

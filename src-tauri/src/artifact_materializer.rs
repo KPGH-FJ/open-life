@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedArtifactMaterialization {
+    pub artifact_id: String,
     pub proposal_id: String,
     pub target_path: PathBuf,
     pub stage_path: PathBuf,
@@ -177,8 +178,27 @@ pub(crate) fn prepare_artifact_materialization(
     content: &str,
     safe_paths: &[String],
 ) -> Result<PreparedArtifactMaterialization, String> {
+    prepare_artifact_materialization_for_artifact(
+        &format!("artifact:{proposal_id}"),
+        proposal_id,
+        dispatch_claim_id,
+        path,
+        content,
+        safe_paths,
+    )
+}
+
+pub(crate) fn prepare_artifact_materialization_for_artifact(
+    artifact_id: &str,
+    proposal_id: &str,
+    dispatch_claim_id: &str,
+    path: &str,
+    content: &str,
+    safe_paths: &[String],
+) -> Result<PreparedArtifactMaterialization, String> {
     let target_precondition = capture_artifact_target_precondition(path, safe_paths)?;
-    prepare_artifact_materialization_with_precondition(
+    prepare_artifact_materialization_with_precondition_for_artifact(
+        artifact_id,
         proposal_id,
         dispatch_claim_id,
         path,
@@ -220,7 +240,8 @@ pub(crate) fn capture_artifact_target_precondition(
     })
 }
 
-pub(crate) fn prepare_artifact_materialization_with_precondition(
+pub(crate) fn prepare_artifact_materialization_with_precondition_for_artifact(
+    artifact_id: &str,
     proposal_id: &str,
     dispatch_claim_id: &str,
     path: &str,
@@ -228,6 +249,9 @@ pub(crate) fn prepare_artifact_materialization_with_precondition(
     safe_paths: &[String],
     target_precondition: ArtifactTargetPrecondition,
 ) -> Result<PreparedArtifactMaterialization, String> {
+    if artifact_id.trim().is_empty() || artifact_id.len() > 512 || artifact_id.contains('\0') {
+        return Err("Artifact identity is invalid.".into());
+    }
     let valid_safe_paths = canonical_safe_paths(safe_paths);
     if valid_safe_paths.is_empty() {
         return Err("No valid safe paths configured for artifact materialization.".into());
@@ -268,6 +292,7 @@ pub(crate) fn prepare_artifact_materialization_with_precondition(
         return Err("Artifact staging path contains a symbolic link.".into());
     }
     Ok(PreparedArtifactMaterialization {
+        artifact_id: artifact_id.to_string(),
         proposal_id: proposal_id.to_string(),
         target_path,
         stage_path,
@@ -779,7 +804,7 @@ pub(crate) fn confirmed_artifact_receipt(
     observed_content_digest: String,
 ) -> ArtifactMaterializationReceipt {
     ArtifactMaterializationReceipt {
-        artifact_id: format!("artifact:{}", prepared.proposal_id),
+        artifact_id: prepared.artifact_id.clone(),
         proposal_id: prepared.proposal_id.clone(),
         target_reference: prepared.target_path.to_string_lossy().into_owned(),
         target_reference_digest: prepared.target_reference_digest.clone(),

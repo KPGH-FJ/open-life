@@ -258,6 +258,11 @@ pub struct AppState {
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
     pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
+    /// ADR 0017 owner for stable Task identity, Run membership, typed report
+    /// Items, and Artifact metadata. AgentRunStore still owns execution
+    /// receipts during the vertical migration.
+    pub canonical_task_runtime_store:
+        Option<Arc<Mutex<openlife_core::task_runtime::CanonicalTaskRuntimeStore>>>,
     pub evidence_store: Arc<Mutex<openlife_core::agent::EvidenceStore>>,
     pub life_event_store: Option<Arc<Mutex<openlife_core::agent::LifeEventStore>>>,
     pub policy_store: Arc<openlife_core::agent::PolicyStore>,

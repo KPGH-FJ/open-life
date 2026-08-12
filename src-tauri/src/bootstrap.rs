@@ -2300,6 +2300,34 @@ fn bootstrap_with_secret_store(
             }
         });
 
+    let canonical_task_runtime_db_path = data_dir.join("task_runtime.db");
+    let canonical_task_runtime_store = init_store(
+        || {
+            openlife_core::task_runtime::CanonicalTaskRuntimeStore::new(
+                &canonical_task_runtime_db_path,
+            )
+            .map_err(|error| error.to_string())
+        },
+        || {
+            openlife_core::task_runtime::CanonicalTaskRuntimeStore::open_read_only_existing(
+                &canonical_task_runtime_db_path,
+            )
+            .map_err(|error| error.to_string())
+        },
+        || {
+            openlife_core::task_runtime::CanonicalTaskRuntimeStore::new_in_memory()
+                .map_err(|error| error.to_string())
+        },
+        "CanonicalTaskRuntimeStore",
+        &startup_warnings,
+        &persistence,
+    );
+    let canonical_task_runtime_store = optional_store(
+        canonical_task_runtime_store,
+        "CanonicalTaskRuntimeStore",
+        &startup_warnings,
+    );
+
     let evidence_db_path = data_dir.join("evidence.db");
     let evidence_store = init_store(
         || init_evidence_store(&evidence_db_path, &startup_warnings),
@@ -3205,6 +3233,8 @@ fn bootstrap_with_secret_store(
         last_snapshot_date: Arc::new(Mutex::new(None)),
         mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
         agent_run_store: agent_run_store.map(|store| Arc::new(Mutex::new(store))),
+        canonical_task_runtime_store: canonical_task_runtime_store
+            .map(|store| Arc::new(Mutex::new(store))),
         evidence_store: Arc::new(Mutex::new(evidence_store)),
         life_event_store: life_event_store.map(|store| Arc::new(Mutex::new(store))),
         policy_store: Arc::new(policy_store),

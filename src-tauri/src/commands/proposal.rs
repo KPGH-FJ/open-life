@@ -3,7 +3,8 @@ use crate::{
         commit_artifact_move, commit_staged_artifact, confirmed_artifact_receipt,
         confirmed_move_receipt, confirmed_move_receipt_from_paths, inspect_artifact_filesystem,
         inspect_artifact_move, prepare_artifact_materialization,
-        prepare_artifact_materialization_with_precondition, prepare_artifact_move,
+        prepare_artifact_materialization_for_artifact,
+        prepare_artifact_materialization_with_precondition_for_artifact, prepare_artifact_move,
         stage_artifact_bytes, ArtifactFilesystemFailure, ArtifactFilesystemObservation,
         ArtifactMaterializationReceipt, ArtifactTargetPrecondition,
     },
@@ -32,6 +33,43 @@ use crate::artifact_materializer::{PreparedArtifactMaterialization, PreparedArti
 /// Maximum content size for ExternalWriteAction (100 KB)
 const EXTERNAL_WRITE_MAX_SIZE: usize = 100 * 1024;
 pub(crate) const COMMUNICATION_STYLE_CANONICAL_PATH: &str = "preferences.communication_style";
+
+fn canonical_report_artifact_id(proposal: &AgentProposal) -> Option<&str> {
+    if proposal
+        .after
+        .get("generatedByProvider")
+        .and_then(Value::as_bool)
+        != Some(true)
+        || proposal
+            .after
+            .get("artifactVersion")
+            .and_then(Value::as_u64)
+            != Some(1)
+        || proposal
+            .after
+            .get("canonicalTaskId")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+        || proposal
+            .after
+            .get("artifactDraftItemId")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+    {
+        return None;
+    }
+    proposal
+        .after
+        .get("artifactId")
+        .and_then(Value::as_str)
+        .filter(|value| value.starts_with("artifact:") && value.len() <= 512)
+}
+
+fn artifact_id_for_proposal(proposal: &AgentProposal) -> String {
+    canonical_report_artifact_id(proposal)
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("artifact:{}", proposal.id))
+}
 
 fn reviewed_artifact_target_precondition(
     after: &Value,
@@ -765,7 +803,8 @@ async fn reconcile_artifact_effects_with_state(
             .get("content")
             .and_then(Value::as_str)
             .unwrap_or("");
-        let prepared = match prepare_artifact_materialization(
+        let prepared = match prepare_artifact_materialization_for_artifact(
+            &artifact_id_for_proposal(&proposal),
             &record.proposal_id,
             &record.dispatch_claim_id,
             path,
@@ -1273,7 +1312,8 @@ async fn confirmed_artifact_receipt_from_store(
         .and_then(Value::as_str)
         .unwrap_or("");
     let safe_paths = artifact_safe_paths_for_proposal(state, proposal).await?;
-    let prepared = prepare_artifact_materialization(
+    let prepared = prepare_artifact_materialization_for_artifact(
+        &artifact_id_for_proposal(proposal),
         &proposal.id,
         &record.dispatch_claim_id,
         path,
@@ -1292,6 +1332,92 @@ async fn confirmed_artifact_receipt_from_store(
         .filter(|digest| digest == &record.content_digest)
         .ok_or_else(|| "confirmed artifact observed digest missing".to_string())?;
     Ok(Some(confirmed_artifact_receipt(&prepared, observed)))
+}
+
+async fn project_confirmed_canonical_report_artifact(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    receipt: &ArtifactMaterializationReceipt,
+) -> Result<Option<openlife_core::task_runtime::CanonicalArtifactRecord>, String> {
+    let Some(expected_artifact_id) = canonical_report_artifact_id(proposal) else {
+        return Ok(None);
+    };
+    if receipt.artifact_id != expected_artifact_id
+        || receipt.proposal_id != proposal.id
+        || receipt.content_digest != receipt.observed_content_digest
+    {
+        return Err("canonical report Artifact receipt binding mismatch".into());
+    }
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    store
+        .lock()
+        .await
+        .confirm_artifact_materialized(
+            &proposal.id,
+            &receipt.target_reference,
+            &receipt.observed_content_digest,
+        )
+        .map(Some)
+        .map_err(|error| format!("canonical report Artifact confirmation failed: {error}"))
+}
+
+async fn project_confirmed_canonical_report_artifact_status(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    receipt: Option<&ArtifactMaterializationReceipt>,
+    warnings: &mut Vec<String>,
+) -> &'static str {
+    let Some(receipt) = receipt else {
+        return "not_applicable";
+    };
+    match project_confirmed_canonical_report_artifact(state, proposal, receipt).await {
+        Ok(Some(_)) => "confirmed",
+        Ok(None) => "not_applicable",
+        Err(error) => {
+            warnings.push(format!(
+                "Artifact 已确认，但 canonical Task Runtime 投影仍等待 reconciliation: {error}"
+            ));
+            "reconciliation_required"
+        }
+    }
+}
+
+async fn mark_canonical_report_artifact_effect_failure(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    reason_code: &str,
+    effect_unknown: bool,
+) {
+    if canonical_report_artifact_id(proposal).is_none() {
+        return;
+    }
+    let Some(store) = state.canonical_task_runtime_store.as_ref() else {
+        log::warn!(
+            "[CanonicalTaskRuntime] report Artifact failure projection unavailable: {}",
+            reason_code
+        );
+        return;
+    };
+    let result = if effect_unknown {
+        store
+            .lock()
+            .await
+            .mark_artifact_effect_unknown(&proposal.id, reason_code)
+    } else {
+        store
+            .lock()
+            .await
+            .mark_artifact_failed_before_effect(&proposal.id, reason_code)
+    };
+    if let Err(error) = result {
+        log::warn!(
+            "[CanonicalTaskRuntime] report Artifact failure projection failed: {}",
+            error
+        );
+    }
 }
 
 fn confirmed_effect_reconciliation_response(
@@ -1454,7 +1580,8 @@ async fn apply_external_write_artifact(
             return ArtifactApplyOutcome::FailedBeforeEffect(error);
         }
     };
-    let prepared = match prepare_artifact_materialization_with_precondition(
+    let prepared = match prepare_artifact_materialization_with_precondition_for_artifact(
+        &artifact_id_for_proposal(proposal),
         &proposal.id,
         claim_id,
         path,
@@ -3472,6 +3599,14 @@ async fn accept_proposal_with_state_and_confirmation(
                     &mut warnings,
                 )
                 .await;
+                let canonical_task_runtime_projection_status =
+                    project_confirmed_canonical_report_artifact_status(
+                        state,
+                        &accepted,
+                        artifact_receipt.as_ref(),
+                        &mut warnings,
+                    )
+                    .await;
                 let mut response = confirmed_effect_reconciliation_response(
                     &accepted,
                     true,
@@ -3481,17 +3616,33 @@ async fn accept_proposal_with_state_and_confirmation(
                 if let Some(learning) = learning {
                     response["lifeModelLearning"] = learning;
                 }
+                response["canonical_task_runtime_projection_status"] =
+                    canonical_task_runtime_projection_status.into();
                 Ok(response)
             }
-            Err(error) => Ok(confirmed_effect_reconciliation_response(
-                &proposal,
-                false,
-                vec![format!(
+            Err(error) => {
+                let mut warnings = vec![format!(
                     "Effect 已确认，Proposal 投影仍等待 reconciliation；未重放副作用: {}",
                     error
-                )],
-                artifact_receipt,
-            )),
+                )];
+                let canonical_task_runtime_projection_status =
+                    project_confirmed_canonical_report_artifact_status(
+                        state,
+                        &proposal,
+                        artifact_receipt.as_ref(),
+                        &mut warnings,
+                    )
+                    .await;
+                let mut response = confirmed_effect_reconciliation_response(
+                    &proposal,
+                    false,
+                    warnings,
+                    artifact_receipt,
+                );
+                response["canonical_task_runtime_projection_status"] =
+                    canonical_task_runtime_projection_status.into();
+                Ok(response)
+            }
         };
     }
     if proposal.status == ProposalStatus::Accepted && dispatch_state.as_deref() == Some("confirmed")
@@ -3508,11 +3659,21 @@ async fn accept_proposal_with_state_and_confirmation(
         let learning =
             reconcile_lifemodel_learning_materialization_response(state, &proposal, &mut warnings)
                 .await;
+        let canonical_task_runtime_projection_status =
+            project_confirmed_canonical_report_artifact_status(
+                state,
+                &proposal,
+                artifact_receipt.as_ref(),
+                &mut warnings,
+            )
+            .await;
         let mut response =
             confirmed_effect_reconciliation_response(&proposal, true, warnings, artifact_receipt);
         if let Some(learning) = learning {
             response["lifeModelLearning"] = learning;
         }
+        response["canonical_task_runtime_projection_status"] =
+            canonical_task_runtime_projection_status.into();
         return Ok(response);
     }
     ensure_pending_or_postponed(&proposal)?;
@@ -3724,11 +3885,14 @@ async fn accept_proposal_with_state_and_confirmation(
                 receipt,
             } => (patch_result, Some(*receipt)),
             ArtifactApplyOutcome::FailedBeforeEffect(error) => {
+                mark_canonical_report_artifact_effect_failure(state, &proposal, &error, false)
+                    .await;
                 return Err(format!(
                     "Artifact materialization failed before effect: {error}"
                 ));
             }
             ArtifactApplyOutcome::Unknown(error) => {
+                mark_canonical_report_artifact_effect_failure(state, &proposal, &error, true).await;
                 return Err(format!(
                         "Artifact materialization state is unknown; automatic redispatch is forbidden: {error}"
                     ));
@@ -3789,6 +3953,14 @@ async fn accept_proposal_with_state_and_confirmation(
         };
     }
     let mut warnings = Vec::new();
+    let canonical_task_runtime_projection_status =
+        project_confirmed_canonical_report_artifact_status(
+            state,
+            &proposal,
+            artifact_materialization.as_ref(),
+            &mut warnings,
+        )
+        .await;
     let learning_materialization =
         reconcile_lifemodel_learning_materialization_response(state, &proposal, &mut warnings)
             .await;
@@ -3937,6 +4109,7 @@ async fn accept_proposal_with_state_and_confirmation(
         } else {
             "reconciliation_required"
         },
+        "canonical_task_runtime_projection_status": canonical_task_runtime_projection_status,
         "warnings": warnings,
     });
     if let Some(receipt) = artifact_materialization {
@@ -4970,6 +5143,9 @@ mod tests {
             ))),
             agent_run_store: Some(Arc::new(Mutex::new(
                 AgentRunStore::new_in_memory().unwrap(),
+            ))),
+            canonical_task_runtime_store: Some(Arc::new(Mutex::new(
+                openlife_core::task_runtime::CanonicalTaskRuntimeStore::new_in_memory().unwrap(),
             ))),
             evidence_store: Arc::new(Mutex::new(
                 openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
@@ -7003,6 +7179,141 @@ mod tests {
         assert_eq!(stored.status, ProposalStatus::Accepted);
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "Hello from test");
+    }
+
+    #[tokio::test]
+    async fn accepted_report_proposal_materializes_the_preexisting_canonical_artifact() {
+        use sha2::{Digest, Sha256};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let safe_path = temp_dir.path().join("safe-report");
+        std::fs::create_dir_all(&safe_path).unwrap();
+        let safe_path = safe_path.canonicalize().unwrap();
+        state.config.lock().await.system.safe_paths =
+            vec![safe_path.to_string_lossy().into_owned()];
+        let file_path = safe_path.join("report.md");
+        let content = "# Canonical report";
+        let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let prepared = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .prepare_report_artifact(openlife_core::task_runtime::ReportArtifactDraftInput {
+                conversation_id: "conversation-report",
+                execution_session_id: "execution-session-report",
+                run_id: "run-report",
+                outcome_digest: &format!(
+                    "sha256:{:x}",
+                    Sha256::digest(b"canonical report outcome")
+                ),
+                target_reference: &file_path.to_string_lossy(),
+                content_digest: &content_digest,
+                media_type: "text/markdown; charset=utf-8",
+            })
+            .unwrap();
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.{}", file_path.display()),
+            serde_json::json!({
+                "path": file_path.to_string_lossy(),
+                "content": content,
+                "content_hash": content_digest,
+                "operation": "propose_write",
+                "expected_target_absent": true,
+                "expected_target_digest": null,
+                "artifactId": prepared.artifact_id,
+                "canonicalTaskId": prepared.task_id,
+                "artifactDraftItemId": prepared.artifact_draft_item_id,
+                "artifactVersion": 1,
+                "generatedByProvider": true,
+            }),
+            "Materialize a generated report after Review",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::ChatConversation,
+        );
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .bind_report_review(&prepared.artifact_id, &proposal.id)
+            .unwrap();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let response = accept_proposal_with_state(proposal.id.clone(), &state)
+            .await
+            .unwrap();
+
+        assert_eq!(response["effect_status"], "confirmed");
+        assert_eq!(
+            response["artifactMaterialization"]["artifactId"],
+            prepared.artifact_id
+        );
+        assert_eq!(
+            response["canonical_task_runtime_projection_status"],
+            "confirmed"
+        );
+        let artifact = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_artifact(&prepared.artifact_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            artifact.status,
+            openlife_core::task_runtime::CanonicalArtifactStatus::Materialized
+        );
+        assert_eq!(
+            artifact.materialized_reference.as_deref(),
+            Some(file_path.to_string_lossy().as_ref())
+        );
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), content);
+
+        let replay = accept_proposal_with_state(proposal.id, &state)
+            .await
+            .unwrap();
+        assert_eq!(replay["effect_status"], "confirmed");
+        assert_eq!(
+            replay["canonical_task_runtime_projection_status"],
+            "confirmed"
+        );
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), content);
+    }
+
+    #[test]
+    fn partial_report_metadata_cannot_replace_legacy_artifact_identity() {
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            "filesystem.report",
+            serde_json::json!({
+                "artifactId": "artifact:forged",
+                "generatedByProvider": true,
+            }),
+            "partial metadata must not mint canonical identity",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::ChatConversation,
+        );
+        assert_eq!(
+            artifact_id_for_proposal(&proposal),
+            format!("artifact:{}", proposal.id)
+        );
+        assert!(canonical_report_artifact_id(&proposal).is_none());
     }
 
     #[tokio::test]
