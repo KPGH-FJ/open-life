@@ -1,6 +1,6 @@
 # Current OpenLife Product Development Plan
 
-Status: active
+Status: complete
 
 ## Objective
 
@@ -20,12 +20,12 @@ local documents + Web research
 ## Current baseline
 
 - Branch: `codex/phase5-native-closure`.
-- The plan was activated on a dirty tree containing conversation and Agent
-  Memory closure, source-bound generation, LifeModel review fixes, frontend
-  presentation, tests, and documentation in one mixed batch.
-- Automated Rust, frontend, build, and browser-shell gates were green on that
-  mixed source snapshot. This is engineering evidence, not current exact-build
-  native or external-live product credit.
+- The original mixed tree has been classified, stabilized, split into semantic
+  commits, and returned to a clean state.
+- Rust, frontend, production-build, and browser-shell gates are green for the
+  final source. The exact debug application also passed an isolated native
+  verification against its own data directory, workspace, and trial Keychain
+  service.
 - Current production Main Chat entrypoints converge on
   `OpenLifeTurnRuntime`. The tree still has multiple durable lifecycle owners
   and does not yet implement the accepted canonical Task Runtime.
@@ -141,6 +141,20 @@ S0 and S1 are complete only when:
 - semantic commits are reviewable and the working tree is clean.
 
 Do not begin S2 inside an unreviewed S0/S1 batch.
+
+## Closure
+
+- Inline source-bound facts produced a bounded native answer without requiring
+  a provider or tool.
+- A selected-document-only request with no selected document stopped before
+  provider or tool use, returned an explicit unknown, and remained blocked
+  rather than appearing complete.
+- An empty LifeModel produced no candidate or Review item, and Review Center
+  remained empty without claiming that any change had been applied.
+- The isolated trial did not use the default Keychain service or an existing
+  application profile.
+- External-live provider and Web behavior were not required for S0/S1 and
+  remain unverified by this batch.
 
 ## Next pointer
 
