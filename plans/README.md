@@ -17,18 +17,15 @@ working tree.
 ## Active Product Development Program
 
 [`openlife_product_development_program.md`](openlife_product_development_program.md)
-is the single active development program. It fixes the six-phase product path,
-phase exit criteria, and the method used to investigate and implement each
-phase.
-
-The current phase pointer in that file is authoritative for development order.
-Phase details may adapt to current source and product evidence, but Agents must
-not add, replace, reorder, or rename Program phases without explicit user
-approval.
+is the single active implementation plan. It records the current objective,
+scope, acceptance evidence, stop condition, and next pointer. Product direction
+lives in `PRODUCT.md`; accepted architecture lives in ADRs. Git history retains
+the superseded six-phase program.
 
 ## Accepted Decisions
 
 - `adr/0016-agent-memory-lifemodel-domain-boundaries.md`
+- `adr/0017-canonical-task-runtime.md`
 - `adr/0014-explicit-user-memory-write-lane.md`
 - `adr/0015-transient-state-command-lane.md`
 
