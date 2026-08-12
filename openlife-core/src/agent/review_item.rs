@@ -225,6 +225,7 @@ pub struct ReviewCenterBuildInput {
     pub safe_mode_active: bool,
     pub safe_mode_reason: Option<String>,
     pub safe_paths: Vec<String>,
+    pub safe_path_overrides: BTreeMap<String, Vec<String>>,
     pub materialization_overrides: BTreeMap<String, ReviewItemMaterializationStatus>,
     pub terminal_owner_task_session_ids: BTreeMap<String, String>,
     pub artifact_evidence: BTreeMap<String, ReviewItemArtifactEvidence>,
@@ -535,7 +536,7 @@ fn edit_blocker(
         );
     }
     if proposal.proposal_type == ProposalType::ExternalWriteAction
-        && !external_write_paths_are_safe(proposal, &input.safe_paths)
+        && !external_write_paths_are_safe(proposal, safe_paths_for_proposal(proposal, input))
     {
         return Some("The external write path is outside configured safe paths.".into());
     }
@@ -603,7 +604,7 @@ fn approve_blocker(
         );
     }
     if proposal.proposal_type == ProposalType::ExternalWriteAction
-        && !external_write_paths_are_safe(proposal, &input.safe_paths)
+        && !external_write_paths_are_safe(proposal, safe_paths_for_proposal(proposal, input))
     {
         return Some("The external write path is outside configured safe paths.".into());
     }
@@ -664,6 +665,17 @@ fn external_write_paths_are_safe(proposal: &AgentProposal, safe_paths: &[String]
         && paths
             .into_iter()
             .all(|path| is_path_in_safe_paths(Some(path), safe_paths))
+}
+
+fn safe_paths_for_proposal<'a>(
+    proposal: &AgentProposal,
+    input: &'a ReviewCenterBuildInput,
+) -> &'a [String] {
+    input
+        .safe_path_overrides
+        .get(&proposal.id)
+        .map(Vec::as_slice)
+        .unwrap_or(input.safe_paths.as_slice())
 }
 
 fn external_write_target_precondition_is_complete(proposal: &AgentProposal) -> bool {
@@ -989,6 +1001,38 @@ mod tests {
         assert!(!edit.enabled);
         assert!(reject.enabled);
         assert_eq!(model.summary.blocked_action_count, 2);
+    }
+
+    #[test]
+    fn review_item_safe_path_override_is_bound_to_one_exact_proposal() {
+        let mut bound = proposal(ProposalType::ExternalWriteAction);
+        bound.id = "proposal:markdown-memory:bound".into();
+        bound.after = json!({
+            "operation": "propose_write",
+            "path": "/memory/MEMORY.md",
+            "content": "bounded memory",
+            "expected_target_absent": true,
+            "expected_target_digest": null
+        });
+        let mut unrelated = bound.clone();
+        unrelated.id = "proposal:external-write:unrelated".into();
+
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![bound, unrelated],
+            safe_path_overrides: BTreeMap::from([(
+                "proposal:markdown-memory:bound".into(),
+                vec!["/memory".into()],
+            )]),
+            ..Default::default()
+        });
+
+        assert!(find_action(&model.items[0], ReviewActionKind::Approve).enabled);
+        let unrelated_approve = find_action(&model.items[1], ReviewActionKind::Approve);
+        assert!(!unrelated_approve.enabled);
+        assert!(unrelated_approve
+            .disabled_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("outside configured safe paths")));
     }
 
     #[test]

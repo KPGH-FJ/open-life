@@ -53,6 +53,7 @@ pub(crate) mod main_chat_runtime_status;
 pub(crate) mod main_chat_runtime_support;
 pub(crate) mod main_chat_send;
 pub(crate) mod main_chat_skills_tools;
+pub(crate) mod main_chat_source_bound;
 pub(crate) mod main_chat_streaming;
 pub(crate) mod main_chat_task_controls;
 #[allow(dead_code)]

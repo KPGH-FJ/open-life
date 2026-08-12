@@ -3,6 +3,8 @@ use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+use super::memory_lifecycle::MemoryLifecycleScope;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryCandidateKind {
@@ -529,11 +531,35 @@ fn push_candidate(
 }
 
 fn split_spans(user_text: &str) -> Vec<String> {
-    user_text
-        .split(['。', '.', '!', '！', ';', '；', '\n'])
-        .map(compact_text)
-        .filter(|span| !span.is_empty())
-        .collect()
+    let chars = user_text.chars().collect::<Vec<_>>();
+    let mut spans = Vec::new();
+    let mut current = String::new();
+
+    for (index, ch) in chars.iter().copied().enumerate() {
+        let period_inside_ascii_token = ch == '.'
+            && index > 0
+            && index + 1 < chars.len()
+            && chars[index - 1].is_ascii_alphanumeric()
+            && chars[index + 1].is_ascii_alphanumeric();
+        let is_separator = matches!(ch, '。' | '!' | '！' | ';' | '；' | '\n')
+            || (ch == '.' && !period_inside_ascii_token);
+
+        if is_separator {
+            let compact = compact_text(&current);
+            if !compact.is_empty() {
+                spans.push(compact);
+            }
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+    }
+
+    let compact = compact_text(&current);
+    if !compact.is_empty() {
+        spans.push(compact);
+    }
+    spans
 }
 
 fn candidates_for_span<'a>(
@@ -578,7 +604,10 @@ fn memory_claim_for_span(span: &str) -> Option<String> {
                 }
                 return None;
             }
-            if meaningful_claim(&before) && !is_future_rule(&before.to_ascii_lowercase()) {
+            if meaningful_claim(&before)
+                && !is_memory_scope_instruction_fragment(&before)
+                && !is_future_rule(&before.to_ascii_lowercase())
+            {
                 return Some(before);
             }
             if meaningful_claim(&after) && !is_future_rule(&after.to_ascii_lowercase()) {
@@ -587,6 +616,64 @@ fn memory_claim_for_span(span: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn is_memory_scope_instruction_fragment(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "在当前会话范围",
+            "在当前工作区范围",
+            "在当前项目范围",
+            "仅限当前会话",
+            "仅限当前工作区",
+            "仅限当前项目",
+            "in the current conversation",
+            "in the current workspace",
+            "in the current project",
+            "conversation-scoped",
+            "workspace-scoped",
+            "project-scoped",
+        ],
+    )
+}
+
+pub fn explicit_memory_scope_from_user_text(user_text: &str) -> MemoryLifecycleScope {
+    let lower = user_text.to_ascii_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "在当前项目范围",
+            "仅限当前项目",
+            "in the current project",
+            "project-scoped",
+        ],
+    ) {
+        MemoryLifecycleScope::Project
+    } else if contains_any(
+        &lower,
+        &[
+            "在当前工作区范围",
+            "仅限当前工作区",
+            "in the current workspace",
+            "workspace-scoped",
+        ],
+    ) {
+        MemoryLifecycleScope::Workspace
+    } else if contains_any(
+        &lower,
+        &[
+            "在当前会话范围",
+            "仅限当前会话",
+            "in the current conversation",
+            "conversation-scoped",
+        ],
+    ) {
+        MemoryLifecycleScope::Conversation
+    } else {
+        MemoryLifecycleScope::Global
+    }
 }
 
 fn is_deictic_memory_trigger(trigger: &str) -> bool {
@@ -615,7 +702,10 @@ fn explicit_memory_life_event_claim(span: &str) -> Option<String> {
     ] {
         if let Some(pos) = lower.find(trigger) {
             let before = compact_claim(&span[..pos]);
-            if meaningful_claim(&before) && !is_future_rule(&before.to_ascii_lowercase()) {
+            if meaningful_claim(&before)
+                && !is_memory_scope_instruction_fragment(&before)
+                && !is_future_rule(&before.to_ascii_lowercase())
+            {
                 return Some(before);
             }
             return None;
@@ -739,6 +829,47 @@ fn has_explicit_memory_marker(lower: &str) -> bool {
             "加入记忆",
         ],
     )
+}
+
+pub fn is_explicit_memory_write_request(user_text: &str) -> bool {
+    let normalized = compact_text(user_text);
+    if normalized.is_empty() {
+        return false;
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if is_negated_memory_or_lifemodel_write(&lower)
+        || contains_any(
+            &lower,
+            &[
+                "不要记住",
+                "别记住",
+                "无需记住",
+                "do not remember",
+                "don't remember",
+                "never remember",
+            ],
+        )
+    {
+        return false;
+    }
+
+    contains_any(
+        &lower,
+        &[
+            "please remember",
+            "remember this",
+            "remember that",
+            "save this",
+            "帮我记下来",
+            "帮我记一下",
+            "请记住",
+            "记下来",
+            "记一下",
+            "加入记忆",
+        ],
+    ) || lower.starts_with("remember ")
+        || (lower.starts_with("记住")
+            && !contains_any(&lower, &["记住了吗", "记住了什么", "记住什么", "？", "?"]))
 }
 
 fn is_future_rule(lower: &str) -> bool {
@@ -969,6 +1100,13 @@ fn is_action_or_advice_request(lower: &str) -> bool {
             "润色",
             "翻译",
             "总结",
+            "生成一份",
+            "生成一个",
+            "并在我确认后保存",
+            "create a report",
+            "generate a report",
+            "draft a report",
+            "save after my confirmation",
         ],
     )
 }
@@ -1490,6 +1628,79 @@ mod tests {
         assert!(result.lifemodel_proposal_candidate_ids.is_empty());
         assert_eq!(result.candidates.len(), 1);
         assert_eq!(result.candidates[0].sensitivity, "internal");
+    }
+
+    #[test]
+    fn explicit_scoped_memory_keeps_the_fact_after_the_scope_instruction() {
+        let result = routed("请在当前项目范围记住：发布复核代号是 OL-PROJECT-417。");
+        let proposals = result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.destination == MemoryDestination::MemoryProposal)
+            .collect::<Vec<_>>();
+
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(
+            proposals[0].normalized_claim,
+            "发布复核代号是 OL-PROJECT-417"
+        );
+    }
+
+    #[test]
+    fn explicit_memory_scope_requires_unambiguous_user_words() {
+        assert_eq!(
+            explicit_memory_scope_from_user_text("请记住：发布复核代号是 OL-GLOBAL-417。"),
+            MemoryLifecycleScope::Global
+        );
+        assert_eq!(
+            explicit_memory_scope_from_user_text("请在当前会话范围记住：只在这次对话使用。"),
+            MemoryLifecycleScope::Conversation
+        );
+        assert_eq!(
+            explicit_memory_scope_from_user_text("请在当前工作区范围记住：使用工作区检查表。"),
+            MemoryLifecycleScope::Workspace
+        );
+        assert_eq!(
+            explicit_memory_scope_from_user_text("请在当前项目范围记住：使用项目检查表。"),
+            MemoryLifecycleScope::Project
+        );
+    }
+
+    #[test]
+    fn explicit_memory_keeps_ascii_periods_inside_identifiers() {
+        let result = routed("请记住：5.6C 全局发布标记是 OL-G5-GLOBAL-314。");
+        let proposals = result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.destination == MemoryDestination::MemoryProposal)
+            .collect::<Vec<_>>();
+
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(
+            proposals[0].normalized_claim,
+            "5.6C 全局发布标记是 OL-G5-GLOBAL-314"
+        );
+    }
+
+    #[test]
+    fn explicit_memory_request_signal_excludes_questions_and_negations() {
+        assert!(is_explicit_memory_write_request("请记住。"));
+        assert!(is_explicit_memory_write_request(
+            "记住：发布代号是 OL-417。"
+        ));
+        assert!(!is_explicit_memory_write_request("记住了吗？"));
+        assert!(!is_explicit_memory_write_request("不要记住这件事。"));
+        assert!(!is_explicit_memory_write_request(
+            "你还记得我上次说了什么吗？"
+        ));
+    }
+
+    #[test]
+    fn generated_artifact_task_with_dotted_tokens_is_not_user_memory() {
+        let result = routed("使用 web.search 搜索 Example Domain 的公开信息，生成一份带 OpenLife 引用的 Markdown 报告 phase3-web-search-evidence.md，并在我确认后保存。");
+
+        assert!(result.memory_proposal_candidate_ids.is_empty());
+        assert!(result.lifemodel_proposal_candidate_ids.is_empty());
     }
 
     #[test]

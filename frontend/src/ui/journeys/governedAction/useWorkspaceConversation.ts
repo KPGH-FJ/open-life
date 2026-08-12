@@ -59,6 +59,11 @@ export type WorkspaceTurnState =
       status: MainChatTurnStatus;
       blockers: string[];
       lifeModelInfluence?: MainChatLifeModelProductReceipt;
+      sourceBoundBasis?: {
+        factCount: number;
+        sourceTypes: string[];
+        checkStatus: string;
+      };
     }
   | { phase: "failed"; stage: "create" | "send" | "refresh"; reason: string };
 
@@ -69,6 +74,26 @@ function sessionTitle(input: string): string {
 
 function resolvedTurnStatus(status: MainChatTurnStatus | undefined): MainChatTurnStatus {
   return status ?? "failed";
+}
+
+function sourceBoundBasisFromTrace(
+  generation: Record<string, unknown> | undefined
+): { factCount: number; sourceTypes: string[]; checkStatus: string } | undefined {
+  if (generation?.sourceBound !== true) return undefined;
+  const sourceTypes = Array.isArray(generation.sourceBoundSourceTypes)
+    ? generation.sourceBoundSourceTypes.filter(
+        (value): value is string => typeof value === "string" && value.length > 0
+      )
+    : [];
+  return {
+    factCount:
+      typeof generation.sourceBoundFactCount === "number" ? generation.sourceBoundFactCount : 0,
+    sourceTypes,
+    checkStatus:
+      typeof generation.sourceBoundCheckStatus === "string"
+        ? generation.sourceBoundCheckStatus
+        : "unknown",
+  };
 }
 
 function turnAnnouncement(status: MainChatTurnStatus): string {
@@ -840,6 +865,7 @@ export function useWorkspaceConversation(
           status,
           blockers: result.blockers ?? result.turn_terminal?.blockers ?? [],
           lifeModelInfluence: result.life_model_influence,
+          sourceBoundBasis: sourceBoundBasisFromTrace(result.reasoning_trace?.generation_result),
         });
         await onAfterTurn();
         announce(turnAnnouncement(status));

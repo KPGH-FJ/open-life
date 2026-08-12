@@ -2910,27 +2910,39 @@ impl InferenceScheduler {
     {
         let system_prompt = request.system_prompt();
         let request_id = request.context_manifest.request_id.clone();
-        let structured_json_output = request.policy_receipt_evidence().payload_purpose
-            == Some(ProviderPayloadPurpose::MainChatArtifactDraft);
+        let payload_purpose = request.policy_receipt_evidence().payload_purpose;
+        let structured_json_output = matches!(
+            payload_purpose,
+            Some(
+                ProviderPayloadPurpose::MainChatArtifactDraft
+                    | ProviderPayloadPurpose::MainChatEvidenceCheck
+            )
+        );
 
         if let Some(ref response) = self.scripted_generation_response {
             return Ok(response.clone());
         }
 
         if request.provider_target == "ollama" {
-            let deterministic_output = structured_json_output
-                || request
-                    .context_manifest
-                    .included_context_categories
-                    .iter()
-                    .any(|category| category == crate::web_search::WEB_SEARCH_CONTEXT_CATEGORY);
+            let deterministic_output = non_streaming_ollama_requires_deterministic_output(
+                payload_purpose,
+                &request.context_manifest.included_context_categories,
+            );
             return crate::ollama::chat_with_ollama_raw_at_endpoint_with_start_observer(
                 execution_binding.endpoint(),
                 &request.model_target,
                 request.messages,
                 system_prompt.as_deref(),
                 crate::ollama::OllamaOutputContract {
-                    structured_json: structured_json_output,
+                    structured_format: match payload_purpose {
+                        Some(ProviderPayloadPurpose::MainChatEvidenceCheck) => {
+                            Some(crate::ollama::main_chat_evidence_check_json_schema())
+                        }
+                        Some(ProviderPayloadPurpose::MainChatArtifactDraft) => {
+                            Some(serde_json::Value::String("json".into()))
+                        }
+                        _ => None,
+                    },
                     deterministic: deterministic_output,
                 },
                 Some(&request_id),
@@ -3383,8 +3395,13 @@ impl InferenceScheduler {
                 endpoint: execution_binding.endpoint(),
                 api_key: execution_binding.api_key(),
                 model: &request.model_target,
-                structured_json_output: policy_evidence.payload_purpose
-                    == Some(ProviderPayloadPurpose::MainChatArtifactDraft),
+                structured_json_output: matches!(
+                    policy_evidence.payload_purpose,
+                    Some(
+                        ProviderPayloadPurpose::MainChatArtifactDraft
+                            | ProviderPayloadPurpose::MainChatEvidenceCheck
+                    )
+                ),
                 network_policy: &request.network_policy,
                 network_policy_decision: &request.network_policy_decision,
                 request_id: Some(&request_id),
@@ -3503,10 +3520,27 @@ impl ScheduledInferenceScheduler {
     }
 }
 
+fn non_streaming_ollama_requires_deterministic_output(
+    payload_purpose: Option<ProviderPayloadPurpose>,
+    included_context_categories: &[String],
+) -> bool {
+    matches!(
+        payload_purpose,
+        Some(
+            ProviderPayloadPurpose::MainChatDirectAnswer
+                | ProviderPayloadPurpose::MainChatEvidenceCheck
+                | ProviderPayloadPurpose::MainChatArtifactDraft
+        )
+    ) || included_context_categories
+        .iter()
+        .any(|category| category == crate::web_search::WEB_SEARCH_CONTEXT_CATEGORY)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        InferenceScheduler, PreparedProviderGenerationMismatch, PreparedProviderStreamEvent,
+        non_streaming_ollama_requires_deterministic_output, InferenceScheduler,
+        PreparedProviderGenerationMismatch, PreparedProviderStreamEvent,
         PreparedProviderStreamTerminal, ProviderInvocationProgress,
         ProviderInvocationTerminalBinding, ProviderStartedAttempt, ScheduledInferenceScheduler,
         ScheduledPreparedProviderTruthBinding, ScheduledProviderLocalAbortCause,
@@ -3516,12 +3550,28 @@ mod tests {
     use crate::agent::{ModelRouter, ProviderAvailability};
     use crate::llm::{
         BoundedContextBlock, ChatMessage, ContextManifest, ProviderDataRoute,
-        ProviderInvocationStatus, ProviderLocalOnlyReason, ProviderPolicyAuthorization,
-        ProviderPolicyReceiptEvidence,
+        ProviderInvocationStatus, ProviderLocalOnlyReason, ProviderPayloadPurpose,
+        ProviderPolicyAuthorization, ProviderPolicyReceiptEvidence,
     };
     use crate::tasks::{ScheduledTask, ScheduledTaskClaim, TaskStore};
     use futures::StreamExt;
     use std::sync::Arc;
+
+    #[test]
+    fn non_streaming_direct_answer_uses_deterministic_local_generation() {
+        assert!(non_streaming_ollama_requires_deterministic_output(
+            Some(ProviderPayloadPurpose::MainChatDirectAnswer),
+            &[],
+        ));
+        assert!(non_streaming_ollama_requires_deterministic_output(
+            Some(ProviderPayloadPurpose::MainChatArtifactDraft),
+            &[],
+        ));
+        assert!(!non_streaming_ollama_requires_deterministic_output(
+            Some(ProviderPayloadPurpose::AgentLoopStep),
+            &[],
+        ));
+    }
 
     fn allow_network_policy() -> crate::config::NetworkPolicy {
         crate::config::NetworkPolicy {

@@ -120,7 +120,11 @@ pub fn extract_main_chat_intent_signals(user_text: &str) -> MainChatIntentSignal
     collect_action_proposal_requirement(&normalized, &mut intent);
     let candidates = extract_main_chat_memory_candidates(user_text);
     let memory_routing = route_memory_candidates(&candidates);
-    collect_durable_write_requirement_from_memory_routing(&memory_routing, &mut intent);
+    collect_durable_write_requirement_from_memory_routing(
+        &memory_routing,
+        crate::agent::main_chat_memory_candidate::is_explicit_memory_write_request(user_text),
+        &mut intent,
+    );
     intent.memory_routing = memory_routing;
     collect_external_read_requirement(&normalized, &mut intent);
 
@@ -232,6 +236,7 @@ fn collect_blocker_requirement(normalized: &str, intent: &mut MainChatIntentSign
 
 fn collect_durable_write_requirement_from_memory_routing(
     memory_routing: &MainChatMemoryRoutingResult,
+    explicit_memory_write_requested: bool,
     intent: &mut MainChatIntentSignals,
 ) {
     if !memory_routing.lifemodel_proposal_candidate_ids.is_empty() {
@@ -259,6 +264,14 @@ fn collect_durable_write_requirement_from_memory_routing(
             "memory_candidate_memory_proposal_required",
             "memory_candidate",
             0.92,
+        );
+    } else if explicit_memory_write_requested {
+        set_durable_write_requirement(
+            intent,
+            MainChatDurableWriteRequirement::MemoryProposal,
+            "explicit_memory_request_has_no_parseable_candidate",
+            "explicit_memory_request",
+            0.9,
         );
     }
 }
@@ -813,6 +826,20 @@ mod tests {
             .lifemodel_proposal_candidate_ids
             .is_empty());
         assert!(intent.external_read_requirement.is_none());
+    }
+
+    #[test]
+    fn explicit_memory_request_without_a_parseable_fact_stays_governed() {
+        let intent = extract_main_chat_intent_signals("请记住。");
+
+        assert_eq!(
+            intent.durable_write_requirement,
+            Some(MainChatDurableWriteRequirement::MemoryProposal)
+        );
+        assert!(intent.memory_routing.candidates.is_empty());
+        assert!(intent
+            .reason_codes
+            .contains(&"explicit_memory_request_has_no_parseable_candidate".to_string()));
     }
 
     #[test]

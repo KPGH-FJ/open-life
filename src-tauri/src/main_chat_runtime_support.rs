@@ -192,6 +192,7 @@ pub(crate) async fn append_main_chat_agent_transcript(
 pub(crate) async fn append_main_chat_direct_answer_contract_transcript(
     state: &Arc<AppState>,
     main_chat_agent_turn: &MainChatAgentTurn,
+    conversation_owner_id: &str,
     user_text: &str,
     selected_skill_id: Option<&str>,
 ) -> Result<Vec<ExecutionTranscriptEntry>, String> {
@@ -224,6 +225,7 @@ pub(crate) async fn append_main_chat_direct_answer_contract_transcript(
         state,
         &main_chat_agent_turn.decision,
         task_session_id,
+        conversation_owner_id,
         user_text,
         selected_skill_id,
     )

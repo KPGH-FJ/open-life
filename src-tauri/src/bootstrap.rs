@@ -844,26 +844,82 @@ fn startup_lifecycle_projection_matches(
             };
             (AgentRunStatus::Failed, task_status)
         }
-        "final_delivery.created" => match event
-            .payload
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-        {
-            Some("completed") => (AgentRunStatus::Completed, AgentTaskSessionStatus::Completed),
-            Some("completed_with_pending_items") => (
-                AgentRunStatus::WaitingPermission,
-                AgentTaskSessionStatus::WaitingPermission,
-            ),
-            Some("blocked") => (AgentRunStatus::Failed, AgentTaskSessionStatus::Blocked),
-            Some("failed") => (AgentRunStatus::Failed, AgentTaskSessionStatus::Failed),
-            Some("interrupted") => (AgentRunStatus::Failed, AgentTaskSessionStatus::Failed),
-            Some("cancelled") => (AgentRunStatus::Cancelled, AgentTaskSessionStatus::Cancelled),
-            _ => return Err("startup_final_delivery_status_invalid".into()),
-        },
+        "final_delivery.created" => startup_final_delivery_owner_projection(event)?,
         "cancel_requested" | "turn.interrupted" => return Ok(false),
         _ => return Err("startup_orphan_terminal_type_invalid".into()),
     };
     Ok(run.status == expected_run && task.status == expected_task)
+}
+
+fn startup_final_delivery_owner_projection(
+    event: &crate::main_chat_event_stream::MainChatAgentDurableEvent,
+) -> Result<
+    (
+        openlife_core::agent::AgentRunStatus,
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus,
+    ),
+    String,
+> {
+    use openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus;
+    use openlife_core::agent::AgentRunStatus;
+
+    let status = event
+        .payload
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "startup_final_delivery_status_missing".to_string())?;
+    let run_status =
+        crate::terminal_owner_write_gateway::startup_agent_run_status_from_durable_event(event)?;
+    let explicit_task = event
+        .payload
+        .get("taskOwnerStatus")
+        .and_then(serde_json::Value::as_str)
+        .map(|owner| match owner {
+            "completed" => Ok(AgentTaskSessionStatus::Completed),
+            "waiting_permission" => Ok(AgentTaskSessionStatus::WaitingPermission),
+            "blocked" => Ok(AgentTaskSessionStatus::Blocked),
+            "failed" => Ok(AgentTaskSessionStatus::Failed),
+            "cancelled" => Ok(AgentTaskSessionStatus::Cancelled),
+            _ => Err("startup_final_delivery_task_owner_status_invalid".to_string()),
+        })
+        .transpose()?;
+    let task_status = explicit_task.unwrap_or(match status {
+        "completed" => AgentTaskSessionStatus::Completed,
+        "completed_with_pending_items" => AgentTaskSessionStatus::WaitingPermission,
+        "blocked" => AgentTaskSessionStatus::Blocked,
+        "failed" | "interrupted" => AgentTaskSessionStatus::Failed,
+        "cancelled" => AgentTaskSessionStatus::Cancelled,
+        _ => AgentTaskSessionStatus::Failed,
+    });
+    let compatible = match status {
+        "completed" => {
+            run_status == AgentRunStatus::Completed
+                && task_status == AgentTaskSessionStatus::Completed
+        }
+        "completed_with_pending_items" => matches!(
+            (run_status, task_status),
+            (AgentRunStatus::Completed, AgentTaskSessionStatus::Completed)
+                | (
+                    AgentRunStatus::WaitingPermission,
+                    AgentTaskSessionStatus::WaitingPermission
+                )
+        ),
+        "blocked" => {
+            run_status == AgentRunStatus::Failed && task_status == AgentTaskSessionStatus::Blocked
+        }
+        "failed" | "interrupted" => {
+            run_status == AgentRunStatus::Failed && task_status == AgentTaskSessionStatus::Failed
+        }
+        "cancelled" => {
+            run_status == AgentRunStatus::Cancelled
+                && task_status == AgentTaskSessionStatus::Cancelled
+        }
+        _ => false,
+    };
+    if !compatible {
+        return Err("startup_final_delivery_owner_status_incompatible".into());
+    }
+    Ok((run_status, task_status))
 }
 
 async fn startup_pre_dispatch_failure_marker_exists(
@@ -989,18 +1045,7 @@ async fn project_startup_final_delivery_receipt(
     crate::terminal_owner_write_gateway::project_agent_run_from_startup_durable_event(state, event)
         .await
         .map_err(|error| format!("project startup final AgentRun failed: {error}"))?;
-    let expected_task_status = match status {
-        "completed" => openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed,
-        "completed_with_pending_items" => {
-            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission
-        }
-        "blocked" => openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked,
-        "failed" | "interrupted" => {
-            openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed
-        }
-        "cancelled" => openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Cancelled,
-        _ => unreachable!("validated final delivery status"),
-    };
+    let (_, expected_task_status) = startup_final_delivery_owner_projection(event)?;
     if task.status == expected_task_status {
         // Startup reconciliation may need to repair only AgentRun. Rewriting
         // an already-canonical TaskSession would advance its owner revision
@@ -1013,24 +1058,31 @@ async fn project_startup_final_delivery_receipt(
         .as_ref()
         .ok_or_else(|| "startup_orphan_task_store_unavailable".to_string())?;
     let store = store_arc.lock().await;
-    match status {
-        "completed" => {
+    match expected_task_status {
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Completed => {
             store.complete_session(&task.id, "Recovered from durable final-delivery receipt.")
         }
-        "completed_with_pending_items" => store.mark_waiting_permission(&task.id),
-        "blocked" => store.block_session(
-            &task.id,
-            "Recovered blocked state from durable final-delivery receipt.",
-        ),
-        "failed" | "interrupted" => store.fail_session(
-            &task.id,
-            "Recovered failed state from durable final-delivery receipt.",
-        ),
-        "cancelled" => store.cancel_session(
-            &task.id,
-            "Recovered cancelled state from durable final-delivery receipt.",
-        ),
-        _ => unreachable!("validated final delivery status"),
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::WaitingPermission => {
+            store.mark_waiting_permission(&task.id)
+        }
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Blocked => store
+            .block_session(
+                &task.id,
+                "Recovered blocked state from durable final-delivery receipt.",
+            ),
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Failed => store
+            .fail_session(
+                &task.id,
+                "Recovered failed state from durable final-delivery receipt.",
+            ),
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Cancelled => store
+            .cancel_session(
+                &task.id,
+                "Recovered cancelled state from durable final-delivery receipt.",
+            ),
+        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus::Running => {
+            unreachable!("validated final delivery status")
+        }
     }
     .map(|_| ())
     .map_err(|error| format!("project startup final task failed: {error}"))
@@ -5180,6 +5232,227 @@ mod tests {
             owner_after_projection.digest(),
             owner_before_projection.digest()
         );
+    }
+
+    #[tokio::test]
+    async fn startup_nonblocking_pending_final_preserves_completed_owners() {
+        use openlife_core::agent::main_chat_agent_v1::{
+            AgentTaskSessionDraft, AgentTaskSessionStatus, MainChatAgentStrategy,
+        };
+        use openlife_core::agent::AgentRunStatus;
+
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::default();
+        let result =
+            bootstrap_with_initialized_test_credentials(directory.path().to_path_buf(), &secrets);
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let chat_session_id = format!("restart-nonblocking-pending-final:{operation_id}");
+        let user_goal = "Reuse an existing non-blocking review item.";
+        result
+            .state
+            .memory_store
+            .lock()
+            .await
+            .create_chat_session(&chat_session_id, "Non-blocking pending restart fixture")
+            .unwrap();
+        let task = result
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_session_with_id(
+                operation_id.clone(),
+                AgentTaskSessionDraft {
+                    chat_session_id: chat_session_id.clone(),
+                    user_goal: user_goal.into(),
+                    selected_strategy: MainChatAgentStrategy::DirectAnswer,
+                    current_plan_summary: None,
+                    context_snapshot_refs: Vec::new(),
+                },
+            )
+            .unwrap();
+        let canonical_message = result
+            .state
+            .memory_store
+            .lock()
+            .await
+            .save_message_idempotent_with_proof(
+                &chat_session_id,
+                &openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: user_goal.into(),
+                },
+                &operation_id,
+            )
+            .unwrap();
+        let admission = {
+            let store = result
+                .state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            store
+                .bind_session_canonical_user_message(
+                    &task.id,
+                    &canonical_message.receipt().canonical_ref,
+                    user_goal,
+                )
+                .unwrap();
+            store
+                .issue_terminal_owner_epoch_admission(&task.id, &operation_id, canonical_message)
+                .unwrap()
+        };
+        let mut run = openlife_core::agent::AgentRun::new_chat_run(&chat_session_id, user_goal);
+        run.id = operation_id.clone();
+        run.task_id = task.id.clone();
+        run.status = AgentRunStatus::Completed;
+        run.finished_at = Some(chrono::Utc::now());
+        result
+            .state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_run(&run)
+            .unwrap();
+        let epoch = result
+            .state
+            .main_chat_agent_event_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .open_terminal_owner_epoch_from_admission(admission)
+            .unwrap();
+        let task_owner = {
+            let store = result
+                .state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            store
+                .complete_session(&task.id, "Completed with a non-blocking review item.")
+                .unwrap();
+            store.canonical_owner_head(&task.id).unwrap().unwrap()
+        };
+        let delivery_id = format!("nonblocking-pending-final:{}", run.id);
+        let final_event = {
+            let event_store = result
+                .state
+                .main_chat_agent_event_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            event_store
+                .begin_terminal_owner_seal(&task.id, &run.id, epoch.generation())
+                .unwrap();
+            event_store
+                .stage_terminal_final_payload(
+                    &task.id,
+                    &run.id,
+                    epoch.generation(),
+                    &delivery_id,
+                    &serde_json::json!({
+                        "deliveryId": delivery_id,
+                        "taskSessionId": task.id,
+                        "runId": run.id,
+                        "status": "completed_with_pending_items",
+                        "bodyStored": false,
+                        "runtimeOwner": "openlife_turn_runtime",
+                        "taskOwnerStatus": "completed",
+                        "runOwnerStatus": "completed",
+                    }),
+                )
+                .unwrap();
+            event_store
+                .append_terminal_final_and_seal(
+                    crate::main_chat_event_stream::MainChatTerminalFinalizationInput {
+                        task_session_id: task.id.clone(),
+                        run_id: run.id.clone(),
+                        epoch_generation: epoch.generation(),
+                        delivery_id,
+                        expected_task_owner_revision: task_owner.revision(),
+                        expected_task_owner_digest: task_owner.digest().to_string(),
+                        status: "completed_with_pending_items".into(),
+                    },
+                )
+                .unwrap()
+        };
+        let completed_task = result
+            .state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_session(&task.id)
+            .unwrap()
+            .unwrap();
+        let completed_run = result
+            .state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed_task.status, AgentTaskSessionStatus::Completed);
+        assert_eq!(completed_run.status, AgentRunStatus::Completed);
+        assert!(startup_lifecycle_projection_matches(
+            &completed_run,
+            &completed_task,
+            &final_event
+        )
+        .expect("owner status projection must be readable"));
+
+        {
+            let store = result.state.agent_run_store.as_ref().unwrap().lock().await;
+            let mut stale_run = store.get_run(&run.id).unwrap().unwrap();
+            stale_run.status = AgentRunStatus::WaitingPermission;
+            stale_run.finished_at = None;
+            store.update_run(&stale_run).unwrap();
+        }
+        let stale_run = result
+            .state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run.id)
+            .unwrap()
+            .unwrap();
+        project_startup_final_delivery_receipt(
+            &result.state,
+            &stale_run,
+            &completed_task,
+            &final_event,
+        )
+        .await
+        .expect("repair the stale run from explicit completed owner facts");
+
+        let repaired_run = result
+            .state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_run(&run.id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(repaired_run.status, AgentRunStatus::Completed);
+        assert!(repaired_run.finished_at.is_some());
     }
 
     #[tokio::test]

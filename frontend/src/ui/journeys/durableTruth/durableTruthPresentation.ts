@@ -68,7 +68,8 @@ function hasExactLifeModelAppliedProof(snapshot: DurableTruthSnapshot, item: Rev
 
 export function durableLifecyclePresentation(
   snapshot: DurableTruthSnapshot | null,
-  item: ReviewItem | null
+  item: ReviewItem | null,
+  owner: "all" | "life_model" | "memory" = "all"
 ): DurableTruthLifecyclePresentation {
   if (!snapshot) {
     return {
@@ -113,18 +114,23 @@ export function durableLifecyclePresentation(
   if (!item) {
     const lifeModel = snapshot.lifeModelEnvelope.data;
     const memory = snapshot.memoryEnvelope.data;
-    const unresolvedReferences = Boolean(
+    const unresolvedLifeModelReferences = Boolean(
       (lifeModel?.pendingUpdateCounts.candidate ?? 0) > 0 ||
       (lifeModel?.pendingUpdateCounts.pendingReview ?? 0) > 0 ||
       (lifeModel?.pendingUpdateCounts.approvedNotApplied ?? 0) > 0 ||
       (lifeModel?.pendingUpdateCounts.failedMaterialization ?? 0) > 0 ||
       (lifeModel?.candidateChanges.length ?? 0) > 0 ||
-      (lifeModel?.relatedReviewItemRefs.length ?? 0) > 0 ||
+      (lifeModel?.relatedReviewItemRefs.length ?? 0) > 0
+    );
+    const unresolvedMemoryReferences = Boolean(
       (memory?.summary.reviewRequiredCount ?? 0) > 0 ||
       (memory?.summary.pendingMaterializationCount ?? 0) > 0 ||
       (memory?.summary.failedMaterializationCount ?? 0) > 0 ||
       (memory?.reviewItemRefs.length ?? 0) > 0
     );
+    const unresolvedReferences =
+      (owner !== "memory" && unresolvedLifeModelReferences) ||
+      (owner !== "life_model" && unresolvedMemoryReferences);
     if (unresolvedReferences) {
       return {
         lifecycle: "unknown",

@@ -284,6 +284,7 @@ impl TaskIntents {
                     "reply",
                     "tone",
                     "写一封",
+                    "写一段",
                     "写邮件",
                     "撰写",
                     "邮件",
@@ -778,6 +779,25 @@ mod tests {
 
         assert_eq!(packet.facts.len(), 1, "{:#?}", packet.facts);
         assert_eq!(packet.facts[0].item_id, "communication-direct");
+    }
+
+    #[test]
+    fn chinese_write_a_paragraph_request_selects_collaboration_preference() {
+        let packet = LifeModelRuntimeContextV2::build(
+            &version(),
+            "请为一次开发阶段复盘写一段四句话的内部说明，内容包含完成情况、主要问题、下一步。不要使用工具，不要执行任何外部或持久写入。",
+            now(),
+        )
+        .unwrap()
+        .expect("Chinese writing request should select communication context");
+
+        assert_eq!(
+            packet.selected_sections,
+            vec![LifeModelSectionV2::CollaborationPreferences]
+        );
+        assert_eq!(packet.facts.len(), 1);
+        assert_eq!(packet.facts[0].item_id, "communication-direct");
+        assert!(!packet.permissions_granted);
     }
 
     #[test]

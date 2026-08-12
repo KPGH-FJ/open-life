@@ -11,14 +11,351 @@ use crate::AppState;
 const MAX_CONTEXT_CHARS_PER_FILE: usize = 1200;
 const CONFIGURED_KNOWLEDGE_ROOT_ENV: &str = "OPENLIFE_KNOWLEDGE_ROOT";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MainChatContextTaskMode {
+    OpenEnded,
+    EvidenceBoundSources,
+    EvidenceBoundMarkdown,
+    EvidenceBoundDocuments,
+    EvidenceBoundAgentMemory,
+    ExactAgentMemoryRead,
+}
+
+impl MainChatContextTaskMode {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::OpenEnded => "open_ended",
+            Self::EvidenceBoundSources => "evidence_bound_sources",
+            Self::EvidenceBoundMarkdown => "evidence_bound_markdown",
+            Self::EvidenceBoundDocuments => "evidence_bound_documents",
+            Self::EvidenceBoundAgentMemory => "evidence_bound_agent_memory",
+            Self::ExactAgentMemoryRead => "exact_agent_memory_read",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MainChatInlineFact {
+    pub(crate) handle: String,
+    pub(crate) content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct MainChatContextRequest {
+    pub(crate) task_mode: MainChatContextTaskMode,
+    pub(crate) memory_scopes: Vec<MemoryLifecycleScope>,
+    pub(crate) inline_facts: Vec<MainChatInlineFact>,
+}
+
+impl MainChatContextRequest {
+    pub(crate) fn from_user_text(user_text: &str) -> Self {
+        let lower = user_text.to_lowercase();
+        let positive_source_text = without_negated_source_clauses(&lower);
+        let explicitly_exclusive = [
+            "只允许使用",
+            "只使用",
+            "仅使用",
+            "只根据",
+            "仅根据",
+            "只基于",
+            "仅基于",
+            "only use",
+            "use only",
+            "only rely on",
+            "exclusively use",
+            "based only on",
+            "only based on",
+        ]
+        .iter()
+        .any(|marker| positive_source_text.contains(marker));
+        if !explicitly_exclusive {
+            return Self::open_ended();
+        }
+
+        let explicitly_agent_memory = ["agent memory", "agent-memory", "智能体记忆", "代理记忆"]
+            .iter()
+            .any(|marker| positive_source_text.contains(marker));
+        if !explicitly_agent_memory {
+            let inline_facts = extract_explicit_inline_facts(user_text);
+            let explicitly_names_a_source = [
+                "以下信息",
+                "给定信息",
+                "以下事实",
+                "给定事实",
+                "以下资料",
+                "这些资料",
+                "选中的资料",
+                "文档",
+                "markdown",
+                "these facts",
+                "following facts",
+                "provided information",
+                "selected sources",
+                "selected documents",
+            ]
+            .iter()
+            .any(|marker| positive_source_text.contains(marker));
+            return if !inline_facts.is_empty() {
+                Self {
+                    task_mode: MainChatContextTaskMode::EvidenceBoundSources,
+                    memory_scopes: Vec::new(),
+                    inline_facts,
+                }
+            } else if positive_source_text.contains("markdown") {
+                Self {
+                    task_mode: MainChatContextTaskMode::EvidenceBoundMarkdown,
+                    memory_scopes: Vec::new(),
+                    inline_facts: Vec::new(),
+                }
+            } else if explicitly_names_a_source {
+                Self {
+                    task_mode: MainChatContextTaskMode::EvidenceBoundDocuments,
+                    memory_scopes: Vec::new(),
+                    inline_facts: Vec::new(),
+                }
+            } else {
+                Self::open_ended()
+            };
+        }
+
+        let mut memory_scopes = Vec::new();
+        for (scope, markers) in [
+            (
+                MemoryLifecycleScope::Global,
+                &[
+                    "全局 agent memory",
+                    "全局作用域",
+                    "全局范围",
+                    "global agent memory",
+                    "global scope",
+                    "global-scoped",
+                ][..],
+            ),
+            (
+                MemoryLifecycleScope::Conversation,
+                &[
+                    "当前会话 agent memory",
+                    "当前会话作用域",
+                    "当前会话范围",
+                    "current conversation agent memory",
+                    "conversation scope",
+                    "conversation-scoped",
+                ][..],
+            ),
+            (
+                MemoryLifecycleScope::Workspace,
+                &[
+                    "当前工作区 agent memory",
+                    "当前工作区作用域",
+                    "当前工作区范围",
+                    "current workspace agent memory",
+                    "workspace scope",
+                    "workspace-scoped",
+                ][..],
+            ),
+            (
+                MemoryLifecycleScope::Project,
+                &[
+                    "当前项目 agent memory",
+                    "当前项目作用域",
+                    "当前项目范围",
+                    "current project agent memory",
+                    "project scope",
+                    "project-scoped",
+                ][..],
+            ),
+        ] {
+            if markers
+                .iter()
+                .any(|marker| positive_source_text.contains(marker))
+            {
+                memory_scopes.push(scope);
+            }
+        }
+
+        Self {
+            task_mode: if memory_scopes.is_empty() {
+                MainChatContextTaskMode::EvidenceBoundAgentMemory
+            } else {
+                MainChatContextTaskMode::ExactAgentMemoryRead
+            },
+            memory_scopes,
+            inline_facts: Vec::new(),
+        }
+    }
+
+    fn open_ended() -> Self {
+        Self {
+            task_mode: MainChatContextTaskMode::OpenEnded,
+            memory_scopes: Vec::new(),
+            inline_facts: Vec::new(),
+        }
+    }
+
+    pub(crate) fn is_agent_memory_bound(&self) -> bool {
+        matches!(
+            self.task_mode,
+            MainChatContextTaskMode::EvidenceBoundAgentMemory
+                | MainChatContextTaskMode::ExactAgentMemoryRead
+        )
+    }
+
+    pub(crate) fn is_source_bound(&self) -> bool {
+        self.task_mode != MainChatContextTaskMode::OpenEnded
+    }
+
+    pub(crate) fn is_inline_fact_bound(&self) -> bool {
+        self.task_mode == MainChatContextTaskMode::EvidenceBoundSources
+            && !self.inline_facts.is_empty()
+    }
+
+    pub(crate) fn is_markdown_bound(&self) -> bool {
+        self.task_mode == MainChatContextTaskMode::EvidenceBoundMarkdown
+    }
+
+    pub(crate) fn is_document_bound(&self) -> bool {
+        self.task_mode == MainChatContextTaskMode::EvidenceBoundDocuments
+    }
+}
+
+fn without_negated_source_clauses(value: &str) -> String {
+    value
+        .split(['。', '！', '？', '；', '.', '!', '?', ';'])
+        .filter(|clause| {
+            ![
+                "不要使用",
+                "不要读取",
+                "不要参考",
+                "不使用",
+                "不读取",
+                "不参考",
+                "排除",
+                "do not use",
+                "don't use",
+                "do not read",
+                "don't read",
+                "do not rely on",
+                "don't rely on",
+                "without using",
+                "without reading",
+                "exclude",
+            ]
+            .iter()
+            .any(|marker| clause.contains(marker))
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+const MAX_EXPLICIT_INLINE_FACTS: usize = 16;
+const MAX_EXPLICIT_INLINE_FACT_CHARS: usize = 1_000;
+const MAX_EXPLICIT_INLINE_FACT_TOTAL_CHARS: usize = 6_000;
+
+fn extract_explicit_inline_facts(user_text: &str) -> Vec<MainChatInlineFact> {
+    let lower = user_text.to_lowercase();
+    let source_start = [
+        "以下信息",
+        "给定信息",
+        "以下事实",
+        "给定事实",
+        "以下资料",
+        "these facts",
+        "following facts",
+        "provided information",
+    ]
+    .iter()
+    .filter_map(|marker| lower.find(marker).map(|index| index + marker.len()))
+    .min();
+    let Some(source_start) = source_start else {
+        return Vec::new();
+    };
+    let Some(after_marker) = user_text.get(source_start..) else {
+        return Vec::new();
+    };
+    let Some(separator) = after_marker.find(['：', ':']) else {
+        return Vec::new();
+    };
+    let separator_len = after_marker[separator..]
+        .chars()
+        .next()
+        .map(char::len_utf8)
+        .unwrap_or_default();
+    let mut fact_text = after_marker[separator + separator_len..].trim();
+    let fact_text_lower = fact_text.to_lowercase();
+    if let Some(control_start) = [
+        "不要使用工具",
+        "不要调用工具",
+        "不要执行任何",
+        "不要执行外部",
+        "do not use tools",
+        "do not call tools",
+        "do not execute",
+        "do not perform",
+    ]
+    .iter()
+    .filter_map(|marker| fact_text_lower.find(marker))
+    .min()
+    {
+        fact_text = fact_text[..control_start].trim();
+    }
+    fact_text = fact_text.trim_end_matches(['。', '.', '；', ';', ' ', '\n', '\r']);
+
+    let mut total_chars = 0usize;
+    let mut facts = Vec::new();
+    for part in fact_text.split(['；', ';', '\n']) {
+        let content = part
+            .trim()
+            .trim_start_matches(['-', '*', '•', ' '])
+            .trim()
+            .trim_end_matches(['。', '.'])
+            .trim();
+        let chars = content.chars().count();
+        if chars == 0 || chars > MAX_EXPLICIT_INLINE_FACT_CHARS {
+            continue;
+        }
+        total_chars = total_chars.saturating_add(chars);
+        if total_chars > MAX_EXPLICIT_INLINE_FACT_TOTAL_CHARS
+            || facts.len() >= MAX_EXPLICIT_INLINE_FACTS
+        {
+            return Vec::new();
+        }
+        facts.push(MainChatInlineFact {
+            handle: format!("F{}", facts.len() + 1),
+            content: content.to_string(),
+        });
+    }
+    facts
+}
+
 #[allow(dead_code)]
 pub(crate) async fn compile_main_chat_context(
     state: &Arc<AppState>,
     decision: &openlife_core::agent::main_chat_agent_v1::AgentIngressDecision,
     task_session_id: &str,
+    conversation_owner_id: &str,
     user_text: &str,
     selected_skill_id: Option<&str>,
 ) -> Result<openlife_core::agent::main_chat_agent_v1::CompiledContext, String> {
+    let context_request = MainChatContextRequest::from_user_text(user_text);
+    if context_request.is_agent_memory_bound() {
+        let candidates =
+            retrievable_lifecycle_context_candidates(state, conversation_owner_id, user_text, &[])
+                .await?
+                .into_iter()
+                .filter(|candidate| {
+                    lifecycle_memory_candidate_matches_request(candidate, &context_request)
+                })
+                .collect();
+        return Ok(ContextCompiler.compile(ContextCompilerInput {
+            strategy: decision.selected_strategy,
+            privacy_risk: decision.privacy_risk.clone(),
+            active_session_id: Some(task_session_id.to_string()),
+            token_budget: 160,
+            selected_skill_id: None,
+            candidates,
+        }));
+    }
+
     let mut candidates = vec![
         ContextSourceCandidate::new(
             ContextSourceKind::StableCore,
@@ -93,29 +430,13 @@ pub(crate) async fn compile_main_chat_context(
     });
     let (current_context, configured_context) = tokio::join!(current_context, configured_context);
     candidates.extend(
-        retrievable_lifecycle_context_candidates(state, task_session_id, user_text, &[]).await?,
+        retrievable_lifecycle_context_candidates(state, conversation_owner_id, user_text, &[])
+            .await?,
     );
     candidates.extend(current_context.unwrap_or_default());
     candidates.extend(configured_context.unwrap_or_default());
     candidates.extend(load_configured_markdown_memory_context_candidates(state, user_text).await?);
     ensure_bundled_selected_skill_context_candidate(&mut candidates, selected_skill_id.as_deref());
-    let sessions = {
-        let store = state.memory_store.lock().await;
-        store.list_sessions(5).map_err(|error| {
-            format!("memory_retrieval_degraded:memory_store_query_failed:{error}")
-        })?
-    };
-    candidates.push(ContextSourceCandidate::new(
-        ContextSourceKind::SelectedPersonalContext,
-        "chat_sessions.recent",
-        format!(
-            "Recent session count available for search: {}",
-            sessions.len()
-        ),
-        "bounded session search metadata",
-        "internal",
-        8,
-    ));
 
     Ok(ContextCompiler.compile(ContextCompilerInput {
         strategy: decision.selected_strategy,
@@ -158,10 +479,16 @@ pub(crate) async fn retrievable_lifecycle_context_candidates(
         .map_err(|error| {
             format!("memory_retrieval_degraded:lifecycle_records_query_failed:{error}")
         })?;
-    let scope = runtime_memory_scope(state, conversation_owner_id).await?;
+    let scope = runtime_memory_scope(state, conversation_owner_id, &records).await?;
+    let exclusive_scopes = explicit_exclusive_memory_scopes(query);
     let records = records
         .into_iter()
-        .filter(|record| scope.allows(record))
+        .filter(|record| {
+            scope.allows(record)
+                && exclusive_scopes
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(&record.scope))
+        })
         .map(|record| (record.memory_id.clone(), record))
         .collect::<HashMap<_, _>>();
     let allowed_memory_ids = records.keys().cloned().collect::<HashSet<_>>();
@@ -187,6 +514,10 @@ pub(crate) async fn retrievable_lifecycle_context_candidates(
     } else {
         "fts_fallback"
     };
+    let approximate_vector_requires_lexical_support = matches!(
+        search.route_quality,
+        crate::memory_gateway::EmbeddingRouteQuality::DeterministicHashApproximation
+    );
     let mut ranked = search
         .hits
         .into_iter()
@@ -194,6 +525,11 @@ pub(crate) async fn retrievable_lifecycle_context_candidates(
             let memory_id = chunk.source.strip_prefix("memory_lifecycle:")?;
             let record = records.get(memory_id)?.clone();
             if !record.conflict_ids.is_empty() {
+                return None;
+            }
+            if approximate_vector_requires_lexical_support
+                && !memory_has_lexical_support(query, &record.content)
+            {
                 return None;
             }
             let freshness = memory_freshness(&record);
@@ -255,6 +591,40 @@ pub(crate) async fn retrievable_lifecycle_context_candidates(
     Ok(selected)
 }
 
+fn explicit_exclusive_memory_scopes(query: &str) -> Option<Vec<MemoryLifecycleScope>> {
+    let request = MainChatContextRequest::from_user_text(query);
+    (request.task_mode == MainChatContextTaskMode::ExactAgentMemoryRead)
+        .then_some(request.memory_scopes)
+}
+
+pub(crate) fn is_lifecycle_memory_context_candidate(candidate: &ContextSourceCandidate) -> bool {
+    candidate.source_kind == ContextSourceKind::SelectedPersonalContext
+        && candidate.source_id.starts_with("memory:")
+}
+
+pub(crate) fn lifecycle_memory_candidate_matches_request(
+    candidate: &ContextSourceCandidate,
+    request: &MainChatContextRequest,
+) -> bool {
+    if !is_lifecycle_memory_context_candidate(candidate) {
+        return false;
+    }
+    let Some(scope) = candidate
+        .content
+        .lines()
+        .find_map(|line| line.strip_prefix("scope="))
+        .map(str::trim)
+        .filter(|scope| !scope.is_empty())
+    else {
+        return false;
+    };
+    request.memory_scopes.is_empty()
+        || request
+            .memory_scopes
+            .iter()
+            .any(|allowed| allowed.as_str() == scope)
+}
+
 fn life_model_memory_rerank_bonus(
     query: &str,
     memory_content: &str,
@@ -299,9 +669,19 @@ fn retrieval_tokens(value: &str) -> Vec<String> {
     tokens
 }
 
+fn memory_has_lexical_support(query: &str, memory_content: &str) -> bool {
+    let memory_tokens = retrieval_tokens(&memory_content.to_lowercase())
+        .into_iter()
+        .collect::<HashSet<_>>();
+    retrieval_tokens(&query.to_lowercase())
+        .into_iter()
+        .any(|token| memory_tokens.contains(&token))
+}
+
 #[derive(Debug)]
 struct RuntimeMemoryScope {
     conversation: String,
+    legacy_conversations: HashSet<String>,
     workspace: Option<String>,
     project: Option<String>,
 }
@@ -312,6 +692,10 @@ impl RuntimeMemoryScope {
             MemoryLifecycleScope::Global => record.scope_owner_ref.is_none(),
             MemoryLifecycleScope::Conversation => {
                 record.scope_owner_ref.as_deref() == Some(self.conversation.as_str())
+                    || record
+                        .scope_owner_ref
+                        .as_ref()
+                        .is_some_and(|owner| self.legacy_conversations.contains(owner))
             }
             MemoryLifecycleScope::Workspace => {
                 record.scope_owner_ref.as_deref() == self.workspace.as_deref()
@@ -326,6 +710,7 @@ impl RuntimeMemoryScope {
 async fn runtime_memory_scope(
     state: &Arc<AppState>,
     conversation_owner_id: &str,
+    records: &[MemoryLifecycleRecord],
 ) -> Result<RuntimeMemoryScope, String> {
     let (workspace_root, project_root) = {
         let config = state.config.lock().await;
@@ -341,12 +726,52 @@ async fn runtime_memory_scope(
             })
             .transpose()
     };
+    let mut legacy_conversations = HashSet::new();
+    if let Some(task_store) = state.main_chat_agent_session_store.as_ref() {
+        let task_store = task_store.lock().await;
+        let mut source_chat_ids: HashMap<String, Option<String>> = HashMap::new();
+        for record in records.iter().filter(|record| {
+            record.scope == MemoryLifecycleScope::Conversation
+                && record.source_task_session_id.is_some()
+                && record.scope_owner_ref.is_some()
+        }) {
+            let source_task_session_id = record
+                .source_task_session_id
+                .as_deref()
+                .expect("filtered source task session");
+            let expected_legacy_owner =
+                memory_scope_owner_ref(MemoryLifecycleScope::Conversation, source_task_session_id)
+                    .map_err(|error| error.to_string())?;
+            if record.scope_owner_ref.as_deref() != Some(expected_legacy_owner.as_str()) {
+                continue;
+            }
+            let source_chat_id = if let Some(cached) = source_chat_ids.get(source_task_session_id) {
+                cached.clone()
+            } else {
+                let loaded = task_store
+                    .chat_session_id_for_task(source_task_session_id)
+                    .map_err(|error| format!("legacy conversation owner lookup failed: {error}"))?;
+                source_chat_ids.insert(source_task_session_id.to_string(), loaded.clone());
+                loaded
+            };
+            let Some(source_chat_id) = source_chat_id else {
+                continue;
+            };
+            if source_chat_id == conversation_owner_id {
+                legacy_conversations.insert(expected_legacy_owner);
+            }
+        }
+    }
     Ok(RuntimeMemoryScope {
         conversation: memory_scope_owner_ref(
             MemoryLifecycleScope::Conversation,
             conversation_owner_id,
         )
         .map_err(|error| error.to_string())?,
+        // Compatibility is deliberately limited to old conversation records
+        // whose task-owned ref can be proven to belong to this same chat.
+        // Remove this set after those rows are migrated to chat-session owners.
+        legacy_conversations,
         workspace: scoped_ref(MemoryLifecycleScope::Workspace, workspace_root)?,
         project: scoped_ref(MemoryLifecycleScope::Project, project_root)?,
     })
@@ -684,29 +1109,42 @@ pub(crate) fn load_markdown_memory_context_candidates_from_roots(
     task_text: &str,
 ) -> Vec<ContextSourceCandidate> {
     let (files, _) = crate::markdown_memory::load_markdown_memory_files(roots);
+    let mut ranked = files
+        .into_iter()
+        .filter_map(|file| {
+            select_task_relevant_markdown(&file.content, task_text)
+                .map(|selection| (file, selection))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(
+        |(left_file, left_selection), (right_file, right_selection)| {
+            right_selection
+                .relevance_score
+                .cmp(&left_selection.relevance_score)
+                .then_with(|| {
+                    markdown_memory_scope_specificity(right_file.scope)
+                        .cmp(&markdown_memory_scope_specificity(left_file.scope))
+                })
+                .then_with(|| left_file.relative_path.cmp(&right_file.relative_path))
+        },
+    );
+
     let mut selected = Vec::new();
     let mut used_chars = 0usize;
-    for file in files {
-        let Some(section) = select_task_relevant_markdown(&file.content, task_text) else {
-            continue;
-        };
+    for (file, selection) in ranked {
         let source = format!(
             "markdown-memory:{}:{}",
             file.scope.as_str(),
             file.relative_path
         );
-        let prefix = format!(
-            "Task-selected {} Markdown working memory from {}. It is not user identity, permission, or completion evidence. Selection reason: current task terms matched one or more headings or sections.\n",
-            file.scope.as_str(),
-            source
-        );
         let remaining =
             crate::markdown_memory::MAX_MARKDOWN_MEMORY_CONTEXT_CHARS.saturating_sub(used_chars);
-        if remaining <= prefix.chars().count() {
+        if remaining == 0 {
             break;
         }
         let per_file_budget = MAX_CONTEXT_CHARS_PER_FILE.min(remaining);
-        let content = format!("{prefix}{section}")
+        let content = selection
+            .content
             .chars()
             .take(per_file_budget)
             .collect::<String>();
@@ -733,7 +1171,23 @@ pub(crate) fn load_markdown_memory_context_candidates_from_roots(
     selected
 }
 
-fn select_task_relevant_markdown(content: &str, task_text: &str) -> Option<String> {
+#[derive(Debug)]
+struct MarkdownSectionSelection {
+    content: String,
+    relevance_score: usize,
+}
+
+fn markdown_memory_scope_specificity(scope: crate::markdown_memory::MarkdownMemoryScope) -> u8 {
+    match scope {
+        crate::markdown_memory::MarkdownMemoryScope::Workspace => 0,
+        crate::markdown_memory::MarkdownMemoryScope::Project => 1,
+    }
+}
+
+fn select_task_relevant_markdown(
+    content: &str,
+    task_text: &str,
+) -> Option<MarkdownSectionSelection> {
     let task = task_text.trim().to_ascii_lowercase();
     if task.is_empty() {
         return None;
@@ -775,13 +1229,17 @@ fn select_task_relevant_markdown(content: &str, task_text: &str) -> Option<Strin
         })
         .collect::<Vec<_>>();
     selected.sort_by_key(|item| std::cmp::Reverse(item.0));
+    let relevance_score = selected.first().map(|(score, _)| *score)?;
     let output = selected
         .into_iter()
         .take(3)
         .map(|(_, section)| section)
         .collect::<Vec<_>>()
         .join("\n\n");
-    (!output.trim().is_empty()).then_some(output)
+    (!output.trim().is_empty()).then_some(MarkdownSectionSelection {
+        content: output,
+        relevance_score,
+    })
 }
 
 fn task_relevance_terms(value: &str) -> Vec<String> {
@@ -1135,7 +1593,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_memory_loads_only_task_relevant_sections_and_stays_non_authoritative() {
+    fn markdown_memory_loads_only_task_relevant_evidence_without_control_metadata() {
         let dir = tempfile::tempdir().expect("temp knowledge root");
         std::fs::write(
             dir.path().join("MEMORY.md"),
@@ -1155,9 +1613,11 @@ mod tests {
             .expect("task-relevant memory");
 
         assert!(memory.content.contains("Roadshow"));
-        assert!(memory
-            .content
-            .contains("not user identity, permission, or completion evidence"));
+        assert!(
+            !memory.content.contains("Selection reason"),
+            "selection metadata is control data and must not enter the evidence body"
+        );
+        assert!(memory.inclusion_reason.contains("non-authoritative"));
         assert!(!memory.content.contains("Gardening"));
     }
 
@@ -1254,6 +1714,32 @@ mod tests {
 
         assert!(candidates.len() <= crate::markdown_memory::MAX_MARKDOWN_MEMORY_CONTEXT_FILES);
         assert!(total_chars <= crate::markdown_memory::MAX_MARKDOWN_MEMORY_CONTEXT_CHARS);
+    }
+
+    #[tokio::test]
+    async fn deterministic_hash_top_k_does_not_admit_unrelated_lifecycle_memory() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        for content in [
+            "5.6C 全局发布标记是 OL-G5-GLOBAL-314",
+            "5.6C 工作区标记是 OL-G5-WORKSPACE-482",
+            "5.6C 项目标记是 OL-G5-PROJECT-693",
+        ] {
+            accept_and_project_memory(&state, &accepted_lifecycle_memory_proposal(content)).await;
+        }
+
+        let candidates = retrievable_lifecycle_context_candidates(
+            &state,
+            "conversation-a",
+            "请为一次开发阶段复盘写一段四句话的内部说明，内容包含完成情况、主要问题、下一步。",
+            &[],
+        )
+        .await
+        .expect("ordinary generation context retrieval");
+
+        assert!(
+            !candidates.iter().any(is_lifecycle_memory_context_candidate),
+            "unrelated approximate Top-K results must not enter the model context"
+        );
     }
 
     #[tokio::test]
@@ -1415,6 +1901,321 @@ mod tests {
                 .access_count,
             0
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_conversation_only_recall_excludes_broader_applicable_scopes() {
+        const GLOBAL: &str = "5.6C GLOBAL SCOPE MUST NOT ENTER CONVERSATION ONLY RECALL";
+        const PROJECT: &str = "5.6C PROJECT SCOPE MUST NOT ENTER CONVERSATION ONLY RECALL";
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let project = tempfile::tempdir().expect("selected project");
+        let project_path = project.path().canonicalize().unwrap();
+        let project_owner = memory_scope_owner_ref(
+            MemoryLifecycleScope::Project,
+            project_path.to_str().unwrap(),
+        )
+        .unwrap();
+        state.config.lock().await.system.project_memory_root =
+            Some(project_path.to_string_lossy().into_owned());
+
+        let global = accept_and_project_memory(
+            &state,
+            &lifecycle_memory_proposal(GLOBAL, "global", None, Vec::new()),
+        )
+        .await;
+        let project = accept_and_project_memory(
+            &state,
+            &lifecycle_memory_proposal(PROJECT, "project", Some(&project_owner), Vec::new()),
+        )
+        .await;
+
+        let candidates = retrievable_lifecycle_context_candidates(
+            &state,
+            "new-conversation-without-memory",
+            "只允许使用当前会话 Agent Memory；5.6C 标记是什么？",
+            &[],
+        )
+        .await
+        .expect("exclusive conversation lifecycle retrieval");
+
+        assert!(!candidates
+            .iter()
+            .any(|candidate| candidate.source_id == global.memory_id));
+        assert!(!candidates
+            .iter()
+            .any(|candidate| candidate.source_id == project.memory_id));
+        assert!(!candidates
+            .iter()
+            .any(|candidate| candidate.source_id.starts_with("memory:")));
+    }
+
+    #[tokio::test]
+    async fn legacy_task_owned_conversation_memory_is_recalled_only_by_its_chat_session() {
+        const SENTINEL: &str = "LEGACY_CONVERSATION_OWNER_SAME_CHAT_ONLY";
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let source_task = {
+            let store = state
+                .main_chat_agent_session_store
+                .as_ref()
+                .expect("task session store")
+                .lock()
+                .await;
+            store
+                .create_session(
+                    openlife_core::agent::main_chat_agent_v1::AgentTaskSessionDraft {
+                        chat_session_id: "chat-a".into(),
+                        user_goal: "create historical conversation memory".into(),
+                        selected_strategy: openlife_core::agent::main_chat_agent_v1::MainChatAgentStrategy::MemoryProposal,
+                        current_plan_summary: None,
+                        context_snapshot_refs: Vec::new(),
+                    },
+                )
+                .expect("source task session")
+        };
+        let legacy_owner =
+            memory_scope_owner_ref(MemoryLifecycleScope::Conversation, &source_task.id).unwrap();
+        let proposal =
+            lifecycle_memory_proposal(SENTINEL, "conversation", Some(&legacy_owner), Vec::new());
+        let accepted = {
+            let mut input =
+                openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                    &proposal,
+                    SENTINEL.into(),
+                )
+                .expect("legacy typed lifecycle proposal");
+            input.source_task_session_id = Some(source_task.id.clone());
+            let accepted = state
+                .memory_lifecycle_store
+                .as_ref()
+                .expect("lifecycle store")
+                .lock()
+                .await
+                .accept_memory_proposal(input)
+                .expect("accept historical task-owned memory")
+                .record;
+            crate::memory_gateway::reconcile_canonical_outboxes_with_state(&state, 32)
+                .await
+                .expect("project historical task-owned memory");
+            accepted
+        };
+
+        let same_chat = retrievable_lifecycle_context_candidates(
+            &state,
+            "chat-a",
+            "LEGACY CONVERSATION OWNER SAME CHAT ONLY",
+            &[],
+        )
+        .await
+        .expect("same-chat legacy retrieval");
+        assert!(same_chat
+            .iter()
+            .any(|candidate| candidate.source_id == accepted.memory_id));
+
+        let foreign_chat = retrievable_lifecycle_context_candidates(
+            &state,
+            "chat-b",
+            "LEGACY CONVERSATION OWNER SAME CHAT ONLY",
+            &[],
+        )
+        .await
+        .expect("foreign-chat legacy retrieval");
+        assert!(!foreign_chat
+            .iter()
+            .any(|candidate| candidate.source_id == accepted.memory_id));
+
+        for (content, source_task_id, owner_identity) in [
+            (
+                "FORGED_LEGACY_CONVERSATION_OWNER_MUST_NOT_RECALL",
+                source_task.id.as_str(),
+                "different-task-owner",
+            ),
+            (
+                "MISSING_LEGACY_SOURCE_TASK_MUST_NOT_RECALL",
+                "missing-source-task",
+                "missing-source-task",
+            ),
+        ] {
+            let owner =
+                memory_scope_owner_ref(MemoryLifecycleScope::Conversation, owner_identity).unwrap();
+            let proposal =
+                lifecycle_memory_proposal(content, "conversation", Some(&owner), Vec::new());
+            let rejected_id = {
+                let mut input =
+                    openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                        &proposal,
+                        content.into(),
+                    )
+                    .expect("typed invalid historical proposal");
+                input.source_task_session_id = Some(source_task_id.into());
+                let record = state
+                    .memory_lifecycle_store
+                    .as_ref()
+                    .expect("lifecycle store")
+                    .lock()
+                    .await
+                    .accept_memory_proposal(input)
+                    .expect("store historical row before runtime verification")
+                    .record;
+                crate::memory_gateway::reconcile_canonical_outboxes_with_state(&state, 32)
+                    .await
+                    .expect("project historical row before runtime verification");
+                record.memory_id
+            };
+            let candidates =
+                retrievable_lifecycle_context_candidates(&state, "chat-a", content, &[])
+                    .await
+                    .expect("invalid legacy row retrieval");
+            assert!(!candidates
+                .iter()
+                .any(|candidate| candidate.source_id == rejected_id));
+        }
+    }
+
+    #[test]
+    fn explicit_memory_scope_filter_requires_exclusive_and_precise_scope_language() {
+        assert_eq!(
+            explicit_exclusive_memory_scopes(
+                "只允许使用当前会话作用域的 Agent Memory；没有依据就回答未知。"
+            ),
+            Some(vec![MemoryLifecycleScope::Conversation])
+        );
+        assert_eq!(
+            explicit_exclusive_memory_scopes("只使用当前会话 Agent Memory；没有依据就回答未知。"),
+            Some(vec![MemoryLifecycleScope::Conversation])
+        );
+        assert_eq!(
+            explicit_exclusive_memory_scopes("仅使用当前工作区 Agent Memory。"),
+            Some(vec![MemoryLifecycleScope::Workspace])
+        );
+        assert_eq!(
+            explicit_exclusive_memory_scopes("只使用全局 Agent Memory。"),
+            Some(vec![MemoryLifecycleScope::Global])
+        );
+        assert_eq!(
+            explicit_exclusive_memory_scopes("Only use the current project Agent Memory."),
+            Some(vec![MemoryLifecycleScope::Project])
+        );
+        assert_eq!(
+            explicit_exclusive_memory_scopes(
+                "Only use the workspace scope and project-scoped Agent Memory."
+            ),
+            Some(vec![
+                MemoryLifecycleScope::Workspace,
+                MemoryLifecycleScope::Project
+            ])
+        );
+        assert_eq!(
+            explicit_exclusive_memory_scopes("当前会话可能有相关记忆。"),
+            None
+        );
+        assert_eq!(explicit_exclusive_memory_scopes("只使用中文回答。"), None);
+    }
+
+    #[test]
+    fn context_request_requires_an_explicit_agent_memory_source_boundary() {
+        let exact = MainChatContextRequest::from_user_text(
+            "只允许使用当前会话作用域的 Agent Memory；没有依据就回答未知。",
+        );
+        assert_eq!(
+            exact.task_mode,
+            MainChatContextTaskMode::ExactAgentMemoryRead
+        );
+        assert_eq!(
+            exact.memory_scopes,
+            vec![MemoryLifecycleScope::Conversation]
+        );
+
+        let source_bound =
+            MainChatContextRequest::from_user_text("Only use Agent Memory to answer this.");
+        assert_eq!(
+            source_bound.task_mode,
+            MainChatContextTaskMode::EvidenceBoundAgentMemory
+        );
+        assert!(source_bound.memory_scopes.is_empty());
+
+        assert_eq!(
+            MainChatContextRequest::from_user_text("只使用中文回答。").task_mode,
+            MainChatContextTaskMode::OpenEnded
+        );
+        assert_eq!(
+            MainChatContextRequest::from_user_text("请参考当前会话继续回答。").task_mode,
+            MainChatContextTaskMode::OpenEnded
+        );
+    }
+
+    #[test]
+    fn context_request_uses_the_positively_selected_source_not_negated_exclusions() {
+        let markdown = MainChatContextRequest::from_user_text(
+            "只允许使用当前已绑定 Project Markdown Memory 回答；不要使用当前对话历史、Agent Memory、LifeModel、文件资料或一般知识。",
+        );
+        assert_eq!(
+            markdown.task_mode,
+            MainChatContextTaskMode::EvidenceBoundMarkdown
+        );
+
+        let document = MainChatContextRequest::from_user_text(
+            "仅使用选中的文档回答；不要使用 Agent Memory、Markdown、LifeModel 或一般知识。",
+        );
+        assert_eq!(
+            document.task_mode,
+            MainChatContextTaskMode::EvidenceBoundDocuments
+        );
+
+        let agent_memory = MainChatContextRequest::from_user_text(
+            "只允许使用当前会话作用域的 Agent Memory 回答；不要使用当前对话历史、Markdown、LifeModel 或一般知识。",
+        );
+        assert_eq!(
+            agent_memory.task_mode,
+            MainChatContextTaskMode::ExactAgentMemoryRead
+        );
+        assert_eq!(
+            agent_memory.memory_scopes,
+            vec![MemoryLifecycleScope::Conversation]
+        );
+
+        let english_markdown = MainChatContextRequest::from_user_text(
+            "Only use the selected Markdown memory. Do not use conversation history, Agent Memory, LifeModel, documents, or general knowledge.",
+        );
+        assert_eq!(
+            english_markdown.task_mode,
+            MainChatContextTaskMode::EvidenceBoundMarkdown
+        );
+    }
+
+    #[test]
+    fn context_request_extracts_turn_local_facts_without_misclassifying_language_constraints() {
+        let request = MainChatContextRequest::from_user_text(
+            "请只根据以下三条给定信息写一段四句话的内部说明，不补充未提供的项目事实：已完成核心流程联调；主要问题是回归验证不足；下一步是补足回归并重新验收。不要使用工具，不要执行任何外部或持久写入。",
+        );
+
+        assert_eq!(
+            request.task_mode,
+            MainChatContextTaskMode::EvidenceBoundSources
+        );
+        assert_eq!(
+            request.inline_facts,
+            vec![
+                MainChatInlineFact {
+                    handle: "F1".into(),
+                    content: "已完成核心流程联调".into(),
+                },
+                MainChatInlineFact {
+                    handle: "F2".into(),
+                    content: "主要问题是回归验证不足".into(),
+                },
+                MainChatInlineFact {
+                    handle: "F3".into(),
+                    content: "下一步是补足回归并重新验收".into(),
+                },
+            ]
+        );
+        assert!(request.is_source_bound());
+        assert!(request.is_inline_fact_bound());
+        assert!(!request.is_agent_memory_bound());
+
+        let language_only = MainChatContextRequest::from_user_text("只使用中文回答。");
+        assert_eq!(language_only.task_mode, MainChatContextTaskMode::OpenEnded);
+        assert!(!language_only.is_source_bound());
     }
 
     #[tokio::test]

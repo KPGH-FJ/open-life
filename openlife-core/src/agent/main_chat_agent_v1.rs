@@ -1655,16 +1655,26 @@ impl PolicyMemoryAdmissionProof {
         {
             anyhow::bail!("high-risk or sensitive Memory requires ReviewWorkflow");
         }
-        let expected = crate::agent::CanonicalMemoryFactDescriptor::from_candidate(
+        let expected_scope =
+            crate::agent::explicit_memory_scope_from_user_text(source_user_message);
+        if fact.scope != expected_scope {
+            anyhow::bail!("explicit Memory admission scope does not match the user message");
+        }
+        if expected_scope != MemoryLifecycleScope::Global && fact.scope_owner_ref.is_none() {
+            anyhow::bail!("explicit non-global Memory admission requires a bound scope owner");
+        }
+        fact.fact_key()?;
+        let mut expected = crate::agent::CanonicalMemoryFactDescriptor::from_candidate(
             candidate.normalized_claim.clone(),
             candidate.kind,
-            MemoryLifecycleScope::Global,
+            expected_scope,
             MemoryLifecycleRiskLevel::from_intent_risk(policy.risk),
             MemoryLifecycleSensitivity::from_policy_and_candidate(
                 policy.sensitivity,
                 &candidate.sensitivity,
             ),
         )?;
+        expected.scope_owner_ref = fact.scope_owner_ref.clone();
         if &expected != fact {
             anyhow::bail!("explicit Memory admission fact does not match authorized candidate");
         }
@@ -4712,6 +4722,19 @@ impl AgentTaskSessionStore {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(err) => Err(err.into()),
         }
+    }
+
+    /// Reads only the stable conversation owner for scope binding. This does
+    /// not hydrate the task's sensitive user-goal payload.
+    pub fn chat_session_id_for_task(&self, id: &str) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT chat_session_id FROM agent_task_sessions WHERE id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
     }
 
     /// Issue a versioned receipt for the durable TaskSession owner exactly as
@@ -17072,6 +17095,25 @@ mod explicit_lifemodel_read_policy_tests {
             decision.policy_decision.action_effect,
             PolicyActionEffect::Blocked
         );
+    }
+
+    #[test]
+    fn exclusive_agent_memory_read_that_negates_lifemodel_keeps_provider_generation() {
+        let decision = AgentIngress::default().decide(
+            "exclusive-agent-memory-read-policy",
+            "只允许使用当前会话作用域的 Agent Memory 回答；当前会话发布标记是什么？不要使用当前对话历史、Markdown、LifeModel 或一般知识。",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert_eq!(decision.policy_route, PolicyRouteKind::DirectAnswer);
+        assert_ne!(
+            decision.policy_decision.reason_code,
+            "explicit_lifemodel_v2_read"
+        );
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
     }
 }
 

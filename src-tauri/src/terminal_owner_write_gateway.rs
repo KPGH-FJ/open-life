@@ -1833,6 +1833,63 @@ pub(crate) async fn project_agent_run_from_startup_task_owner(
 /// Project a pre-existing AgentRun from an exact durable startup event. The
 /// event is re-read by id under the task fence; caller-shaped event values or
 /// arbitrary AgentRun mutations cannot authorize this lane.
+pub(crate) fn startup_agent_run_status_from_durable_event(
+    evidence: &MainChatAgentDurableEvent,
+) -> Result<AgentRunStatus, String> {
+    let status = evidence
+        .payload
+        .get("status")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "startup_agent_run_durable_evidence_status_missing".to_string())?;
+    if evidence.event_type != "final_delivery.created" || evidence.object_type != "final_delivery" {
+        return match (
+            evidence.event_type.as_str(),
+            evidence.object_type.as_str(),
+            status,
+        ) {
+            ("local_aborted", "turn", "local_aborted") => Ok(AgentRunStatus::Cancelled),
+            ("failed", "turn", "failed") | ("interrupted", "turn", "interrupted") => {
+                Ok(AgentRunStatus::Failed)
+            }
+            _ => Err("startup_agent_run_durable_evidence_transition_invalid".into()),
+        };
+    }
+
+    let explicit_owner = evidence
+        .payload
+        .get("runOwnerStatus")
+        .and_then(serde_json::Value::as_str)
+        .map(|owner| match owner {
+            "completed" => Ok(AgentRunStatus::Completed),
+            "waiting_permission" => Ok(AgentRunStatus::WaitingPermission),
+            "failed" => Ok(AgentRunStatus::Failed),
+            "cancelled" => Ok(AgentRunStatus::Cancelled),
+            _ => Err("startup_final_delivery_run_owner_status_invalid".to_string()),
+        })
+        .transpose()?;
+    let projected = explicit_owner.unwrap_or(match status {
+        "completed" => AgentRunStatus::Completed,
+        "completed_with_pending_items" => AgentRunStatus::WaitingPermission,
+        "blocked" | "failed" | "interrupted" => AgentRunStatus::Failed,
+        "cancelled" => AgentRunStatus::Cancelled,
+        _ => AgentRunStatus::RemoteUnknown,
+    });
+    let compatible = match status {
+        "completed" => projected == AgentRunStatus::Completed,
+        "completed_with_pending_items" => matches!(
+            projected,
+            AgentRunStatus::Completed | AgentRunStatus::WaitingPermission
+        ),
+        "blocked" | "failed" | "interrupted" => projected == AgentRunStatus::Failed,
+        "cancelled" => projected == AgentRunStatus::Cancelled,
+        _ => false,
+    };
+    if !compatible {
+        return Err("startup_final_delivery_run_owner_status_incompatible".into());
+    }
+    Ok(projected)
+}
+
 pub(crate) async fn project_agent_run_from_startup_durable_event(
     state: &Arc<AppState>,
     evidence: &MainChatAgentDurableEvent,
@@ -1886,28 +1943,19 @@ pub(crate) async fn project_agent_run_from_startup_durable_event(
         .get("status")
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| "startup_agent_run_durable_evidence_status_missing".to_string())?;
-    match (
-        evidence.event_type.as_str(),
-        evidence.object_type.as_str(),
-        status,
-    ) {
-        ("final_delivery.created", "final_delivery", "completed") => {
+    match startup_agent_run_status_from_durable_event(evidence)? {
+        AgentRunStatus::Completed => {
             run.status = AgentRunStatus::Completed;
             run.finished_at = Some(evidence.created_at);
             run.error = None;
         }
-        ("final_delivery.created", "final_delivery", "completed_with_pending_items") => {
+        AgentRunStatus::WaitingPermission => {
             run.status = AgentRunStatus::WaitingPermission;
             run.finished_at = None;
             run.error = None;
         }
-        ("final_delivery.created", "final_delivery", "cancelled")
-        | ("local_aborted", "turn", "local_aborted") => run.cancel(),
-        ("final_delivery.created", "final_delivery", "blocked")
-        | ("final_delivery.created", "final_delivery", "failed")
-        | ("final_delivery.created", "final_delivery", "interrupted")
-        | ("failed", "turn", "failed")
-        | ("interrupted", "turn", "interrupted") => {
+        AgentRunStatus::Cancelled => run.cancel(),
+        AgentRunStatus::Failed => {
             run.fail(AgentRunError {
                 message: "Recovered terminal lifecycle from an exact durable startup receipt."
                     .into(),
@@ -1915,9 +1963,11 @@ pub(crate) async fn project_agent_run_from_startup_durable_event(
                 recoverable: status == "blocked" || status == "failed",
             });
         }
-        _ => return Err("startup_agent_run_durable_evidence_transition_invalid".into()),
+        AgentRunStatus::Running | AgentRunStatus::RemoteUnknown => {
+            return Err("startup_agent_run_durable_evidence_transition_invalid".into())
+        }
     }
-    if status != "completed_with_pending_items" {
+    if run.status != AgentRunStatus::WaitingPermission {
         run.finished_at = Some(evidence.created_at);
     }
     let admission = state
@@ -3230,6 +3280,12 @@ impl TerminalOwnerWriteGateway {
             .any(|action| action.status == ExecutionQueueStatus::PendingPermission))
     }
 
+    fn conversation_owner_id_for_task(&self, task_session_id: &str) -> anyhow::Result<String> {
+        self.task_store
+            .chat_session_id_for_task(task_session_id)?
+            .ok_or_else(|| anyhow::anyhow!("terminal_owner_task_session_missing"))
+    }
+
     async fn apply_terminal_owner_successor(
         &self,
         proposal_id: &str,
@@ -3449,18 +3505,21 @@ impl TerminalOwnerWriteGateway {
                     .get("content")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("terminal_owner_memory_content_missing"))?;
+                let conversation_owner_id =
+                    self.conversation_owner_id_for_task(origin.task_session_id())?;
                 let mut input =
                     MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
                         &proposal,
                         content.to_string(),
                         origin.task_session_id(),
+                        &conversation_owner_id,
                         origin.run_id(),
                         origin.canonical_user_message_ref(),
                         origin.canonical_user_message_digest(),
                     )?;
                 openlife_core::agent::bind_memory_fact_scope_owner(
                     &mut input.fact,
-                    Some(origin.task_session_id()),
+                    Some(&conversation_owner_id),
                     self.workspace_memory_root.as_deref(),
                     self.project_memory_root.as_deref(),
                 )?;
@@ -3547,18 +3606,21 @@ impl TerminalOwnerWriteGateway {
                     .get("content")
                     .and_then(serde_json::Value::as_str)
                     .ok_or_else(|| anyhow::anyhow!("terminal_owner_memory_content_missing"))?;
+                let conversation_owner_id =
+                    self.conversation_owner_id_for_task(origin.task_session_id())?;
                 let mut input =
                     MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
                         &proposal,
                         content.to_string(),
                         origin.task_session_id(),
+                        &conversation_owner_id,
                         origin.run_id(),
                         origin.canonical_user_message_ref(),
                         origin.canonical_user_message_digest(),
                     )?;
                 openlife_core::agent::bind_memory_fact_scope_owner(
                     &mut input.fact,
-                    Some(origin.task_session_id()),
+                    Some(&conversation_owner_id),
                     self.workspace_memory_root.as_deref(),
                     self.project_memory_root.as_deref(),
                 )?;

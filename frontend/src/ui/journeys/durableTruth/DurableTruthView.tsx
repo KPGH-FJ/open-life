@@ -227,7 +227,7 @@ export function DurableTruthView({
   );
   const lifeModelItem =
     lifeModelItems.find(item => item.id === selectedItem?.id) ?? lifeModelItems[0] ?? null;
-  const state = durableLifecyclePresentation(snapshot, lifeModelItem);
+  const state = durableLifecyclePresentation(snapshot, lifeModelItem, "life_model");
   const memoryOwnerReady = snapshot.memoryEnvelope.status === "ready";
   const reviewOwnerReady = snapshot.reviewEnvelope.status === "ready";
 

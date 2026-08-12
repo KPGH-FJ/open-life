@@ -9279,6 +9279,7 @@ mod provider_start_admission_tests {
             selected_skill_id: None,
             payload_purpose: ProviderPayloadPurpose::MainChatDirectAnswer,
             stream_provider_tokens,
+            additional_resource_context_allowed: true,
         }
     }
 

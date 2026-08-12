@@ -32,8 +32,10 @@ pub struct LifeModelExplicitReadAnswer {
 
 pub fn is_explicit_lifemodel_read_intent(user_text: &str) -> bool {
     let normalized = normalize(user_text);
+    let write_intent_text = without_negated_write_boundaries(&normalized);
+    let positive_lifemodel_text = without_negated_lifemodel_clauses(&normalized);
     let names_lifemodel = contains_any(
-        &normalized,
+        &positive_lifemodel_text,
         &[
             "life model",
             "lifemodel",
@@ -68,7 +70,7 @@ pub fn is_explicit_lifemodel_read_intent(user_text: &str) -> bool {
         ],
     );
     let asks_to_write = contains_any(
-        &normalized,
+        &write_intent_text,
         &[
             "update my",
             "update the life model",
@@ -125,6 +127,68 @@ pub fn is_explicit_lifemodel_read_intent(user_text: &str) -> bool {
         ],
     );
     names_lifemodel && asks_to_read && !asks_to_write
+}
+
+fn without_negated_lifemodel_clauses(value: &str) -> String {
+    value
+        .split(['。', '！', '？', '；', '.', '!', '?', ';'])
+        .filter(|clause| {
+            let names_lifemodel = contains_any(
+                clause,
+                &[
+                    "life model",
+                    "lifemodel",
+                    "个人模型",
+                    "长期画像",
+                    "人生模型",
+                ],
+            );
+            let negates_lifemodel_use = contains_any(
+                clause,
+                &[
+                    "不要使用",
+                    "不要读取",
+                    "不要参考",
+                    "不使用",
+                    "不读取",
+                    "不参考",
+                    "do not use",
+                    "don't use",
+                    "do not read",
+                    "don't read",
+                    "without using",
+                    "without reading",
+                ],
+            );
+            !(names_lifemodel && negates_lifemodel_use)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn without_negated_write_boundaries(value: &str) -> String {
+    let mut remaining = value.to_string();
+    for boundary in [
+        "不要执行任何外部或持久写入",
+        "不要执行外部或持久写入",
+        "不要执行任何外部写入",
+        "不要执行外部写入",
+        "不要修改我的 life model",
+        "不要修改 life model",
+        "不要写入我的 life model",
+        "不要写入 life model",
+        "do not perform any external or durable writes",
+        "do not perform external or durable writes",
+        "do not perform any external writes",
+        "do not perform external writes",
+        "do not modify my life model",
+        "don't modify my life model",
+        "do not write to my life model",
+        "don't write to my life model",
+    ] {
+        remaining = remaining.replace(boundary, " ");
+    }
+    remaining
 }
 
 impl LifeModelExplicitReadAnswer {
@@ -546,6 +610,35 @@ mod tests {
         ));
         assert!(is_explicit_lifemodel_read_intent(
             "我的 Life Model 更新了什么？"
+        ));
+    }
+
+    #[test]
+    fn negative_write_boundaries_do_not_hide_an_explicit_read() {
+        assert!(is_explicit_lifemodel_read_intent(
+            "请根据当前 Life Model 告诉我已确认的协作方式是什么？不要执行任何外部或持久写入。"
+        ));
+        assert!(is_explicit_lifemodel_read_intent(
+            "What is recorded in my Life Model? Do not perform any external or durable writes."
+        ));
+        assert!(is_explicit_lifemodel_read_intent(
+            "我的 Life Model 记录了什么？不要修改我的 Life Model。"
+        ));
+        assert!(!is_explicit_lifemodel_read_intent(
+            "告诉我 Life Model 里有什么；不要执行外部写入，但请更新我的沟通偏好。"
+        ));
+    }
+
+    #[test]
+    fn negated_lifemodel_use_does_not_become_an_explicit_lifemodel_read() {
+        assert!(!is_explicit_lifemodel_read_intent(
+            "只允许使用当前会话作用域的 Agent Memory 回答；当前会话发布标记是什么？不要使用当前对话历史、Markdown、LifeModel 或一般知识。"
+        ));
+        assert!(!is_explicit_lifemodel_read_intent(
+            "Answer only from conversation Agent Memory. What is the release marker? Do not use LifeModel or general knowledge."
+        ));
+        assert!(is_explicit_lifemodel_read_intent(
+            "告诉我 Life Model 记录了什么，但不要修改 Life Model。"
         ));
     }
 

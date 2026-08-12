@@ -117,7 +117,8 @@ pub use main_chat_governance_intent::{
     MainChatExternalReadRequirement, MainChatIntentSignals,
 };
 pub use main_chat_memory_candidate::{
-    extract_main_chat_memory_candidates, plan_main_chat_memory_routing, route_memory_candidates,
+    explicit_memory_scope_from_user_text, extract_main_chat_memory_candidates,
+    is_explicit_memory_write_request, plan_main_chat_memory_routing, route_memory_candidates,
     MainChatMemoryCandidate, MainChatMemoryRoutingResult, MemoryCandidateKind, MemoryDestination,
 };
 pub use memory_lifecycle::{

@@ -53,7 +53,7 @@ fn reviewed_artifact_target_precondition(
     }
 }
 
-async fn artifact_safe_paths_for_proposal(
+pub(crate) async fn artifact_safe_paths_for_proposal(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
 ) -> Result<Vec<String>, String> {

@@ -164,6 +164,45 @@ fn main_chat_markdown_memory_requires_an_explicit_scope_root() {
 }
 
 #[test]
+fn project_markdown_memory_precedes_broader_workspace_memory_for_a_project_task() {
+    let workspace = tempfile::tempdir().expect("workspace memory root");
+    let project = tempfile::tempdir().expect("project memory root");
+    std::fs::write(
+        workspace.path().join("MEMORY.md"),
+        "# Workspace A Memory\n- 作用域标记：OL-WS-A-731。\n- 仅在 Workspace A 的任务中使用。",
+    )
+    .expect("write workspace memory");
+    std::fs::write(
+        project.path().join("MEMORY.md"),
+        "# Project A Memory\n- 作用域标记：OL-PROJ-A-482。\n- 仅在 Project A 的发布复核中使用。",
+    )
+    .expect("write project memory");
+
+    let roots = crate::markdown_memory::configured_markdown_memory_roots(
+        workspace.path().to_str(),
+        project.path().to_str(),
+    );
+    let candidates = load_markdown_memory_context_candidates_from_roots(
+        &roots,
+        "我正在进行 Project A 的发布复核，请引用当前工作记忆中的作用域标记。",
+    );
+
+    assert_eq!(
+        candidates.first().map(|candidate| candidate.source_id.as_str()),
+        Some("markdown-memory:project:MEMORY.md"),
+        "the narrower, more relevant project memory must reach the model before broader workspace memory"
+    );
+    assert!(candidates[0].content.contains("OL-PROJ-A-482"));
+    assert!(
+        !candidates[0].content.contains("Scope precedence"),
+        "scope and selection metadata must remain in the control layer rather than becoming factual evidence"
+    );
+    assert!(candidates[0]
+        .inclusion_reason
+        .contains("project Markdown working memory"));
+}
+
+#[test]
 fn main_chat_knowledge_context_loader_does_not_load_unselected_skill_instruction() {
     let root = create_main_chat_knowledge_workspace();
     let candidates =

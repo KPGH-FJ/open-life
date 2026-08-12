@@ -135,6 +135,56 @@ function lifeModelInfluenceFeedback(
   );
 }
 
+function sourceBoundBasisFeedback(controller: WorkspaceConversationController) {
+  const state = controller.turnState;
+  if (state.phase !== "resolved" || !state.sourceBoundBasis) return null;
+  const basis = state.sourceBoundBasis;
+  const sourceLabels: Record<string, string> = {
+    current_message: "本轮消息",
+    agent_memory: "Agent Memory",
+    markdown_memory: "Markdown 工作记忆",
+    document_or_resource: "选中文档或资源",
+  };
+  const answerWasBound =
+    basis.checkStatus === "semantic_support_passed" ||
+    basis.checkStatus === "deterministic_rendered";
+  return (
+    <FoundationNotice
+      title={answerWasBound ? "本轮按限定资料回答" : "本轮限定资料边界"}
+      tone="neutral"
+    >
+      <p>
+        {answerWasBound
+          ? "OpenLife 只允许使用你指定的资料，回答在展示前已完成边界核对。"
+          : "OpenLife 没有展示无法在你指定资料范围内核对的回答。"}
+      </p>
+      <details>
+        <summary>查看回答依据</summary>
+        <ul>
+          <li>
+            采用资料：
+            {basis.sourceTypes.map(type => sourceLabels[type] ?? "其他获准资料").join("、")}
+          </li>
+          <li>本轮事实块：{basis.factCount} 条</li>
+          <li>
+            核对状态：
+            {basis.checkStatus === "semantic_support_passed"
+              ? "逐句支持检查通过"
+              : basis.checkStatus === "deterministic_rendered"
+                ? "程序已按原文确定性输出"
+                : basis.checkStatus === "no_evidence"
+                  ? "限定范围内没有可用事实"
+                  : basis.checkStatus === "failed_closed"
+                    ? "核对未通过，已停止生成"
+                    : "状态未知"}
+          </li>
+        </ul>
+        <p>Life Model 如有参与，只影响表达方式，不作为事实来源。</p>
+      </details>
+    </FoundationNotice>
+  );
+}
+
 function resourceFailureText(code: string): string {
   if (code.includes("file_count_exceeded")) return "本轮最多只能读取 5 个文件。";
   if (code.includes("bytes_exceeded")) return "所选文件超过了当前允许的大小。";
@@ -289,7 +339,15 @@ function MarkdownMemoryPanel({ controller }: { controller: WorkspaceConversation
               icon={<Pencil size={15} aria-hidden="true" />}
               loading={memory.phase === "submitting" && memory.operation === "write"}
               disabled={busy || !relativePath.trim() || !content.trim()}
-              disabledReason={!content.trim() ? "先填写 Markdown 内容。" : undefined}
+              disabledReason={
+                busy
+                  ? "变更正在提交到 Review；文件仍未修改。"
+                  : !relativePath.trim()
+                    ? "先填写相对路径。"
+                    : !content.trim()
+                      ? "先填写 Markdown 内容。"
+                      : undefined
+              }
               onClick={() =>
                 void controller.proposeMarkdownMemoryWrite({
                   scope,
@@ -306,6 +364,9 @@ function MarkdownMemoryPanel({ controller }: { controller: WorkspaceConversation
                 variant="quiet"
                 loading={memory.phase === "submitting" && memory.operation === "deactivate"}
                 disabled={busy}
+                disabledReason={
+                  busy ? "另一项 Memory 变更正在提交；当前文件仍保持启用。" : undefined
+                }
                 onClick={() =>
                   void controller.proposeMarkdownMemoryDeactivation({
                     scope,
@@ -467,6 +528,7 @@ export function WorkspaceConversationPanel({
       )}
 
       {turnFeedback(controller)}
+      {sourceBoundBasisFeedback(controller)}
       {lifeModelInfluenceFeedback(controller, onOpenLifeModel)}
 
       {controller.sessionMutation.phase === "failed" && (

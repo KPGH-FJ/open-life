@@ -682,6 +682,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selected_memory_root_enables_only_its_bound_review_write() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let canonical = root.path().canonicalize().unwrap();
+        state.config.lock().await.system.project_memory_root =
+            Some(canonical.to_string_lossy().into_owned());
+
+        let receipt = draft_markdown_memory_file_proposal_with_state(
+            DraftMarkdownMemoryFileRequest {
+                scope: MarkdownMemoryScope::Project,
+                relative_path: "MEMORY.md".into(),
+                content: "# Project\nKeep exact review ownership.".into(),
+                expected_current_digest: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let envelope =
+            crate::read_models::review_center::get_review_center_view_model_with_state(&state)
+                .await
+                .unwrap();
+        let model = envelope.data.expect("review center model");
+        let item = model
+            .items
+            .iter()
+            .find(|item| item.id == receipt.proposal_id)
+            .expect("markdown memory review item");
+        let approve = item
+            .allowed_actions
+            .iter()
+            .find(|action| action.kind == openlife_core::agent::ReviewActionKind::Approve)
+            .expect("approve action");
+
+        assert!(approve.enabled, "{:?}", approve.disabled_reason);
+        assert!(!root.path().join("MEMORY.md").exists());
+    }
+
+    #[tokio::test]
     async fn stale_editor_digest_is_rejected_before_review_creation() {
         let root = tempfile::tempdir().unwrap();
         std::fs::write(root.path().join("MEMORY.md"), "current").unwrap();

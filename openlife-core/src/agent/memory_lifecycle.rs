@@ -2392,12 +2392,14 @@ impl MemoryLifecycleAcceptanceInput {
         proposal: &AgentProposal,
         content: String,
         task_session_id: &str,
+        conversation_owner_id: &str,
         run_id: &str,
         canonical_user_message_ref: &str,
         canonical_user_message_digest: &str,
     ) -> Result<Self> {
         let mut input = Self::from_memory_proposal(proposal, content)?;
         if task_session_id.trim().is_empty()
+            || conversation_owner_id.trim().is_empty()
             || run_id.trim().is_empty()
             || canonical_user_message_ref.trim().is_empty()
             || canonical_user_message_digest.trim().is_empty()
@@ -2411,7 +2413,7 @@ impl MemoryLifecycleAcceptanceInput {
         {
             input.fact.scope_owner_ref = Some(memory_scope_owner_ref(
                 MemoryLifecycleScope::Conversation,
-                task_session_id,
+                conversation_owner_id,
             )?);
         }
         input.evidence_ids = vec![
@@ -4692,6 +4694,7 @@ mod tests {
                 &valid,
                 "Task-bound reviewed fact".into(),
                 "task-session-1",
+                "chat-session-1",
                 "run-1",
                 "conversation-message:1",
                 "sha256:canonical-user-message",
@@ -4702,6 +4705,49 @@ mod tests {
             Some("task-session-1")
         );
         assert_eq!(terminal_bound.source_run_id.as_deref(), Some("run-1"));
+        assert_eq!(
+            terminal_bound.fact.scope_owner_ref, None,
+            "global Memory remains ownerless"
+        );
+
+        let conversation = proposal(
+            json!({
+                "content": "Conversation reviewed fact",
+                "scope": "conversation",
+                "category": "fact",
+                "candidateKind": "semantic_user_fact",
+                "riskLevel": "medium",
+                "sensitivity": "internal"
+            }),
+            Some("main_chat_agent_task_session:task-session-1;candidate:candidate-2"),
+        );
+        let conversation_bound =
+            MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
+                &conversation,
+                "Conversation reviewed fact".into(),
+                "task-session-1",
+                "chat-session-1",
+                "run-1",
+                "conversation-message:1",
+                "sha256:canonical-user-message",
+            )
+            .unwrap();
+        assert_eq!(
+            conversation_bound.fact.scope_owner_ref.as_deref(),
+            Some(
+                memory_scope_owner_ref(MemoryLifecycleScope::Conversation, "chat-session-1")
+                    .unwrap()
+                    .as_str()
+            )
+        );
+        assert_ne!(
+            conversation_bound.fact.scope_owner_ref.as_deref(),
+            Some(
+                memory_scope_owner_ref(MemoryLifecycleScope::Conversation, "task-session-1")
+                    .unwrap()
+                    .as_str()
+            )
+        );
 
         let drift = proposal(
             valid_after.clone(),
