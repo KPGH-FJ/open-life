@@ -39,6 +39,14 @@ task sessions, Agent runs, action queues, event streams, and a separate
 PlanExecute session. A current Main Chat operation is also effectively one task
 slice. These are migration constraints, not the target product contract.
 
+The first S2 vertical slice now adds `CanonicalTaskRuntimeStore` on the
+provider-generated report path. It owns stable report Task identity, Run
+membership, typed artifact/review/materialization Items, and independent
+ArtifactVersion metadata in `task_runtime.db`. The report Artifact exists before
+its Proposal; Review is a checkpoint relation, and confirmed materialization
+updates the same ArtifactVersion. This is current product code for that path,
+not yet a claim that every Main Chat route has migrated.
+
 ## Canonical task runtime target
 
 ADR 0017 accepts one product lifecycle:
@@ -132,6 +140,12 @@ refreshed product read model where one exists.
   authority.
 - Backend ViewModels are rebuildable projections and the only product-facing
   composition surface when a ViewModel exists.
+
+During the current vertical migration, `AgentRunStore` remains the execution
+and receipt owner while `CanonicalTaskRuntimeStore` owns stable report Task,
+Run membership, Item, and Artifact metadata. It deliberately does not copy
+AgentRun status or TaskSession bodies. Compatibility owners are retired only
+after each migrated path has a replacement read model and recovery proof.
 
 ## Personal intelligence boundary
 

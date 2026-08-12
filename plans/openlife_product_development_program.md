@@ -4,112 +4,80 @@ Status: complete
 
 ## Objective
 
-Create a clean, reviewable baseline for the agreed general Agent product before
-changing its canonical runtime. Close the current mixed working-tree batch,
-record the stable product and architecture decisions, verify the exact source,
-and leave one unambiguous next pointer.
+Deliver the first S2 vertical slice of the canonical Task Runtime on the
+existing generated-report path. A report draft must gain a stable Task, typed
+Items, and an Artifact identity before Review; approval must materialize and
+confirm that same Artifact rather than deriving artifact identity from the
+Proposal.
 
-The next product path is:
-
-```text
-local documents + Web research
-  -> sourced Markdown report
-  -> preview, changes, steering, verification, and resumable result
-```
-
-## Current baseline
-
-- Branch: `codex/phase5-native-closure`.
-- The original mixed tree has been classified, stabilized, split into semantic
-  commits, and returned to a clean state.
-- Rust, frontend, production-build, and browser-shell gates are green for the
-  final source. The exact debug application also passed an isolated native
-  verification against its own data directory, workspace, and trial Keychain
-  service.
-- Current production Main Chat entrypoints converge on
-  `OpenLifeTurnRuntime`. The tree still has multiple durable lifecycle owners
-  and does not yet implement the accepted canonical Task Runtime.
-
-Do not add bundle hashes, run IDs, proposal IDs, profile dumps, or iterative
-trial narratives to this plan. Git history and isolated local evidence retain
-that detail when needed.
-
-## Product contract
-
-- The user delegates an outcome and may supply resources, scope, constraints,
-  and a desired deliverable.
-- One Task may plan, use tools, pause for approval, accept steering, resume, and
-  deliver artifacts without changing product identity.
-- Work inside an explicit low-risk and recoverable scope proceeds autonomously.
-  Scope expansion and consequential or destructive effects require a
-  just-in-time decision.
-- The selected provider and model stay bound to the Task. There is no silent
-  model or provider fallback.
-- Result completion requires canonical state, artifacts, and verification; a
-  plan, streaming response, tool call, or approved proposal is not enough.
-- Agent Memory and LifeModel are bounded collaborators, not task-runtime owners.
-
-## Current batch: S0 stabilization and S1 authority
-
-### In scope
-
-1. Classify every existing changed file as retain, correct, extract, or delete.
-2. Close only the already-implemented conversation/Memory and source-bound
-   generation behavior needed to make the current batch self-consistent.
-3. Extract the newly added source/evidence/output-validation responsibilities
-   from `main_chat_kernel.rs` into a bounded module while retaining one runtime
-   owner.
-4. Remove stale phase pointers, raw fixed-snapshot audit links, duplicated plan
-   history, and temporary report authority.
-5. Keep `PRODUCT.md`, `docs/ARCHITECTURE.md`, ADR 0017, and this plan aligned.
-6. Run proportional focused checks, full engineering gates, and one exact-build
-   isolated native verification for the current source.
-7. Split the stabilized work into reviewable semantic commits and finish with a
-   clean working tree.
-
-### Out of scope
-
-- implementing Task/Run/Item/Artifact schemas or migrating a product path;
-- building another runtime, dual-writing, or adding a fallback to an old path;
-- expanding LifeModel learning or introducing AI coding for LifeModel;
-- computer use, arbitrary shell, email send, calendar write, payment, or broad
-  connector work;
-- automatic model routing or cross-provider fallback;
-- subagent orchestration or a workflow DSL;
-- deleting old application profiles or touching the default Keychain service;
-- creating a development ledger, evidence registry, task-packet system, or new
-  governance platform.
-
-## Source entrypoints
+## Product result
 
 ```text
-frontend/src/tauri.ts
-  -> src-tauri/src/lib.rs
-  -> main_chat_send.rs | main_chat_streaming.rs
-  -> main_chat_turn_runtime.rs
-  -> main_chat_kernel.rs
-  -> openlife-core/src/agent/main_chat_agent_v1.rs
+report request
+  -> existing governed generation and read evidence
+  -> canonical Task + ArtifactDraft Item + ArtifactVersion
+  -> ReviewCheckpoint Item + Proposal
+  -> confirmed file materialization
+  -> same ArtifactVersion points to the confirmed file
 ```
 
-Relevant supporting owners include ToolGateway, ReviewWorkflow,
-ArtifactMaterializer, MemoryGateway, LifeModelWriteGateway,
-PersistenceCoordinator, canonical stores, and backend ViewModels.
+The actual file remains the artifact content authority. SQLite owns Task,
+Item, review relation, artifact metadata, version, and recovery state.
 
-## Acceptance matrix
+## In scope
 
-| Scenario | Required result | Evidence |
-| --- | --- | --- |
-| Existing conversation and scoped Memory path | Correct scope, no unrelated recall, no silent write | focused contracts + exact native |
-| Source-bound answer with matching evidence | Answer bound to selected sources without internal IDs | focused contracts + exact native |
-| Source-bound answer without evidence | Provider/tool not called; visible blocker or bounded unknown | focused contracts + exact native |
-| Conflicting or unsupported source claims | No silent synthesis; limitation remains visible | focused contracts + exact native |
-| LifeModel absent or not selected | Ordinary Agent path remains healthy; no false Review state | focused contracts + exact native |
-| Provider/tool failure or uncertain effect | accurate blocked/failed/unknown state; no false completion | contracts + product projection checks |
-| Documentation | one current product contract, architecture direction, ADR, and plan | source review + diff review |
+1. Add a bounded SQLite canonical Task Runtime store for stable Tasks, Run
+   membership, typed Items, Artifact metadata, and ArtifactVersion metadata.
+2. Make Task identity stable across multiple Run references without changing
+   the existing AgentRun execution owner in this slice.
+3. Integrate only the current provider-generated Markdown/CSV report path.
+4. Mint Artifact identity before Proposal creation and bind Proposal as a
+   Review checkpoint rather than artifact identity.
+5. On confirmed file materialization, update the same ArtifactVersion with the
+   confirmed file reference and digest.
+6. Preserve failed, blocked, and effect-unknown states without reporting Task
+   completion.
+7. Add restart/idempotency and production-path contract tests.
+
+## Out of scope
+
+- general Web or local-document capability expansion from S3;
+- migrating every Main Chat route in this batch;
+- changing provider/model selection or adding fallback;
+- steering, concurrency, subagents, or workflow DSLs;
+- broad Results/Changes/Preview redesign;
+- deleting TaskSession, AgentRun, ActionQueue, PlanExecute, or transcript
+  compatibility surfaces before the report path proves its replacement;
+- changing Memory or LifeModel ownership;
+- old profile or default Keychain cleanup.
+
+## Ownership during this slice
+
+- `OpenLifeTurnRuntime` remains the production application runtime.
+- `AgentRunStore` remains the execution and receipt owner for the current Run.
+- The new Task Runtime store is the sole owner of the new stable Task,
+  Task-to-Run membership, typed report Items, and independent Artifact records.
+- `AgentTaskSessionStore` remains a compatibility execution-session owner; it
+  is not copied into the new Task store as another Task status authority.
+- ReviewWorkflow owns the approval decision. ArtifactMaterializer owns the
+  filesystem effect. Neither owns Artifact identity or Task completion.
+
+## Acceptance
+
+| Scenario | Required result |
+| --- | --- |
+| First generated report draft | one stable Task, one Run membership, ArtifactDraft Item, ArtifactVersion v1 |
+| Proposal staging | same Artifact is waiting on a ReviewCheckpoint; Proposal ID is only a relation |
+| Replayed staging | no duplicate Task, Item, Artifact, version, or checkpoint |
+| Same conversation, later Run | same Task accepts another Run membership |
+| Confirmed materialization | same ArtifactVersion records confirmed file ref and observed digest |
+| Failed or unknown effect | Artifact and Task remain failed/blocked/unknown, never completed |
+| Restart | SQLite reopens to the same identities and states |
+| Non-report route | no canonical report Task/Artifact is created |
 
 ## Checks
 
-Use focused tests during editing. Before closing the batch run:
+Use focused tests while editing, followed by:
 
 ```sh
 git diff --check
@@ -123,53 +91,28 @@ corepack pnpm --dir frontend build
 corepack pnpm --dir frontend test:e2e
 ```
 
-The exact-build native trial must use an explicit isolated data directory,
-workspace, artifact directory, and trial Keychain service. External-live
-provider or Web credit is required only for a contract that actually uses it;
-otherwise it remains explicitly unverified.
+Exact native evidence is required if the production report path or ViewModel
+changes in a way that cannot be proven by source contracts. External-live Web
+and provider credit remains S3/S6 work and must not be inferred from fixtures.
 
 ## Stop condition
 
-S0 and S1 are complete only when:
-
-- all original dirty changes have a reviewed disposition;
-- current source responsibilities are bounded and obsolete authority is gone;
-- authority documents agree and this plan remains concise;
-- engineering gates are green for the final source;
-- the same exact source has current isolated native evidence;
-- evidence levels and unverified live behavior are reported accurately;
-- semantic commits are reviewable and the working tree is clean.
-
-Do not begin S2 inside an unreviewed S0/S1 batch.
+S2 first slice closes only when the report path uses the new owner in
+production code, Proposal-derived artifact identity is removed for that path,
+all acceptance cases pass, documentation stays aligned, semantic commits are
+reviewable, and the working tree is clean.
 
 ## Closure
 
-- Inline source-bound facts produced a bounded native answer without requiring
-  a provider or tool.
-- A selected-document-only request with no selected document stopped before
-  provider or tool use, returned an explicit unknown, and remained blocked
-  rather than appearing complete.
-- An empty LifeModel produced no candidate or Review item, and Review Center
-  remained empty without claiming that any change had been applied.
-- The isolated trial did not use the default Keychain service or an existing
-  application profile.
-- External-live provider and Web behavior were not required for S0/S1 and
-  remain unverified by this batch.
+The generated Markdown/CSV report path now creates its canonical Task,
+Run membership, ArtifactDraft Item, and ArtifactVersion before Proposal
+staging. Review is an exact checkpoint relation; confirmed materialization and
+recovery update the same ArtifactVersion. Focused recovery/idempotency tests,
+the full Rust suite, frontend unit/build checks, and browser-shell E2E are
+green. No external-live provider or Web credit is claimed by this slice.
 
 ## Next pointer
 
-After S0/S1 closes, begin S2 with a minimal canonical Task/Run/Item/Artifact
-contract used immediately by the first vertical report path. Each later batch
-must deliver user-visible value or be consumed by that path no later than the
-following batch.
-
-The accepted roadmap is:
-
-1. S0 stabilization and dirty-tree closure.
-2. S1 product, architecture, ADR, plan, and evaluation contract.
-3. S2 canonical Task/Run/Item/Artifact foundation on the report path.
-4. S3 real local-document and Web report tool loop.
-5. S4 steering, inline approval, recovery, and controlled concurrency.
-6. S5 Results, Changes, Preview, and Verification product surfaces.
-7. S6 behavior matrix with exact native and required live evidence.
-8. S7 remaining old-path deletion and clean release baseline.
+Continue S2 by projecting canonical Task/Item/Artifact records into backend
+ViewModels and moving the next report execution fact from compatibility stores.
+Begin S3 only after the minimal report Task Runtime is recoverable and visible.
