@@ -172,7 +172,7 @@ use commands::memory::{
 use commands::proposal::{
     accept_proposal, accept_proposal_and_continue, batch_accept_low_risk_proposals, edit_proposal,
     get_memory_asset, get_pending_proposals, list_memory_assets, list_proposals, postpone_proposal,
-    reject_proposal, rollback_memory_asset,
+    reject_proposal, request_artifact_undo, rollback_memory_asset,
 };
 use commands::router::get_model_router_status;
 use commands::settings::{
@@ -1080,6 +1080,7 @@ pub fn run() {
             accept_proposal,
             accept_proposal_and_continue,
             reject_proposal,
+            request_artifact_undo,
             edit_proposal,
             draft_edit_memory_proposal,
             postpone_proposal,

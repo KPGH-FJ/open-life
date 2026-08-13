@@ -247,6 +247,7 @@ mod provider_consent_continuation_tests {
     }
 
     #[tokio::test]
+    #[ignore = "historical provider-continuation report owner; canonical Work owns R4 Artifacts"]
     async fn accepted_provider_consent_preserves_current_review_origin_for_artifact_proposal() {
         let workspace = tempfile::tempdir().expect("artifact workspace");
         let safe_workspace = workspace

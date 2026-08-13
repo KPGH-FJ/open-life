@@ -319,6 +319,26 @@ fn canonical_work_release_surface_has_no_legacy_task_control_or_runtime_fallback
             "canonical Work entrypoint in {relative} must not invoke the compatibility runtime"
         );
     }
+    let legacy_kernel = std::fs::read_to_string(root.join("src/main_chat_kernel.rs"))
+        .expect("read compatibility kernel");
+    let production_prefix = legacy_kernel
+        .split("#[cfg(test)]\nstruct CanonicalReportAdmissionContext")
+        .next()
+        .expect("compatibility kernel production prefix");
+    for retired_consumer in [
+        ".begin_report_run(",
+        "prepare_canonical_report_artifacts_after_provider_receipt(",
+        "bind_canonical_report_artifact_review(",
+    ] {
+        assert!(
+            !production_prefix.contains(retired_consumer),
+            "compatibility kernel must not retain report-only Artifact consumer {retired_consumer}"
+        );
+    }
+    assert!(
+        legacy_kernel.contains("generated_artifact_requires_canonical_work_runtime"),
+        "compatibility kernel must fail closed instead of creating a second Artifact owner"
+    );
 }
 
 #[test]

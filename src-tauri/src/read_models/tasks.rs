@@ -3,10 +3,10 @@ use openlife_core::agent::{
     build_tasks_view_model, build_workspace_view_model, BackendEntityKind, BackendEntityRef,
     EvidenceRef, EvidenceSensitivity, EvidenceSource, ProviderPrivacyBoundarySummary, ReviewItem,
     ReviewItemDecisionStatus, TaskArtifactChangeKind, TaskArtifactChangeViewModel,
-    TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel, TaskArtifactVerificationStatus,
-    TaskArtifactVerificationViewModel, TaskArtifactViewModel, TaskItemViewModel,
-    TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelTaskInput, TasksViewModel,
-    TasksViewModelBuildInput, ViewModelEnvelope, ViewModelStatus, ViewModelWarning,
+    TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel, TaskArtifactUndoViewModel,
+    TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel, TaskArtifactViewModel,
+    TaskItemViewModel, TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelTaskInput,
+    TasksViewModel, TasksViewModelBuildInput, ViewModelEnvelope, ViewModelStatus, ViewModelWarning,
     ViewModelWarningSeverity, WorkspaceActivityItem, WorkspaceViewModel,
     WorkspaceViewModelBuildInput,
 };
@@ -274,12 +274,11 @@ async fn canonical_task_input(
     for artifact in &snapshot.artifacts {
         canonical_artifacts.push(canonical_artifact_view(state, &snapshot, artifact).await);
     }
-    let (lifecycle_status, terminal_status, delivery_proven) =
-        if snapshot.task.task_kind == "report" {
-            canonical_report_delivery_status(&snapshot, &canonical_artifacts)
-        } else {
-            canonical_general_delivery_status(&snapshot)
-        };
+    let (lifecycle_status, terminal_status, delivery_proven) = if !snapshot.artifacts.is_empty() {
+        canonical_artifact_delivery_status(&snapshot, &canonical_artifacts)
+    } else {
+        canonical_general_delivery_status(&snapshot)
+    };
     let mut pending_review_item_refs = snapshot
         .artifacts
         .iter()
@@ -288,7 +287,7 @@ async fn canonical_task_input(
         .map(|proposal_id| BackendEntityRef {
             id: proposal_id.clone(),
             kind: BackendEntityKind::ReviewItem,
-            label: "Report Artifact review".into(),
+            label: "Artifact review".into(),
             href: None,
         })
         .collect::<Vec<_>>();
@@ -306,7 +305,7 @@ async fn canonical_task_input(
         })
         .map(|item| item.summary_code.clone())
         .collect::<Vec<_>>();
-    let preview = canonical_result_preview(state, &snapshot)
+    let preview = canonical_result_preview(state, &snapshot, &canonical_artifacts)
         .await
         .or_else(|| Some(canonical_task_preview(&snapshot)));
     let canonical_evidence = vec![
@@ -480,8 +479,42 @@ fn canonical_general_delivery_status(
 async fn canonical_result_preview(
     state: &Arc<AppState>,
     snapshot: &CanonicalTaskSnapshot,
+    artifact_views: &[TaskArtifactViewModel],
 ) -> Option<String> {
     let result = snapshot.final_result.as_ref()?;
+    if !artifact_views.is_empty() {
+        let undone = snapshot
+            .artifacts
+            .iter()
+            .filter(|artifact| {
+                artifact
+                    .undo
+                    .as_ref()
+                    .is_some_and(|undo| undo.status == "undone")
+            })
+            .count();
+        if undone > 0 {
+            return Some(format!(
+                "任务已经完成并通过核验；{undone} 个产物随后已按用户请求撤销。"
+            ));
+        }
+        let verified_previews = artifact_views
+            .iter()
+            .filter(|artifact| {
+                artifact.verification.status == TaskArtifactVerificationStatus::Verified
+            })
+            .filter_map(|artifact| artifact.preview.content.as_deref())
+            .collect::<Vec<_>>();
+        if !verified_previews.is_empty() {
+            return Some(
+                verified_previews
+                    .join("\n\n")
+                    .chars()
+                    .take(TASK_ARTIFACT_PREVIEW_MAX_CHARS)
+                    .collect(),
+            );
+        }
+    }
     let store = state.conversation_store.as_ref()?;
     store
         .lock()
@@ -495,25 +528,31 @@ async fn canonical_result_preview(
         .map(|item| item.content.chars().take(800).collect())
 }
 
-fn canonical_report_delivery_status(
+fn canonical_artifact_delivery_status(
     snapshot: &CanonicalTaskSnapshot,
     artifact_views: &[TaskArtifactViewModel],
 ) -> (TaskLifecycleStatus, TaskTerminalDeliveryStatus, bool) {
-    let final_result_present = snapshot.items.iter().any(|item| {
+    let final_result_present = snapshot.final_result.as_ref().is_some_and(|result| {
         let expected_id = openlife_core::task_runtime::report_final_result_item_id(
             &snapshot.task.id,
-            &item.run_id,
+            &result.run_id,
         );
-        item.id == expected_id
-            && item.kind == openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult
-            && item.status == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+        result.item_id == expected_id
+            && snapshot.items.iter().any(|item| {
+                item.id == result.item_id
+                    && item.run_id == result.run_id
+                    && item.kind == openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult
+                    && item.status
+                        == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+            })
     });
     let delivery_proven = !snapshot.artifacts.is_empty()
         && artifact_views.len() == snapshot.artifacts.len()
-        && artifact_views.iter().all(|artifact| {
-            artifact.verification.status == TaskArtifactVerificationStatus::Verified
-        })
-        && snapshot.artifacts.iter().all(|artifact| {
+        && snapshot
+            .artifacts
+            .iter()
+            .zip(artifact_views.iter())
+            .all(|(artifact, artifact_view)| {
             let observed_digest = artifact
                 .current_version
                 .observed_content_digest
@@ -524,6 +563,24 @@ fn canonical_report_delivery_status(
                 artifact.current_version.version,
                 observed_digest,
             );
+            let governed_undo_proven = artifact
+                .undo
+                .as_ref()
+                .is_some_and(|undo| undo.status == "undone")
+                && snapshot.items.iter().any(|item| {
+                    item.kind
+                        == openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint
+                        && item.status
+                            == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+                        && item.summary_code == "artifact_undo_confirmed"
+                        && snapshot.attempts.iter().any(|attempt| {
+                            attempt.item_id == item.id
+                                && attempt.executor_kind == "materializer"
+                                && attempt.status
+                                    == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+                                && attempt.receipt_digest.is_some()
+                        })
+                });
             artifact.artifact.status == CanonicalArtifactStatus::Materialized
                 && artifact.artifact.content_digest == observed_digest
                 && artifact.artifact.materialized_reference.is_some()
@@ -536,6 +593,9 @@ fn canonical_report_delivery_status(
                         && item.status
                             == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
                 })
+                && (artifact_view.verification.status
+                    == TaskArtifactVerificationStatus::Verified
+                    || governed_undo_proven)
         })
         && final_result_present;
     match snapshot.task.status {
@@ -642,9 +702,48 @@ async fn canonical_artifact_view(
             source: EvidenceSource::Task,
             sensitivity: Some(EvidenceSensitivity::LocalPrivate),
         }],
+        undo: artifact_undo_view(snapshot, &presentation.change, &presentation.verification),
         change: presentation.change,
         preview: presentation.preview,
         verification: presentation.verification,
+    }
+}
+
+fn artifact_undo_view(
+    snapshot: &CanonicalArtifactSnapshot,
+    change: &TaskArtifactChangeViewModel,
+    verification: &TaskArtifactVerificationViewModel,
+) -> TaskArtifactUndoViewModel {
+    if let Some(undo) = snapshot.undo.as_ref() {
+        return TaskArtifactUndoViewModel {
+            available: false,
+            status: Some(undo.status.clone()),
+            proposal_ref: Some(BackendEntityRef {
+                id: undo.proposal_id.clone(),
+                kind: BackendEntityKind::ReviewItem,
+                label: "Artifact Undo Review checkpoint".into(),
+                href: None,
+            }),
+            reason_code: (undo.status != "undone")
+                .then(|| "artifact_undo_pending_or_failed".into()),
+        };
+    }
+    let available = snapshot.artifact.status == CanonicalArtifactStatus::Materialized
+        && verification.status == TaskArtifactVerificationStatus::Verified
+        && change.kind == TaskArtifactChangeKind::Create;
+    TaskArtifactUndoViewModel {
+        available,
+        status: None,
+        proposal_ref: None,
+        reason_code: (!available).then(|| {
+            if change.kind == TaskArtifactChangeKind::Replace {
+                "artifact_undo_unavailable_without_original_bytes".into()
+            } else if verification.status != TaskArtifactVerificationStatus::Verified {
+                "artifact_undo_requires_verified_materialization".into()
+            } else {
+                "artifact_undo_unavailable".into()
+            }
+        }),
     }
 }
 
@@ -1079,7 +1178,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tasks_view_model_fails_closed_when_canonical_report_store_is_unavailable() {
+    async fn tasks_view_model_fails_closed_when_canonical_task_store_is_unavailable() {
         let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         Arc::get_mut(&mut state)
             .expect("test state has one outer owner")
@@ -1112,7 +1211,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tasks_view_model_projects_canonical_report_items_and_artifact_delivery() {
+    async fn tasks_view_model_projects_canonical_artifact_delivery_and_undo_availability() {
         use sha2::{Digest, Sha256};
 
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
@@ -1123,24 +1222,36 @@ mod tests {
             vec![artifact_dir.path().to_string_lossy().into_owned()];
         let content = "# Canonical report";
         let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: "turn-artifact-view",
+                instruction_digest: &format!(
+                    "sha256:{:x}",
+                    Sha256::digest(b"artifact view outcome")
+                ),
+                plan_digest: None,
+            })
+            .unwrap();
         let prepared = state
             .canonical_task_runtime_store
             .as_ref()
             .unwrap()
             .lock()
             .await
-            .prepare_report_artifact(openlife_core::task_runtime::ReportArtifactDraftInput {
-                conversation_id: "conversation-report-view",
-                execution_session_id: "execution-report-view",
-                run_id: "run-report-view",
-                outcome_digest: &format!("sha256:{:x}", Sha256::digest(b"report view outcome")),
-                plan_digest: &format!("sha256:{:x}", Sha256::digest(b"report view plan")),
-                provider_request_id: "provider-request-report-view",
-                provider_receipt_digest: &format!(
-                    "sha256:{:x}",
-                    Sha256::digest(b"provider receipt report view")
-                ),
-                tool_observations: &[],
+            .prepare_general_artifact(openlife_core::task_runtime::GeneralArtifactDraftInput {
+                task_id: &task_id,
+                run_id: &run_id,
                 target_reference: &artifact_path_text,
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",
@@ -1178,7 +1289,24 @@ mod tests {
             .unwrap()
             .lock()
             .await
-            .bind_report_review(&prepared.artifact_id, "proposal-report-view")
+            .bind_artifact_review(&prepared.artifact_id, "proposal-report-view")
+            .unwrap();
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .defer_general_task_result(openlife_core::task_runtime::DeferGeneralTaskResultInput {
+                task_id: &prepared.task_id,
+                run_id: &run_id,
+                conversation_item_id: "conversation-item-report-view",
+                result_digest: &format!(
+                    "sha256:{:x}",
+                    Sha256::digest(b"report view waiting review")
+                ),
+                summary_code: "work_artifact_completed",
+            })
             .unwrap();
 
         let waiting = get_tasks_view_model_with_state(&state).await.unwrap();
@@ -1195,15 +1323,14 @@ mod tests {
             task.lifecycle_status,
             openlife_core::agent::TaskLifecycleStatus::WaitingReview
         );
-        assert_eq!(task.items.len(), 5);
+        assert_eq!(task.items.len(), 4);
         assert_eq!(
             task.items.iter().map(|item| item.kind).collect::<Vec<_>>(),
             vec![
                 openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
-                openlife_core::task_runtime::CanonicalTaskItemKind::Plan,
-                openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
                 openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactDraft,
                 openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint,
+                openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactMaterialized,
             ]
         );
         assert_eq!(task.artifacts.len(), 1);
@@ -1220,6 +1347,7 @@ mod tests {
             task.artifacts[0].preview.content.as_deref(),
             Some("# Canonical report")
         );
+        assert!(!task.artifacts[0].undo.available);
         assert_eq!(
             task.artifacts[0].verification.status,
             openlife_core::agent::TaskArtifactVerificationStatus::Pending
@@ -1261,7 +1389,7 @@ mod tests {
                 .push(super::canonical_artifact_view(&state, &incomplete_snapshot, artifact).await);
         }
         assert_eq!(
-            super::canonical_report_delivery_status(
+            super::canonical_artifact_delivery_status(
                 &incomplete_snapshot,
                 &incomplete_artifact_views
             ),
@@ -1288,13 +1416,11 @@ mod tests {
             .latest_result_preview
             .as_ref()
             .is_some_and(|preview| preview.final_delivery_ref.is_some()));
-        assert_eq!(task.items.len(), 8);
+        assert_eq!(task.items.len(), 6);
         assert_eq!(
             task.items.iter().map(|item| item.kind).collect::<Vec<_>>(),
             vec![
                 openlife_core::task_runtime::CanonicalTaskItemKind::Instruction,
-                openlife_core::task_runtime::CanonicalTaskItemKind::Plan,
-                openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
                 openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactDraft,
                 openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint,
                 openlife_core::task_runtime::CanonicalTaskItemKind::ArtifactMaterialized,
@@ -1314,6 +1440,8 @@ mod tests {
             task.artifacts[0].preview.content.as_deref(),
             Some("# Canonical report")
         );
+        assert!(task.artifacts[0].undo.available);
+        assert!(task.artifacts[0].undo.status.is_none());
 
         std::fs::write(&artifact_path, "# Tampered after delivery").unwrap();
         let drifted = get_tasks_view_model_with_state(&state).await.unwrap();

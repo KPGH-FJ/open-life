@@ -85,6 +85,7 @@ describe("Workbench desktop read-only journey", () => {
       within(artifacts).getByText(/\/OpenLife\/Results\/travel-checklist\.md/)
     ).toBeInTheDocument();
     expect(within(artifacts).getByText("已物化")).toBeInTheDocument();
+    expect(within(artifacts).getByRole("button", { name: "申请撤销此产物" })).toBeInTheDocument();
   });
 
   it("fails stale state closed and exposes complete product action attributes", async () => {

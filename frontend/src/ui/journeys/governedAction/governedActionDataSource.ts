@@ -8,6 +8,7 @@ import {
   getWorkspaceViewModel,
   postponeProposal,
   rejectProposal,
+  requestArtifactUndo,
   retryWorkTask,
   type ReviewAction,
   type ReviewCenterViewModel,
@@ -38,6 +39,7 @@ export interface GovernedActionDataSource {
   editLifeModelLearningProposal(proposalId: string, statement: string): Promise<void>;
   resumeTask(control: TaskControl): Promise<void>;
   dispatchTaskControl(control: TaskControl): Promise<void>;
+  requestArtifactUndo(artifactId: string): Promise<void>;
 }
 
 export function buildGovernedActionErrorSnapshot(error: unknown): GovernedActionSnapshot {
@@ -199,4 +201,14 @@ export const tauriGovernedActionDataSource: GovernedActionDataSource = {
     throw new Error(`canonical_task_resume_unavailable:${control.targetTaskId}`);
   },
   dispatchTaskControl,
+  async requestArtifactUndo(artifactId) {
+    const receipt = await requestArtifactUndo(artifactId);
+    if (
+      receipt.artifactId !== artifactId ||
+      !receipt.proposalId ||
+      receipt.status !== "waiting_review"
+    ) {
+      throw new Error("artifact_undo_receipt_unverified");
+    }
+  },
 };

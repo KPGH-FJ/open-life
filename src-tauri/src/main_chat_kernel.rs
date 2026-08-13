@@ -2500,42 +2500,6 @@ where
             "Main Chat kernel rejected a user message that did not match its PolicyDecision".into(),
         );
     }
-    let report_run_is_authorized = main_chat_agent_turn
-        .decision
-        .policy_decision
-        .allows(AllowedCapability::ProviderGeneration)
-        && main_chat_agent_turn
-            .decision
-            .policy_decision
-            .allows(AllowedCapability::FileWriteProposal);
-    if report_run_is_authorized {
-        if let Some(artifact_specs) = generated_artifact_specs(&user_text) {
-            let plan_digest = canonical_report_plan_digest(
-                &main_chat_agent_turn
-                    .decision
-                    .policy_decision
-                    .authorized_user_message_digest,
-                &artifact_specs,
-            )?;
-            state
-                .canonical_task_runtime_store
-                .as_ref()
-                .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
-                .lock()
-                .await
-                .begin_report_run(openlife_core::task_runtime::BeginReportRunInput {
-                    conversation_id: session_id,
-                    execution_session_id: &task_session_id,
-                    run_id: canonical_run_id,
-                    outcome_digest: &main_chat_agent_turn
-                        .decision
-                        .policy_decision
-                        .authorized_user_message_digest,
-                    plan_digest: &plan_digest,
-                })
-                .map_err(|error| format!("begin canonical report run failed: {error}"))?;
-        }
-    }
     let sanitized_selected_skill_id =
         sanitize_main_chat_selected_skill_id(selected_skill_id.as_deref());
     let mut execution_transcript = main_chat_agent_turn.transcript_entries.clone();
@@ -6890,7 +6854,9 @@ where
         self.run_turn(input, event_sink).await
     }
 
-    /// Canonical Work path for provider generation plus R3 governed reads.
+    /// Canonical Work path for provider generation, governed reads, and typed
+    /// governed-effect planning. The coordinator outside the kernel owns
+    /// Artifact/Review persistence and materialization.
     /// The general Task owner remains outside the kernel; ToolGateway projects
     /// every read into canonical Item/Attempt/Observation facts and no legacy
     /// TaskSession/AgentRun/ActionQueue event owner is involved.
@@ -6910,10 +6876,9 @@ where
             input.policy_decision.route_kind,
             openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::TransientStateCommand
                 | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ReversibleMemoryCommit
-                | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ProposalOnlyWrite
                 | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ConfirmationRequest
         ) {
-            return self.blocked("work_capability_requires_r3_or_r4", event_sink);
+            return self.blocked("work_capability_not_available", event_sink);
         }
         if matches!(
             input.policy_decision.route_kind,
@@ -10070,7 +10035,7 @@ enum KernelWriteProposalAdmission {
     },
 }
 
-enum KernelWriteProposalPreparation {
+pub(crate) enum KernelWriteProposalPreparation {
     Pending {
         request: Box<openlife_core::agent::DurableWriteRequest>,
         relation_kind: openlife_core::agent::ProposalTerminalRelationKind,
@@ -10081,7 +10046,7 @@ enum KernelWriteProposalPreparation {
     },
 }
 
-async fn expand_generated_artifact_outcomes(
+pub(crate) async fn expand_generated_artifact_outcomes(
     state: &Arc<AppState>,
     outcome: &MainChatKernelWriteOutcome,
 ) -> Result<Vec<MainChatKernelWriteOutcome>, String> {
@@ -10162,6 +10127,7 @@ async fn expand_generated_artifact_outcomes(
     Ok(expanded)
 }
 
+#[cfg(test)]
 struct CanonicalReportAdmissionContext<'a> {
     conversation_id: &'a str,
     execution_session_id: &'a str,
@@ -10173,6 +10139,7 @@ struct CanonicalReportAdmissionContext<'a> {
     tool_observations: &'a [CanonicalReportToolObservationFact],
 }
 
+#[cfg(test)]
 struct CanonicalReportArtifactBatchInput<'a> {
     conversation_id: &'a str,
     execution_session_id: &'a str,
@@ -10184,6 +10151,7 @@ struct CanonicalReportArtifactBatchInput<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg(test)]
 struct CanonicalReportToolObservationFact {
     action_id: String,
     tool_call_digest: String,
@@ -10191,6 +10159,7 @@ struct CanonicalReportToolObservationFact {
     observation_digest: String,
 }
 
+#[cfg(test)]
 async fn prepare_canonical_report_artifact_for_review(
     state: &Arc<AppState>,
     context: &CanonicalReportAdmissionContext<'_>,
@@ -10278,6 +10247,7 @@ async fn prepare_canonical_report_artifact_for_review(
     Ok(())
 }
 
+#[cfg(test)]
 fn canonical_report_provider_receipt_digest(
     receipt: &ProviderInvocationReceipt,
 ) -> Result<String, String> {
@@ -10306,6 +10276,7 @@ fn canonical_report_provider_receipt_digest(
     )
 }
 
+#[cfg(test)]
 fn canonical_report_plan_digest(
     instruction_digest: &str,
     artifact_specs: &[Value],
@@ -10353,6 +10324,7 @@ fn canonical_report_plan_digest(
     )
 }
 
+#[cfg(test)]
 async fn prepare_canonical_report_artifacts_after_provider_receipt(
     state: &Arc<AppState>,
     input: CanonicalReportArtifactBatchInput<'_>,
@@ -10390,6 +10362,7 @@ async fn prepare_canonical_report_artifacts_after_provider_receipt(
     Ok(())
 }
 
+#[cfg(test)]
 async fn bind_canonical_report_artifact_review(
     state: &Arc<AppState>,
     outcome: &MainChatKernelWriteOutcome,
@@ -10443,7 +10416,7 @@ async fn active_canonical_memory_owner(
         .map_err(|error| format!("canonical Memory fact lookup failed: {error}"))
 }
 
-async fn prepare_kernel_write_proposal(
+pub(crate) async fn prepare_kernel_write_proposal(
     state: &Arc<AppState>,
     task_session_id: &str,
     run_id: &str,
@@ -11930,7 +11903,15 @@ async fn build_kernel_write_outcome_command_surface_result(
         .write_outcome
         .clone()
         .ok_or_else(|| "Main Chat kernel write outcome missing".to_string())?;
-    let mut expanded_outcomes = match expand_generated_artifact_outcomes(state, &outcome).await {
+    if outcome
+        .governed_input
+        .get("providerGeneratedDraft")
+        .and_then(Value::as_bool)
+        == Some(true)
+    {
+        return Err("generated_artifact_requires_canonical_work_runtime".into());
+    }
+    let expanded_outcomes = match expand_generated_artifact_outcomes(state, &outcome).await {
         Ok(outcomes) => outcomes,
         Err(blocker) => {
             kernel_result.write_outcome = None;
@@ -12040,48 +12021,6 @@ async fn build_kernel_write_outcome_command_surface_result(
         &mut execution_transcript,
     )
     .await?;
-    let canonical_tool_observations = if provider_generated_draft {
-        let canonical_run = crate::terminal_owner_write_gateway::project_main_chat_tool_evidence(
-            state,
-            &agent_run.id,
-            task_session_id,
-            execution_epoch,
-            agent_run.actions.clone(),
-            agent_run.observations.clone(),
-        )
-        .await
-        .map_err(|error| {
-            format!("persist report tool evidence before admission failed: {error}")
-        })?;
-        let facts = canonical_report_tool_observation_facts(
-            &agent_run,
-            &tool_calls,
-            &kernel_result.tool_calls,
-        )?;
-        agent_run.actions = canonical_run.actions;
-        agent_run.observations = canonical_run.observations;
-        facts
-    } else {
-        Vec::new()
-    };
-    prepare_canonical_report_artifacts_after_provider_receipt(
-        state,
-        CanonicalReportArtifactBatchInput {
-            conversation_id: session_id,
-            execution_session_id: task_session_id,
-            run_id: canonical_run_id,
-            user_text,
-            instruction_digest: &main_chat_agent_turn
-                .decision
-                .policy_decision
-                .authorized_user_message_digest,
-            provider_receipt: selected_provider_receipt,
-            tool_observations: &canonical_tool_observations,
-        },
-        &mut expanded_outcomes,
-    )
-    .await?;
-
     let mut queued_actions = Vec::with_capacity(expanded_outcomes.len());
     for expanded_outcome in &expanded_outcomes {
         queued_actions.push(
@@ -12121,12 +12060,6 @@ async fn build_kernel_write_outcome_command_surface_result(
                     proposal,
                     created_for_turn,
                 } => {
-                    let canonical_review = bind_canonical_report_artifact_review(
-                        state,
-                        expanded_outcome,
-                        &proposal.id,
-                    )
-                    .await?;
                     generated_proposals.push(proposal.id.clone());
                     agent_run.add_generated_proposal(&proposal.id);
                     if created_for_turn {
@@ -12153,9 +12086,6 @@ async fn build_kernel_write_outcome_command_surface_result(
                         "acceptedDurableTruthWritten": false,
                         "fileWritten": false,
                         "externalWritesExecuted": false,
-                        "canonicalTaskId": canonical_review.as_ref().map(|review| review.task_id.as_str()),
-                        "canonicalArtifactId": canonical_review.as_ref().map(|review| review.artifact_id.as_str()),
-                        "reviewCheckpointItemId": canonical_review.as_ref().map(|review| review.checkpoint_item_id.as_str()),
                     });
                     transition_main_chat_action(
                         state,
@@ -12863,6 +12793,7 @@ fn validate_kernel_tool_call_observation_bindings(
     Ok(())
 }
 
+#[cfg(test)]
 fn canonical_report_tool_observation_facts(
     run: &openlife_core::agent::AgentRun,
     calls: &[ToolCallResult],

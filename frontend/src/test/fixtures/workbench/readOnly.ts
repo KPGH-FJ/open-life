@@ -216,6 +216,9 @@ const readyTasks: TaskViewModelItem[] = [
           observedContentDigest: "sha256:travel-checklist-v1",
           verificationItemPresent: true,
         },
+        undo: {
+          available: true,
+        },
       },
     ],
     latestResultPreview: {

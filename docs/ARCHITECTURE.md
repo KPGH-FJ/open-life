@@ -64,23 +64,18 @@ Event lifecycle state. Those stores remain only as effect/materialization,
 scheduling, or test migration consumers for R4 and later stages and are not
 Task truth.
 
-The historical S2-S5 report implementation remains reusable capability and
-Artifact evidence. It owns stable report Task identity, Run
-membership, typed instruction/plan/tool/observation/provider-generation/
-artifact/review/materialization/verification/final-result Items, and independent
-ArtifactVersion metadata in `task_runtime.db`. A report Task and Run begin
-before governed reads or provider work with the Policy-authorized instruction
-and deterministic plan digest. Completed tool and provider receipts append
-later in the same Run before ArtifactDraft. The canonical store records their
-identities and bounded digests, not prompt or response bodies. The report Artifact exists before its
-Proposal; Review is a checkpoint relation, and confirmed materialization updates
-the same ArtifactVersion. The Task becomes delivered only after each current
-ArtifactVersion has an exact expected/observed digest match and the store writes
-the completing Run's canonical FinalResult. This is current product code for
-that path, not a claim that every Main Chat route has migrated.
-
-That retained implementation extends the same report Run rather than adding
-another execution owner.
+General Work owns stable Task identity, Run membership, typed
+instruction/plan/tool/observation/provider-generation/artifact/review/
+materialization/verification/final-result Items, ItemAttempts, and independent
+ArtifactVersion metadata in `task_runtime.db`. A Work Task and Run begin before
+governed reads or provider work. Completed tool and provider receipts append in
+the same Run before ArtifactDraft. The canonical store records identities and
+bounded digests, not prompt or response bodies. An Artifact exists before its
+Proposal; Review is a checkpoint relation; approval starts a materializer
+ItemAttempt; and confirmed materialization updates the same ArtifactVersion.
+While Review is pending, the exact assistant Conversation Item identity is
+stored as a deferred result relation. Approval can therefore complete the same
+FinalResult after restart without inventing a second Task owner.
 Policy can authorize the bounded production `document.read` capability for
 resources already imported and bound to the current message/task operation.
 The kernel executes `document.read` before `web.search`/`web.fetch` when both
@@ -91,7 +86,7 @@ selection identity, digest, and count, never document bodies. Provider context
 is reselected from the same bound resources for the actual provider request,
 must match the ToolCall selection digest, and receives newly issued
 request-scoped citations. Local-resource and Web citation authorities validate
-model output before a report ArtifactDraft or ReviewCheckpoint can exist.
+model output before a Work ArtifactDraft or ReviewCheckpoint can exist.
 Missing/failed reads or a failed one-shot citation repair therefore stop before
 provider-backed completion and durable effects. For document reads, durable
 replay metadata contains only the selected chunk count and stable selection
@@ -122,8 +117,9 @@ Items, attempts, FinalResult, Artifact versions, Review wait, rejection,
 verified delivery, and effect-unknown states. They do not overlay TaskSession
 or AgentRun state. Current Work controls use canonical cancel and retry IPCs.
 
-The retained Artifact path adds backend-owned Result, Change, Preview, and Verification projections to
-each report ArtifactVersion. A pending preview is admitted only from the exact
+The canonical Artifact path adds backend-owned Result, Change, Preview,
+Verification, and Undo projections to each Work ArtifactVersion. A pending
+preview is admitted only from the exact
 proposal whose Artifact id, version, target digest, content digest, and body
 digest all match. A materialized preview is reread only from a regular file
 inside the configured safe paths and is shown only when its current byte digest,
@@ -131,7 +127,9 @@ the stored observed digest, and the canonical Verification Item agree. File
 drift, disappearance, symlinks, oversize content, or non-UTF-8 bytes remove the
 preview and prevent the Task from retaining delivered product credit. React
 renders these typed projections; it does not read files, proposals, or
-`task_runtime.db` itself.
+`task_runtime.db` itself. A confirmed governed Undo is an independent receipt-
+bound move: it preserves the original verified Task history and is presented
+as a later reversal instead of being misclassified as missing delivery.
 
 ## Reconstruction target
 
@@ -155,17 +153,18 @@ unrelated active outcomes to blur the user experience.
 The reconstruction keeps proven provider adapters and receipts, ToolGateway
 contracts, production document/Web/Skill/MCP reads, ReviewWorkflow,
 materializers, effect certainty, cancellation fences, outbox recovery, backend
-ViewModels, and the report Artifact/Changes/Preview/Verification implementation.
+ViewModels, and the Work Artifact/Changes/Preview/Verification/Undo
+implementation.
 Memory and LifeModel remain retained stores behind future narrow typed ports.
 
 The following remain capability migration consumers, not Work lifecycle owners:
 
 - `AgentTaskSessionStore`, `AgentRunStore`, `ActionQueueStore`, and
-  `MainChatAgentEventStore` are still used by pre-R4 materialization,
-  evaluation, or scheduling paths, but no longer own release Chat, Work, or
-  the migrated read-capability lifecycle;
-- retained report Artifact/effect execution still needs migration into the
-  general Work coordinator in R4;
+  `MainChatAgentEventStore` remain compatibility/evaluation/scheduling stores,
+  but no longer own release Chat, Work, Artifact materialization, or Undo;
+- generated Artifact effects are accepted only when they carry canonical Work
+  Task/Run/Item/Artifact identity. The compatibility kernel fails closed rather
+  than creating a report-only Artifact owner;
 - PlanExecute session/store/IPC ownership is retired; remaining PlanExecute
   names are drafting algorithms or test fixtures; and
 - Today, Tasks, and Review remain top-level frontend surfaces during migration.

@@ -258,6 +258,7 @@ export function TasksReadOnlyView({
   onRequestTaskControl,
   onConfirmTaskControl,
   onCancelTaskControlConfirmation,
+  onRequestArtifactUndo,
 }: {
   envelope: ViewModelEnvelope<TasksViewModel>;
   refreshing: boolean;
@@ -270,9 +271,11 @@ export function TasksReadOnlyView({
   onRequestTaskControl: (control: TaskControl, expectedTaskId: string) => void;
   onConfirmTaskControl: () => void;
   onCancelTaskControlConfirmation: () => void;
+  onRequestArtifactUndo: (artifactId: string) => Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<TaskFilter>("all");
+  const [undoingArtifactId, setUndoingArtifactId] = useState<string | null>(null);
   const items = envelope.data?.items ?? [];
   const listAvailable = envelope.data !== null && !["error", "loading"].includes(envelope.status);
   const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
@@ -550,6 +553,31 @@ export function TasksReadOnlyView({
                     </dl>
                     {artifact.verification.reasonCode && (
                       <small>{artifact.verification.reasonCode}</small>
+                    )}
+                  </section>
+                  <section className="ol-task-result-card__section" aria-label="Undo">
+                    <span>Undo</span>
+                    {artifact.undo.available ? (
+                      <FoundationActionButton
+                        onClick={() => {
+                          setUndoingArtifactId(artifact.artifactId);
+                          void onRequestArtifactUndo(artifact.artifactId).finally(() =>
+                            setUndoingArtifactId(null)
+                          );
+                        }}
+                        label="申请撤销此产物"
+                        icon={<RotateCcw aria-hidden="true" />}
+                        loading={undoingArtifactId === artifact.artifactId}
+                        loadingLabel="正在创建撤销审核…"
+                      />
+                    ) : artifact.undo.proposalRef ? (
+                      <p>
+                        {artifact.undo.status === "undone"
+                          ? "已撤销，原文件已移入 OpenLife 安全回收位置。"
+                          : "撤销正在等待审核或 reconciliation。"}
+                      </p>
+                    ) : (
+                      <p>不可撤销：{artifact.undo.reasonCode ?? "缺少可验证恢复依据"}</p>
                     )}
                   </section>
                   <small className="ol-task-result-card__id">{artifact.artifactId}</small>

@@ -946,6 +946,20 @@ export function ReadOnlySpineJourney({
         onRequestTaskControl={governed.requestTaskControl}
         onConfirmTaskControl={governed.confirmTaskControl}
         onCancelTaskControlConfirmation={governed.cancelTaskControlConfirmation}
+        onRequestArtifactUndo={async artifactId => {
+          try {
+            if (!governedActionDataSource) {
+              throw new Error("artifact_undo_data_source_unavailable");
+            }
+            await governedActionDataSource.requestArtifactUndo(artifactId);
+            setAnnouncement("撤销建议已进入审核中心；批准前不会移动文件。");
+            await (governedActionDataSource && governed.snapshot
+              ? governed.load(true)
+              : loadTasks(true));
+          } catch (error) {
+            setAnnouncement(`无法创建撤销建议：${errorText(error)}`);
+          }
+        }}
       />
     );
   } else if (activeSurface === "workspace" && governedActionDataSource) {

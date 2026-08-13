@@ -218,12 +218,13 @@ pub use strategy_runtime::{
 pub use tasks_view_model::{
     build_tasks_view_model, build_workspace_view_model, TaskArtifactChangeKind,
     TaskArtifactChangeViewModel, TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel,
-    TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel, TaskArtifactViewModel,
-    TaskControl, TaskControlEffect, TaskControlKind, TaskItemViewModel, TaskLatestResultPreview,
-    TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelContractError, TaskViewModelItem,
-    TaskViewModelRunInput, TaskViewModelTaskInput, TasksViewModel, TasksViewModelBuildInput,
-    TasksViewModelSummary, WorkspaceActivityItem, WorkspaceActivityKind, WorkspaceActivityStatus,
-    WorkspaceViewModel, WorkspaceViewModelBuildInput,
+    TaskArtifactUndoViewModel, TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel,
+    TaskArtifactViewModel, TaskControl, TaskControlEffect, TaskControlKind, TaskItemViewModel,
+    TaskLatestResultPreview, TaskLifecycleStatus, TaskTerminalDeliveryStatus,
+    TaskViewModelContractError, TaskViewModelItem, TaskViewModelRunInput, TaskViewModelTaskInput,
+    TasksViewModel, TasksViewModelBuildInput, TasksViewModelSummary, WorkspaceActivityItem,
+    WorkspaceActivityKind, WorkspaceActivityStatus, WorkspaceViewModel,
+    WorkspaceViewModelBuildInput,
 };
 #[cfg(any(test, feature = "test-utils"))]
 pub use tool_execution_owner::AgentRunToolExecutionFaultPoint;

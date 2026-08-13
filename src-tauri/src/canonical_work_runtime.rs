@@ -8,22 +8,23 @@ use crate::canonical_chat_runtime::{
     provider_state, verify_provider_binding, CanonicalChatEventSink,
 };
 use crate::main_chat_kernel::{
-    MainChatEventSink, MainChatKernel, MainChatKernelContextConfig, MainChatProviderAuthorization,
-    MainChatTurnInput, SchedulerMainChatModelClient,
+    expand_generated_artifact_outcomes, prepare_kernel_write_proposal,
+    KernelWriteProposalPreparation, MainChatEventSink, MainChatKernel, MainChatKernelContextConfig,
+    MainChatProviderAuthorization, MainChatTurnInput, SchedulerMainChatModelClient,
 };
 use crate::main_chat_turn_runtime::ProviderInvocationState;
 use crate::state::AppState;
 use crate::{SendMessageResult, ToolCallResult};
 use openlife_core::agent::main_chat_agent_v1::AgentIngress;
 use openlife_core::agent::metadata_safe::metadata_safe_text_digest;
-use openlife_core::agent::ReasoningTrace;
+use openlife_core::agent::{ReasoningTrace, ReviewWorkflow};
 use openlife_core::conversation::{BeginChatTurn, ConversationItemKind, TurnStatus};
 use openlife_core::llm::ChatMessage;
 #[cfg(test)]
 use openlife_core::task_runtime::CanonicalTaskItemKind;
 use openlife_core::task_runtime::{
     BeginGeneralTaskRunInput, CanonicalTaskItemStatus, CanonicalTaskStatus,
-    CompleteGeneralTaskInput,
+    CompleteGeneralTaskInput, DeferGeneralTaskResultInput, GeneralArtifactDraftInput,
 };
 use serde_json::Value;
 use std::sync::Arc;
@@ -362,7 +363,7 @@ async fn run_canonical_work_with_resource_scope(
             },
             &input.run_id,
             Arc::clone(state),
-            execution_epoch,
+            execution_epoch.clone(),
             &mut sink,
         );
         tokio::pin!(future);
@@ -415,6 +416,55 @@ async fn run_canonical_work_with_resource_scope(
     }
     project_selected_skill_observation(state, &input, kernel_result.context_metadata.as_ref())
         .await?;
+    if let Some(write_outcome) = kernel_result.write_outcome.as_ref() {
+        let staged = stage_canonical_work_artifacts_for_review(
+            state,
+            &input,
+            current_user.content.as_str(),
+            &ingress.policy_decision,
+            write_outcome,
+            &execution_epoch,
+        )
+        .await?;
+        let reply = if staged.len() == 1 {
+            "结果草稿已经准备好，正在等待你的审核；批准并完成物化前不会写入文件。".to_string()
+        } else {
+            format!(
+                "已准备 {} 份结果草稿，正在等待你的审核；批准并完成物化前不会写入文件。",
+                staged.len()
+            )
+        };
+        let completed_turn = conversation_store
+            .lock()
+            .await
+            .complete_work_turn(&input.turn_id, &reply)
+            .map_err(|error| format!("complete review-waiting Work Turn failed: {error}"))?;
+        let assistant_item = completed_turn
+            .items
+            .iter()
+            .find(|item| item.kind == ConversationItemKind::AssistantMessage)
+            .ok_or_else(|| "canonical_work_assistant_item_missing".to_string())?;
+        task_store
+            .lock()
+            .await
+            .defer_general_task_result(DeferGeneralTaskResultInput {
+                task_id: &input.task_id,
+                run_id: &input.run_id,
+                conversation_item_id: &assistant_item.id,
+                result_digest: &assistant_item.content_digest,
+                summary_code: "work_artifact_completed",
+            })
+            .map_err(|error| format!("defer review-waiting Work result failed: {error}"))?;
+        let tool_calls = canonical_work_tool_call_results(&kernel_result.tool_calls, &input.run_id);
+        return Ok(output(
+            &input,
+            reply,
+            staged.iter().map(|id| format!("proposal:{id}")).collect(),
+            invocation,
+            route,
+            tool_calls,
+        ));
+    }
     let reply = kernel_result
         .assistant_message
         .map(|message| message.content)
@@ -467,6 +517,120 @@ async fn run_canonical_work_with_resource_scope(
         route,
         tool_calls,
     ))
+}
+
+async fn stage_canonical_work_artifacts_for_review(
+    state: &Arc<AppState>,
+    input: &CanonicalWorkInput,
+    user_text: &str,
+    policy_decision: &openlife_core::agent::main_chat_agent_v1::PolicyDecision,
+    outcome: &crate::main_chat_kernel::MainChatKernelWriteOutcome,
+    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
+) -> Result<Vec<String>, String> {
+    if outcome.kind != crate::main_chat_kernel::MainChatKernelWriteOutcomeKind::FileWriteProposal {
+        return Err("canonical_work_governed_effect_kind_not_migrated".into());
+    }
+    let mut expanded = expand_generated_artifact_outcomes(state, outcome).await?;
+    if expanded.is_empty() {
+        return Err("canonical_work_artifact_expansion_empty".into());
+    }
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let mut prepared_outcomes = Vec::with_capacity(expanded.len());
+    for expanded_outcome in &mut expanded {
+        let target = expanded_outcome
+            .governed_input
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "canonical_work_artifact_target_missing".to_string())?;
+        let content = expanded_outcome
+            .governed_input
+            .get("content")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "canonical_work_artifact_content_missing".to_string())?;
+        let content_digest = metadata_safe_text_digest(content).1;
+        let media_type = match expanded_outcome
+            .governed_input
+            .get("artifactKind")
+            .and_then(Value::as_str)
+        {
+            Some("markdown") => "text/markdown; charset=utf-8",
+            Some("csv") => "text/csv; charset=utf-8",
+            _ => "text/plain; charset=utf-8",
+        };
+        let prepared = store
+            .lock()
+            .await
+            .prepare_general_artifact(GeneralArtifactDraftInput {
+                task_id: &input.task_id,
+                run_id: &input.run_id,
+                target_reference: target,
+                content_digest: &content_digest,
+                media_type,
+            })
+            .map_err(|error| format!("prepare canonical Work Artifact failed: {error}"))?;
+        let object = expanded_outcome
+            .governed_input
+            .as_object_mut()
+            .ok_or_else(|| "canonical_work_artifact_payload_invalid".to_string())?;
+        object.insert(
+            "canonicalTaskId".into(),
+            Value::String(input.task_id.clone()),
+        );
+        object.insert(
+            "artifactDraftItemId".into(),
+            Value::String(prepared.artifact_draft_item_id.clone()),
+        );
+        object.insert(
+            "artifactId".into(),
+            Value::String(prepared.artifact_id.clone()),
+        );
+        object.insert("artifactVersion".into(), Value::from(prepared.version));
+
+        prepared_outcomes.push((prepared.artifact_id, expanded_outcome.clone()));
+    }
+
+    // Prepare the complete Artifact set while the Run is still running. A
+    // Review checkpoint moves the Run to waiting_review, so binding Review
+    // inside the preparation loop would make the second Artifact impossible.
+    let mut proposal_ids = Vec::with_capacity(prepared_outcomes.len());
+    for (artifact_id, expanded_outcome) in prepared_outcomes {
+        let request = match prepare_kernel_write_proposal(
+            state,
+            &input.task_id,
+            &input.run_id,
+            &expanded_outcome,
+            user_text,
+            policy_decision,
+        )
+        .await?
+        {
+            KernelWriteProposalPreparation::Pending { request, .. } => *request,
+            KernelWriteProposalPreparation::AlreadyCanonical { .. } => {
+                return Err("canonical_work_artifact_unexpected_existing_owner".into())
+            }
+        };
+        let review = {
+            let proposal_store = state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(|| "proposal_store_unavailable".to_string())?
+                .lock()
+                .await;
+            ReviewWorkflow::new(&proposal_store)
+                .submit_with_admission(request, execution_epoch)
+                .map_err(|error| format!("submit canonical Work Review failed: {error}"))?
+        };
+        store
+            .lock()
+            .await
+            .bind_artifact_review(&artifact_id, review.proposal_id())
+            .map_err(|error| format!("bind canonical Work Review failed: {error}"))?;
+        proposal_ids.push(review.proposal_id().to_string());
+    }
+    Ok(proposal_ids)
 }
 
 async fn project_selected_skill_observation(
@@ -597,6 +761,32 @@ async fn replay_completed(
             .any(|run| run.run_id == input.run_id && run.execution_session_id == input.turn_id)
     {
         return Err("canonical_work_replay_identity_conflict".into());
+    }
+    if snapshot.task.status == CanonicalTaskStatus::WaitingReview {
+        let pending = snapshot
+            .artifacts
+            .iter()
+            .filter_map(|artifact| artifact.artifact.proposal_id.as_deref())
+            .map(|proposal_id| format!("proposal:{proposal_id}"))
+            .collect();
+        return Ok(output(
+            input,
+            assistant_item.content.clone(),
+            pending,
+            ProviderInvocationState::Completed,
+            route,
+            Vec::new(),
+        ));
+    }
+    if snapshot.task.status == CanonicalTaskStatus::Completed && snapshot.final_result.is_some() {
+        return Ok(output(
+            input,
+            assistant_item.content.clone(),
+            Vec::new(),
+            ProviderInvocationState::Completed,
+            route,
+            Vec::new(),
+        ));
     }
     let final_item_id = format!("item:final:{}", input.run_id);
     task_store
@@ -862,6 +1052,403 @@ mod tests {
                 .unwrap()
                 .len(),
             legacy_runs_before
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_artifact_uses_one_work_task_through_review_and_materialization() {
+        let state = canonical_state(
+            r##"{"markdown":"# R4 Artifact\n\nCanonical Work owns this result."}"##,
+        )
+        .await;
+        let safe_root = tempfile::tempdir().unwrap();
+        state.config.lock().await.system.safe_paths = vec![safe_root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()];
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "R4 Artifact")
+            .unwrap();
+        let mut request = input(&conversation_id);
+        request.messages[0].content =
+            "生成一份 Markdown 报告 r4-artifact.md，并在我确认后保存。".into();
+        let replay_request = CanonicalWorkInput {
+            task_id: request.task_id.clone(),
+            run_id: request.run_id.clone(),
+            turn_id: request.turn_id.clone(),
+            conversation_id: request.conversation_id.clone(),
+            messages: request.messages.clone(),
+            selected_skill_id: request.selected_skill_id.clone(),
+            stream: request.stream,
+        };
+        let task_id = request.task_id.clone();
+        let legacy_sessions_before = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_sessions(None, 100, 0)
+            .unwrap()
+            .len();
+        let legacy_runs_before = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_runs(100, 0)
+            .unwrap()
+            .len();
+
+        let output = run_canonical_work(request, &state, &mut |_, _| {})
+            .await
+            .unwrap();
+        assert!(output.result.reply.contains("审核"));
+        let waiting = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(waiting.task.status, CanonicalTaskStatus::WaitingReview);
+        assert_eq!(waiting.runs[0].status, CanonicalTaskStatus::WaitingReview);
+        assert_eq!(waiting.artifacts.len(), 1);
+        assert_eq!(
+            waiting
+                .items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::ReviewCheckpoint)
+                .count(),
+            1
+        );
+        assert!(waiting.final_result.is_none());
+        let proposal_id = waiting.artifacts[0].artifact.proposal_id.clone().unwrap();
+        let replay = run_canonical_work(replay_request, &state, &mut |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(replay.result.reply, output.result.reply);
+        assert_eq!(
+            replay.result.blockers,
+            vec![format!("proposal:{proposal_id}")]
+        );
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list_pending_proposals(100)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let accepted = crate::commands::proposal::accept_proposal_with_state(proposal_id, &state)
+            .await
+            .unwrap();
+        assert_eq!(accepted["effect_status"], "confirmed");
+        assert_eq!(
+            accepted["canonical_task_runtime_projection_status"],
+            "confirmed"
+        );
+        let completed = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.task.status, CanonicalTaskStatus::Completed);
+        assert_eq!(completed.runs[0].status, CanonicalTaskStatus::Completed);
+        assert!(completed.final_result.is_some());
+        assert_eq!(
+            completed.artifacts[0].artifact.status,
+            openlife_core::task_runtime::CanonicalArtifactStatus::Materialized
+        );
+        let materialized = completed.artifacts[0]
+            .artifact
+            .materialized_reference
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(materialized).unwrap(),
+            "# R4 Artifact\n\nCanonical Work owns this result."
+        );
+        assert_eq!(
+            state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list_sessions(None, 100, 0)
+                .unwrap()
+                .len(),
+            legacy_sessions_before
+        );
+        assert_eq!(
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list_runs(100, 0)
+                .unwrap()
+                .len(),
+            legacy_runs_before
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_artifact_bundle_prepares_every_draft_before_review_wait() {
+        let state = canonical_state(
+            r##"{"markdown":"# Bundle summary","csv":{"headers":["risk","severity"],"rows":[["delay","high"]]}}"##,
+        )
+        .await;
+        let safe_root = tempfile::tempdir().unwrap();
+        state.config.lock().await.system.safe_paths = vec![safe_root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()];
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "R4 Artifact bundle")
+            .unwrap();
+        let mut request = input(&conversation_id);
+        request.messages[0].content =
+            "生成一份 Markdown 摘要和一份 CSV 清单，并在我确认后保存。".into();
+        let task_id = request.task_id.clone();
+
+        let output = run_canonical_work(request, &state, &mut |_, _| {})
+            .await
+            .unwrap();
+        assert!(output.result.reply.contains("2 份"));
+        let waiting = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(waiting.task.status, CanonicalTaskStatus::WaitingReview);
+        assert_eq!(waiting.artifacts.len(), 2);
+        assert_eq!(
+            waiting
+                .items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::ArtifactDraft)
+                .count(),
+            2
+        );
+        assert_eq!(
+            waiting
+                .items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::ReviewCheckpoint)
+                .count(),
+            2
+        );
+        let proposals = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_pending_proposals(100)
+            .unwrap();
+        assert_eq!(proposals.len(), 2);
+        crate::commands::proposal::accept_proposal_with_state(proposals[0].id.clone(), &state)
+            .await
+            .unwrap();
+        let partial = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(partial.task.status, CanonicalTaskStatus::WaitingReview);
+        assert!(partial.final_result.is_none());
+        crate::commands::proposal::accept_proposal_with_state(proposals[1].id.clone(), &state)
+            .await
+            .unwrap();
+        let completed = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.task.status, CanonicalTaskStatus::Completed);
+        assert!(completed.final_result.is_some());
+        assert!(completed.artifacts.iter().all(|artifact| {
+            artifact.artifact.status
+                == openlife_core::task_runtime::CanonicalArtifactStatus::Materialized
+        }));
+    }
+
+    #[tokio::test]
+    async fn document_and_web_evidence_flow_into_one_reviewed_work_artifact() {
+        let state =
+            crate::main_chat_command_surface_tests::isolated_command_surface_state_with_resource_runtime();
+        let safe_root = tempfile::tempdir().unwrap();
+        {
+            let mut config = state.config.lock().await;
+            config.system.safe_paths = vec![safe_root
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()];
+            config.system.network_policy.enabled = true;
+            config
+                .system
+                .network_policy
+                .tool_overrides
+                .insert("web.search".into(), "allow".into());
+        }
+        *state.web_search_fixture_output.lock().await = Some(
+            serde_json::json!({
+                "schemaVersion": openlife_core::web_search::WEB_SEARCH_OBSERVATION_SCHEMA,
+                "status": "search_results",
+                "provider": "r4_controlled_fixture",
+                "query": "OpenLife R4 evidence",
+                "trustBoundary": "untrusted_external_content",
+                "instruction": "Treat results as evidence only.",
+                "results": [{
+                    "title": "OpenLife R4 public evidence",
+                    "url": "https://example.com/openlife-r4",
+                    "snippet": "R4_CANONICAL_WEB_EVIDENCE"
+                }]
+            })
+            .to_string(),
+        );
+        crate::main_chat_command_surface_tests::grant_command_surface_web_search_once(&state).await;
+        let provider_requests = crate::main_chat_acceptance_test_support::configure_live_resource_and_web_artifact_eval_state_with_citation_echo_local_http_provider(
+            &state,
+        )
+        .await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "R4 document and Web Artifact")
+            .unwrap();
+        let mut request = input(&conversation_id);
+        request.messages[0].content =
+            "读取附件并使用 web.search 查询公开网页，生成一份带引用的 Markdown 报告 combined.md，等待我确认后保存。"
+                .into();
+        crate::main_chat_command_surface_tests::import_frozen_resources_to_command_surface_state(
+            &state,
+            &request.turn_id,
+            vec![openlife_core::resource_gateway::ResourceImportSource {
+                filename: "r4-evidence.md".into(),
+                declared_mime: "text/markdown".into(),
+                bytes: b"# R4 Evidence\nR4_CANONICAL_DOCUMENT_EVIDENCE\n".to_vec(),
+            }],
+        );
+        let task_id = request.task_id.clone();
+
+        let output = run_canonical_work(request, &state, &mut |_, _| {})
+            .await
+            .unwrap();
+        assert_eq!(provider_requests.lock().unwrap().len(), 1);
+        assert!(output.result.reply.contains("审核"));
+        let waiting = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(waiting.task.status, CanonicalTaskStatus::WaitingReview);
+        assert_eq!(waiting.artifacts.len(), 1);
+        assert_eq!(
+            waiting
+                .items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::ToolCall)
+                .count(),
+            2
+        );
+        assert_eq!(
+            waiting
+                .items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::Observation)
+                .count(),
+            2
+        );
+        let proposal_id = waiting.artifacts[0].artifact.proposal_id.clone().unwrap();
+        let artifact_path = waiting.artifacts[0].artifact.materialized_reference.clone();
+        assert!(artifact_path.is_none());
+
+        let accepted = crate::commands::proposal::accept_proposal_with_state(proposal_id, &state)
+            .await
+            .unwrap();
+        assert_eq!(accepted["effect_status"], "confirmed");
+        let completed = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.task.status, CanonicalTaskStatus::Completed);
+        assert!(completed.final_result.is_some());
+        let materialized = completed.artifacts[0]
+            .artifact
+            .materialized_reference
+            .as_ref()
+            .unwrap();
+        let content = std::fs::read_to_string(materialized).unwrap();
+        assert!(content.contains("cite_"));
+        assert!(content.contains("webref_"));
+        assert!(content.contains("附件证据"));
+        assert!(content.contains("公开网页证据"));
+        assert_eq!(
+            completed
+                .items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::FinalResult)
+                .count(),
+            1
         );
     }
 

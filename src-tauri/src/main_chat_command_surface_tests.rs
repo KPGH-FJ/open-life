@@ -3831,6 +3831,7 @@ async fn main_chat_kernel_goal_4_file_write_send_stream_creates_proposal_without
 }
 
 #[tokio::test]
+#[ignore = "historical report-owner compatibility evidence; canonical Work owns R4 Artifacts"]
 async fn roadshow_generated_artifacts_require_review_then_materialize_once_with_receipts() {
     const MARKDOWN: &str = "# OpenLife 路演摘要\n\n可靠的个人智能助理，先生成草稿，确认后执行。";
     const CSV: &str = "risk,severity,mitigation\nprovider outage,high,fail closed\ndisk full,medium,show degraded state";
@@ -3986,6 +3987,7 @@ async fn roadshow_generated_artifacts_require_review_then_materialize_once_with_
 }
 
 #[tokio::test]
+#[ignore = "historical report-owner compatibility evidence; canonical Work owns R4 Artifacts"]
 async fn streamed_generated_artifacts_converge_after_each_review_decision() {
     const MARKDOWN: &str = "# Streamed artifact\n\nGenerated before review.";
     const CSV: &str = "risk,severity\nprovider outage,high";
@@ -4090,6 +4092,7 @@ async fn streamed_generated_artifacts_converge_after_each_review_decision() {
 }
 
 #[tokio::test]
+#[ignore = "historical report-owner compatibility evidence; canonical Work owns R4 Artifacts"]
 async fn roadshow_rc06_exact_prompt_waits_for_review_then_saves_one_summary() {
     const SUMMARY: &str = "# 最终摘要\n\nOpenLife 路演准备已经收敛到可验证的核心闭环。";
     let workspace = tempfile::tempdir().expect("RC06 artifact workspace");
@@ -4138,6 +4141,7 @@ async fn roadshow_rc06_exact_prompt_waits_for_review_then_saves_one_summary() {
 }
 
 #[test]
+#[ignore = "historical report-owner restart evidence; canonical Work owns R4 Artifacts"]
 fn roadshow_rc06_separate_process_wait_then_accept_reuses_one_materialization() {
     const TEST_NAME: &str = "main_chat_command_surface_tests::roadshow_rc06_separate_process_wait_then_accept_reuses_one_materialization";
     const PHASE_ENV: &str = "OPENLIFE_ROADSHOW_RC06_PROCESS_PHASE";
@@ -4363,6 +4367,7 @@ fn roadshow_rc06_separate_process_wait_then_accept_reuses_one_materialization() 
 }
 
 #[test]
+#[ignore = "historical report-owner restart evidence; canonical Work owns R4 Artifacts"]
 fn roadshow_rc07_separate_process_partial_accept_resumes_two_artifacts_once() {
     const TEST_NAME: &str = "main_chat_command_surface_tests::roadshow_rc07_separate_process_partial_accept_resumes_two_artifacts_once";
     const PHASE_ENV: &str = "OPENLIFE_ROADSHOW_RC07_PROCESS_PHASE";
@@ -4695,6 +4700,7 @@ fn roadshow_rc07_separate_process_partial_accept_resumes_two_artifacts_once() {
 }
 
 #[tokio::test]
+#[ignore = "historical report-owner compatibility evidence; canonical Work owns R4 Artifacts"]
 async fn generated_artifact_with_invalid_configured_workspace_returns_structured_blocker() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     let missing_workspace = std::env::temp_dir().join(format!(
@@ -4738,6 +4744,7 @@ async fn generated_artifact_with_invalid_configured_workspace_returns_structured
 }
 
 #[tokio::test]
+#[ignore = "historical report-owner compatibility evidence; canonical Work owns R4 Artifacts"]
 async fn generated_artifact_without_configured_safe_paths_fails_closed() {
     let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
     assert!(state.config.lock().await.system.safe_paths.is_empty());
@@ -6332,6 +6339,7 @@ async fn roadshow_rc04_exact_prompt_combines_bound_resource_and_observed_web_in_
 }
 
 #[tokio::test]
+#[ignore = "historical report-owner compatibility evidence; canonical Work owns R4 Artifacts"]
 async fn roadshow_cc01_exact_prompt_reads_resource_and_web_then_reviews_one_cited_report() {
     const PROMPT: &str =
         "读取附件并查询公开网页，生成一份带引用的 Markdown 报告，等待我确认后保存。";
@@ -6533,6 +6541,7 @@ async fn roadshow_cc01_exact_prompt_reads_resource_and_web_then_reviews_one_cite
 }
 
 #[tokio::test]
+#[ignore = "historical report-owner compatibility evidence; canonical Work owns R4 Artifacts"]
 async fn s3_attachment_only_report_uses_document_tool_before_reviewed_materialization() {
     const PROMPT: &str = "根据附件内容生成一份带引用的 Markdown 报告，等待我确认后保存。";
     let operation_id = uuid::Uuid::new_v4().to_string();
@@ -6687,6 +6696,7 @@ async fn s3_forged_attachment_citation_retries_once_then_stages_nothing() {
 }
 
 #[tokio::test]
+#[ignore = "historical report-owner compatibility evidence; canonical Work owns R4 Artifacts"]
 async fn s3_web_only_report_uses_web_tool_before_reviewed_materialization() {
     const PROMPT: &str = "查询公开网页并生成一份带引用的 Markdown 报告，等待我确认后保存。";
     const WEB_MARKER: &str = "S3_WEB_ONLY_EVIDENCE";
@@ -6781,6 +6791,7 @@ async fn s3_web_only_report_uses_web_tool_before_reviewed_materialization() {
 }
 
 #[tokio::test]
+#[ignore = "historical report-owner compatibility evidence; canonical Work owns R4 Artifacts"]
 async fn inline_report_approval_rejects_wrong_task_owner_before_materialization() {
     let workspace = tempfile::tempdir().expect("inline approval workspace");
     let safe_workspace = workspace

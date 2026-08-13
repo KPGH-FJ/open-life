@@ -34,12 +34,18 @@ use crate::artifact_materializer::{PreparedArtifactMaterialization, PreparedArti
 const EXTERNAL_WRITE_MAX_SIZE: usize = 100 * 1024;
 pub(crate) const COMMUNICATION_STYLE_CANONICAL_PATH: &str = "preferences.communication_style";
 
-fn canonical_report_artifact_id(proposal: &AgentProposal) -> Option<&str> {
-    if proposal
+fn canonical_work_artifact_id(proposal: &AgentProposal) -> Option<&str> {
+    let artifact_undo = proposal
         .after
-        .get("generatedByProvider")
-        .and_then(Value::as_bool)
-        != Some(true)
+        .get("undoOfArtifactId")
+        .and_then(Value::as_str)
+        .is_some();
+    if (!artifact_undo
+        && proposal
+            .after
+            .get("generatedByProvider")
+            .and_then(Value::as_bool)
+            != Some(true))
         || proposal
             .after
             .get("artifactVersion")
@@ -66,7 +72,7 @@ fn canonical_report_artifact_id(proposal: &AgentProposal) -> Option<&str> {
 }
 
 fn artifact_id_for_proposal(proposal: &AgentProposal) -> String {
-    canonical_report_artifact_id(proposal)
+    canonical_work_artifact_id(proposal)
         .map(str::to_string)
         .unwrap_or_else(|| format!("artifact:{}", proposal.id))
 }
@@ -216,7 +222,7 @@ pub struct AcceptProposalResponse {
     #[serde(alias = "proposal_projection_status")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal_projection_status: Option<String>,
-    /// Projection into the canonical report Task/Run/Item/Artifact owner is a
+    /// Projection into the canonical Work Task/Run/Item/Artifact owner is a
     /// separate truth surface from Proposal status. Keep it in the strict IPC
     /// contract so a confirmed effect never becomes an apparent UI failure.
     #[serde(alias = "canonical_task_runtime_projection_status")]
@@ -1193,12 +1199,29 @@ async fn reconcile_durable_proposal_projections_inner(
         ..ProposalReconciliationReport::default()
     };
     for (proposal, claim_id) in confirmed_projection_pending {
+        let artifact_receipt = confirmed_artifact_receipt_from_store(state, &proposal).await?;
+        let mut canonical_warnings = Vec::new();
+        let canonical_projection = project_confirmed_canonical_work_artifact_status(
+            state,
+            &proposal,
+            artifact_receipt.as_ref(),
+            &mut canonical_warnings,
+        )
+        .await;
+        if canonical_projection == "reconciliation_required" {
+            return Err(canonical_warnings
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| "canonical Work Artifact reconciliation failed".into()));
+        }
         let accepted =
             project_confirmed_effect_projection_only(state, &proposal, &claim_id).await?;
         sync_main_chat_task_blockers_after_review_proposal_accept(state, &accepted).await;
-        report.agent_runs_reconciled +=
-            reconcile_agent_runs_for_proposal_with_admission(state, &accepted.id, admission)
-                .await?;
+        if canonical_work_artifact_id(&accepted).is_none() {
+            report.agent_runs_reconciled +=
+                reconcile_agent_runs_for_proposal_with_admission(state, &accepted.id, admission)
+                    .await?;
+        }
         report.proposal_projections_repaired += 1;
     }
 
@@ -1304,14 +1327,16 @@ async fn confirmed_artifact_receipt_from_store(
             .observed_content_digest
             .filter(|digest| digest == &record.content_digest)
             .ok_or_else(|| "confirmed artifact move observed digest missing".to_string())?;
-        return Ok(Some(confirmed_move_receipt_from_paths(
+        let mut receipt = confirmed_move_receipt_from_paths(
             &proposal.id,
             target,
             target_reference_digest,
             observed,
             record.byte_size,
             record.media_type,
-        )));
+        );
+        receipt.artifact_id = artifact_id_for_proposal(proposal);
+        return Ok(Some(receipt));
     }
     let path = proposal
         .after
@@ -1346,37 +1371,58 @@ async fn confirmed_artifact_receipt_from_store(
     Ok(Some(confirmed_artifact_receipt(&prepared, observed)))
 }
 
-async fn project_confirmed_canonical_report_artifact(
+async fn project_confirmed_canonical_work_artifact(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
     receipt: &ArtifactMaterializationReceipt,
 ) -> Result<Option<openlife_core::task_runtime::CanonicalArtifactRecord>, String> {
-    let Some(expected_artifact_id) = canonical_report_artifact_id(proposal) else {
+    let Some(expected_artifact_id) = canonical_work_artifact_id(proposal) else {
         return Ok(None);
     };
     if receipt.artifact_id != expected_artifact_id
         || receipt.proposal_id != proposal.id
         || receipt.content_digest != receipt.observed_content_digest
     {
-        return Err("canonical report Artifact receipt binding mismatch".into());
+        return Err("canonical Work Artifact receipt binding mismatch".into());
     }
     let store = state
         .canonical_task_runtime_store
         .as_ref()
         .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
-    store
-        .lock()
-        .await
-        .confirm_artifact_materialized(
-            &proposal.id,
-            &receipt.target_reference,
-            &receipt.observed_content_digest,
-        )
-        .map(Some)
-        .map_err(|error| format!("canonical report Artifact confirmation failed: {error}"))
+    let operation = proposal
+        .after
+        .get("operation")
+        .and_then(Value::as_str)
+        .unwrap_or("propose_write");
+    if operation == "trash" && proposal.after.get("undoOfArtifactId").is_some() {
+        let store = store.lock().await;
+        store
+            .confirm_artifact_undone(
+                &proposal.id,
+                &receipt.target_reference,
+                &receipt.observed_content_digest,
+            )
+            .map_err(|error| {
+                format!("canonical Work Artifact Undo confirmation failed: {error}")
+            })?;
+        store
+            .load_artifact(expected_artifact_id)
+            .map_err(|error| format!("canonical Work Artifact reload failed: {error}"))
+    } else {
+        store
+            .lock()
+            .await
+            .confirm_artifact_materialized(
+                &proposal.id,
+                &receipt.target_reference,
+                &receipt.observed_content_digest,
+            )
+            .map(Some)
+            .map_err(|error| format!("canonical Work Artifact confirmation failed: {error}"))
+    }
 }
 
-async fn project_confirmed_canonical_report_artifact_status(
+async fn project_confirmed_canonical_work_artifact_status(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
     receipt: Option<&ArtifactMaterializationReceipt>,
@@ -1385,7 +1431,7 @@ async fn project_confirmed_canonical_report_artifact_status(
     let Some(receipt) = receipt else {
         return "not_applicable";
     };
-    match project_confirmed_canonical_report_artifact(state, proposal, receipt).await {
+    match project_confirmed_canonical_work_artifact(state, proposal, receipt).await {
         Ok(Some(_)) => "confirmed",
         Ok(None) => "not_applicable",
         Err(error) => {
@@ -1397,23 +1443,38 @@ async fn project_confirmed_canonical_report_artifact_status(
     }
 }
 
-async fn mark_canonical_report_artifact_effect_failure(
+async fn mark_canonical_work_artifact_effect_failure(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
     reason_code: &str,
     effect_unknown: bool,
 ) {
-    if canonical_report_artifact_id(proposal).is_none() {
+    if canonical_work_artifact_id(proposal).is_none() {
         return;
     }
     let Some(store) = state.canonical_task_runtime_store.as_ref() else {
         log::warn!(
-            "[CanonicalTaskRuntime] report Artifact failure projection unavailable: {}",
+            "[CanonicalTaskRuntime] Work Artifact failure projection unavailable: {}",
             reason_code
         );
         return;
     };
-    let result = if effect_unknown {
+    let artifact_undo = proposal.after.get("undoOfArtifactId").is_some();
+    let result = if artifact_undo {
+        store
+            .lock()
+            .await
+            .mark_artifact_undo_terminal(
+                &proposal.id,
+                if effect_unknown {
+                    "effect_unknown"
+                } else {
+                    "failed"
+                },
+                reason_code,
+            )
+            .map(|_| ())
+    } else if effect_unknown {
         store
             .lock()
             .await
@@ -1426,29 +1487,37 @@ async fn mark_canonical_report_artifact_effect_failure(
     };
     if let Err(error) = result {
         log::warn!(
-            "[CanonicalTaskRuntime] report Artifact failure projection failed: {}",
+            "[CanonicalTaskRuntime] Work Artifact failure projection failed: {}",
             error
         );
     }
 }
 
-async fn project_canonical_report_review_rejection(
+async fn project_canonical_work_review_rejection(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
 ) -> Result<(), String> {
-    if canonical_report_artifact_id(proposal).is_none() {
+    if canonical_work_artifact_id(proposal).is_none() {
         return Ok(());
     }
     let store = state
         .canonical_task_runtime_store
         .as_ref()
         .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    if proposal.after.get("undoOfArtifactId").is_some() {
+        return store
+            .lock()
+            .await
+            .mark_artifact_undo_terminal(&proposal.id, "failed", "artifact_undo_review_rejected")
+            .map(|_| ())
+            .map_err(|error| format!("canonical Work Undo rejection projection failed: {error}"));
+    }
     store
         .lock()
         .await
         .mark_artifact_review_rejected(&proposal.id)
         .map(|_| ())
-        .map_err(|error| format!("canonical report Review rejection projection failed: {error}"))
+        .map_err(|error| format!("canonical Work Review rejection projection failed: {error}"))
 }
 
 fn confirmed_effect_reconciliation_response(
@@ -1857,6 +1926,8 @@ async fn apply_external_move_artifact(
     if !matches!(confirmed, Ok(true)) {
         return ArtifactApplyOutcome::Unknown("artifact_move_confirmed_receipt_unavailable".into());
     }
+    let mut receipt = confirmed_move_receipt(&prepared, observed_digest);
+    receipt.artifact_id = artifact_id_for_proposal(proposal);
     ArtifactApplyOutcome::Confirmed {
         patch_result: patch_result_for_proposal(
             proposal,
@@ -1867,7 +1938,7 @@ async fn apply_external_move_artifact(
             ),
             None,
         ),
-        receipt: Box::new(confirmed_move_receipt(&prepared, observed_digest)),
+        receipt: Box::new(receipt),
     }
 }
 
@@ -3631,7 +3702,7 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
                 )
                 .await;
                 let canonical_task_runtime_projection_status =
-                    project_confirmed_canonical_report_artifact_status(
+                    project_confirmed_canonical_work_artifact_status(
                         state,
                         &accepted,
                         artifact_receipt.as_ref(),
@@ -3657,7 +3728,7 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
                     error
                 )];
                 let canonical_task_runtime_projection_status =
-                    project_confirmed_canonical_report_artifact_status(
+                    project_confirmed_canonical_work_artifact_status(
                         state,
                         &proposal,
                         artifact_receipt.as_ref(),
@@ -3691,7 +3762,7 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
             reconcile_lifemodel_learning_materialization_response(state, &proposal, &mut warnings)
                 .await;
         let canonical_task_runtime_projection_status =
-            project_confirmed_canonical_report_artifact_status(
+            project_confirmed_canonical_work_artifact_status(
                 state,
                 &proposal,
                 artifact_receipt.as_ref(),
@@ -3907,6 +3978,61 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
         }
         return Ok(response);
     }
+    if canonical_work_artifact_id(&proposal).is_some() {
+        let request_digest = openlife_core::agent::metadata_safe_value_digest(&serde_json::json!({
+            "proposalId": proposal.id,
+            "dispatchClaimId": dispatch_claim_id,
+            "artifactId": canonical_work_artifact_id(&proposal),
+            "operation": proposal.after.get("operation"),
+        }))
+        .1;
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let attempt_result = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
+            .lock()
+            .await;
+        let attempt_result = if proposal.after.get("undoOfArtifactId").is_some() {
+            attempt_result.begin_artifact_undo_attempt(&proposal.id, &attempt_id, &request_digest)
+        } else {
+            attempt_result.begin_artifact_materialization_attempt(
+                &proposal.id,
+                &attempt_id,
+                &request_digest,
+            )
+        };
+        match attempt_result {
+            Ok(Some(_)) => {}
+            Ok(None) => {
+                if let Some(store) = state.proposal_store.as_ref() {
+                    let store = store.lock().await;
+                    let _ = store.mark_dispatch_failed_before_effect(
+                        &proposal_id,
+                        &dispatch_claim_id,
+                        "canonical_materializer_owner_missing",
+                    );
+                }
+                return Err(
+                    "canonical Work materialization owner is missing; no effect was dispatched"
+                        .into(),
+                );
+            }
+            Err(error) => {
+                if let Some(store) = state.proposal_store.as_ref() {
+                    let store = store.lock().await;
+                    let _ = store.mark_dispatch_failed_before_effect(
+                        &proposal_id,
+                        &dispatch_claim_id,
+                        "canonical_materializer_attempt_admission_failed",
+                    );
+                }
+                return Err(format!(
+                    "canonical Work materialization attempt admission failed: {error}"
+                ));
+            }
+        }
+    }
     let (result, artifact_materialization) = if proposal.proposal_type
         == ProposalType::ExternalWriteAction
     {
@@ -3916,14 +4042,13 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
                 receipt,
             } => (patch_result, Some(*receipt)),
             ArtifactApplyOutcome::FailedBeforeEffect(error) => {
-                mark_canonical_report_artifact_effect_failure(state, &proposal, &error, false)
-                    .await;
+                mark_canonical_work_artifact_effect_failure(state, &proposal, &error, false).await;
                 return Err(format!(
                     "Artifact materialization failed before effect: {error}"
                 ));
             }
             ArtifactApplyOutcome::Unknown(error) => {
-                mark_canonical_report_artifact_effect_failure(state, &proposal, &error, true).await;
+                mark_canonical_work_artifact_effect_failure(state, &proposal, &error, true).await;
                 return Err(format!(
                         "Artifact materialization state is unknown; automatic redispatch is forbidden: {error}"
                     ));
@@ -3985,7 +4110,7 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
     }
     let mut warnings = Vec::new();
     let canonical_task_runtime_projection_status =
-        project_confirmed_canonical_report_artifact_status(
+        project_confirmed_canonical_work_artifact_status(
             state,
             &proposal,
             artifact_materialization.as_ref(),
@@ -4117,8 +4242,10 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
     };
     let dispatch_projection_confirmed = proposal_projected;
     drop(terminal_owner_fence_guard);
-    if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
-        warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
+    if canonical_work_artifact_id(&proposal).is_none() {
+        if let Err(error) = reconcile_agent_runs_for_proposal(state, &proposal).await {
+            warnings.push(format!("AgentRun 投影仍等待 reconciliation: {}", error));
+        }
     }
     // Check for blocked_action in the patch result error field
     let blocked_action_info = if let Some(ref err) = result.error {
@@ -4514,7 +4641,7 @@ pub(crate) async fn reject_proposal_with_state(
     require_persistence_write(state)?;
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     if proposal.status == ProposalStatus::Rejected {
-        project_canonical_report_review_rejection(state, &proposal).await?;
+        project_canonical_work_review_rejection(state, &proposal).await?;
         crate::life_model_learning::record_lifemodel_learning_review_rejected_with_state(
             state, &proposal,
         )
@@ -4538,7 +4665,7 @@ pub(crate) async fn reject_proposal_with_state(
     let expected_status = proposal.status;
     proposal.reject();
     update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
-    project_canonical_report_review_rejection(state, &proposal).await?;
+    project_canonical_work_review_rejection(state, &proposal).await?;
     crate::life_model_learning::record_lifemodel_learning_review_rejected_with_state(
         state, &proposal,
     )
@@ -5116,6 +5243,142 @@ pub async fn reject_proposal(
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), String> {
     reject_proposal_with_state(proposal_id, state.inner()).await
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactUndoProposalResponse {
+    pub artifact_id: String,
+    pub proposal_id: String,
+    pub status: &'static str,
+}
+
+#[tauri::command]
+pub async fn request_artifact_undo(
+    artifact_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ArtifactUndoProposalResponse, String> {
+    request_artifact_undo_with_state(artifact_id, state.inner()).await
+}
+
+pub(crate) async fn request_artifact_undo_with_state(
+    artifact_id: String,
+    state: &Arc<AppState>,
+) -> Result<ArtifactUndoProposalResponse, String> {
+    require_persistence_write(state)?;
+    let canonical_store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let artifact = canonical_store
+        .lock()
+        .await
+        .load_artifact(&artifact_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_artifact_missing".to_string())?;
+    if artifact.status != openlife_core::task_runtime::CanonicalArtifactStatus::Materialized {
+        return Err("canonical_artifact_undo_requires_materialized_artifact".into());
+    }
+    let source = artifact
+        .materialized_reference
+        .clone()
+        .ok_or_else(|| "canonical_artifact_materialized_reference_missing".to_string())?;
+    let original_proposal_id = artifact
+        .proposal_id
+        .as_deref()
+        .ok_or_else(|| "canonical_artifact_review_origin_missing".to_string())?;
+    let original_proposal = get_proposal_with_state(state, original_proposal_id).await?;
+    if original_proposal
+        .after
+        .get("expected_target_absent")
+        .and_then(Value::as_bool)
+        != Some(true)
+    {
+        return Err("canonical_artifact_undo_unavailable_without_original_bytes".into());
+    }
+    let safe_paths = artifact_safe_paths_for_proposal(state, &original_proposal).await?;
+    let target = crate::artifact_materializer::trash_target_for_source(&source, &safe_paths)?;
+    let prepared = crate::artifact_materializer::prepare_artifact_move(
+        "artifact-undo-preview",
+        &source,
+        &target.to_string_lossy(),
+        &artifact.content_digest,
+        &safe_paths,
+    )?;
+    let task_snapshot = canonical_store
+        .lock()
+        .await
+        .load_task_snapshot(&artifact.task_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_artifact_task_missing".to_string())?;
+    let source_item = task_snapshot
+        .items
+        .iter()
+        .find(|item| item.id == artifact.source_item_id)
+        .ok_or_else(|| "canonical_artifact_source_item_missing".to_string())?;
+    let mut proposal = AgentProposal::new(
+        ProposalType::ExternalWriteAction,
+        &format!(
+            "filesystem.{}->{}",
+            prepared.source_path.display(),
+            prepared.target_path.display()
+        ),
+        serde_json::json!({
+            "operation": "trash",
+            "source_path": prepared.source_path,
+            "target_path": prepared.target_path,
+            "source_digest": prepared.content_digest,
+            "contentDigest": artifact.content_digest,
+            "canonicalTaskId": artifact.task_id,
+            "artifactDraftItemId": artifact.source_item_id,
+            "artifactId": artifact.id,
+            "artifactVersion": artifact.current_version,
+            "undoOfArtifactId": artifact.id,
+            "undoOfProposalId": original_proposal_id,
+            "sourceRunId": source_item.run_id,
+            "directWritesExecuted": false,
+            "externalWritesExecuted": false,
+        }),
+        "User requested a governed Undo for a verified OpenLife-created Artifact.",
+        1.0,
+        RiskLevel::High,
+        openlife_core::agent::ProposalSource::Manual,
+    );
+    proposal.run_id = Some(source_item.run_id.clone());
+    proposal.source_detail = Some(artifact.task_id.clone());
+    let request = openlife_core::agent::DurableWriteRequest::from_agent_proposal(
+        openlife_core::agent::DurableWriteSource::ManualOverride,
+        openlife_core::agent::DurableWriteSubject::ExternalWrite,
+        proposal,
+        "Artifact Undo is pending Review Center approval; no file was moved.",
+    )
+    .with_idempotency_key(format!("artifact_undo:{}", artifact.id));
+    let proposal_store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(proposal_store_missing)?
+        .lock()
+        .await;
+    let review = openlife_core::agent::ReviewWorkflow::new(&proposal_store)
+        .submit(request)
+        .map_err(|error| error.to_string())?;
+    drop(proposal_store);
+    canonical_store
+        .lock()
+        .await
+        .bind_artifact_undo(
+            &artifact.id,
+            review.proposal_id(),
+            &source,
+            &target.to_string_lossy(),
+            &artifact.content_digest,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(ArtifactUndoProposalResponse {
+        artifact_id: artifact.id,
+        proposal_id: review.proposal_id().to_string(),
+        status: "waiting_review",
+    })
 }
 
 #[tauri::command]
@@ -7327,7 +7590,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn accepted_report_proposal_materializes_the_preexisting_canonical_artifact() {
+    async fn accepted_work_proposal_materializes_the_preexisting_canonical_artifact() {
         use sha2::{Digest, Sha256};
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -7340,27 +7603,31 @@ mod tests {
         let file_path = safe_path.join("report.md");
         let content = "# Canonical report";
         let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
-        let prepared = state
-            .canonical_task_runtime_store
-            .as_ref()
-            .unwrap()
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let runtime = state.canonical_task_runtime_store.as_ref().unwrap();
+        runtime
             .lock()
             .await
-            .prepare_report_artifact(openlife_core::task_runtime::ReportArtifactDraftInput {
-                conversation_id: "conversation-report",
-                execution_session_id: "execution-session-report",
-                run_id: "run-report",
-                outcome_digest: &format!(
+            .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: "turn-work-artifact",
+                instruction_digest: &format!(
                     "sha256:{:x}",
-                    Sha256::digest(b"canonical report outcome")
+                    Sha256::digest(b"canonical Work artifact outcome")
                 ),
-                plan_digest: &format!("sha256:{:x}", Sha256::digest(b"canonical report plan")),
-                provider_request_id: "provider-request-report",
-                provider_receipt_digest: &format!(
-                    "sha256:{:x}",
-                    Sha256::digest(b"provider receipt report")
-                ),
-                tool_observations: &[],
+                plan_digest: None,
+            })
+            .unwrap();
+        let prepared = runtime
+            .lock()
+            .await
+            .prepare_general_artifact(openlife_core::task_runtime::GeneralArtifactDraftInput {
+                task_id: &task_id,
+                run_id: &run_id,
                 target_reference: &file_path.to_string_lossy(),
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",
@@ -7393,7 +7660,7 @@ mod tests {
             .unwrap()
             .lock()
             .await
-            .bind_report_review(&prepared.artifact_id, &proposal.id)
+            .bind_artifact_review(&prepared.artifact_id, &proposal.id)
             .unwrap();
         state
             .proposal_store
@@ -7456,7 +7723,192 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejected_report_proposal_blocks_the_preexisting_canonical_artifact_task() {
+    async fn governed_undo_moves_a_verified_created_artifact_without_legacy_run_projection() {
+        use sha2::{Digest, Sha256};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let safe_path = temp_dir.path().join("safe-undo");
+        std::fs::create_dir_all(&safe_path).unwrap();
+        let safe_path = safe_path.canonicalize().unwrap();
+        state.config.lock().await.system.safe_paths =
+            vec![safe_path.to_string_lossy().into_owned()];
+        let file_path = safe_path.join("created.md");
+        let content = "# Governed Undo";
+        let digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let runtime = state.canonical_task_runtime_store.as_ref().unwrap();
+        runtime
+            .lock()
+            .await
+            .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: "turn-undo",
+                instruction_digest: &format!("sha256:{:x}", Sha256::digest(b"create file")),
+                plan_digest: None,
+            })
+            .unwrap();
+        let prepared = runtime
+            .lock()
+            .await
+            .prepare_general_artifact(openlife_core::task_runtime::GeneralArtifactDraftInput {
+                task_id: &task_id,
+                run_id: &run_id,
+                target_reference: &file_path.to_string_lossy(),
+                content_digest: &digest,
+                media_type: "text/markdown; charset=utf-8",
+            })
+            .unwrap();
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.{}", file_path.display()),
+            serde_json::json!({
+                "path": file_path.to_string_lossy(),
+                "content": content,
+                "content_hash": digest,
+                "operation": "propose_write",
+                "expected_target_absent": true,
+                "expected_target_digest": null,
+                "artifactId": prepared.artifact_id,
+                "canonicalTaskId": prepared.task_id,
+                "artifactDraftItemId": prepared.artifact_draft_item_id,
+                "artifactVersion": 1,
+                "generatedByProvider": true,
+            }),
+            "Create a governed Work Artifact",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::ChatConversation,
+        );
+        runtime
+            .lock()
+            .await
+            .bind_artifact_review(&prepared.artifact_id, &proposal.id)
+            .unwrap();
+        runtime
+            .lock()
+            .await
+            .defer_general_task_result(openlife_core::task_runtime::DeferGeneralTaskResultInput {
+                task_id: &task_id,
+                run_id: &run_id,
+                conversation_item_id: "conversation-item-undo",
+                result_digest: &format!("sha256:{:x}", Sha256::digest(b"undo waiting review")),
+                summary_code: "work_artifact_completed",
+            })
+            .unwrap();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+        accept_proposal_with_state(proposal.id, &state)
+            .await
+            .unwrap();
+
+        let undo = request_artifact_undo_with_state(prepared.artifact_id.clone(), &state)
+            .await
+            .unwrap();
+        let undo_proposal = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&undo.proposal_id)
+            .unwrap()
+            .unwrap();
+        let undo_target = undo_proposal.after["target_path"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let undo_proposal_id = undo.proposal_id.clone();
+        let accepted = accept_proposal_with_state(undo_proposal_id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(accepted["effect_status"], "confirmed");
+        assert!(!file_path.exists());
+        assert_eq!(std::fs::read_to_string(&undo_target).unwrap(), content);
+        let snapshot = runtime
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot.artifacts[0].undo.as_ref().unwrap().status,
+            "undone"
+        );
+        assert!(snapshot.attempts.iter().any(|attempt| {
+            attempt.executor_kind == "materializer"
+                && attempt.status == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+        }));
+
+        let tasks = crate::read_models::tasks::get_tasks_view_model_with_state(&state)
+            .await
+            .unwrap()
+            .data
+            .unwrap();
+        let task = tasks
+            .items
+            .iter()
+            .find(|task| task.canonical_task_id == task_id)
+            .unwrap();
+        assert_eq!(
+            task.lifecycle_status,
+            openlife_core::agent::TaskLifecycleStatus::Completed
+        );
+        assert_eq!(
+            task.terminal_delivery_status,
+            openlife_core::agent::TaskTerminalDeliveryStatus::Delivered
+        );
+        assert!(task.final_delivery_evidence_present);
+        assert_eq!(
+            task.latest_result_preview
+                .as_ref()
+                .and_then(|preview| preview.preview.as_deref()),
+            Some("任务已经完成并通过核验；1 个产物随后已按用户请求撤销。")
+        );
+        assert_eq!(task.artifacts[0].undo.status.as_deref(), Some("undone"));
+        assert!(!task.artifacts[0].undo.available);
+        assert_eq!(
+            task.artifacts[0]
+                .undo
+                .proposal_ref
+                .as_ref()
+                .map(|reference| reference.id.as_str()),
+            Some(undo_proposal_id.as_str())
+        );
+
+        let replay = accept_proposal_with_state(undo_proposal_id, &state)
+            .await
+            .unwrap();
+        assert_eq!(replay["effect_status"], "confirmed");
+        assert_eq!(
+            replay["canonical_task_runtime_projection_status"],
+            "confirmed"
+        );
+        assert!(!file_path.exists());
+        assert_eq!(std::fs::read_to_string(&undo_target).unwrap(), content);
+        assert!(state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_runs(10, 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn rejected_work_proposal_blocks_the_preexisting_canonical_artifact_task() {
         use sha2::{Digest, Sha256};
 
         let temp_dir = tempfile::tempdir().unwrap();
@@ -7464,30 +7916,31 @@ mod tests {
         let file_path = temp_dir.path().join("rejected-report.md");
         let content = "# Rejected canonical report";
         let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
-        let prepared = state
-            .canonical_task_runtime_store
-            .as_ref()
-            .unwrap()
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let runtime = state.canonical_task_runtime_store.as_ref().unwrap();
+        runtime
             .lock()
             .await
-            .prepare_report_artifact(openlife_core::task_runtime::ReportArtifactDraftInput {
-                conversation_id: "conversation-rejected-report",
-                execution_session_id: "execution-session-rejected-report",
-                run_id: "run-rejected-report",
-                outcome_digest: &format!(
+            .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: "turn-rejected-work",
+                instruction_digest: &format!(
                     "sha256:{:x}",
-                    Sha256::digest(b"rejected canonical report outcome")
+                    Sha256::digest(b"reject canonical Work artifact")
                 ),
-                plan_digest: &format!(
-                    "sha256:{:x}",
-                    Sha256::digest(b"rejected canonical report plan")
-                ),
-                provider_request_id: "provider-request-rejected-report",
-                provider_receipt_digest: &format!(
-                    "sha256:{:x}",
-                    Sha256::digest(b"provider receipt rejected report")
-                ),
-                tool_observations: &[],
+                plan_digest: None,
+            })
+            .unwrap();
+        let prepared = runtime
+            .lock()
+            .await
+            .prepare_general_artifact(openlife_core::task_runtime::GeneralArtifactDraftInput {
+                task_id: &task_id,
+                run_id: &run_id,
                 target_reference: &file_path.to_string_lossy(),
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",
@@ -7520,7 +7973,7 @@ mod tests {
             .unwrap()
             .lock()
             .await
-            .bind_report_review(&prepared.artifact_id, &proposal.id)
+            .bind_artifact_review(&prepared.artifact_id, &proposal.id)
             .unwrap();
         state
             .proposal_store
@@ -7560,7 +8013,7 @@ mod tests {
             .any(|item| {
                 item.kind == openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint
                     && item.status == openlife_core::task_runtime::CanonicalTaskItemStatus::Blocked
-                    && item.summary_code == "report_artifact_review_rejected"
+                    && item.summary_code == "artifact_review_rejected"
             }));
         assert!(!file_path.exists());
         drop(store);
@@ -7589,7 +8042,7 @@ mod tests {
             artifact_id_for_proposal(&proposal),
             format!("artifact:{}", proposal.id)
         );
-        assert!(canonical_report_artifact_id(&proposal).is_none());
+        assert!(canonical_work_artifact_id(&proposal).is_none());
     }
 
     #[tokio::test]

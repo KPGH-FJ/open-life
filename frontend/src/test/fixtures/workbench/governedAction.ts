@@ -702,5 +702,6 @@ export function workbenchJourneyFixtureDataSource(
     async dispatchTaskControl(control) {
       await applyTaskControl(control);
     },
+    async requestArtifactUndo() {},
   };
 }

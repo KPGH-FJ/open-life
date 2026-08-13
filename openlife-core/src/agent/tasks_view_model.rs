@@ -253,6 +253,19 @@ pub struct TaskArtifactViewModel {
     pub change: TaskArtifactChangeViewModel,
     pub preview: TaskArtifactPreviewViewModel,
     pub verification: TaskArtifactVerificationViewModel,
+    pub undo: TaskArtifactUndoViewModel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactUndoViewModel {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_ref: Option<BackendEntityRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1279,6 +1292,12 @@ mod tests {
                 observed_content_digest: None,
                 verification_item_present: false,
                 reason_code: Some("artifact_waiting_materialization".into()),
+            },
+            undo: TaskArtifactUndoViewModel {
+                available: false,
+                status: None,
+                proposal_ref: None,
+                reason_code: Some("artifact_not_materialized".into()),
             },
         };
         let model = build_tasks_view_model(TasksViewModelBuildInput {

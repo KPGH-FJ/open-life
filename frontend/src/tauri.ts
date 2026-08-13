@@ -2804,6 +2804,12 @@ export type TaskArtifactViewModel = {
     verificationItemPresent: boolean;
     reasonCode?: string;
   };
+  undo: {
+    available: boolean;
+    status?: string;
+    proposalRef?: BackendEntityRef;
+    reasonCode?: string;
+  };
 };
 
 export type TaskViewModelItem = {
@@ -4671,6 +4677,17 @@ export async function getMemoryAsset(memoryId: string): Promise<MemoryLifecycleR
 
 export async function rejectProposal(proposalId: string): Promise<void> {
   return safeInvoke("reject_proposal", { proposalId, proposal_id: proposalId });
+}
+
+export async function requestArtifactUndo(artifactId: string): Promise<{
+  artifactId: string;
+  proposalId: string;
+  status: "waiting_review";
+}> {
+  return safeInvoke("request_artifact_undo", {
+    artifactId,
+    artifact_id: artifactId,
+  });
 }
 
 export async function editProposal(

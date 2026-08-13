@@ -10,6 +10,7 @@ const tauriMocks = vi.hoisted(() => ({
   getWorkspaceViewModel: vi.fn(),
   postponeProposal: vi.fn(),
   rejectProposal: vi.fn(),
+  requestArtifactUndo: vi.fn(),
   retryWorkTask: vi.fn(),
 }));
 
@@ -191,6 +192,30 @@ describe("governed action Tauri data source", () => {
 
     expect(tauriMocks.retryWorkTask).toHaveBeenCalledWith("task-1", "run-2");
     expect(tauriMocks.cancelWorkTask).toHaveBeenCalledWith("task-1");
+  });
+
+  it("verifies an exact governed Artifact Undo review receipt", async () => {
+    tauriMocks.requestArtifactUndo.mockResolvedValue({
+      artifactId: "artifact-1",
+      proposalId: "proposal-undo-1",
+      status: "waiting_review",
+    });
+
+    await tauriGovernedActionDataSource.requestArtifactUndo("artifact-1");
+
+    expect(tauriMocks.requestArtifactUndo).toHaveBeenCalledWith("artifact-1");
+  });
+
+  it("fails closed on an unbound Artifact Undo review receipt", async () => {
+    tauriMocks.requestArtifactUndo.mockResolvedValue({
+      artifactId: "artifact-other",
+      proposalId: "proposal-undo-1",
+      status: "waiting_review",
+    });
+
+    await expect(tauriGovernedActionDataSource.requestArtifactUndo("artifact-1")).rejects.toThrow(
+      "artifact_undo_receipt_unverified"
+    );
   });
 
   it("fails closed instead of inventing edit, apply, revoke, resume, or evidence dispatch", async () => {

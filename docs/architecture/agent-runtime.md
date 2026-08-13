@@ -165,8 +165,12 @@ or body-preview text: it keeps only selection digest/count and a safe summary.
 Restart synthesis reselects from the canonical task-bound ResourceStore and
 fails closed if the selection digest or count has drifted.
 
-For the report path, `CanonicalTaskRuntimeStore` now creates Task, Run,
-Instruction, and Plan before the first governed read or provider call. Active
+For general Work, `CanonicalTaskRuntimeStore` creates Task, Run, Instruction,
+and optional Plan before the first governed read or provider call. It also owns
+ArtifactDraft, ReviewCheckpoint, materializer ItemAttempt, Verification,
+FinalResult, and Undo state. Final delivery requires the canonical FinalResult
+record and its exact completed Item; a confirmed Undo preserves that original
+completion proof and adds an independently receipted reversal. Active
 Workspace steering is an authenticated Conversation message plus a digest-only
 Steering Item bound to the exact execution session, canonical Run, and base
 plan revision. The kernel consumes one pending in-scope Steering Item at the
@@ -190,9 +194,10 @@ policy, and finalizes failures with `directWritesExecuted=false`.
 Release Work cancel and retry are owned by `canonical_work_runtime.rs` and
 operate on canonical Task/Run/Turn identity. The former TaskSession list,
 detail, refresh, resume, cancel, and action-retry IPCs are removed from the
-release handler and frontend. `main_chat_task_controls.rs` remains only for
-pre-R4 Review continuation/materialization consumers and tests until those
-capabilities move to canonical Item checkpoints.
+release handler and frontend. `main_chat_task_controls.rs` remains
+compatibility/test code only. Canonical Artifact approval and Undo resume
+through ReviewWorkflow into the same Work Item lifecycle and never project an
+AgentRun.
 
 ## Test And Eval Surfaces
 

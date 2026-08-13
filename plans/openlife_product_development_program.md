@@ -378,10 +378,55 @@ registered stdio MCP, failure, citation-retry, exact-replay, and document-retry
 tests passed. R3 does not claim external-live Web/provider/MCP or interactive
 native evidence; those remain R8 evidence.
 
-## Current stage: R4 - governed Artifact and effect lifecycle
+## Completed stage: R4 - governed Artifact and effect lifecycle
 
-R4 migrates ArtifactVersion, Changes, Preview, Verification, ReviewCheckpoint,
-approval continuation, materialization receipts, Undo, and effect
-reconciliation into the same general Work Task/Run/Item lifecycle. It must
-delete each retained report-only or legacy effect consumer only after the
-general replacement is complete.
+R4 is complete in the controlled product boundary:
+
+- generated Markdown/CSV outcomes enter the same general Work Task and Run;
+  each ArtifactDraft exists before Review, and ReviewCheckpoint plus the
+  waiting materialization Item are canonical Task Items. Bundles prepare every
+  draft before the first Review checkpoint pauses the Run, so Markdown and CSV
+  cannot split into competing lifecycles;
+- approval claims the exact Proposal, starts a receipt-bound materializer
+  ItemAttempt, confirms the file effect, writes Verification, and completes the
+  same Run/Task only when every current ArtifactVersion is verified;
+- the assistant result identity is persisted while Review is pending, so an
+  approval after restart creates the same canonical FinalResult rather than a
+  second lifecycle;
+- effect failure and effect-unknown states terminalize the exact Artifact Item,
+  Attempt, Run, and Task without claiming delivery; startup reconciliation can
+  finish a confirmed canonical projection without redispatching the effect;
+- created files expose governed Undo. Undo gets its own ReviewCheckpoint and
+  materializer Attempt, revalidates exact content and scope, moves the file to
+  the safe OpenLife trash location, and records `undone` without rewriting the
+  original Artifact history. Replacement Undo stays unavailable until original
+  bytes are durably captured;
+- TasksViewModel owns Changes, Preview, Verification, and Undo presentation;
+  React invokes only the typed Undo command and never reads files or stores.
+  Final delivery requires the canonical FinalResult record, its exact
+  completed Item, and verified Artifact receipts; a successful governed Undo
+  preserves that completed history while presenting the later reversal rather
+  than degrading the original Task to missing evidence;
+- the compatibility kernel now rejects provider-generated Artifacts and cannot
+  call the report-only Artifact owner. An absence guard prevents that consumer
+  from returning; and
+- the obsolete AgentRun tool-evidence projection used only by the retired
+  report Artifact path was deleted.
+
+Focused restart, single- and multi-Artifact generation-to-approval,
+document-plus-Web-to-Artifact,
+rejection, effect receipt, Undo replay, ViewModel, and frontend rendering tests
+passed. Full locked gates passed: core 1464 passed / 2 ignored, scheduler 8
+passed, Tauri 1211 passed / 25 ignored, resource worker 2 passed, doc tests 8
+passed, frontend 271 passed, production build and absence guard passed, and 8
+browser-shell E2E cases passed. The additional ignored Tauri cases are labeled
+historical pre-reconstruction report-owner evidence and are not current R4
+completion credit. These controlled tests do not claim external-live
+provider/Web/MCP or exact-native product evidence; R8 owns those evidence
+levels.
+
+## Current stage: R5 - bounded concurrency, steering, recovery, and task control
+
+R5 will migrate remaining active steering and control semantics onto general
+Work identity, then delete the report-named steering and compatibility control
+consumers. R5 has not started.

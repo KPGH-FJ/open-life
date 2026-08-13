@@ -52,7 +52,9 @@ scripts/s6-report-matrix.zsh
 
 This historical script proves bounded report contracts that remain useful as
 migration evidence. It does not prove the reconstructed general Agent, a native
-product path, or an external-live path.
+product path, or an external-live path. It is not an R4 acceptance gate; R4
+uses canonical Work generation, approval, materialization, restart recovery,
+verification, and Undo product tests.
 
 The required external-live report case is gated separately:
 
