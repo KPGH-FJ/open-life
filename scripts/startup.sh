@@ -218,9 +218,9 @@ JSON
 
 openlife_app_dir_name() {
     case "${OPENLIFE_PROFILE:-release}" in
-        dev) echo "ai.openlife.app.dev" ;;
-        qa) echo "ai.openlife.app.qa" ;;
-        *) echo "ai.openlife.app" ;;
+        dev) echo "ai.openlife.desktop.dev" ;;
+        qa) echo "ai.openlife.desktop.qa" ;;
+        *) echo "ai.openlife.desktop" ;;
     esac
 }
 

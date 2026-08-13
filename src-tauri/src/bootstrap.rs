@@ -2,6 +2,7 @@
 //! Extracted from lib.rs to keep the main entry point focused on Tauri lifecycle.
 
 use crate::a2a_sidecar;
+use crate::credential_bootstrap::initialize_fresh_profile_credentials;
 use crate::main_chat_event_stream::{MainChatAgentEventStore, MainChatEventDigestKey};
 use crate::persistence_coordinator::PersistenceCoordinator;
 #[cfg(test)]
@@ -9,9 +10,10 @@ use crate::secret_store::MCP_AUDIT_KEY_REF_PREFIX;
 use crate::secret_store::{
     hydrate_config_secrets_read_only, inspect_and_hydrate_integrity_key,
     inspect_existing_mcp_audit_keys, selected_keyring_service_classification,
-    IntegrityKeyHydration, McpAuditKeyHydrationInspection, ProviderCredentialHydrationStatus,
-    SecretReader, StartupKeyringSecretStore, ACTION_QUEUE_AUTHORITY_KEY_REF,
-    AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
+    IntegrityKeyHydration, KeyringSecretStore, McpAuditKeyHydrationInspection,
+    ProviderCredentialHydrationStatus, SecretReader, StartupKeyringSecretStore,
+    ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
+    TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::{AppState, CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{load_mcp_audit_keyring_from_path, privacy_policy_path, McpAuditKeyringLoad};
@@ -1935,7 +1937,31 @@ pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
         }
         Err(error) => log::error!("[startup] OS credential service selection blocked: {error}"),
     }
-    bootstrap_with_secret_store(data_dir, &StartupKeyringSecretStore::default())
+    let startup_store = StartupKeyringSecretStore::default();
+    if let Err(error) =
+        initialize_fresh_profile_credentials(&data_dir, &startup_store, &KeyringSecretStore)
+    {
+        log::warn!("[startup] fresh internal credential initialization skipped: {error}");
+    }
+    bootstrap_with_secret_store(data_dir, &startup_store)
+}
+
+#[cfg(test)]
+fn bootstrap_with_fresh_profile_initialization_for_test(
+    data_dir: PathBuf,
+    secret_store: &dyn crate::secret_store::SecretStore,
+) -> BootstrapResult {
+    struct TestSecretReader<'a>(&'a dyn crate::secret_store::SecretStore);
+
+    impl SecretReader for TestSecretReader<'_> {
+        fn read_secret(&self, secret_ref: &str) -> anyhow::Result<Option<String>> {
+            crate::secret_store::SecretStore::get(self.0, secret_ref)
+        }
+    }
+
+    initialize_fresh_profile_credentials(&data_dir, secret_store, secret_store)
+        .expect("initialize fresh test profile credentials");
+    bootstrap_with_secret_store(data_dir, &TestSecretReader(secret_store))
 }
 
 #[cfg(test)]
@@ -3651,6 +3677,104 @@ mod tests {
             CredentialBootstrapStatus::MissingExistingData
         );
         assert_eq!(result.state.credential_bootstrap_snapshot.digest.len(), 64);
+    }
+
+    #[test]
+    fn reconstruction_fresh_profile_initializes_internal_credentials_before_bootstrap() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::empty();
+
+        let result = bootstrap_with_fresh_profile_initialization_for_test(
+            directory.path().to_path_buf(),
+            &secrets,
+        );
+
+        assert!(result.state.credential_bootstrap_snapshot.purposes[..5]
+            .iter()
+            .all(|purpose| purpose.status == CredentialBootstrapStatus::Available));
+        assert!(result.state.agent_run_store.is_some());
+        assert!(result.state.main_chat_agent_session_store.is_some());
+        assert!(result.state.main_chat_agent_event_store.is_some());
+        assert!(result.state.main_chat_action_queue_store.is_some());
+    }
+
+    #[test]
+    fn reconstruction_existing_protected_data_never_triggers_credential_creation() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("agent_runs.db"), b"existing").unwrap();
+        let secrets = TestSecretStore::empty();
+
+        let error =
+            initialize_fresh_profile_credentials(directory.path(), &secrets, &secrets).unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("existing protected data has no matching internal credential"));
+        assert_eq!(secrets.operation_counts(), (0, 0));
+    }
+
+    #[test]
+    fn reconstruction_restart_reuses_exact_internal_credentials_without_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::empty();
+        let first = bootstrap_with_fresh_profile_initialization_for_test(
+            directory.path().to_path_buf(),
+            &secrets,
+        );
+        assert!(first.state.credential_bootstrap_snapshot.purposes[..5]
+            .iter()
+            .all(|purpose| purpose.status == CredentialBootstrapStatus::Available));
+        secrets.reset_operation_counts();
+
+        let second = bootstrap_with_fresh_profile_initialization_for_test(
+            directory.path().to_path_buf(),
+            &secrets,
+        );
+
+        assert!(second.state.credential_bootstrap_snapshot.purposes[..5]
+            .iter()
+            .all(|purpose| purpose.status == CredentialBootstrapStatus::Available));
+        assert_eq!(secrets.operation_counts(), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn reconstruction_fresh_profile_projects_a_usable_empty_workspace() {
+        let directory = tempfile::tempdir().unwrap();
+        let secrets = TestSecretStore::empty();
+        let result = bootstrap_with_fresh_profile_initialization_for_test(
+            directory.path().to_path_buf(),
+            &secrets,
+        );
+
+        let tasks = crate::read_models::tasks::get_tasks_view_model_with_state(&result.state)
+            .await
+            .unwrap();
+        let workspace =
+            crate::read_models::tasks::get_workspace_view_model_with_state(&result.state)
+                .await
+                .unwrap();
+        let boundary =
+            crate::read_models::provider_privacy::get_provider_privacy_boundary_summary_with_state(
+                &result.state,
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(tasks.status, openlife_core::agent::ViewModelStatus::Empty);
+        assert_eq!(
+            workspace.status,
+            openlife_core::agent::ViewModelStatus::Empty
+        );
+        assert!(tasks.data.unwrap().items.is_empty());
+        let workspace = workspace.data.unwrap();
+        assert!(workspace.active_task.is_none());
+        assert!(workspace.recent_task_refs.is_empty());
+        assert_eq!(
+            boundary.status,
+            openlife_core::agent::ViewModelStatus::Ready
+        );
+        assert!(boundary.data.is_some());
+        assert!(!boundary.evidence_refs.is_empty());
     }
 
     #[tokio::test]

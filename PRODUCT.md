@@ -12,34 +12,34 @@ continuity and personalization. Those systems remain optional collaborators of
 the Agent harness rather than owners of task execution, permission, or
 completion.
 
-## Current Product Loop
+## Target Product Loop
 
-1. The user describes an outcome in Workspace and optionally supplies files,
-   sources, a workspace, constraints, and a desired deliverable.
-2. OpenLife derives a bounded task contract and works through one canonical task
-   lifecycle. Planning, adaptive tool use, approvals, and future subagents are
-   phases or capabilities inside that lifecycle, not separate product runtimes.
-3. The user can follow progress, steer the active task, answer questions, stop
-   work, or approve an important boundary without losing the task context.
-4. OpenLife returns a reviewable result with relevant artifacts, changes,
+1. The user opens or creates a Conversation in the Workbench. Chat provides a
+   direct answer; Work accepts a meaningful outcome and optional files,
+   sources, Project scope, constraints, and desired deliverables.
+2. Chat and Work share one canonical Conversation, Turn, and typed Item spine.
+   Work adds a durable Task and Run with an editable completion contract.
+3. OpenLife plans when useful, uses authorized capabilities adaptively, and
+   lets the user follow progress, steer, answer questions, pause, resume, or
+   approve an important boundary without losing context.
+4. OpenLife returns one canonical FinalResult with relevant Artifacts, changes,
    sources, limitations, and verification state.
-5. Durable or external effects follow the applicable scope and risk contract.
+5. Durable or external effects follow the applicable task scope and risk contract.
    A Review proposal is used only when a governed change needs asynchronous or
    durable review; it is not the container for every task or action.
 
-## Core Surfaces
+## Target Core Surfaces
 
-- **Today**: current read model and safe status summary.
-- **Workspace**: task delegation, conversation, live progress, steering, and
-  results.
-- **Tasks**: task lifecycle, blockers, retry, resume, cancellation, and result
-  history.
-- **Review**: governed proposals, approval, rejection, postponement, and
-  materialization evidence.
+- **Workbench** (`/workspace`): Projects, Conversations, Chat and Work,
+  progress, steering, inline decisions, results, and a Needs Attention filter.
 - **Personal Intelligence** (`/life-model`): two peer areas with separate
   backend owners: user-owned long-term understanding in LifeModel, and
   user-controlled Agent Memory for work continuity.
-- **Settings**: model configuration, privacy boundaries, and credential state.
+- **Settings**: provider/model profiles, privacy and transmission boundaries,
+  credential recovery, local data controls, and diagnostics.
+
+Task, Run, Item, and Approval remain explicit backend facts. They do not each
+require a separate top-level product page.
 
 ## Non-Negotiable Boundaries
 
@@ -62,10 +62,14 @@ completion.
 
 ## Current Development Priority
 
-Build a genuinely capable Agent harness through complete vertical task paths,
-starting with local documents plus Web research producing a sourced,
-previewable, editable, and verified Markdown report. Complete a useful and
-reliable path before broadening it.
+Reconstruct the product from a stable local baseline into one capable Agent
+harness. Migrate complete vertical product capabilities, delete each replaced
+legacy owner and frontend consumer, and prove completion at the required unit,
+integration, browser, exact-native, and external-live evidence level.
+
+S0-S7 are historical exploration and reusable evidence, not current product
+completion. The active R0-R8 sequence is defined by the single plan in
+`plans/` and ADR 0018.
 
 Repository governance remains small and conventional: one active plan, normal
 source tests, normal CI, and concise architecture and decision records.

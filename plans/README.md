@@ -20,11 +20,12 @@ working tree.
 is the single active implementation plan. It records the current objective,
 scope, acceptance evidence, stop condition, and next pointer. Product direction
 lives in `PRODUCT.md`; accepted architecture lives in ADRs. Git history retains
-the superseded six-phase program.
+the superseded S0-S7 program. The active plan is the R0-R8 reconstruction.
 
 ## Accepted Decisions
 
 - `adr/0016-agent-memory-lifemodel-domain-boundaries.md`
+- `adr/0018-product-reconstruction-contract.md`
 - `adr/0017-canonical-task-runtime.md`
 - `adr/0014-explicit-user-memory-write-lane.md`
 - `adr/0015-transient-state-command-lane.md`

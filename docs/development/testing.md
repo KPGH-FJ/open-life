@@ -42,7 +42,7 @@ passing test must not be used as evidence for a broader layer.
 Tests use synthetic resources under `test-fixtures/`. They must not read real
 application data, Keychain contents, or private user files.
 
-## Report behavior matrix
+## Historical report behavior matrix
 
 Run the controlled S6 report matrix with:
 
@@ -50,9 +50,9 @@ Run the controlled S6 report matrix with:
 scripts/s6-report-matrix.zsh
 ```
 
-This script proves deterministic Task/Run/Item/Artifact, tool, Review,
-recovery, concurrency, and projection contracts. It deliberately does not
-claim native or external-live evidence.
+This historical script proves bounded report contracts that remain useful as
+migration evidence. It does not prove the reconstructed general Agent, a native
+product path, or an external-live path.
 
 The required external-live report case is gated separately:
 
@@ -66,7 +66,37 @@ It uses the configured provider and real Web access. Never paste provider
 payloads, credentials, resource bodies, or generated report content into plans
 or test summaries. A failed or unavailable live adapter remains blocked.
 
-Native review must use an exact current Tauri bundle and an isolated data
-profile. If that profile requires macOS Keychain initialization or recovery,
-stop for explicit user confirmation rather than touching the default profile or
-silently substituting fixture credentials.
+Native review must use an exact current Tauri bundle and a purpose-specific
+data profile. If that profile requires macOS Keychain recovery, stop for
+explicit user confirmation rather than silently substituting fixture
+credentials or rotating an existing credential.
+
+## macOS exact-native identity
+
+R0 and later native evidence must use an explicit local signing identity rather
+than a linker-generated ad-hoc executable identity:
+
+```sh
+OPENLIFE_CODESIGN_IDENTITY="OpenLife Local Code Signing" \
+  scripts/macos-exact-native.zsh
+```
+
+The verifier requires the signed bundle identity `ai.openlife.desktop`; the
+legacy `ai.openlife.app` name remains only as the explicit pre-reconstruction
+data-directory migration source and is not a valid macOS bundle identity.
+
+The script builds the exact source and verifies the configured bundle
+identifier, the selected signing authority, and the strict deep resource seal.
+It never reads Keychain values. A release build uses the fixed product Keychain
+service, so R0 first-run evidence used the fresh reconstruction profile after an
+explicit, bounded reset of OpenLife-owned internal keys. Provider and search
+credentials were not touched. Development-only isolated Keychain services may
+be used for diagnostics, but cannot be presented as release-path evidence.
+
+For local self-signed development, Keychain restart credit is bound to the
+exact built application. Rebuilding may cause macOS to require explicit ACL
+recovery even when the certificate subject is unchanged; cross-build access is
+not credited until a stable Developer ID/distribution identity is available.
+R0's measured exact-binary baseline on 2026-08-13 was 216.7 ms from launch to
+all protected execution stores open, 70,592 KiB RSS at that boundary, and zero
+observed network sockets. These are comparison measurements, not a release SLA.

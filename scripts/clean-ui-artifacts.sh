@@ -19,7 +19,7 @@ Default clean targets:
   target/debug/bundle/macos/OpenLife.app.stale-*
 
 Never cleaned by this script:
-  ~/Library/Application Support/ai.openlife.app
+  ~/Library/Application Support/ai.openlife.desktop
   *.db files
   LifeModel, memory, proposal, or agent run data
 EOF
@@ -91,12 +91,12 @@ fi
 if [ "$INCLUDE_WEBVIEW_CACHE" -eq 1 ]; then
     case "$(uname -s)" in
         Darwin*)
-            add_path "$HOME/Library/Caches/ai.openlife.app"
-            add_path "$HOME/Library/WebKit/ai.openlife.app"
-            add_path "$HOME/Library/Saved Application State/ai.openlife.app.savedState"
+            add_path "$HOME/Library/Caches/ai.openlife.desktop"
+            add_path "$HOME/Library/WebKit/ai.openlife.desktop"
+            add_path "$HOME/Library/Saved Application State/ai.openlife.desktop.savedState"
             ;;
         Linux*)
-            add_path "${XDG_CACHE_HOME:-$HOME/.cache}/ai.openlife.app"
+            add_path "${XDG_CACHE_HOME:-$HOME/.cache}/ai.openlife.desktop"
             ;;
         *)
             echo "No WebView cache paths configured for $(uname -s)" >&2
@@ -111,7 +111,7 @@ assert_safe_path() {
         exit 1
     fi
     case "$path" in
-        "$HOME/Library/Application Support/ai.openlife.app"|"$HOME/Library/Application Support/ai.openlife.app/"*)
+        "$HOME/Library/Application Support/ai.openlife.desktop"|"$HOME/Library/Application Support/ai.openlife.desktop/"*)
             echo "Refusing to clean Application Support data: $path" >&2
             exit 1
             ;;

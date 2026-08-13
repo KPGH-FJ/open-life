@@ -10,6 +10,7 @@ pub mod a2a_sidecar;
 pub(crate) mod artifact_materializer;
 pub mod bootstrap;
 pub mod commands;
+mod credential_bootstrap;
 pub(crate) mod danger_action_confirmation;
 pub mod errors;
 pub(crate) mod life_model_learning;

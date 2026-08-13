@@ -10,9 +10,9 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::Mutex;
 
-const RELEASE_APP_DIR_NAME: &str = "ai.openlife.app";
-const DEV_APP_DIR_NAME: &str = "ai.openlife.app.dev";
-const QA_APP_DIR_NAME: &str = "ai.openlife.app.qa";
+const RELEASE_APP_DIR_NAME: &str = "ai.openlife.desktop";
+const DEV_APP_DIR_NAME: &str = "ai.openlife.desktop.dev";
+const QA_APP_DIR_NAME: &str = "ai.openlife.desktop.qa";
 
 pub fn openlife_profile() -> String {
     normalize_openlife_profile(std::env::var("OPENLIFE_PROFILE").ok().as_deref()).to_string()

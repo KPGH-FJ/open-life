@@ -2,10 +2,10 @@
 
 ## Status
 
-Stable source map and accepted target direction for OpenLife. Sections marked
-"current" describe the production tree; sections marked "target" describe an
-accepted migration that is not yet product credit. Current source and accepted
-ADRs remain authoritative.
+Stable source map and accepted reconstruction direction for OpenLife. Sections
+marked "current" describe the production tree; sections marked "target"
+describe accepted R0-R8 work that is not yet product credit. Current source and
+accepted ADRs remain authoritative.
 
 ## Current product path
 
@@ -113,9 +113,44 @@ preview and prevent the Task from retaining delivered product credit. React
 renders these typed projections; it does not read files, proposals, or
 `task_runtime.db` itself.
 
-## Canonical task runtime target
+## Reconstruction target
 
-ADR 0017 accepts one product lifecycle:
+ADR 0018 extends ADR 0017 with one shared Conversation spine:
+
+```text
+Workbench -> optional Project -> Conversation -> Turn -> typed Item
+                                           \-> optional Work Task
+                                               -> Run -> Item -> ItemAttempt
+                                               -> FinalResult
+                                               -> ArtifactVersion
+```
+
+A direct Chat response does not create a Task. A durable Work outcome does.
+Conversation and Task are not aliases, and the target schema must allow a
+Conversation to retain multiple historical Tasks without allowing multiple
+unrelated active outcomes to blur the user experience.
+
+### R0 retained assets and migration consumers
+
+The reconstruction keeps proven provider adapters and receipts, ToolGateway
+contracts, production document/Web/Skill/MCP reads, ReviewWorkflow,
+materializers, effect certainty, cancellation fences, outbox recovery, backend
+ViewModels, and the report Artifact/Changes/Preview/Verification implementation.
+Memory and LifeModel remain retained stores behind future narrow typed ports.
+
+The following are current production consumers, not accepted target owners:
+
+- `AgentTaskSessionStore`, `AgentRunStore`, `ActionQueueStore`, and
+  `MainChatAgentEventStore` still divide ordinary Chat lifecycle and controls;
+- `CanonicalTaskRuntimeStore` still covers report/plan rather than all Tasks;
+- `PlanExecute` remains a selected execution strategy in runtime state; and
+- Today, Tasks, and Review remain top-level frontend surfaces during migration.
+
+R1-R7 migrate these consumers vertically and delete each old writer, read
+model, IPC, and frontend surface only after its complete replacement exists.
+Adding another compatibility store or restoring a retired route is forbidden.
+
+The Work lifecycle remains:
 
 ```text
 Task
@@ -158,6 +193,12 @@ Product read state comes from `LifeStateProjection`, backend ViewModels, and
 strict frontend adapters that compose named backend owner outputs. Governed
 writes pass through proposal, permission, persistence, and target-domain owners
 rather than page-local state.
+
+These six routes are current migration input, not the target information
+architecture. R7 reduces the shipped top-level surfaces to Workbench
+(`/workspace`), Personal Intelligence (`/life-model`), and Settings. Task and
+approval status are presented in their Conversation and a Needs Attention
+filter rather than duplicate top-level Task and Review products.
 
 ## Domain ownership
 
@@ -207,12 +248,15 @@ refreshed product read model where one exists.
 - Backend ViewModels are rebuildable projections and the only product-facing
   composition surface when a ViewModel exists.
 
-During the current vertical migration, `AgentRunStore` remains the execution
+During the current production baseline, `AgentRunStore` remains the execution
 and receipt owner while `CanonicalTaskRuntimeStore` owns stable report Task,
 Run membership, typed execution-fact Item, and Artifact metadata. It
 deliberately does not copy AgentRun status, provider payloads, or TaskSession
 bodies. Compatibility owners are retired only after each migrated path has a
-replacement read model and recovery proof.
+replacement read model and recovery proof. The S2 report slice is reusable
+migration evidence, not the migration strategy: ADR 0018 requires ordinary Chat
+and every Work capability to migrate vertically and deletes legacy execution
+data rather than keeping a runtime fallback.
 
 ## Personal intelligence boundary
 

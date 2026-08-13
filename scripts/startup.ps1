@@ -153,9 +153,9 @@ function Wait-ForPort($port, $timeoutSeconds = 30) {
 
 function Get-OpenLifeAppDirName {
     switch ($env:OPENLIFE_PROFILE) {
-        "dev" { return "ai.openlife.app.dev" }
-        "qa" { return "ai.openlife.app.qa" }
-        default { return "ai.openlife.app" }
+        "dev" { return "ai.openlife.desktop.dev" }
+        "qa" { return "ai.openlife.desktop.qa" }
+        default { return "ai.openlife.desktop" }
     }
 }
 

@@ -1,7 +1,7 @@
 use crate::a2a_server;
 use crate::storage;
 
-const BUNDLE_IDENTIFIER: &str = "ai.openlife.app";
+const BUNDLE_IDENTIFIER: &str = "ai.openlife.desktop";
 const PRODUCT_NAME: &str = "OpenLife";
 
 #[derive(Clone, Debug, serde::Serialize)]
