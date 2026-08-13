@@ -112,3 +112,9 @@ Completing the report workflow inside that exact isolated native profile needs
 macOS Keychain initialization/recovery. That creates or accesses persistent
 credentials, so it requires the user's confirmation at action time. Do not use
 the default OpenLife profile or substitute fixture credentials.
+
+After the user completed Keychain recovery/initialization, native Review exposed
+a strict IPC contract mismatch: the backend returned canonical report runtime
+projection truth that the typed acceptance response did not model. The effect
+was not replayed. S6 remains blocked until the patched exact bundle completes a
+fresh isolated report task through Review and verified Results.

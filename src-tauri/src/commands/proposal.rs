@@ -216,6 +216,12 @@ pub struct AcceptProposalResponse {
     #[serde(alias = "proposal_projection_status")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal_projection_status: Option<String>,
+    /// Projection into the canonical report Task/Run/Item/Artifact owner is a
+    /// separate truth surface from Proposal status. Keep it in the strict IPC
+    /// contract so a confirmed effect never becomes an apparent UI failure.
+    #[serde(alias = "canonical_task_runtime_projection_status")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_task_runtime_projection_status: Option<String>,
     #[serde(alias = "proposal_id")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal_id: Option<String>,
@@ -310,6 +316,11 @@ fn typed_accept_proposal_response(value: Value) -> Result<AcceptProposalResponse
                 response.proposal_projection_status.as_deref(),
                 Some("confirmed" | "reconciliation_required")
             )
+            || matches!(
+                response.canonical_task_runtime_projection_status.as_deref(),
+                Some(value)
+                    if !matches!(value, "confirmed" | "reconciliation_required" | "not_applicable")
+            )
         {
             return Err(
                 "accept Proposal confirmed response is missing confirmed effect/projection truth"
@@ -360,6 +371,7 @@ fn typed_accept_proposal_response(value: Value) -> Result<AcceptProposalResponse
     } else if response.patch_result.is_some()
         || response.effect_status.is_some()
         || response.proposal_projection_status.is_some()
+        || response.canonical_task_runtime_projection_status.is_some()
         || response.terminal_owner_transition.is_some()
         || response.memory_gateway.is_some()
         || response.memory_lifecycle.is_some()
@@ -5571,6 +5583,7 @@ mod tests {
             },
             "effect_status": "confirmed",
             "proposal_projection_status": "reconciliation_required",
+            "canonical_task_runtime_projection_status": "not_applicable",
             "warnings": ["projection pending"],
             "memoryPersistence": {
                 "canonicalCommitted": true,
@@ -5612,6 +5625,10 @@ mod tests {
         assert_eq!(
             serialized["proposalProjectionStatus"],
             "reconciliation_required"
+        );
+        assert_eq!(
+            serialized["canonicalTaskRuntimeProjectionStatus"],
+            "not_applicable"
         );
         assert_eq!(serialized["memoryPersistence"]["canonicalCommitted"], true);
         assert_eq!(
@@ -7399,6 +7416,14 @@ mod tests {
         assert_eq!(
             response["canonical_task_runtime_projection_status"],
             "confirmed"
+        );
+        let typed_response = typed_accept_proposal_response(response.clone())
+            .expect("the shipped IPC contract must preserve canonical report projection truth");
+        assert_eq!(
+            typed_response
+                .canonical_task_runtime_projection_status
+                .as_deref(),
+            Some("confirmed")
         );
         let artifact = state
             .canonical_task_runtime_store

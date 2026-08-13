@@ -4695,6 +4695,7 @@ export interface ConfirmedAcceptProposalResult {
   patchResult?: PatchApplyResult;
   effectStatus: "confirmed";
   proposalProjectionStatus: "confirmed" | "reconciliation_required";
+  canonicalTaskRuntimeProjectionStatus?: "confirmed" | "reconciliation_required" | "not_applicable";
   proposalId?: string;
   terminalOwnerTransition?: unknown;
   warnings: string[];
