@@ -1,6 +1,6 @@
 # Current OpenLife Product Development Plan
 
-Status: complete
+Status: blocked
 
 ## Objective
 
@@ -120,5 +120,13 @@ clean release baseline.
   does not retain native-trial content. The isolated profile remains outside
   the repository and the default OpenLife profile was not used.
 
-S6 is complete. The next product-development pointer is S7: remaining old-path
-deletion and a clean release baseline.
+## Current blocker
+
+The final-commit external-live recheck invoked the configured DeepSeek model
+twice but both attempts ended at the provider boundary with
+`artifact_generation_failed`; no proposal or filesystem effect was created.
+The same current source completed the exact native document report path and an
+earlier external-live combined report, while a bounded direct provider health
+probe still succeeds. This isolates the remaining S6 blocker to the governed
+combined document + Web artifact-generation path or its external response
+contract. Diagnose and close that boundary before entering S7.
