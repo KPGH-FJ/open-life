@@ -19,7 +19,7 @@ import type {
   WorkspaceConversationDataSource,
 } from "@/ui/journeys/governedAction";
 import type { DurableTruthDataSource } from "@/ui/journeys/durableTruth";
-import type { ReadOnlySpineDataSource } from "@/ui/journeys/readOnly";
+import type { ProductBoundaryDataSource } from "@/ui/journeys/productWorkbench";
 import type { SettingsPrivacyDataSource } from "@/ui/journeys/settingsPrivacy";
 import {
   buildDurableFixtureSnapshot,
@@ -36,7 +36,7 @@ import {
   type ProviderTestFixtureStage,
 } from "./settingsPrivacy";
 
-export type WorkbenchJourneyDataSource = ReadOnlySpineDataSource &
+export type WorkbenchJourneyDataSource = ProductBoundaryDataSource &
   GovernedActionDataSource &
   DurableTruthDataSource &
   SettingsPrivacyDataSource &

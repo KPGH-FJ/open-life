@@ -255,6 +255,42 @@
   cursor: default;
 }
 
+.ol-workspace-onboarding-steps {
+  display: grid;
+  gap: var(--ol-space-2);
+  margin: var(--ol-space-3) 0 0;
+  padding-left: var(--ol-space-5);
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+}
+
+@media (max-width: 860px) {
+  .ol-governed-page {
+    padding: var(--ol-space-5) var(--ol-space-4) var(--ol-space-10);
+  }
+
+  .ol-workspace-conversation__header,
+  .ol-workspace-task-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .ol-workspace-conversation__tools {
+    flex-wrap: wrap;
+  }
+
+  .ol-workspace-conversation__tools select,
+  .ol-workspace-conversation__tools input {
+    width: min(100%, 260px);
+  }
+
+  .ol-workspace-transcript li {
+    grid-template-columns: 1fr;
+    gap: var(--ol-space-1);
+  }
+}
+
 .ol-workspace-conversation__delete:not(:disabled) {
   color: var(--ol-danger, #b42318);
 }

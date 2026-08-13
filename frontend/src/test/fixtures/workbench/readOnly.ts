@@ -5,16 +5,13 @@ import type {
   TasksViewModel,
   ViewModelEnvelope,
 } from "@/tauri";
-import {
-  buildTodayViewModelEnvelope,
-  type BuildTodayViewModelEnvelopeInput,
-} from "@/viewmodels/today/todayViewModelAdapter";
-import { makeDailyGoal, makeLifeStateProjection } from "@/viewmodels/today/todayViewModel.fixtures";
-import type {
-  ReadOnlySpineDataSource,
-  TasksReadOnlySnapshot,
-  TodayReadOnlySnapshot,
-} from "@/ui/journeys/readOnly";
+import type { ProductBoundaryDataSource } from "@/ui/journeys/productWorkbench";
+
+type TasksReadOnlySnapshot = {
+  envelope: ViewModelEnvelope<TasksViewModel>;
+  boundaryEnvelope: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
+  diagnostics: Array<{ id: string; status: string; message?: string }>;
+};
 
 export type WorkbenchFixtureId =
   | "fixture-ready"
@@ -350,102 +347,7 @@ function tasksEnvelope(
   };
 }
 
-function todayInput(id: WorkbenchFixtureId): BuildTodayViewModelEnvelopeInput {
-  if (id === "fixture-error") {
-    return {
-      projection: null,
-      status: "error",
-      errorMessage: "LifeStateProjection fixture could not be loaded.",
-    };
-  }
-  if (id === "fixture-empty") {
-    return {
-      projection: makeLifeStateProjection({
-        generatedAt,
-        pending: {
-          pendingProposalCount: 0,
-          editedProposalCount: 0,
-          totalReviewRequiredCount: 0,
-          highRiskReviewRequiredCount: 0,
-          proposalStoreStatus: "ok",
-          requiresUserAction: false,
-        },
-        taskState: {
-          taskStoreStatus: "ok",
-          latestTaskId: null,
-          latestTaskStatus: null,
-          runningCount: 0,
-          waitingPermissionCount: 0,
-          blockedCount: 0,
-          failedCount: 0,
-          cancelledCount: 0,
-          completedCount: 0,
-          activeCount: 0,
-        },
-      }),
-      dailyGoals: [],
-      providerPrivacyBoundary: localBoundary,
-      status: "empty",
-    };
-  }
-  return {
-    projection: makeLifeStateProjection({
-      generatedAt,
-      pending: {
-        pendingProposalCount: 1,
-        editedProposalCount: 0,
-        totalReviewRequiredCount: 1,
-        highRiskReviewRequiredCount: 0,
-        proposalStoreStatus: "ok",
-        requiresUserAction: true,
-      },
-      taskState: {
-        taskStoreStatus: "ok",
-        latestTaskId: "task-weekly-brief",
-        latestTaskStatus: "running",
-        runningCount: 1,
-        waitingPermissionCount: 1,
-        blockedCount: 0,
-        failedCount: 0,
-        cancelledCount: 0,
-        completedCount: 1,
-        activeCount: 2,
-      },
-    }),
-    dailyGoals: [
-      makeDailyGoal({
-        name: "整理下周客户访谈要验证的三个问题",
-        time_block: { start: "09:30", end: "10:30" },
-      }),
-    ],
-    providerPrivacyBoundary: localBoundary,
-    status: id === "fixture-stale" ? "stale" : "ready",
-    lastUpdatedAt: id === "fixture-stale" ? "2026-07-15T08:30:00.000Z" : generatedAt,
-  };
-}
-
-function makeTodaySnapshot(id: WorkbenchFixtureId): TodayReadOnlySnapshot {
-  const boundaryStatus =
-    id === "fixture-error" ? "error" : id === "fixture-stale" ? "stale" : "ready";
-  return {
-    envelope: buildTodayViewModelEnvelope(todayInput(id)),
-    boundaryEnvelope: boundaryEnvelope(
-      boundaryStatus,
-      boundaryStatus === "error" ? null : localBoundary
-    ),
-    diagnostics: [
-      {
-        id: "life_state_projection",
-        status: id === "fixture-error" ? "failed" : "loaded",
-        message: id === "fixture-error" ? "Static error fixture." : undefined,
-      },
-      { id: "daily_goals", status: id === "fixture-error" ? "failed" : "loaded" },
-      { id: "provider_privacy", status: id === "fixture-error" ? "failed" : "loaded" },
-    ],
-  };
-}
-
-function makeTasksSnapshot(id: WorkbenchFixtureId): TasksReadOnlySnapshot {
+export function makeTasksSnapshot(id: WorkbenchFixtureId): TasksReadOnlySnapshot {
   const status =
     id === "fixture-error"
       ? "error"
@@ -490,13 +392,11 @@ export const workbenchFixtureLabels: Record<WorkbenchFixtureId, string> = {
   "fixture-settings-save-failed": "设置：保存失败",
 };
 
-export function readOnlyFixtureDataSource(id: WorkbenchFixtureId): ReadOnlySpineDataSource {
+export function readOnlyFixtureDataSource(id: WorkbenchFixtureId): ProductBoundaryDataSource {
   return {
-    async loadToday() {
-      return makeTodaySnapshot(id);
-    },
-    async loadTasks() {
-      return makeTasksSnapshot(id);
+    async loadBoundary() {
+      const status = id === "fixture-error" ? "error" : id === "fixture-stale" ? "stale" : "ready";
+      return boundaryEnvelope(status, status === "error" ? null : localBoundary);
     },
   };
 }

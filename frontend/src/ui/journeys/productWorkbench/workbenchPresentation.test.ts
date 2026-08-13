@@ -5,7 +5,7 @@ import type {
   TaskViewModelItem,
   ViewModelEnvelope,
 } from "@/tauri";
-import { boundaryPresentation, taskLifecyclePresentation } from "./readOnlySpinePresentation";
+import { boundaryPresentation, taskLifecyclePresentation } from "./workbenchPresentation";
 
 const routeEvidence: EvidenceRef = {
   id: "provider-route:test",

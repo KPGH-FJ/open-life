@@ -5,7 +5,7 @@ import type {
   WorkbenchEvidenceReference,
   WorkbenchInspectorModel,
 } from "@/ui/shell";
-import { toWorkbenchEvidence } from "@/ui/journeys/readOnly/readOnlySpinePresentation";
+import { toWorkbenchEvidence } from "@/ui/journeys/productWorkbench/workbenchPresentation";
 import type { DurableTruthSnapshot } from "./durableTruthDataSource";
 
 export type DurableTruthLifecycle =
@@ -136,7 +136,7 @@ export function durableLifecyclePresentation(
         lifecycle: "unknown",
         label: "变更状态不完整",
         status: "unknown",
-        detail: "长期状态读模型报告了待处理引用，但审核中心缺少对应审核项。",
+        detail: "长期状态读模型报告了待处理引用，但 Workbench 需处理区缺少对应事项。",
       };
     }
     return {

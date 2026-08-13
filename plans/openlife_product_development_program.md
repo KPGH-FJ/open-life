@@ -481,11 +481,33 @@ passed, frontend 273 passed, production build and absence guard passed, and 8
 browser-shell E2E cases passed. R6 claims controlled source/product evidence
 only; exact-native and external-live evidence remain R8.
 
-## Current stage: R7 - final Workbench product surface
+## Completed stage: R7 - final Workbench product surface
 
-R7 will reduce the frontend to one coherent Workbench around Projects,
-Conversations, Chat/Work, Results, Changes, Preview, Verification, inline
-attention and resumable work. It will remove remaining user-facing remnants of
-the retired lifecycle, make first-run and unavailable states actionable, and
-verify accessibility, localization, and responsive desktop behavior. R7 has
-not started.
+Completed on 2026-08-14. The shipped frontend now has three product routes:
+Workbench (`/workspace`), Personal Intelligence (`/life-model`), and Settings.
+Results and needs-attention items are contexts inside the same Workbench and
+retain the canonical backend task/review identities; `/today`, `/tasks`, and
+`/review` are explicit retired paths without redirects.
+
+The old Today adapter, Today view model, independent Tasks loader, unavailable
+compatibility page, daily-goal display guard, and the misleading
+`ReadOnlySpineJourney` product owner were deleted. The production composition
+owner is now `ProductWorkbenchJourney`, while the independent provider/privacy
+boundary has one narrow data source and cannot inherit a Tasks failure.
+
+First-run empty conversation state now explains Projects, Chat/Work, and
+results. The same shell adapts at 860px and 560px without a second mobile route
+authority. Icon-only navigation and Settings retain accessible names; the skip
+link moves focus to the canonical main region. Settings exposes only the two
+implemented categories instead of placeholder sections.
+
+Frontend format, typecheck, 245 behavior tests, production build and absence
+guard, and 11 browser-shell E2E scenarios pass. R7 claims controlled browser
+evidence only; exact-native and external-live evidence remain R8.
+
+## Current stage: R8 - golden evidence and clean release baseline
+
+R8 will run the final golden behavior matrix, measure performance and provider
+cost boundaries, verify profile migration and exact native identity, execute
+only the external-live checks required by the accepted product contract, and
+remove remaining replaced backend/IPC paths before the clean release baseline.

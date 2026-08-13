@@ -1,0 +1,75 @@
+import { StrictMode } from "react";
+import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { describe, expect, it, vi } from "vitest";
+import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
+import { createSettingsPrivacyFixture } from "@/test/fixtures/workbench/settingsPrivacy";
+import { ProductWorkbenchJourney } from "./ProductWorkbenchJourney";
+
+describe("OpenLife product shell", () => {
+  it("uses Workbench as the single task surface and removes retired top-level pages", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    render(
+      <ProductWorkbenchJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+      />
+    );
+
+    expect(await screen.findByRole("heading", { name: "工作区", level: 1 })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^对话/ })).toHaveAttribute("aria-current", "page");
+    expect(screen.getByRole("button", { name: /^结果/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^需处理/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^今日/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^任务/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^审核中心/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^结果/ }));
+    expect(await screen.findByText(/共 \d+ 项，当前显示 \d+ 项/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^结果/ })).toHaveAttribute("aria-current", "page");
+
+    await user.click(screen.getByRole("button", { name: /^需处理/ }));
+    expect(
+      await screen.findByRole("heading", { name: "读取本地客户访谈记录", level: 2 })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^需处理/ })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("loads transmission boundary independently of Workbench lifecycle health", async () => {
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const loadBoundary = vi.fn(dataSource.loadBoundary);
+    render(
+      <ProductWorkbenchJourney
+        dataSource={{ loadBoundary }}
+        governedActionDataSource={dataSource}
+      />
+    );
+
+    await waitFor(() => expect(loadBoundary).toHaveBeenCalledTimes(1));
+    expect(await screen.findByText("本地路由，未外传")).toBeInTheDocument();
+  });
+
+  it("shows only implemented settings categories", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    const settings = createSettingsPrivacyFixture("fixture-ready");
+    render(
+      <StrictMode>
+        <ProductWorkbenchJourney
+          dataSource={dataSource}
+          governedActionDataSource={dataSource}
+          settingsPrivacyDataSource={settings.dataSource}
+        />
+      </StrictMode>
+    );
+
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    expect(screen.getByText("共 2 个设置分类")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^模型与供应商/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^隐私与网络/ })).toBeInTheDocument();
+    expect(screen.queryByText("通知")).not.toBeInTheDocument();
+    expect(screen.queryByText("账户")).not.toBeInTheDocument();
+  });
+});

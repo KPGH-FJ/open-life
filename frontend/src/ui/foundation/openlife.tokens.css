@@ -76,7 +76,7 @@
   --ol-shell-sidebar-width: 232px;
   --ol-shell-inspector-width: 344px;
   --ol-shell-context-height: 56px;
-  --ol-shell-min-width: 1024px;
+  --ol-shell-min-width: 0px;
   --ol-divider-width: 1px;
   --ol-focus-width: 2px;
   --ol-focus-offset: 2px;

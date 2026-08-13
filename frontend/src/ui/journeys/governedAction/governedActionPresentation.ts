@@ -13,7 +13,7 @@ import type {
 import {
   taskLifecyclePresentation,
   toWorkbenchEvidence,
-} from "@/ui/journeys/readOnly/readOnlySpinePresentation";
+} from "@/ui/journeys/productWorkbench/workbenchPresentation";
 import type { GovernedActionSnapshot } from "./governedActionDataSource";
 
 function uniqueEvidence(refs: readonly EvidenceRef[]): WorkbenchEvidenceReference[] {
@@ -114,42 +114,42 @@ export function reviewContext(
   if (!snapshot || snapshot.reviewEnvelope.status === "loading") {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "正在读取", status: "neutral" },
     };
   }
   if (snapshot.reviewEnvelope.status === "error") {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "状态不可用", status: "error" },
     };
   }
   if (snapshot.reviewEnvelope.status === "stale") {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "状态已陈旧", status: "stale" },
     };
   }
   if (snapshot.reviewEnvelope.status === "empty") {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "暂无待处理项", status: "neutral" },
     };
   }
   if (!item) {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "暂无待处理项", status: "neutral" },
     };
   }
   if (["pending", "edited", "deferred"].includes(item.status)) {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "等待你的决定", status: "waiting" },
     };
   }
@@ -168,7 +168,7 @@ export function reviewContext(
                 : { label: "已批准，尚未应用", status: "neutral" as const };
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: {
         label: item.type === "tool_permission" ? "已允许一次，尚未继续任务" : materialization.label,
         status: item.type === "tool_permission" ? "neutral" : materialization.status,
@@ -179,13 +179,13 @@ export function reviewContext(
   if (item.status === "rejected") {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "已拒绝", status: "neutral" },
     };
   }
   return {
     eyebrow: "建议与权限",
-    title: "审核中心",
+    title: "需处理",
     status: { label: "决定状态未知", status: "unknown" },
   };
 }
@@ -255,7 +255,7 @@ export function workspaceInspector(
         ? "错误或陈旧状态不能授权审核决定或任务恢复。"
         : "当前没有等待决定的精确权限项。",
     nextAction: permissionItem
-      ? "进入审核中心核对访问范围并作出决定。"
+      ? "进入需处理事项核对访问范围并作出决定。"
       : findExactResumeControl(snapshot)?.enabled
         ? "请求继续任务，然后再次刷新同一任务状态。"
         : "查看当前活动与来源；没有后端允许的动作时保持只读。",

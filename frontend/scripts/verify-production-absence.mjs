@@ -57,8 +57,8 @@ for (const owner of forbiddenOldOwners) {
 
 const appSource = readFileSync(appPath, "utf8");
 for (const requiredOwner of [
-  "ReadOnlySpineJourney",
-  "tauriReadOnlySpineDataSource",
+  "ProductWorkbenchJourney",
+  "tauriProductBoundaryDataSource",
   "tauriGovernedActionDataSource",
   "tauriDurableTruthDataSource",
   "tauriSettingsPrivacyDataSource",
@@ -88,10 +88,7 @@ if (/ProductShell|productShellContract|LEGACY_PRODUCT_REDIRECTS/.test(appSource)
 
 const routeSource = readFileSync(routeContractPath, "utf8");
 for (const canonicalPath of [
-  'today: "/today"',
   'workspace: "/workspace"',
-  'tasks: "/tasks"',
-  'review: "/review"',
   '"life-model": "/life-model"',
   'SETTINGS_ROUTE_PATH = "/settings"',
 ]) {
@@ -99,8 +96,26 @@ for (const canonicalPath of [
     throw new Error(`Production route contract is missing ${canonicalPath}`);
   }
 }
+for (const retiredTopLevelPath of ['"/today"', '"/tasks"', '"/review"']) {
+  if (!routeSource.includes(retiredTopLevelPath)) {
+    throw new Error(`Production route contract must explicitly retire ${retiredTopLevelPath}`);
+  }
+}
+if (/today:\s*"\/today"|tasks:\s*"\/tasks"|review:\s*"\/review"/.test(routeSource)) {
+  throw new Error("Today, Tasks, and Review must not return as top-level product routes.");
+}
 if (/Navigate|Redirect|LEGACY_PRODUCT_REDIRECTS/.test(routeSource)) {
   throw new Error("Production route contract must not authorize compatibility redirects.");
+}
+
+for (const retiredFrontendOwner of [
+  "src/ui/journeys/readOnly",
+  "src/viewmodels/today",
+  "src/utils/dailyGoalDisplayGuard.ts",
+]) {
+  if (existsSync(join(frontendRoot, retiredFrontendOwner))) {
+    throw new Error(`Retired frontend owner must stay absent: ${retiredFrontendOwner}`);
+  }
 }
 
 function sourceFiles(directory) {

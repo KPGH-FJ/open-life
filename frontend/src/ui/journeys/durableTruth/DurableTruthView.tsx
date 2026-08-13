@@ -499,7 +499,7 @@ export function DurableTruthView({
                       ) : null}
                       {candidate.status === "reviewable" && candidate.confirmedAt ? (
                         <FoundationActionButton
-                          label="送去审核中心"
+                          label="送去需处理"
                           icon={<ArrowRight size={16} aria-hidden="true" />}
                           loading={
                             learningAction?.candidateId === candidate.id &&

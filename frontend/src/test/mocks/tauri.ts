@@ -1,5 +1,5 @@
 import { vi } from "vitest";
-import type { LifeModel, ChatMessage, DailyGoal, StateHistoryEntry, StateAlert } from "@/types";
+import type { LifeModel, ChatMessage, StateHistoryEntry, StateAlert } from "@/types";
 import type {
   LifeModelViewModel,
   MemoryViewModel,
@@ -604,11 +604,6 @@ export function createMockMemoryViewModelEnvelope(
   };
 }
 
-export const mockDailyGoals: DailyGoal[] = [
-  { name: "早起", done: false, time_block: { start: "07:00", end: "08:00" } },
-  { name: "运动", done: true },
-];
-
 export const mockStateAlerts: StateAlert[] = [
   {
     dimension_name: "专注度",
@@ -850,8 +845,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve(createMockTasksViewModelEnvelope() as T);
     case "get_workspace_view_model":
       return Promise.resolve(createMockWorkspaceViewModelEnvelope() as T);
-    case "get_daily_goals":
-      return Promise.resolve(mockDailyGoals as T);
     case "get_state_alerts":
       return Promise.resolve(mockStateAlerts as T);
     case "get_state_history":

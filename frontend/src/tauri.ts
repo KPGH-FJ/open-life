@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { LifeModel, ChatMessage, DailyGoal, StateHistoryEntry, StateAlert } from "./types";
+import type { LifeModel, ChatMessage, StateHistoryEntry, StateAlert } from "./types";
 
 function isTauriEnv(): boolean {
   return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
@@ -3746,10 +3746,6 @@ export async function getStateHistory(
 
 export async function getStateAlerts(): Promise<StateAlert[]> {
   return safeInvoke<StateAlert[]>("get_state_alerts");
-}
-
-export async function getDailyGoals(): Promise<DailyGoal[]> {
-  return safeInvoke<DailyGoal[]>("get_daily_goals");
 }
 
 // ── Milestone D: Hot Memory Cache ──

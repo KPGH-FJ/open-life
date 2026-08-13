@@ -5,7 +5,7 @@ import App from "./App.tsx";
 import "./index.css";
 import "@/ui/foundation/openlife.foundation.css";
 import "@/ui/shell/openlife.shell.css";
-import "@/ui/journeys/readOnly/readOnlySpine.css";
+import "@/ui/journeys/productWorkbench/productWorkbench.css";
 import "@/ui/journeys/governedAction/governedAction.css";
 import "@/ui/journeys/durableTruth/durableTruth.css";
 import "@/ui/journeys/settingsPrivacy/settingsPrivacy.css";

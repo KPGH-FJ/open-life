@@ -567,9 +567,22 @@ export function WorkspaceConversationPanel({
           )}
         </ol>
       ) : (
-        <div className="ol-workspace-conversation__empty">
-          <strong>{controller.selectedSessionId ? "这段对话还没有消息" : "开始一段新对话"}</strong>
-          <p>草稿只保留在当前页面；发送才会创建会话并进入后端治理流程。</p>
+        <div className="ol-workspace-conversation__empty" data-testid="workbench-onboarding">
+          <strong>
+            {controller.selectedSessionId ? "这段对话还没有消息" : "把一件真实工作交给 OpenLife"}
+          </strong>
+          <p>
+            {controller.selectedSessionId
+              ? "输入消息继续这段对话。"
+              : "简单问题选择 Chat；需要查资料、读取文件或交付结果时选择 Work。发送前不会创建任务或写入任何长期状态。"}
+          </p>
+          {!controller.selectedSessionId && (
+            <ol className="ol-workspace-onboarding-steps">
+              <li>说清楚想要的结果和完成标准</li>
+              <li>需要时添加文件、Project 或 Skill</li>
+              <li>执行中可追加指令，关键边界才会请你决定</li>
+            </ol>
+          )}
         </div>
       )}
 
@@ -628,7 +641,7 @@ export function WorkspaceConversationPanel({
               ? "直接对话，不创建任务。"
               : "可使用文件、工具与受治理动作完成任务。"}
             {controller.workStatus === "reconstructing" &&
-              " Work 正在迁移到新的 Task/Run 执行链，完成前不会回退到旧路径。"}
+              " Work 当前不可用；不会回退到旧执行路径。"}
           </small>
         </fieldset>
         {controller.mode === "chat" && (

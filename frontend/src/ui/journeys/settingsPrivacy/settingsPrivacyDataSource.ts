@@ -18,7 +18,7 @@ import {
   type ViewModelEnvelope,
 } from "@/tauri";
 import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
-import { buildReadModelErrorEnvelope } from "@/ui/journeys/readOnly/readOnlySpineDataSource";
+import { buildReadModelErrorEnvelope } from "@/ui/journeys/productWorkbench/productBoundaryDataSource";
 
 export type SettingsPrivacyDiagnostic = {
   id:

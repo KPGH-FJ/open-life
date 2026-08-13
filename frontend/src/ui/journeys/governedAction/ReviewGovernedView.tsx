@@ -320,7 +320,7 @@ export function ReviewGovernedView({
   if (!snapshot || !envelope || envelope.status === "loading") {
     return (
       <div className="ol-governed-page ol-governed-page--centered" aria-busy="true">
-        <FoundationNotice title="正在读取审核中心" tone="neutral">
+        <FoundationNotice title="正在读取需处理事项" tone="neutral">
           <p>读取完成前不开放决定动作。</p>
         </FoundationNotice>
       </div>

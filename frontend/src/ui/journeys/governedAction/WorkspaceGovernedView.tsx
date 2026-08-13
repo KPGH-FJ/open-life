@@ -6,7 +6,7 @@ import {
   FoundationNotice,
   FoundationStatusLabel,
 } from "@/ui/foundation";
-import { taskLifecyclePresentation } from "@/ui/journeys/readOnly/readOnlySpinePresentation";
+import { taskLifecyclePresentation } from "@/ui/journeys/productWorkbench/workbenchPresentation";
 import type { TaskResumeState } from "./governedActionContract";
 import type { GovernedActionSnapshot } from "./governedActionDataSource";
 import { findExactResumeControl } from "./governedActionPresentation";
@@ -197,7 +197,7 @@ export function WorkspaceGovernedView({
           <FoundationStatusLabel label="没有活动任务" status="neutral" />
         </header>
         <p className="ol-governed-muted">
-          工作区不会把最近历史提升为当前执行。任务历史仍由“任务”页面负责。
+          Workbench 不会把最近历史提升为当前执行。完整任务结果可在“结果”中查看。
         </p>
         <div className="ol-governed-inline-actions">
           <FoundationActionButton

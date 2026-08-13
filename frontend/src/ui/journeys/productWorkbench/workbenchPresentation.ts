@@ -12,7 +12,6 @@ import type {
   WorkbenchContextSummary,
   WorkbenchEvidenceReference,
 } from "@/ui/shell";
-import type { TodayViewModelEnvelope } from "@/viewmodels/today/todayViewModel";
 
 export type ProductStatusPresentation = {
   label: string;
@@ -147,41 +146,6 @@ function envelopeStatusPresentation(status: ViewModelStatus): ProductStatusPrese
     case "ready":
       return { label: "已读取", status: "neutral" };
   }
-}
-
-export function todayContext(envelope: TodayViewModelEnvelope): WorkbenchContextSummary {
-  const base = envelopeStatusPresentation(envelope.status);
-  if (envelope.status === "loading" || envelope.status === "error") {
-    return { eyebrow: "今日关注", title: "今日", status: base };
-  }
-  if (envelope.status === "empty") {
-    return { eyebrow: "今日关注", title: "今日", status: base };
-  }
-  if (envelope.status === "stale" && !envelope.data?.safeMode.active) {
-    return { eyebrow: "今日关注", title: "今日", status: base };
-  }
-  if (envelope.data?.safeMode.active) {
-    return {
-      eyebrow: "今日关注",
-      title: "今日",
-      status: { label: "安全模式", status: "waiting" },
-    };
-  }
-  if (envelope.data && envelope.data.blockers.length > 0) {
-    return {
-      eyebrow: "今日关注",
-      title: "今日",
-      status: { label: "有事项需要处理", status: "waiting" },
-    };
-  }
-  if (envelope.data && envelope.data.pendingReviewCount > 0) {
-    return {
-      eyebrow: "今日关注",
-      title: "今日",
-      status: { label: "有建议等待决定", status: "waiting" },
-    };
-  }
-  return { eyebrow: "今日关注", title: "今日", status: base };
 }
 
 export function tasksContext(envelope: ViewModelEnvelope<TasksViewModel>): WorkbenchContextSummary {

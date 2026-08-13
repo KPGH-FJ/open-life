@@ -4,7 +4,7 @@ import type {
   WorkbenchEvidenceReference,
   WorkbenchInspectorModel,
 } from "@/ui/shell";
-import { boundaryPresentation, toWorkbenchEvidence } from "@/ui/journeys/readOnly";
+import { boundaryPresentation, toWorkbenchEvidence } from "@/ui/journeys/productWorkbench";
 import type { SettingsPrivacyJourneyController } from "./useSettingsPrivacyJourney";
 import {
   endpointHost,
@@ -132,7 +132,7 @@ function nextAction(controller: SettingsPrivacyJourneyController): string {
   if (outcome?.result.validation_status === "consent_required") {
     return outcome.reviewItem
       ? "按需打开精确待决定项；批准只授权一次请求，之后仍需重新测试。"
-      : "先重新读取审核中心；找不到精确待决定项时不进行猜测跳转。";
+      : "先重新读取需处理事项；找不到精确待决定项时不进行猜测跳转。";
   }
   if (controller.state.phase === "dirty") return "可先测试草稿，也可以明确保存；测试不会自动保存。";
   if (controller.state.phase === "tested") return "确认字段后明确保存；保存后仍需等待边界刷新。";

@@ -17,7 +17,7 @@ import {
   type WorkspaceViewModel,
 } from "@/tauri";
 import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
-import { buildReadModelErrorEnvelope } from "@/ui/journeys/readOnly/readOnlySpineDataSource";
+import { buildReadModelErrorEnvelope } from "@/ui/journeys/productWorkbench/productBoundaryDataSource";
 
 export type GovernedActionDiagnostic = {
   id: "workspace_view_model" | "review_center_view_model" | "tasks_view_model";

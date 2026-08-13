@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
-import { ReadOnlySpineJourney } from "@/ui/journeys/readOnly";
+import { ProductWorkbenchJourney } from "@/ui/journeys/productWorkbench";
 import type { ReviewAction, ReviewItem } from "@/tauri";
 import {
   reviewDecisionFeedback,
@@ -81,7 +81,7 @@ describe("Workbench governed action journey", () => {
     const resumeTask = vi.spyOn(dataSource, "resumeTask");
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         initialSurface="workspace"
@@ -133,13 +133,14 @@ describe("Workbench governed action journey", () => {
     const dispatchReview = vi.spyOn(dataSource, "dispatchReviewAction");
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
-        initialSurface="review"
+        initialSurface="workspace"
       />
     );
 
+    await user.click(await screen.findByRole("button", { name: /^需处理/ }));
     expect(await screen.findByText("访问范围不完整")).toBeInTheDocument();
     const approve = screen.getByRole("button", { name: "仅允许本次" });
     expect(approve).toBeDisabled();
@@ -196,13 +197,14 @@ describe("Workbench governed action journey", () => {
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
-        initialSurface="review"
+        initialSurface="workspace"
       />
     );
 
+    await user.click(await screen.findByRole("button", { name: /^需处理/ }));
     expect(
       await screen.findByRole("heading", { name: "Review LifeModel changes", level: 2 })
     ).toBeInTheDocument();
@@ -217,13 +219,14 @@ describe("Workbench governed action journey", () => {
     const dispatchReview = vi.spyOn(dataSource, "dispatchReviewAction");
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
-        initialSurface="review"
+        initialSurface="workspace"
       />
     );
 
+    await user.click(await screen.findByRole("button", { name: /^需处理/ }));
     expect(await screen.findByText("审核状态已陈旧")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "仅允许本次" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "拒绝" })).toBeDisabled();
@@ -242,13 +245,14 @@ describe("Workbench governed action journey", () => {
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
-        initialSurface="review"
+        initialSurface="workspace"
       />
     );
 
+    await user.click(await screen.findByRole("button", { name: /^需处理/ }));
     await screen.findByRole("heading", { name: "读取本地客户访谈记录", level: 2 });
     await user.click(screen.getByRole("button", { name: "仅允许本次" }));
     await user.click(screen.getByRole("button", { name: "确认仅允许本次" }));
@@ -278,7 +282,7 @@ describe("Workbench governed action journey", () => {
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         initialSurface="workspace"
@@ -310,13 +314,14 @@ describe("Workbench governed action journey", () => {
     const dispatchTaskControl = vi.spyOn(dataSource, "dispatchTaskControl");
 
     const { container } = render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
-        initialSurface="tasks"
+        initialSurface="workspace"
       />
     );
 
+    await user.click(await screen.findByRole("button", { name: /^结果/ }));
     await user.click(
       await screen.findByRole("button", {
         name: /整理三次客户访谈，归纳下周要验证的问题/,
@@ -357,7 +362,7 @@ describe("Workbench governed action journey", () => {
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         initialSurface="workspace"
@@ -366,7 +371,7 @@ describe("Workbench governed action journey", () => {
 
     expect(await screen.findByRole("heading", { name: "没有活动任务" })).toBeInTheDocument();
     expect(screen.queryByText("任务暂停在一个动作之前")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /^审核中心\s+建议与权限决定/ }));
+    await user.click(screen.getByRole("button", { name: /^需处理/ }));
     expect(await screen.findByRole("heading", { name: "暂无审核项" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "仅允许本次" })).not.toBeInTheDocument();
   });
@@ -404,7 +409,7 @@ describe("Workbench governed action journey", () => {
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         workspaceConversationDataSource={dataSource}
@@ -509,7 +514,7 @@ describe("Workbench governed action journey", () => {
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         durableTruthDataSource={dataSource}
@@ -563,7 +568,7 @@ describe("Workbench governed action journey", () => {
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         workspaceConversationDataSource={dataSource}
@@ -593,7 +598,7 @@ describe("Workbench governed action journey", () => {
     const detachResource = vi.spyOn(dataSource, "detachResource");
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         workspaceConversationDataSource={dataSource}
@@ -800,7 +805,7 @@ describe("Workbench governed action journey", () => {
     const deleteSession = vi.spyOn(dataSource, "deleteSession");
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         workspaceConversationDataSource={dataSource}

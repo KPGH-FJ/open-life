@@ -8,11 +8,11 @@ import {
   tauriWorkspaceConversationDataSource,
 } from "@/ui/journeys/governedAction";
 import {
-  ReadOnlySpineJourney,
-  tauriReadOnlySpineDataSource,
-  type ReadOnlyProductSurfaceId,
-  type ReadOnlySpineRouteState,
-} from "@/ui/journeys/readOnly";
+  ProductWorkbenchJourney,
+  tauriProductBoundaryDataSource,
+  type PublicProductSurfaceId,
+  type ProductWorkbenchRouteState,
+} from "@/ui/journeys/productWorkbench";
 import { tauriSettingsPrivacyDataSource } from "@/ui/journeys/settingsPrivacy";
 import { journeyErrorCode } from "@/ui/journeys/journeyError";
 import {
@@ -54,8 +54,8 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
     window.location.reload();
   };
 
-  private goToday = (): void => {
-    window.location.hash = productPath("today");
+  private goWorkbench = (): void => {
+    window.location.hash = productPath("workspace");
     window.location.reload();
   };
 
@@ -87,10 +87,10 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
             onClick={this.reload}
           />
           <FoundationActionButton
-            label="返回今日"
+            label="返回工作台"
             variant="secondary"
             icon={<Home size={17} aria-hidden="true" />}
-            onClick={this.goToday}
+            onClick={this.goWorkbench}
           />
           <FoundationActionButton
             label="复制错误信息"
@@ -116,14 +116,8 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
   }
 }
 
-function validReturnSurface(value: unknown): ReadOnlyProductSurfaceId {
-  return value === "today" ||
-    value === "workspace" ||
-    value === "tasks" ||
-    value === "review" ||
-    value === "life-model"
-    ? value
-    : "today";
+function validReturnSurface(value: unknown): PublicProductSurfaceId {
+  return value === "workspace" || value === "life-model" ? value : "workspace";
 }
 
 function UnavailableRoute({ pathname }: { pathname: string }) {
@@ -142,10 +136,10 @@ function UnavailableRoute({ pathname }: { pathname: string }) {
       </p>
       <code>{pathname}</code>
       <FoundationActionButton
-        label="返回今日"
+        label="返回工作台"
         variant="primary"
         icon={<Home size={17} aria-hidden="true" />}
-        onClick={() => navigate(productPath("today"), { replace: true })}
+        onClick={() => navigate(productPath("workspace"), { replace: true })}
       />
     </main>
   );
@@ -156,7 +150,7 @@ function ProductionWorkbenchRoute() {
   const navigate = useNavigate();
 
   if (location.pathname === "/") {
-    return <Navigate to={productPath("today")} replace />;
+    return <Navigate to={productPath("workspace")} replace />;
   }
 
   const locationState = location.state as { returnSurface?: unknown } | null;
@@ -166,7 +160,7 @@ function ProductionWorkbenchRoute() {
   );
   if (!route) return <UnavailableRoute pathname={location.pathname} />;
 
-  function changeRoute(next: ReadOnlySpineRouteState): void {
+  function changeRoute(next: ProductWorkbenchRouteState): void {
     if (next.mode === "settings") {
       if (location.pathname === SETTINGS_ROUTE_PATH) return;
       navigate(SETTINGS_ROUTE_PATH, { state: { returnSurface: next.surface } });
@@ -177,8 +171,8 @@ function ProductionWorkbenchRoute() {
   }
 
   return (
-    <ReadOnlySpineJourney
-      dataSource={tauriReadOnlySpineDataSource}
+    <ProductWorkbenchJourney
+      dataSource={tauriProductBoundaryDataSource}
       governedActionDataSource={tauriGovernedActionDataSource}
       durableTruthDataSource={tauriDurableTruthDataSource}
       settingsPrivacyDataSource={tauriSettingsPrivacyDataSource}

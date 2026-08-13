@@ -23,7 +23,7 @@ import {
   formatBackendTime,
   taskLifecyclePresentation,
   taskPrimaryQuestion,
-} from "./readOnlySpinePresentation";
+} from "./workbenchPresentation";
 
 type TaskFilter = "all" | "attention" | "active" | "terminal";
 
@@ -251,7 +251,7 @@ function taskControlFeedback(state: TaskControlDispatchState) {
   };
 }
 
-export function TasksReadOnlyView({
+export function WorkbenchResultsView({
   envelope,
   refreshing,
   selectedTaskId,
@@ -324,8 +324,8 @@ export function TasksReadOnlyView({
   }
 
   return (
-    <article className="ol-readonly-page" data-testid="tasks-product-view">
-      <header className="ol-readonly-page-heading ol-readonly-page-heading--with-actions">
+    <article className="ol-workbench-result-page" data-testid="tasks-product-view">
+      <header className="ol-workbench-result-page-heading ol-workbench-result-page-heading--with-actions">
         <div>
           <span>哪些任务需要我或可以继续</span>
           <h2>{taskPrimaryQuestion(envelope)}</h2>
@@ -361,14 +361,14 @@ export function TasksReadOnlyView({
       )}
 
       {listAvailable && (
-        <section className="ol-readonly-section" aria-labelledby="tasks-list-title">
-          <div className="ol-readonly-section-heading ol-readonly-task-tools-heading">
+        <section className="ol-workbench-result-section" aria-labelledby="tasks-list-title">
+          <div className="ol-workbench-result-section-heading ol-workbench-result-task-tools-heading">
             <div>
               <span>任务列表</span>
               <h3 id="tasks-list-title">最近工作</h3>
             </div>
-            <div className="ol-readonly-task-tools">
-              <label className="ol-readonly-search">
+            <div className="ol-workbench-result-task-tools">
+              <label className="ol-workbench-result-search">
                 <span className="ol-sr-only">搜索任务</span>
                 <Search size={17} strokeWidth={1.75} aria-hidden="true" />
                 <input
@@ -381,7 +381,7 @@ export function TasksReadOnlyView({
                   }}
                 />
               </label>
-              <label className="ol-readonly-filter">
+              <label className="ol-workbench-result-filter">
                 <span className="ol-sr-only">筛选任务</span>
                 <select
                   value={filter}
@@ -400,12 +400,12 @@ export function TasksReadOnlyView({
             </div>
           </div>
 
-          <p className="ol-readonly-list-count">
+          <p className="ol-workbench-result-list-count">
             共 {items.length} 项，当前显示 {visibleItems.length} 项
           </p>
 
           {visibleItems.length > 0 ? (
-            <div className="ol-readonly-task-list">
+            <div className="ol-workbench-result-task-list">
               {visibleItems.map(item => {
                 const lifecycle = taskLifecyclePresentation(item);
                 const updatedAt = formatBackendTime(item.updatedAt);
@@ -413,12 +413,12 @@ export function TasksReadOnlyView({
                   <button
                     key={item.canonicalTaskId}
                     type="button"
-                    className="ol-readonly-task-row"
+                    className="ol-workbench-result-task-row"
                     data-selected={selectedTaskId === item.canonicalTaskId ? "true" : "false"}
                     aria-pressed={selectedTaskId === item.canonicalTaskId}
                     onClick={() => onSelectTask(item)}
                   >
-                    <span className="ol-readonly-task-row__copy">
+                    <span className="ol-workbench-result-task-row__copy">
                       <strong>{item.title}</strong>
                       <span>{statusDetail(item)}</span>
                       {updatedAt && <small>最近更新 {updatedAt}</small>}
@@ -433,7 +433,7 @@ export function TasksReadOnlyView({
               })}
             </div>
           ) : (
-            <p className="ol-readonly-empty-list">
+            <p className="ol-workbench-result-empty-list">
               {items.length === 0 ? "当前没有可展示的任务。" : "当前搜索和筛选下没有任务。"}
             </p>
           )}
@@ -441,8 +441,8 @@ export function TasksReadOnlyView({
       )}
 
       {listAvailable && (
-        <section className="ol-readonly-section" aria-labelledby="tasks-progress-title">
-          <div className="ol-readonly-section-heading">
+        <section className="ol-workbench-result-section" aria-labelledby="tasks-progress-title">
+          <div className="ol-workbench-result-section-heading">
             <div>
               <span>执行过程</span>
               <h3 id="tasks-progress-title">
@@ -467,7 +467,7 @@ export function TasksReadOnlyView({
               ))}
             </ol>
           ) : (
-            <p className="ol-readonly-empty-list">
+            <p className="ol-workbench-result-empty-list">
               {selectedTask
                 ? "该任务还没有后端确认的执行记录。"
                 : "选择任务后显示后端 Task Item 记录。"}
@@ -477,8 +477,8 @@ export function TasksReadOnlyView({
       )}
 
       {listAvailable && (
-        <section className="ol-readonly-section" aria-labelledby="tasks-results-title">
-          <div className="ol-readonly-section-heading">
+        <section className="ol-workbench-result-section" aria-labelledby="tasks-results-title">
+          <div className="ol-workbench-result-section-heading">
             <div>
               <span>任务结果</span>
               <h3 id="tasks-results-title">
@@ -590,7 +590,7 @@ export function TasksReadOnlyView({
               ))}
             </div>
           ) : (
-            <p className="ol-readonly-empty-list">
+            <p className="ol-workbench-result-empty-list">
               {selectedTask ? "该任务还没有 canonical Artifact。" : "选择任务后显示后端产物记录。"}
             </p>
           )}
@@ -598,7 +598,7 @@ export function TasksReadOnlyView({
       )}
 
       {listAvailable && (
-        <section className="ol-readonly-action-area" aria-labelledby="tasks-controls-title">
+        <section className="ol-workbench-result-action-area" aria-labelledby="tasks-controls-title">
           <div>
             <span>任务动作</span>
             <h3 id="tasks-controls-title">
@@ -606,7 +606,7 @@ export function TasksReadOnlyView({
             </h3>
           </div>
           {selectedTask && executableControls.length > 0 ? (
-            <div className="ol-readonly-task-controls">
+            <div className="ol-workbench-result-task-controls">
               {executableControls.map(control => {
                 const busyForControl =
                   taskControlBusy &&
@@ -658,7 +658,7 @@ export function TasksReadOnlyView({
               })}
             </div>
           ) : (
-            <p className="ol-readonly-task-control-empty">
+            <p className="ol-workbench-result-task-control-empty">
               {selectedTask
                 ? "后端当前没有提供可执行的任务控制。"
                 : "选择任务只改变当前检查对象，不会自动发送命令。"}
@@ -672,7 +672,7 @@ export function TasksReadOnlyView({
         </section>
       )}
 
-      <section className="ol-readonly-action-area" aria-labelledby="tasks-evidence-title">
+      <section className="ol-workbench-result-action-area" aria-labelledby="tasks-evidence-title">
         <div>
           <span>证据入口</span>
           <h3 id="tasks-evidence-title">

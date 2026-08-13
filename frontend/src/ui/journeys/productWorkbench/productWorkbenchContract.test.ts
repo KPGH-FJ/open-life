@@ -6,26 +6,27 @@ function read(path: string): string {
   return readFileSync(join(process.cwd(), path), "utf8");
 }
 
-describe("read-only journey boundaries", () => {
-  it("makes the read-only journey owner production authority without importing a dev harness", () => {
+describe("product Workbench boundaries", () => {
+  it("makes the product Workbench journey production authority without importing a dev harness", () => {
     const app = read("src/App.tsx");
-    expect(app).toContain("ReadOnlySpineJourney");
+    expect(app).toContain("ProductWorkbenchJourney");
     expect(app).not.toMatch(/src\/dev\//);
     expect(existsSync(join(process.cwd(), "src/components/ProductShell.tsx"))).toBe(false);
     expect(existsSync(join(process.cwd(), "src/productShellContract.ts"))).toBe(false);
   });
 
-  it("contains no narrow-screen navigation implementation or narrow viewport breakpoint", () => {
+  it("contains one responsive Workbench shell instead of a second narrow-screen owner", () => {
     const sources = [
-      read("src/ui/journeys/readOnly/ReadOnlySpineJourney.tsx"),
-      read("src/ui/journeys/readOnly/readOnlySpine.css"),
+      read("src/ui/journeys/productWorkbench/ProductWorkbenchJourney.tsx"),
+      read("src/ui/journeys/productWorkbench/productWorkbench.css"),
     ].join("\n");
 
-    expect(sources).not.toMatch(/bottom[- ]?(?:nav|sheet)|drawer|@media\s*\(max-width/i);
+    expect(sources).not.toMatch(/bottom[- ]?(?:nav|sheet)|drawer/i);
+    expect(read("src/ui/shell/openlife.shell.css")).toMatch(/@media\s*\(max-width:\s*560px\)/i);
   });
 
   it("keeps literal colors and sub-12px type out of new CSS consumers", () => {
-    for (const path of ["src/ui/journeys/readOnly/readOnlySpine.css"]) {
+    for (const path of ["src/ui/journeys/productWorkbench/productWorkbench.css"]) {
       const source = read(path);
       expect(source, path).not.toMatch(/#[0-9a-f]{3,8}|(?:rgb|hsl)a?\(/i);
       for (const match of source.matchAll(/font-size:\s*([0-9.]+)px/g)) {

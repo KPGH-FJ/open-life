@@ -214,13 +214,10 @@ migration must not use dual writes or silently fall back to a retired runtime.
 
 ## Product surfaces
 
-The shipped Workbench routes are:
+The shipped product routes are:
 
 ```text
-/today
 /workspace
-/tasks
-/review
 /life-model
 /settings
 ```
@@ -230,9 +227,8 @@ strict frontend adapters that compose named backend owner outputs. Governed
 writes pass through proposal, permission, persistence, and target-domain owners
 rather than page-local state.
 
-These six routes are current migration input, not the target information
-architecture. R7 reduces the shipped top-level surfaces to Workbench
-(`/workspace`), Personal Intelligence (`/life-model`), and Settings. Task and
+R7 reduced the shipped top-level surfaces to Workbench (`/workspace`),
+Personal Intelligence (`/life-model`), and Settings. Task and
 approval status are presented in their Conversation and a Needs Attention
 filter rather than duplicate top-level Task and Review products.
 

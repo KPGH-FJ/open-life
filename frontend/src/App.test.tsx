@@ -1,21 +1,24 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ReadOnlyProductSurfaceId, ReadOnlySpineRouteState } from "@/ui/journeys/readOnly";
+import type {
+  PublicProductSurfaceId,
+  ProductWorkbenchRouteState,
+} from "@/ui/journeys/productWorkbench";
 import App from "./App";
 
-vi.mock("@/ui/journeys/readOnly", async importOriginal => {
-  const actual = await importOriginal<typeof import("@/ui/journeys/readOnly")>();
+vi.mock("@/ui/journeys/productWorkbench", async importOriginal => {
+  const actual = await importOriginal<typeof import("@/ui/journeys/productWorkbench")>();
   return {
     ...actual,
-    ReadOnlySpineJourney: ({
+    ProductWorkbenchJourney: ({
       initialMode,
       initialSurface,
       onRouteChange,
     }: {
-      initialMode: ReadOnlySpineRouteState["mode"];
-      initialSurface: ReadOnlyProductSurfaceId;
-      onRouteChange: (route: ReadOnlySpineRouteState) => void;
+      initialMode: ProductWorkbenchRouteState["mode"];
+      initialSurface: PublicProductSurfaceId;
+      onRouteChange: (route: ProductWorkbenchRouteState) => void;
     }) => (
       <div data-testid="production-workbench" data-mode={initialMode} data-surface={initialSurface}>
         <button
@@ -52,10 +55,7 @@ describe("production App route authority", () => {
   });
 
   it.each([
-    ["/today", "product", "today"],
     ["/workspace", "product", "workspace"],
-    ["/tasks", "product", "tasks"],
-    ["/review", "product", "review"],
     ["/life-model", "product", "life-model"],
   ] as const)("maps %s to the canonical %s/%s workbench state", (path, mode, surface) => {
     renderPath(path);
@@ -64,11 +64,14 @@ describe("production App route authority", () => {
     expect(screen.getByTestId("production-workbench")).toHaveAttribute("data-surface", surface);
   });
 
-  it("redirects only the root entry to Today", async () => {
+  it("redirects only the root entry to Workbench", async () => {
     renderPath("/");
 
     await waitFor(() =>
-      expect(screen.getByTestId("production-workbench")).toHaveAttribute("data-surface", "today")
+      expect(screen.getByTestId("production-workbench")).toHaveAttribute(
+        "data-surface",
+        "workspace"
+      )
     );
   });
 
@@ -80,7 +83,7 @@ describe("production App route authority", () => {
   });
 
   it("updates the URL-driven workbench when internal navigation requests a product route", async () => {
-    renderPath("/today");
+    renderPath("/workspace");
 
     fireEvent.click(screen.getByRole("button", { name: "前往工作区" }));
     await waitFor(() =>
@@ -92,25 +95,35 @@ describe("production App route authority", () => {
   });
 
   it("opens Settings without losing the current product return surface", async () => {
-    renderPath("/tasks");
+    renderPath("/workspace");
 
     fireEvent.click(screen.getByRole("button", { name: "打开设置" }));
     await waitFor(() => {
       expect(screen.getByTestId("production-workbench")).toHaveAttribute("data-mode", "settings");
-      expect(screen.getByTestId("production-workbench")).toHaveAttribute("data-surface", "tasks");
+      expect(screen.getByTestId("production-workbench")).toHaveAttribute(
+        "data-surface",
+        "workspace"
+      );
     });
   });
 
-  it.each(["/companion", "/mailbox", "/runs", "/runs/task-1", "/builder", "/mcp"])(
-    "shows an explicit retired state for %s without redirecting",
-    path => {
-      renderPath(path);
+  it.each([
+    "/today",
+    "/tasks",
+    "/review",
+    "/companion",
+    "/mailbox",
+    "/runs",
+    "/runs/task-1",
+    "/builder",
+    "/mcp",
+  ])("shows an explicit retired state for %s without redirecting", path => {
+    renderPath(path);
 
-      expect(screen.getByRole("heading", { name: "这个旧页面已从产品中移除" })).toBeInTheDocument();
-      expect(screen.getByText(path)).toBeInTheDocument();
-      expect(screen.queryByTestId("production-workbench")).not.toBeInTheDocument();
-    }
-  );
+    expect(screen.getByRole("heading", { name: "这个旧页面已从产品中移除" })).toBeInTheDocument();
+    expect(screen.getByText(path)).toBeInTheDocument();
+    expect(screen.queryByTestId("production-workbench")).not.toBeInTheDocument();
+  });
 
   it("shows an explicit unavailable state for an unknown path", () => {
     renderPath("/unknown-product-path");

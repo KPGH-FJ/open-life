@@ -260,7 +260,7 @@ export function LifeModelV2ControlsPanel({
           <p>当前模型尚未改变。建议编号：{action.proposalId}</p>
           {onOpenReview ? (
             <button type="button" className="ol-lifemodel-link-button" onClick={onOpenReview}>
-              前往审核中心
+              前往需处理
             </button>
           ) : null}
         </FoundationNotice>
