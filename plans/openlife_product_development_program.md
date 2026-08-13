@@ -1,77 +1,70 @@
 # Current OpenLife Product Development Plan
 
-Status: complete
+Status: active
 
 ## Objective
 
-Complete S6 by proving the accepted report task path as one behavior matrix on
-the exact current source: controlled tests for every safety and recovery
-contract, an exact native Tauri build and product-path review, and only the
-external-live provider/Web checks required to prove real execution.
-
-## Product path
-
-```text
-Workspace request
-  -> canonical Task / Run / Item execution
-  -> document.read and/or Web read
-  -> user-selected provider synthesis
-  -> ArtifactVersion + Review checkpoint
-  -> confirmed materialization
-  -> Results / Changes / Preview / Verification
-```
+Complete S7 by removing the remaining release-reachable parallel lifecycle and
+compatibility surfaces left after the canonical report-path migration, while
+preserving the proven Workspace -> Task -> Review -> Artifact result loop.
+Finish with one clean release baseline whose production commands, stores,
+read models, and documentation no longer advertise retired product owners.
 
 ## In scope
 
-1. Define one report behavior matrix covering document-only, Web-only, and
-   combined reports plus their failure boundaries.
-2. Prove steering consumption, inline approval continuation, restart recovery,
-   cancellation, and bounded concurrency without creating a second lifecycle.
-3. Prove proposed, materialized, drifted, missing, failed, and effect-unknown
-   artifact projections through backend product truth.
-4. Build the exact current native Tauri application and review the Workspace,
-   Tasks, and Review product path with an isolated data profile.
-5. Run a bounded external-live provider/Web report case only through the
-   explicit live-eval gate. Never credit local HTTP, fixtures, or scripted
-   providers as external-live evidence.
-6. Keep the evidence summary concise and tied to commands and current commit;
-   do not create an evidence registry or store user content in planning docs.
+1. Remove unused standalone PlanExecute IPC, frontend contracts, mocks, and
+   release command registration. Planning remains an Item inside a Task.
+2. Retire residual PlanExecute session ownership from ordinary Main Chat after
+   migrating any still-required report/task facts to the canonical runtime.
+3. Remove obsolete compatibility wrappers and projections that have no current
+   product caller, including algorithm-named durable strategy state where it no
+   longer owns behavior.
+4. Reduce overlapping TaskSession, ActionQueue, AgentRun, and Event lifecycle
+   ownership only through complete production paths; do not introduce dual
+   writes or a second runtime.
+5. Add product/static guards that keep retired release commands and fallback
+   paths absent.
+6. Run full Rust/frontend gates, build the exact release bundle, and perform
+   proportional isolated native verification of the report path.
 
 ## Out of scope
 
-- new connectors, computer-use, shell, provider auto-routing, Memory, or
-  LifeModel capability;
-- rich editors, PDF/image preview, or additional artifact formats;
-- S7 old-path deletion and release cleanup;
-- touching the default OpenLife profile or using historical native/live runs
-  as proof for the current build.
+- new tools, connectors, computer use, arbitrary shell, subagents, or provider
+  auto-routing;
+- expanding Memory or LifeModel behavior;
+- deleting user profiles, Keychain credentials, or historical database files;
+- rewriting healthy gateways, receipts, cancellation, outbox, or Review
+  materializers merely to rename them;
+- a big-bang migration of unrelated scheduled-task or personal-intelligence
+  domains.
 
-## Behavior matrix
+## Deletion order
 
-| Scenario | Required product truth | Required evidence |
-| --- | --- | --- |
-| Document-only report | exact bound document read before provider; reviewable report | controlled command-surface + exact native |
-| Web-only report | observed Web evidence and verified citations before proposal | controlled command-surface + external-live |
-| Combined report | ordered document and Web Items feed one provider synthesis | controlled command-surface + external-live |
-| Missing/drifted document | no Web/provider dispatch and no Artifact | controlled negative test |
-| Missing/forged Web citation | one bounded provider retry, then no Artifact | controlled negative test + external-live valid case |
-| Steering | authenticated in-scope input consumed once at checkpoint | restart/integration test + native UI |
-| Scope-expanding steering | blocked without capability or policy expansion | controlled negative test |
-| Review approval | exact Artifact materializes, then same task may continue | integration test + native UI |
-| Restart recovery | no duplicate reads, proposal, effect, or steering consume | file-backed/restart test |
-| Concurrency/cancellation | admission before mutation; one owner; bounded parallelism | integration test |
-| Result surfaces | backend-owned Result, Change, Preview, Verification agree | projection/UI test + native UI |
-| Drift/missing/effect unknown | no delivered claim, no fabricated preview, no blind replay | controlled negative test |
+1. Standalone PlanExecute release surface with no current frontend caller.
+2. Ordinary Main Chat PlanExecute session/store ownership and its compatibility
+   projections.
+3. Remaining report-path duplicate lifecycle state that canonical Task Items
+   already own.
+4. Dead adapters, DTO fields, mocks, tests, and documentation exposed only by
+   the retired paths.
 
-## Evidence boundaries
+Each slice must leave send and stream converged on `OpenLifeTurnRuntime`, keep
+the canonical report behavior matrix green, and end in a reviewable commit.
 
-- Source/unit/integration tests prove deterministic contracts only.
-- Browser-shell tests prove React behavior only.
-- Native evidence must use the exact current bundle and an isolated profile.
-- External-live evidence must use the configured user-selected provider and
-  real Web access through `scripts/live-eval.zsh`.
-- A missing key, unavailable account, or provider/network refusal stops S6 as
-  blocked; it is never replaced by a fixture.
+## Acceptance
+
+- Release frontend and Tauri handlers expose no standalone PlanExecute product
+  API.
+- A report plan is represented by canonical Task Items, not an independent
+  PlanExecute session.
+- Approval resumes the same Task and verified Artifact result without a
+  compatibility fallback.
+- No removed command remains in frontend mocks, release guards, or generated
+  handler registration.
+- Missing historical stores fail closed or remain read-only migration input;
+  they are never silently recreated as active product owners.
+- Full checks pass, the final working tree is clean, and an exact release bundle
+  is produced.
 
 ## Checks
 
@@ -89,44 +82,8 @@ corepack pnpm --dir frontend test:e2e
 
 ## Stop condition
 
-S6 closes only when every matrix row has its required current-source evidence,
-the exact native path is reviewed from an isolated profile, the required live
-case succeeds or is truthfully blocked on user-supplied credentials, all gates
-pass, and the working tree is clean. Then move to S7 old-path deletion and a
-clean release baseline.
-
-## Current result
-
-- The controlled report matrix passes for document/Web execution, typed retry,
-  steering, approval ownership, cancellation, recovery, concurrency, artifact
-  materialization, and backend result projections.
-- Full Rust and frontend gates pass. The exact current release bundle builds.
-- The explicitly gated external-live document + Web report completes through
-  one pending Review item and materializes once after acceptance.
-- The exact native bundle was reviewed from a fresh isolated profile after the
-  user confirmed macOS Keychain recovery and MCP audit credential
-  initialization. The first run exposed a strict Review acceptance IPC mismatch;
-  the response contract was repaired, covered by focused tests, and the exact
-  bundle was rebuilt before revalidation.
-- The rebuilt native application bound `comparison.pdf`, paused for one exact
-  DeepSeek network grant, continued the same Task through real provider
-  synthesis, created one reviewable Markdown Artifact, and materialized it only
-  after the native high-risk confirmation.
-- The refreshed Tasks read model showed one completed task with matching
-  Result, Changes, bounded Preview, and expected/observed Verification digests.
-  Restarting the same isolated profile preserved that single verified result
-  without duplicating the Task or filesystem effect.
-- The generated report file was removed after verification so the repository
-  does not retain native-trial content. The isolated profile remains outside
-  the repository and the default OpenLife profile was not used.
-
-The final-commit external-live recheck also exercised provider volatility: two
-DeepSeek attempts ended at the provider boundary with
-`artifact_generation_failed`, correctly producing no proposal or filesystem
-effect. A bounded endpoint health probe remained healthy, and the next exact
-combined document + Web run completed with one Review item and one verified
-materialization. This preserves both the fail-closed negative evidence and a
-current successful live path.
-
-S6 is complete. The next product-development pointer is S7: remaining old-path
-deletion and a clean release baseline.
+S7 closes only when the retired release surfaces and duplicate report-path
+owners are absent, current-source tests and product guards pass, the report
+path remains verified, the exact release bundle builds, and the repository is
+clean. If a legacy store still has a real production consumer, stop deletion
+at that boundary and migrate the consumer before removing the store.

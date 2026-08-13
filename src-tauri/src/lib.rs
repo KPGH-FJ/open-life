@@ -129,11 +129,8 @@ use commands::agent::{
     list_provider_transmission_history,
 };
 use commands::agent_runtime::{
-    cancel_plan_execute_session, clear_main_chat_skill, create_plan_execute_session,
-    execute_plan_execute_step, finalize_plan_execute_session, get_main_chat_skill_detail,
-    get_plan_execute_session, list_main_chat_skills, list_main_chat_tool_candidates,
-    list_plan_execute_sessions, review_plan_execute_session, select_main_chat_skill,
-    skip_plan_execute_step, update_plan_execute_session_draft,
+    clear_main_chat_skill, get_main_chat_skill_detail, list_main_chat_skills,
+    list_main_chat_tool_candidates, select_main_chat_skill,
 };
 
 use commands::chat::{
@@ -977,15 +974,6 @@ pub fn run() {
             clear_main_chat_skill,
             list_main_chat_tool_candidates,
             open_external_https_source,
-            create_plan_execute_session,
-            get_plan_execute_session,
-            list_plan_execute_sessions,
-            update_plan_execute_session_draft,
-            finalize_plan_execute_session,
-            cancel_plan_execute_session,
-            review_plan_execute_session,
-            execute_plan_execute_step,
-            skip_plan_execute_step,
             get_pending_proposals,
             list_proposals,
             batch_accept_low_risk_proposals,

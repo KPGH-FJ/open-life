@@ -18,7 +18,7 @@ use openlife_core::agent::{
     DurableWriteRequest, HSBehaviorCheckSummary, HSSelectionAudit, MemoryLifecycleAcceptanceInput,
     MemoryLifecycleStore, ModelRouteTrace, PlanExecuteSession, PlanExecuteSessionStatus,
     ProposalStatus, ProposalStore, ProposalTerminalRelationKind, ProposalType, ReasoningTrace,
-    RedactionLevel, ReviewWorkflow, TerminalOwnerReviewOriginProof, TerminalOwnerReviewSubmission,
+    ReviewWorkflow, TerminalOwnerReviewOriginProof, TerminalOwnerReviewSubmission,
 };
 use openlife_core::persistence_outbox::CanonicalMutationReceipt;
 
@@ -2027,57 +2027,6 @@ pub(crate) async fn update_agent_run_after_startup_review_reconciliation(
     .await
 }
 
-/// Finalizes proposal staging from canonical owners. The
-/// producer may supply only newly returned Proposal references and numeric
-/// staging counts; it cannot submit a caller-shaped AgentRun status or body.
-/// The per-run causal lock is acquired before re-reading the canonical row, so
-/// a review that wins the race cannot be overwritten by a stale full-row save.
-pub(crate) async fn project_agent_run_from_plan_execute_session(
-    state: &Arc<AppState>,
-    run_id: &str,
-    plan_session_id: &str,
-) -> Result<(), String> {
-    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
-    let _causal_guard = causal_lock.lock().await;
-    let store = clone_agent_run_store(state).await?;
-    let mut run = load_live_agent_run(state, &store, run_id)?;
-    if run.kind != openlife_core::agent::AgentTaskKind::Planning {
-        // A Main Chat AgentRun may be immutable lineage for a Plan session. It
-        // is not the Planning lifecycle owner and must not be reshaped here.
-        return Ok(());
-    }
-    if run.task_id != plan_session_id {
-        return Err("plan_execute_agent_run_task_identity_mismatch".into());
-    }
-    let _fence = acquire_open_turn_write_fence(state, &run.task_id).await?;
-    let session = load_plan_execute_session(state, plan_session_id).await?;
-    if session.source_agent_run_id.as_deref() != Some(run_id) {
-        return Err("plan_execute_agent_run_source_identity_mismatch".into());
-    }
-    for proposal_id in &session.linked_proposal_ids {
-        if !run
-            .generated_proposals
-            .iter()
-            .any(|item| item == proposal_id)
-        {
-            run.generated_proposals.push(proposal_id.clone());
-        }
-    }
-    run.step_count = u32::try_from(session.step_count).unwrap_or(u32::MAX);
-    run.tool_call_count = 0;
-    run.context_summary = Some(plan_execute_context_summary());
-    project_canonical_review_lifecycle_with_plan(
-        state,
-        &store,
-        &mut run,
-        AgentRunWriteLane::Normal,
-        Some(session),
-    )
-    .await?;
-    let admission = admit_agent_run_write(state, AgentRunWriteLane::Normal)?;
-    commit_agent_run_update(state, &store, &run, &admission).await
-}
-
 fn load_live_agent_run(
     state: &Arc<AppState>,
     store: &AgentRunStore,
@@ -2107,59 +2056,6 @@ async fn load_plan_execute_session(
         .get_session(session_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "agent_run_review_projection_plan_session_missing".to_string())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum AgentRunOwnedFailure {
-    PlanSessionCreate,
-    PlanCreatedEventProjection,
-}
-
-/// Applies a bounded owner failure to a freshly created AgentRun without
-/// accepting a mutable AgentRun row from the product caller.
-pub(crate) async fn fail_agent_run_from_owned_phase(
-    state: &Arc<AppState>,
-    run_id: &str,
-    failure: AgentRunOwnedFailure,
-) -> Result<(), String> {
-    let causal_lock = state.persistence_coordinator.agent_run_causal_lock(run_id);
-    let _causal_guard = causal_lock.lock().await;
-    let store = clone_agent_run_store(state).await?;
-    let mut run = load_live_agent_run(state, &store, run_id)?;
-    let _fence = acquire_open_turn_write_fence(state, &run.task_id).await?;
-    let (message, phase) = match failure {
-        AgentRunOwnedFailure::PlanSessionCreate => {
-            ("plan_execute_session_create_failed", "execution")
-        }
-        AgentRunOwnedFailure::PlanCreatedEventProjection => {
-            ("plan_execute_created_event_failed", "finalize")
-        }
-    };
-    run.fail(AgentRunError {
-        message: message.into(),
-        phase: phase.into(),
-        recoverable: true,
-    });
-    let admission = admit_agent_run_write(state, AgentRunWriteLane::Normal)?;
-    commit_agent_run_update(state, &store, &run, &admission).await
-}
-
-fn plan_execute_context_summary() -> ContextSummary {
-    ContextSummary {
-        life_model_empty: false,
-        included_life_model_sections: vec![
-            "goal_priority".into(),
-            "energy_current_state".into(),
-            "planning_intensity".into(),
-            "privacy_model_route".into(),
-            "proposal_boundaries".into(),
-        ],
-        memory_hit_count: 0,
-        memory_sources: Vec::new(),
-        used_tools_prompt: true,
-        redaction_applied: true,
-        redaction_level: RedactionLevel::Strict,
-    }
 }
 
 fn review_owned_error(error: &AgentRunError) -> bool {

@@ -5,14 +5,6 @@ import type {
   DailyGoal,
   StateHistoryEntry,
   StateAlert,
-  CreatePlanExecuteSessionInput,
-  PlanExecuteSession,
-  UpdatePlanExecuteSessionDraftInput,
-  ExecutePlanExecuteStepInput,
-  ExecutePlanExecuteStepOutput,
-  SkipPlanExecuteStepInput,
-  SkipPlanExecuteStepOutput,
-  ReviewPlanExecuteSessionOutput,
   PlanExecuteReviewSummary,
 } from "./types";
 
@@ -1578,69 +1570,6 @@ export async function getMainChatAgentStateSnapshot(
     taskSessionId,
     task_session_id: taskSessionId,
   });
-}
-
-export async function createPlanExecuteSession(
-  input: CreatePlanExecuteSessionInput
-): Promise<PlanExecuteSession> {
-  return safeInvoke<PlanExecuteSession>("create_plan_execute_session", { input });
-}
-
-export async function getPlanExecuteSession(sessionId: string): Promise<PlanExecuteSession | null> {
-  return safeInvoke<PlanExecuteSession | null>("get_plan_execute_session", {
-    input: { sessionId },
-  });
-}
-
-export async function listPlanExecuteSessions(limit: number = 5): Promise<PlanExecuteSession[]> {
-  return safeInvoke<PlanExecuteSession[]>("list_plan_execute_sessions", {
-    input: { limit },
-  });
-}
-
-export async function updatePlanExecuteSessionDraft(
-  input: UpdatePlanExecuteSessionDraftInput
-): Promise<PlanExecuteSession> {
-  return safeInvoke<PlanExecuteSession>("update_plan_execute_session_draft", { input });
-}
-
-export async function finalizePlanExecuteSession(
-  sessionId: string,
-  baseRevision?: number
-): Promise<PlanExecuteSession> {
-  return safeInvoke<PlanExecuteSession>("finalize_plan_execute_session", {
-    input: { sessionId, ...(baseRevision !== undefined ? { baseRevision } : {}) },
-  });
-}
-
-export async function cancelPlanExecuteSession(
-  sessionId: string,
-  baseRevision?: number
-): Promise<PlanExecuteSession> {
-  return safeInvoke<PlanExecuteSession>("cancel_plan_execute_session", {
-    input: { sessionId, ...(baseRevision !== undefined ? { baseRevision } : {}) },
-  });
-}
-
-export async function reviewPlanExecuteSession(
-  sessionId: string,
-  baseRevision?: number
-): Promise<ReviewPlanExecuteSessionOutput> {
-  return safeInvoke<ReviewPlanExecuteSessionOutput>("review_plan_execute_session", {
-    input: { sessionId, ...(baseRevision !== undefined ? { baseRevision } : {}) },
-  });
-}
-
-export async function executePlanExecuteStep(
-  input: ExecutePlanExecuteStepInput
-): Promise<ExecutePlanExecuteStepOutput> {
-  return safeInvoke<ExecutePlanExecuteStepOutput>("execute_plan_execute_step", { input });
-}
-
-export async function skipPlanExecuteStep(
-  input: SkipPlanExecuteStepInput
-): Promise<SkipPlanExecuteStepOutput> {
-  return safeInvoke<SkipPlanExecuteStepOutput>("skip_plan_execute_step", { input });
 }
 
 export async function startStreamMessage(
