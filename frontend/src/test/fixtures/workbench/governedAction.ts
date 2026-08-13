@@ -644,24 +644,24 @@ export function workbenchJourneyFixtureDataSource(
       events.onStart({
         session_id: sessionId,
         operation_id: options.operationId,
-        task_session_id: options.operationId,
-        run_id: options.operationId,
+        conversation_id: sessionId,
+        turn_id: options.operationId,
         reasoning_trace: {},
         tool_calls: [],
       });
       events.onChunk({
         session_id: sessionId,
         operation_id: options.operationId,
-        task_session_id: options.operationId,
-        run_id: options.operationId,
+        conversation_id: sessionId,
+        turn_id: options.operationId,
         chunk: reply,
       });
       histories.set(sessionId, [...messages, { role: "assistant", content: reply }]);
       return {
         session_id: sessionId,
         operation_id: options.operationId,
-        task_session_id: options.operationId,
-        run_id: options.operationId,
+        conversation_id: sessionId,
+        turn_id: options.operationId,
         reply,
         status: "completed",
         blockers: [],

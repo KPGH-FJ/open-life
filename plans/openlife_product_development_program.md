@@ -144,11 +144,92 @@ product proof and remains part of R8 release identity work.
 
 ## Current stage: R1 - canonical Conversation and reliable Chat
 
-R1's first vertical outcome is one canonical Conversation/Turn/Item lifecycle
-for ordinary Chat, together with a Provider Registry and user-visible
-provider/model binding. It must migrate controls, recovery, ViewModels, and the
-Workbench conversation UI before deleting old TaskSession/Event/AgentRun
-presentation owners.
+### Outcome
+
+One canonical Conversation/Turn/Item lifecycle owns ordinary Chat from the
+Workbench request through durable history and recovery. Chat binds the exact
+user-selected provider/model and never creates Task, Run, Proposal, or an
+algorithm-specific product object.
+
+### In scope
+
+1. Add a single SQLite Conversation owner with Conversation, Turn, and typed
+   Item tables, exact idempotency, terminal transitions, deletion, and restart
+   recovery.
+2. Add an explicit Chat/Work request mode. R1 migrates Chat; Work remains an
+   explicitly separate current consumer until R2, never a fallback from Chat.
+3. Bind every Chat Turn to the selected provider profile, model, endpoint
+   class, and configuration generation. Same-provider retries may be bounded;
+   model/provider substitution is forbidden.
+4. Move ordinary Chat send/stream, history, conversation CRUD, selected Skill,
+   cancellation, and failure recovery to the canonical owner.
+5. Project one backend Conversation ViewModel for the Workbench and remove its
+   dependence on Tasks/Review health.
+6. Delete Chat use of MemoryStore message/session tables and Chat use of
+   TaskSession, AgentRun, ActionQueue, and MainChatEvent presentation state.
+7. Add absence guards, product tests, browser tests, exact-native first Chat,
+   restart history, cancellation, and unavailable-provider evidence.
+
+### Out of scope
+
+- durable Work Task/Run/ItemAttempt and report migration (R2-R4);
+- multiple simultaneous active Tasks, background work, and notifications;
+- new connectors, Computer Use, shell, mail/calendar writes, or broader Memory
+  and LifeModel behavior;
+- importing the authorized legacy test conversations deleted at R0.
+
+### Acceptance
+
+- A new Chat Conversation survives restart with ordered user/assistant Items
+  and no Task, Run, Proposal, or legacy Chat lifecycle row.
+- A Turn is exactly-once by caller UUID; payload drift and invalid transitions
+  fail closed.
+- The terminal assistant Item and Turn completion commit atomically. A crash or
+  provider failure leaves a typed recoverable/failed state, never a fake reply.
+- Buffered and streaming delivery use the same canonical runtime and the UI
+  re-reads backend history after terminal delivery.
+- Provider/model shown for the Turn matches the adapter receipt; no silent
+  substitution or cross-provider fallback occurs.
+- Empty or degraded Task/Review stores cannot hide or disable ordinary Chat.
+- Replaced Chat writers, read models, IPC fields, and frontend consumers are
+  absent from release source.
+
+### R1 result
+
+Implemented on 2026-08-13:
+
+- `ConversationStore` is the sole ordinary Chat lifecycle owner for exact
+  Conversation, Turn, and ordered user/assistant Item persistence;
+- buffered and streaming Chat converge on `CanonicalChatRuntime`, which binds
+  the Settings-selected provider/model/profile generation, performs bounded
+  generation, and commits terminal state without TaskSession, AgentRun,
+  ActionQueue, durable Main Chat Event, or Proposal rows;
+- exact retries replay the committed assistant Item without another provider
+  request, while payload drift, unknown Conversation identity, unavailable
+  providers, cancellation, late replies, and restart-interrupted Turns remain
+  typed non-success states;
+- one backend `ConversationViewModel` owns conversation list, selected history,
+  latest Turn, provider availability, exact selected model, and Work
+  availability independently of Tasks and Review health;
+- the production Workbench no longer calls the retired Chat list/history/Life
+  Model influence IPCs or loads Work tools/Markdown Memory for ordinary Chat;
+  those retired release IPCs have been deleted;
+- Work is shown as reconstructing and cannot silently enter the legacy runtime;
+  compatibility-only tests remain explicit migration evidence for R2; and
+- system diagnostics count canonical Conversations rather than legacy
+  `MemoryStore` chat sessions.
+
+The exact current macOS bundle was rebuilt with bundle identifier
+`ai.openlife.desktop`, signed by `OpenLife Local Code Signing`, and passed
+strict deep resource-seal verification. Core, Tauri, frontend, production
+build, and browser-shell gates are green. Interactive native first-Chat,
+restart-history, and cancellation review remains explicitly deferred to the R8
+golden native matrix because the current Computer Use host resolves the new
+bundle to the retired `ai.openlife.app` accessibility target and cannot attach
+to its window. That tooling limitation is not credited as product evidence.
+
+R1 does not claim that Work is complete. R2 must replace the explicit
+compatibility Work runtime before the UI marks Work ready.
 
 ## R1 entry condition
 

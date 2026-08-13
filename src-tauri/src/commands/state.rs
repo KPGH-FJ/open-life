@@ -173,6 +173,9 @@ mod tests {
             memory_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
             )),
+            conversation_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::conversation::ConversationStore::new_in_memory().unwrap(),
+            ))),
             mcp_registry: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp::McpRegistry::new(),
             )),

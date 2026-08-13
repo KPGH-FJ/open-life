@@ -8,7 +8,6 @@ import {
   listMainChatAgentEvents,
   getMainChatAgentStateSnapshot,
   restoreArchivedMemory,
-  saveChatMessage,
   startStreamMessage,
   importAllData,
   abandonGovernedDataImportRecovery,
@@ -323,15 +322,10 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("keeps existing explicit aliases for high-traffic chat commands", async () => {
+  it("keeps exact aliases for the canonical Chat stream command", async () => {
     await startStreamMessage("session-1", [{ role: "user", content: "你好" }], {
       operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
     });
-    await saveChatMessage(
-      "session-1",
-      { role: "assistant", content: "你好" },
-      "c7414f1e-35dc-4aec-b2f0-f704313003aa"
-    );
 
     expect(invoke).toHaveBeenCalledWith(
       "start_stream_message",
@@ -346,16 +340,6 @@ describe("tauri command argument aliases", () => {
           sessionId: "session-1",
           session_id: "session-1",
         }),
-      })
-    );
-    expect(invoke).toHaveBeenCalledWith(
-      "save_chat_message",
-      expect.objectContaining({
-        sessionId: "session-1",
-        session_id: "session-1",
-        message: { role: "assistant", content: "你好" },
-        operationId: "c7414f1e-35dc-4aec-b2f0-f704313003aa",
-        operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003aa",
       })
     );
   });

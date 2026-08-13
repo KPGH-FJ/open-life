@@ -153,6 +153,7 @@ describe("Workbench governed action journey", () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
       ...fixture,
+      listSessions: async () => [],
       load: async () => {
         const snapshot = await fixture.load();
         const item = snapshot.reviewEnvelope.data!.items[0];
@@ -375,6 +376,7 @@ describe("Workbench governed action journey", () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
       ...fixture,
+      listSessions: async () => [],
       load: async () => {
         const snapshot = await fixture.load();
         return {
@@ -599,6 +601,11 @@ describe("Workbench governed action journey", () => {
       />
     );
 
+    await screen.findByText("继续当前工作");
+    const workMode = screen.getByRole("radio", { name: "Work" });
+    await waitFor(() => expect(workMode).toBeEnabled());
+    await user.click(workMode);
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Work" })).toBeChecked());
     await user.click(await screen.findByRole("button", { name: "添加文件" }));
 
     expect(await screen.findByText("访谈记录.md")).toBeInTheDocument();

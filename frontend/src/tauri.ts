@@ -356,6 +356,7 @@ export async function recoverRequiredCredentialAccess(): Promise<CredentialRecov
 export interface MainChatMessageOptions {
   operationId: string;
   selectedSkillId?: string;
+  mode?: "chat" | "work";
 }
 
 export async function sendMessage(
@@ -368,6 +369,7 @@ export async function sendMessage(
     operation_id: options.operationId,
     ...sessionArgs(sessionId),
     messages,
+    mode: options.mode ?? "chat",
     ...selectedSkillArgs(options.selectedSkillId),
   });
   return result.reply;
@@ -710,12 +712,14 @@ export interface ProductFinalDeliveryView {
 export interface StreamMessageStartPayload {
   session_id: string;
   operation_id: string;
-  task_session_id: string;
-  run_id: string;
+  conversation_id?: string;
+  turn_id?: string;
+  task_session_id?: string;
+  run_id?: string;
   status?: MainChatTurnStatus;
   blockers?: string[];
-  reasoning_trace: ReasoningTrace;
-  tool_calls: ToolCallResult[];
+  reasoning_trace?: ReasoningTrace;
+  tool_calls?: ToolCallResult[];
   agent_ingress?: MainChatAgentIngressDecision;
   agent_state?: MainChatAgentStateSnapshot;
   execution_transcript?: MainChatExecutionTranscriptEntry[];
@@ -727,8 +731,10 @@ export interface StreamMessageStartPayload {
 export interface StreamMessageChunkPayload {
   session_id: string;
   operation_id: string;
-  task_session_id: string;
-  run_id: string;
+  conversation_id?: string;
+  turn_id?: string;
+  task_session_id?: string;
+  run_id?: string;
   request_id?: string;
   chunk: string;
 }
@@ -736,8 +742,10 @@ export interface StreamMessageChunkPayload {
 export interface StreamMessageDonePayload {
   session_id: string;
   operation_id: string;
-  task_session_id: string;
-  run_id: string;
+  conversation_id?: string;
+  turn_id?: string;
+  task_session_id?: string;
+  run_id?: string;
   reply: string;
   status?: MainChatTurnStatus;
   blockers?: string[];
@@ -745,8 +753,8 @@ export interface StreamMessageDonePayload {
   model_invoked?: boolean;
   tool_invoked?: boolean;
   life_model_influence?: MainChatLifeModelProductReceipt;
-  reasoning_trace: ReasoningTrace;
-  tool_calls: ToolCallResult[];
+  reasoning_trace?: ReasoningTrace;
+  tool_calls?: ToolCallResult[];
   agent_ingress?: MainChatAgentIngressDecision;
   agent_state?: MainChatAgentStateSnapshot;
   execution_transcript?: MainChatExecutionTranscriptEntry[];
@@ -1349,7 +1357,27 @@ export async function sendMessageV2(
     operation_id: options.operationId,
     ...sessionArgs(sessionId),
     messages,
+    mode: options.mode ?? "chat",
     ...selectedSkillArgs(options.selectedSkillId),
+  });
+}
+
+export interface CancelChatTurnResult {
+  conversationId: string;
+  turnId: string;
+  status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  activeTurnFound: boolean;
+}
+
+export async function cancelChatTurn(
+  conversationId: string,
+  turnId: string
+): Promise<CancelChatTurnResult> {
+  return safeInvoke<CancelChatTurnResult>("cancel_chat_turn", {
+    conversationId,
+    conversation_id: conversationId,
+    turnId,
+    turn_id: turnId,
   });
 }
 
@@ -1486,6 +1514,7 @@ export async function startStreamMessage(
     operation_id: options.operationId,
     ...sessionArgs(sessionId),
     messages,
+    mode: options.mode ?? "chat",
     ...selectedSkillArgs(options.selectedSkillId),
   };
   return safeInvoke<StreamMessageDonePayload>("start_stream_message", {
@@ -1536,32 +1565,6 @@ export async function detachResourceFromTurn(
 }
 
 // Note: Hermes dispatch command has been removed. Use AgentRuntime instead.
-
-export async function getChatHistory(sessionId: string): Promise<ChatMessage[]> {
-  return safeInvoke<ChatMessage[]>("get_chat_history", sessionArgs(sessionId));
-}
-
-export async function getChatLifeModelInfluence(
-  sessionId: string
-): Promise<ChatLifeModelInfluenceSnapshot | null> {
-  return safeInvoke<ChatLifeModelInfluenceSnapshot | null>(
-    "get_chat_life_model_influence",
-    sessionArgs(sessionId)
-  );
-}
-
-export async function saveChatMessage(
-  sessionId: string,
-  message: ChatMessage,
-  operationId: string
-): Promise<void> {
-  return safeInvoke("save_chat_message", {
-    ...sessionArgs(sessionId),
-    message,
-    operationId,
-    operation_id: operationId,
-  });
-}
 
 export async function checkOllamaStatus(): Promise<boolean> {
   return safeInvoke<boolean>("check_ollama_status");
@@ -3650,8 +3653,44 @@ export interface ChatSession {
   updated_at: string;
 }
 
-export async function listChatSessions(): Promise<ChatSession[]> {
-  return safeInvoke<ChatSession[]>("list_chat_sessions");
+export interface ConversationTurnViewModel {
+  turnId: string;
+  status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  providerProfileId: string;
+  providerId: string;
+  modelId: string;
+  endpointClass: string;
+  errorCode?: string;
+}
+
+export interface ProviderProfileViewModel {
+  profileId: string;
+  providerId: string;
+  modelId: string;
+  endpointClass: string;
+  selected: boolean;
+}
+
+export interface ConversationViewModel {
+  status: "ready" | "empty";
+  conversations: ChatSession[];
+  selectedConversationId: string | null;
+  messages: ChatMessage[];
+  latestTurn: ConversationTurnViewModel | null;
+  providerStatus: "ready" | "unavailable";
+  providerProfiles: ProviderProfileViewModel[];
+  selectedProviderProfileId: string | null;
+  providerErrorCode: string | null;
+  workStatus: "reconstructing" | "ready";
+}
+
+export async function getConversationViewModel(
+  conversationId?: string
+): Promise<ConversationViewModel> {
+  return safeInvoke<ConversationViewModel>("get_conversation_view_model", {
+    conversationId,
+    conversation_id: conversationId,
+  });
 }
 
 export async function createChatSession(sessionId: string, title: string): Promise<void> {

@@ -3120,6 +3120,53 @@ impl AgentIngress {
         Ok(decision)
     }
 
+    /// R1 product ingress for ordinary Chat. ConversationStore, not Memory or
+    /// TaskSession, proves the exact current user Item.
+    pub fn decide_with_conversation_user_item(
+        &self,
+        proof: &crate::conversation::ConversationUserMessageProof,
+        user_message: &str,
+        selected_messages: &[ChatMessage],
+    ) -> Result<AgentIngressDecision> {
+        let (content_length_bytes, content_digest) =
+            crate::agent::metadata_safe::metadata_safe_text_digest(user_message);
+        if !proof.is_live()
+            || proof.content_digest() != content_digest
+            || proof.content_length_bytes() != content_length_bytes
+        {
+            anyhow::bail!("canonical Conversation user Item proof mismatch");
+        }
+        let mut intent_frame = IntentFrame::from_user_message(user_message);
+        intent_frame.current_user_message_id = Some(proof.item_ref());
+        intent_frame.current_user_message_digest = content_digest;
+        let mut decision = self.decision_from_intent_frame(
+            proof.turn_id().to_string(),
+            proof.conversation_id(),
+            intent_frame,
+            None,
+            AgentTaskKind::Conversation,
+        );
+        let selected_context_requires_local = selected_messages.iter().any(|message| {
+            classify_privacy_risk(&message.content.to_ascii_lowercase()).local_only_required
+        });
+        if selected_context_requires_local && !decision.privacy_risk.local_only_required {
+            decision.privacy_risk.local_only_required = true;
+            decision.privacy_risk.risk_level = "high".into();
+            decision.privacy_risk.privacy_class = "sensitive".into();
+            decision.privacy_risk.policy_reason_code =
+                "local_only_required_for_selected_provider_context".into();
+            decision.policy_decision.data_route = ProviderDataRoute::LocalOnly;
+            decision.policy_decision.sensitivity = PolicySensitivity::Sensitive;
+            decision.policy_decision.risk = IntentRiskLevel::High;
+            decision.intent_frame.risk_level = IntentRiskLevel::High;
+            decision.policy_decision = decision.policy_decision.seal_policy_router_authority();
+        }
+        decision
+            .validate_policy_projection()
+            .map_err(|error| anyhow::anyhow!(error))?;
+        Ok(decision)
+    }
+
     /// Apply privacy routing to the exact message set selected for provider
     /// transmission. Intent authorization still comes only from the current
     /// authenticated user message; historical/system/assistant content can

@@ -3,7 +3,6 @@ use crate::main_chat_event_stream::MainChatAgentDurableEvent;
 use crate::main_chat_kernel::{
     MainChatLifeModelProductReceipt, MainChatLifeModelSelectedItemReceipt,
 };
-use crate::memory_gateway;
 use crate::AppState;
 use openlife_core::life_model::v2::{
     LifeModelItemV2, LifeModelSectionV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID,
@@ -12,6 +11,7 @@ use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
 use tauri::State;
 
+#[cfg(test)]
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatLifeModelInfluenceSnapshot {
@@ -19,26 +19,144 @@ pub struct ChatLifeModelInfluenceSnapshot {
     pub life_model_influence: MainChatLifeModelProductReceipt,
 }
 
-pub(crate) async fn get_chat_history_with_state(
-    session_id: &str,
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationTurnViewModel {
+    pub turn_id: String,
+    pub status: openlife_core::conversation::TurnStatus,
+    pub provider_profile_id: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub endpoint_class: String,
+    pub error_code: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ConversationViewModel {
+    pub status: String,
+    pub conversations: Vec<openlife_core::memory::ChatSession>,
+    pub selected_conversation_id: Option<String>,
+    pub messages: Vec<ChatMessage>,
+    pub latest_turn: Option<ConversationTurnViewModel>,
+    pub provider_status: String,
+    pub provider_profiles: Vec<crate::provider_registry::ProviderProfileViewModel>,
+    pub selected_provider_profile_id: Option<String>,
+    pub provider_error_code: Option<String>,
+    /// R1 intentionally keeps the retired Work runtime out of the product UI.
+    /// R2 changes this only after Task/Run/ItemAttempt is canonical end to end.
+    pub work_status: String,
+}
+
+pub(crate) async fn get_conversation_view_model_with_state(
+    requested_conversation_id: Option<&str>,
     state: &Arc<AppState>,
-) -> Result<Vec<ChatMessage>, AppError> {
+) -> Result<ConversationViewModel, AppError> {
     state
         .persistence_coordinator
-        .require_trusted_read("MemoryStore")
+        .require_trusted_read("ConversationStore")
         .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
-    let store = state.memory_store.lock().await;
-    store
-        .load_recent_messages(session_id, 200)
-        .map_err(AppError::from)
+    let store = state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("conversation_store_unavailable"))?
+        .lock()
+        .await;
+    let records = store
+        .list_conversations(false, 200)
+        .map_err(AppError::from)?;
+    let selected = match requested_conversation_id {
+        Some(requested) => {
+            if records.iter().any(|record| record.id == requested) {
+                Some(requested.to_string())
+            } else {
+                return Err(AppError::not_found("conversation_not_found"));
+            }
+        }
+        None => records.first().map(|record| record.id.clone()),
+    };
+    let conversations = records
+        .into_iter()
+        .map(|record| openlife_core::memory::ChatSession {
+            session_id: record.id,
+            title: record.title,
+            created_at: record.created_at.to_rfc3339(),
+            updated_at: record.updated_at.to_rfc3339(),
+        })
+        .collect::<Vec<_>>();
+    let (messages, latest_turn) = if let Some(conversation_id) = selected.as_deref() {
+        let messages = store
+            .list_items(conversation_id, 200)
+            .map_err(AppError::from)?
+            .into_iter()
+            .filter_map(|item| match item.kind {
+                openlife_core::conversation::ConversationItemKind::UserMessage => {
+                    Some(ChatMessage {
+                        role: "user".into(),
+                        content: item.content,
+                    })
+                }
+                openlife_core::conversation::ConversationItemKind::AssistantMessage => {
+                    Some(ChatMessage {
+                        role: "assistant".into(),
+                        content: item.content,
+                    })
+                }
+                openlife_core::conversation::ConversationItemKind::SystemNotice => None,
+            })
+            .collect();
+        let latest_turn = store
+            .latest_turn(conversation_id)
+            .map_err(AppError::from)?
+            .map(|turn| ConversationTurnViewModel {
+                turn_id: turn.id,
+                status: turn.status,
+                provider_profile_id: turn.provider.profile_id,
+                provider_id: turn.provider.provider_id,
+                model_id: turn.provider.model_id,
+                endpoint_class: turn.provider.endpoint_class,
+                error_code: turn.error_code,
+            });
+        (messages, latest_turn)
+    } else {
+        (Vec::new(), None)
+    };
+    drop(store);
+    let (provider_status, provider_profiles, selected_provider_profile_id, provider_error_code) =
+        match crate::provider_registry::selected_provider_profile(state).await {
+            Ok(provider) => (
+                "ready".to_string(),
+                provider.profiles,
+                Some(provider.binding.profile_id),
+                None,
+            ),
+            Err(error) => ("unavailable".to_string(), Vec::new(), None, Some(error)),
+        };
+    Ok(ConversationViewModel {
+        status: if conversations.is_empty() {
+            "empty"
+        } else {
+            "ready"
+        }
+        .into(),
+        conversations,
+        selected_conversation_id: selected,
+        messages,
+        latest_turn,
+        provider_status,
+        provider_profiles,
+        selected_provider_profile_id,
+        provider_error_code,
+        work_status: "reconstructing".into(),
+    })
 }
 
 #[tauri::command]
-pub async fn get_chat_history(
-    session_id: String,
+pub async fn get_conversation_view_model(
+    conversation_id: Option<String>,
     state: State<'_, Arc<AppState>>,
-) -> Result<Vec<ChatMessage>, AppError> {
-    get_chat_history_with_state(&session_id, &state.inner().clone()).await
+) -> Result<ConversationViewModel, AppError> {
+    get_conversation_view_model_with_state(conversation_id.as_deref(), state.inner()).await
 }
 
 fn required_final_bool(event: &MainChatAgentDurableEvent, field: &str) -> Result<bool, AppError> {
@@ -293,10 +411,32 @@ pub(crate) async fn life_model_influence_for_final_event_with_state(
     }))
 }
 
+#[cfg(test)]
 pub(crate) async fn get_chat_life_model_influence_with_state(
     session_id: &str,
     state: &Arc<AppState>,
 ) -> Result<Option<ChatLifeModelInfluenceSnapshot>, AppError> {
+    // Canonical Chat no longer derives presentation from the legacy Work
+    // AgentRun/Event owners. R1 does not yet persist the bounded LifeModel
+    // influence receipt on Conversation items, so canonical conversations
+    // truthfully report no durable influence snapshot here.
+    if let Some(store) = state.conversation_store.as_ref() {
+        state
+            .persistence_coordinator
+            .require_trusted_read("ConversationStore")
+            .map_err(|error| {
+                AppError::db_with_hint(error.to_string(), "canonical_state_unknown")
+            })?;
+        if store
+            .lock()
+            .await
+            .get_conversation(session_id)
+            .map_err(AppError::from)?
+            .is_some()
+        {
+            return Ok(None);
+        }
+    }
     state
         .persistence_coordinator
         .require_trusted_read("AgentRunStore")
@@ -381,56 +521,24 @@ pub(crate) async fn get_chat_life_model_influence_with_state(
     }))
 }
 
-#[tauri::command]
-pub async fn get_chat_life_model_influence(
-    session_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Option<ChatLifeModelInfluenceSnapshot>, AppError> {
-    get_chat_life_model_influence_with_state(&session_id, state.inner()).await
-}
-
-pub(crate) async fn save_chat_message_with_state(
-    session_id: &str,
-    message: &ChatMessage,
-    operation_id: &str,
-    state: &Arc<AppState>,
-) -> Result<(), AppError> {
-    let parsed = uuid::Uuid::parse_str(operation_id)
-        .map_err(|_| AppError::permission("conversation operation id must be a UUIDv4"))?;
-    if parsed.get_version() != Some(uuid::Version::Random)
-        || parsed.hyphenated().to_string() != operation_id
-    {
-        return Err(AppError::permission(
-            "conversation operation id must be a canonical lowercase UUIDv4",
-        ));
-    }
-    memory_gateway::save_conversation_message_idempotent_with_state(
-        session_id,
-        message,
-        operation_id,
-        state,
-    )
-    .await
-    .map(|_| ())
-    .map_err(AppError::internal)
-}
-
-#[tauri::command]
-pub async fn save_chat_message(
-    session_id: String,
-    message: ChatMessage,
-    operation_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<(), AppError> {
-    save_chat_message_with_state(&session_id, &message, &operation_id, &state.inner().clone()).await
-}
-
 pub(crate) async fn create_chat_session_with_state(
     session_id: &str,
     title: &str,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    memory_gateway::create_chat_session_with_state(session_id, title, state).await
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
+    state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("conversation_store_unavailable"))?
+        .lock()
+        .await
+        .create_conversation(session_id, title)
+        .map(|_| ())
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -448,7 +556,18 @@ pub async fn rename_chat_session(
     title: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
-    memory_gateway::rename_chat_session_with_state(&session_id, &title, state.inner()).await
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
+    state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("conversation_store_unavailable"))?
+        .lock()
+        .await
+        .rename_conversation(&session_id, &title)
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -456,25 +575,18 @@ pub async fn delete_chat_session(
     session_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
-    memory_gateway::delete_chat_session_with_state(&session_id, state.inner()).await
-}
-
-pub(crate) async fn list_chat_sessions_with_state(
-    state: &Arc<AppState>,
-) -> Result<Vec<openlife_core::memory::ChatSession>, AppError> {
     state
         .persistence_coordinator
-        .require_trusted_read("MemoryStore")
+        .require_effects_allowed()
         .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
-    let store = state.memory_store.lock().await;
-    store.list_chat_sessions(200).map_err(AppError::from)
-}
-
-#[tauri::command]
-pub async fn list_chat_sessions(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<openlife_core::memory::ChatSession>, AppError> {
-    list_chat_sessions_with_state(&state.inner().clone()).await
+    state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("conversation_store_unavailable"))?
+        .lock()
+        .await
+        .delete_conversation(&session_id)
+        .map_err(AppError::from)
 }
 
 #[cfg(test)]
@@ -501,6 +613,9 @@ mod tests {
             memory_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
             )),
+            conversation_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::conversation::ConversationStore::new_in_memory().unwrap(),
+            ))),
             mcp_registry: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp::McpRegistry::new(),
             )),
@@ -597,51 +712,86 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn create_and_list_chat_session() {
+    async fn create_chat_session_is_visible_through_the_conversation_view_model() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
 
         // Create session
-        let result = create_chat_session_with_state("session-1", "Test Session", &state).await;
+        let session_id = uuid::Uuid::new_v4().to_string();
+        let result = create_chat_session_with_state(&session_id, "Test Session", &state).await;
         assert!(result.is_ok());
 
-        // List sessions
-        let sessions = list_chat_sessions_with_state(&state).await.unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, "session-1");
-        assert_eq!(sessions[0].title, "Test Session");
+        let view = get_conversation_view_model_with_state(Some(&session_id), &state)
+            .await
+            .unwrap();
+        assert_eq!(view.conversations.len(), 1);
+        assert_eq!(view.conversations[0].session_id, session_id);
+        assert_eq!(view.conversations[0].title, "Test Session");
     }
 
     #[tokio::test]
-    async fn save_and_get_chat_message() {
+    async fn conversation_view_model_is_canonical_and_provider_bound() {
         let temp_dir = tempfile::tempdir().unwrap();
         let state = test_app_state(&temp_dir);
-
-        // Create session first
-        create_chat_session_with_state("session-2", "Msg Test", &state)
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        create_chat_session_with_state(&conversation_id, "Canonical", &state)
             .await
             .unwrap();
-
-        // Save message
-        let msg = ChatMessage {
-            role: "user".to_string(),
-            content: "Hello world".to_string(),
+        let provider = openlife_core::conversation::ProviderBinding {
+            profile_id: "provider-profile:test".into(),
+            provider_id: "openai".into(),
+            model_id: "gpt-test".into(),
+            endpoint_class: "cloud".into(),
+            config_generation: "test-generation".into(),
         };
-        let result = save_chat_message_with_state(
-            "session-2",
-            &msg,
-            "a8af0116-1571-4918-93ac-79880ef1f783",
-            &state,
-        )
-        .await;
-        assert!(result.is_ok());
+        let store = state.conversation_store.as_ref().unwrap().lock().await;
+        store
+            .begin_chat_turn(openlife_core::conversation::BeginChatTurn {
+                turn_id: &turn_id,
+                conversation_id: &conversation_id,
+                user_message: "你好",
+                provider: &provider,
+            })
+            .unwrap();
+        store.complete_chat_turn(&turn_id, "你好，我在。").unwrap();
+        drop(store);
 
-        // Get history
-        let history = get_chat_history_with_state("session-2", &state)
+        let view = get_conversation_view_model_with_state(Some(&conversation_id), &state)
             .await
             .unwrap();
-        assert_eq!(history.len(), 1);
-        assert_eq!(history[0].content, "Hello world");
+        assert_eq!(view.status, "ready");
+        assert_eq!(
+            view.selected_conversation_id.as_deref(),
+            Some(conversation_id.as_str())
+        );
+        assert_eq!(view.messages.len(), 2);
+        assert_eq!(view.latest_turn.unwrap().turn_id, turn_id);
+        assert_eq!(view.provider_status, "unavailable");
+        assert!(view.provider_profiles.is_empty());
+        assert!(view.selected_provider_profile_id.is_none());
+        assert_eq!(
+            view.provider_error_code.as_deref(),
+            Some("configured_provider_unavailable")
+        );
+        assert!(state.agent_run_store.is_none());
+        assert!(state.main_chat_agent_event_store.is_none());
+    }
+
+    #[tokio::test]
+    async fn conversation_view_model_rejects_an_unknown_requested_identity() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let existing_id = uuid::Uuid::new_v4().to_string();
+        create_chat_session_with_state(&existing_id, "Existing", &state)
+            .await
+            .unwrap();
+
+        let error =
+            get_conversation_view_model_with_state(Some(&uuid::Uuid::new_v4().to_string()), &state)
+                .await
+                .unwrap_err();
+        assert!(error.to_string().contains("conversation_not_found"));
     }
 
     fn influence_event(payload: serde_json::Value) -> MainChatAgentDurableEvent {

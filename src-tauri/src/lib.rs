@@ -9,6 +9,7 @@ pub mod a2a_server;
 pub mod a2a_sidecar;
 pub(crate) mod artifact_materializer;
 pub mod bootstrap;
+mod canonical_chat_runtime;
 pub mod commands;
 mod credential_bootstrap;
 pub(crate) mod danger_action_confirmation;
@@ -66,6 +67,7 @@ pub(crate) mod memory_gateway;
 pub(crate) mod persistence_coordinator;
 pub(crate) mod product_agent_dto;
 pub(crate) mod provider_network_consent;
+pub(crate) mod provider_registry;
 pub(crate) mod provider_validation;
 pub(crate) mod read_models;
 pub(crate) mod resource_commands;
@@ -133,8 +135,7 @@ use commands::agent_runtime::{
 };
 
 use commands::chat::{
-    create_chat_session, delete_chat_session, get_chat_history, get_chat_life_model_influence,
-    list_chat_sessions, rename_chat_session, save_chat_message,
+    create_chat_session, delete_chat_session, get_conversation_view_model, rename_chat_session,
 };
 use commands::diagnostics::{
     check_ollama_status, get_policy_router_status, get_runtime_build_info, get_system_diagnostics,
@@ -398,17 +399,33 @@ async fn send_message(
     session_id: String,
     messages: Vec<ChatMessage>,
     selected_skill_id: Option<String>,
+    mode: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SendMessageResult, String> {
     let selected_skill_id = selected_skill_id.as_deref().map(str::to_owned);
-    main_chat_send::send_message_with_operation_state(
-        operation_id,
-        session_id,
-        messages,
-        selected_skill_id,
-        state.inner(),
-    )
-    .await
+    match mode.as_deref().unwrap_or("chat") {
+        "chat" => {
+            main_chat_send::send_canonical_chat_with_state(
+                operation_id,
+                session_id,
+                messages,
+                selected_skill_id,
+                state.inner(),
+            )
+            .await
+        }
+        "work" => {
+            main_chat_send::send_message_with_operation_state(
+                operation_id,
+                session_id,
+                messages,
+                selected_skill_id,
+                state.inner(),
+            )
+            .await
+        }
+        _ => Err("invalid_main_chat_mode".into()),
+    }
 }
 
 #[derive(serde::Deserialize, Clone)]
@@ -418,6 +435,8 @@ struct StartStreamMessageArgs {
     messages: Vec<ChatMessage>,
     #[serde(default)]
     selected_skill_id: Option<String>,
+    #[serde(default)]
+    mode: Option<String>,
 }
 
 impl std::fmt::Debug for StartStreamMessageArgs {
@@ -432,49 +451,64 @@ impl std::fmt::Debug for StartStreamMessageArgs {
                 "selected_skill_id_present",
                 &self.selected_skill_id.is_some(),
             )
+            .field("mode", &self.mode)
             .finish()
     }
 }
 
 #[tauri::command]
 async fn start_stream_message<R: tauri::Runtime>(
-    args: Option<StartStreamMessageArgs>,
-    operation_id: Option<String>,
-    session_id: Option<String>,
-    messages: Option<Vec<ChatMessage>>,
-    selected_skill_id: Option<String>,
+    args: StartStreamMessageArgs,
     app_handle: tauri::AppHandle<R>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<serde_json::Value, String> {
-    let (operation_id, session_id, messages, selected_skill_id) = if let Some(args) = args {
-        (
-            args.operation_id,
-            args.session_id,
-            args.messages,
-            args.selected_skill_id,
-        )
-    } else {
-        (
-            operation_id.ok_or_else(|| "start_stream_message 缺少 operation_id".to_string())?,
-            session_id.ok_or_else(|| "start_stream_message 缺少 session_id".to_string())?,
-            messages.ok_or_else(|| "start_stream_message 缺少 messages".to_string())?,
-            selected_skill_id,
-        )
-    };
-
-    let selected_skill_id = selected_skill_id.as_deref().map(str::to_owned);
-    let app_handle = app_handle.clone();
-    main_chat_streaming::start_stream_message_with_operation_state(
+    let StartStreamMessageArgs {
         operation_id,
         session_id,
         messages,
         selected_skill_id,
-        state.inner(),
-        move |event, payload| {
-            let _ = app_handle.emit(event, payload);
-        },
-    )
-    .await
+        mode,
+    } = args;
+
+    let selected_skill_id = selected_skill_id.as_deref().map(str::to_owned);
+    let app_handle = app_handle.clone();
+    let emit = move |event: &str, payload| {
+        let _ = app_handle.emit(event, payload);
+    };
+    match mode.as_deref().unwrap_or("chat") {
+        "chat" => {
+            main_chat_streaming::start_canonical_chat_stream_with_state(
+                operation_id,
+                session_id,
+                messages,
+                selected_skill_id,
+                state.inner(),
+                emit,
+            )
+            .await
+        }
+        "work" => {
+            main_chat_streaming::start_stream_message_with_operation_state(
+                operation_id,
+                session_id,
+                messages,
+                selected_skill_id,
+                state.inner(),
+                emit,
+            )
+            .await
+        }
+        _ => Err("invalid_main_chat_mode".into()),
+    }
+}
+
+#[tauri::command]
+async fn cancel_chat_turn(
+    conversation_id: String,
+    turn_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<canonical_chat_runtime::CancelCanonicalChatResult, String> {
+    canonical_chat_runtime::cancel_canonical_chat(&conversation_id, &turn_id, state.inner()).await
 }
 
 #[tauri::command]
@@ -991,6 +1025,7 @@ pub fn run() {
             get_memory_asset,
             send_message,
             start_stream_message,
+            cancel_chat_turn,
             pick_and_import_resources,
             cancel_resource_import,
             get_resource_import_status,
@@ -1005,9 +1040,7 @@ pub fn run() {
             cancel_main_chat_agent_task,
             retry_main_chat_agent_action,
             submit_main_chat_task_steering,
-            get_chat_history,
-            get_chat_life_model_influence,
-            save_chat_message,
+            get_conversation_view_model,
             #[cfg(feature = "dev-extensions")]
             execute_tool_call,
             #[cfg(feature = "dev-extensions")]
@@ -1058,7 +1091,6 @@ pub fn run() {
             get_governed_data_import_status,
             test_llm_connection,
             get_last_model_error,
-            list_chat_sessions,
             create_chat_session,
             rename_chat_session,
             delete_chat_session,

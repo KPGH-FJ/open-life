@@ -296,7 +296,8 @@ describe("workspace conversation journey", () => {
           session_id: sessionId,
           operation_id: options.operationId,
           task_session_id: options.operationId,
-          run_id: options.operationId,
+          conversation_id: sessionId,
+          turn_id: options.operationId,
           reasoning_trace: {},
           tool_calls: [],
         });
@@ -305,7 +306,8 @@ describe("workspace conversation journey", () => {
           session_id: sessionId,
           operation_id: options.operationId,
           task_session_id: options.operationId,
-          run_id: options.operationId,
+          conversation_id: sessionId,
+          turn_id: options.operationId,
         };
       }
     );
@@ -327,7 +329,11 @@ describe("workspace conversation journey", () => {
     expect(streamTurn).toHaveBeenCalledWith(
       "conversation-1",
       expect.any(Array),
-      { operationId: exactTurnOperationId },
+      {
+        operationId: exactTurnOperationId,
+        mode: "work",
+        selectedSkillId: undefined,
+      },
       expect.any(Object)
     );
     expect(result.current.pendingResources).toEqual([]);
@@ -896,6 +902,58 @@ describe("workspace conversation journey", () => {
     await act(async () => finishTurn(turnResult("cancelled")));
     await waitFor(() =>
       expect(result.current.turnState).toMatchObject({ phase: "resolved", status: "cancelled" })
+    );
+  });
+
+  it("cancels canonical Chat by exact Conversation and Turn without a Task", async () => {
+    let finishTurn!: (value: StreamMessageDonePayload) => void;
+    const streamTurn = vi.fn(
+      async (
+        _sessionId,
+        _messages,
+        options,
+        events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
+      ) => {
+        events.onStart({
+          session_id: "conversation-1",
+          operation_id: options.operationId,
+          conversation_id: "conversation-1",
+          turn_id: options.operationId,
+          reasoning_trace: {},
+          tool_calls: [],
+        });
+        return new Promise<StreamMessageDonePayload>(resolve => {
+          finishTurn = resolve;
+        });
+      }
+    );
+    const cancelChatTurn = vi.fn().mockResolvedValue({ status: "cancelled" });
+    const cancelTask = vi.fn().mockResolvedValue({} as MainChatAgentTaskState);
+    const dataSource = source({ streamTurn, cancelChatTurn, cancelTask });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.setDraft("停止这一轮"));
+    act(() => void result.current.send());
+    await waitFor(() => expect(result.current.turnState.phase).toBe("streaming"));
+    const turnId =
+      result.current.turnState.phase === "streaming" ? result.current.turnState.turnId : "";
+
+    await act(async () => result.current.cancel());
+
+    expect(cancelChatTurn).toHaveBeenCalledWith("conversation-1", turnId);
+    expect(cancelTask).not.toHaveBeenCalled();
+    expect(result.current.turnState.phase).toBe("cancelling");
+    await act(async () =>
+      finishTurn({
+        ...turnResult("cancelled"),
+        conversation_id: "conversation-1",
+        turn_id: turnId,
+        operation_id: turnId,
+        task_session_id: undefined,
+        run_id: undefined,
+      })
     );
   });
 

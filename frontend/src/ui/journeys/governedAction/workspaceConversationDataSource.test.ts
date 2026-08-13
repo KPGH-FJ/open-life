@@ -5,6 +5,7 @@ const mocks = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
   unlisten: vi.fn(),
   startStreamMessage: vi.fn(),
+  cancelChatTurn: vi.fn(),
   pickAndImportResources: vi.fn(),
   detachResourceFromTurn: vi.fn(),
   listMainChatSkills: vi.fn(),
@@ -12,6 +13,7 @@ const mocks = vi.hoisted(() => ({
   clearMainChatSkill: vi.fn(),
   listMainChatToolCandidates: vi.fn(),
   getMarkdownMemoryViewModel: vi.fn(),
+  getConversationViewModel: vi.fn(),
   selectMarkdownMemoryRoot: vi.fn(),
   draftMarkdownMemoryFileProposal: vi.fn(),
   deactivateMarkdownMemoryFileProposal: vi.fn(),
@@ -27,11 +29,10 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@/tauri", () => ({
   cancelMainChatAgentTask: vi.fn(),
+  cancelChatTurn: mocks.cancelChatTurn,
   createChatSession: vi.fn(),
   deleteChatSession: vi.fn(),
-  getChatHistory: vi.fn(),
-  getChatLifeModelInfluence: vi.fn(),
-  listChatSessions: vi.fn(),
+  getConversationViewModel: mocks.getConversationViewModel,
   renameChatSession: vi.fn(),
   startStreamMessage: mocks.startStreamMessage,
   pickAndImportResources: mocks.pickAndImportResources,
@@ -61,6 +62,7 @@ describe("workspace conversation Tauri stream adapter", () => {
     mocks.clearMainChatSkill.mockReset();
     mocks.listMainChatToolCandidates.mockReset();
     mocks.getMarkdownMemoryViewModel.mockReset();
+    mocks.getConversationViewModel.mockReset();
     mocks.selectMarkdownMemoryRoot.mockReset();
     mocks.draftMarkdownMemoryFileProposal.mockReset();
     mocks.deactivateMarkdownMemoryFileProposal.mockReset();

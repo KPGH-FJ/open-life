@@ -593,6 +593,55 @@ fn transient_state_chat_authority_has_no_frontend_or_shipped_command_write_bypas
     );
 }
 
+#[test]
+fn canonical_chat_product_path_does_not_read_retired_chat_owners() {
+    let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("repo root");
+    let runtime =
+        std::fs::read_to_string(repo_root.join("src-tauri/src/canonical_chat_runtime.rs"))
+            .expect("read canonical Chat runtime");
+    let conversation_commands =
+        std::fs::read_to_string(repo_root.join("src-tauri/src/commands/chat.rs"))
+            .expect("read Conversation commands");
+    let production_data_source = std::fs::read_to_string(
+        repo_root
+            .join("frontend/src/ui/journeys/governedAction/workspaceConversationDataSource.ts"),
+    )
+    .expect("read production Conversation data source");
+
+    let production_runtime = runtime
+        .split("#[cfg(test)]")
+        .next()
+        .expect("canonical Chat production runtime");
+    for retired_owner in [
+        "memory_store",
+        "agent_run_store",
+        "main_chat_agent_session_store",
+        "main_chat_agent_event_store",
+        "action_queue_store",
+        "proposal_store",
+    ] {
+        assert!(
+            !production_runtime.contains(retired_owner),
+            "canonical Chat runtime must not depend on retired owner {retired_owner}"
+        );
+    }
+    assert!(runtime.contains("conversation_store"));
+    assert!(conversation_commands.contains("ConversationViewModel"));
+    assert!(production_data_source.contains("loadConversation: getConversationViewModel"));
+    for retired_read in [
+        "listSessions: listChatSessions",
+        "loadHistory: getChatHistory",
+        "loadLifeModelInfluence: getChatLifeModelInfluence",
+    ] {
+        assert!(
+            !production_data_source.contains(retired_read),
+            "production Chat data source must not retain {retired_read}"
+        );
+    }
+}
+
 fn extract_rust_function_body(source: &str, signature: &str) -> String {
     let signature_start = source.find(signature).expect("function signature exists");
     let brace_start = source[signature_start..]

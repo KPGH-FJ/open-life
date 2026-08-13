@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  ProviderProfileViewModel,
   ChatSession,
   ImportedResourceReceipt,
   MainChatSkillSummary,
@@ -20,6 +21,14 @@ import type { WorkspaceConversationDataSource } from "./workspaceConversationDat
 type Announce = (message: string) => void;
 
 export type WorkspaceConversationLoadStatus = "idle" | "loading" | "ready" | "error";
+export type WorkspaceConversationMode = "chat" | "work";
+export type WorkspaceConversationProviderState = {
+  status: "unknown" | "ready" | "unavailable";
+  profiles: ProviderProfileViewModel[];
+  selectedProfileId: string | null;
+  errorCode: string | null;
+};
+export type WorkspaceConversationWorkStatus = "unknown" | "reconstructing" | "ready";
 export type WorkspaceSessionMutationState =
   | { phase: "idle" }
   | { phase: "renaming"; sessionId: string }
@@ -53,11 +62,12 @@ export type WorkspaceTurnState =
   | {
       phase: "streaming";
       sessionId: string;
-      taskSessionId: string;
-      runId: string;
+      turnId: string;
+      taskSessionId?: string;
+      runId?: string;
       cancelError?: string;
     }
-  | { phase: "cancelling"; sessionId: string; taskSessionId: string }
+  | { phase: "cancelling"; sessionId: string; turnId: string; taskSessionId?: string }
   | { phase: "refreshing"; sessionId: string; status: MainChatTurnStatus }
   | {
       phase: "resolved";
@@ -82,6 +92,21 @@ function resolvedTurnStatus(status: MainChatTurnStatus | undefined): MainChatTur
   return status ?? "failed";
 }
 
+async function requireLegacySessions(
+  dataSource: WorkspaceConversationDataSource
+): Promise<ChatSession[]> {
+  if (!dataSource.listSessions) throw new Error("legacy_conversation_list_unavailable");
+  return dataSource.listSessions();
+}
+
+async function requireLegacyHistory(
+  dataSource: WorkspaceConversationDataSource,
+  sessionId: string
+): Promise<ChatMessage[]> {
+  if (!dataSource.loadHistory) throw new Error("legacy_conversation_history_unavailable");
+  return dataSource.loadHistory(sessionId);
+}
+
 function sourceBoundBasisFromTrace(
   generation: Record<string, unknown> | undefined
 ): { factCount: number; sourceTypes: string[]; checkStatus: string } | undefined {
@@ -100,6 +125,24 @@ function sourceBoundBasisFromTrace(
         ? generation.sourceBoundCheckStatus
         : "unknown",
   };
+}
+
+function streamIdentityMatches(
+  payload: {
+    session_id: string;
+    operation_id: string;
+    conversation_id?: string;
+    turn_id?: string;
+    task_session_id?: string;
+  },
+  mode: WorkspaceConversationMode,
+  sessionId: string,
+  operationId: string
+): boolean {
+  if (payload.session_id !== sessionId || payload.operation_id !== operationId) return false;
+  return mode === "chat"
+    ? payload.conversation_id === sessionId && payload.turn_id === operationId
+    : payload.task_session_id === operationId;
 }
 
 function turnAnnouncement(status: MainChatTurnStatus): string {
@@ -131,6 +174,9 @@ export type WorkspaceConversationController = {
   turnState: WorkspaceTurnState;
   streamingReply: string;
   activeTaskSessionId: string | null;
+  mode: WorkspaceConversationMode;
+  provider: WorkspaceConversationProviderState;
+  workStatus: WorkspaceConversationWorkStatus;
   sessionMutation: WorkspaceSessionMutationState;
   pendingResources: ImportedResourceReceipt[];
   pendingResourceTurnOperationId: string | null;
@@ -146,6 +192,7 @@ export type WorkspaceConversationController = {
   selectSession: (sessionId: string) => void;
   startNewConversation: () => void;
   setDraft: (value: string) => void;
+  setMode: (mode: WorkspaceConversationMode) => void;
   attachResources: () => Promise<boolean>;
   detachResource: (resourceId: string) => Promise<boolean>;
   selectSkill: (skillId: string | null) => Promise<boolean>;
@@ -185,6 +232,14 @@ export function useWorkspaceConversation(
   const [turnState, setTurnState] = useState<WorkspaceTurnState>({ phase: "idle" });
   const [streamingReply, setStreamingReply] = useState("");
   const [activeTaskSessionId, setActiveTaskSessionId] = useState<string | null>(null);
+  const [mode, setModeState] = useState<WorkspaceConversationMode>("chat");
+  const [provider, setProvider] = useState<WorkspaceConversationProviderState>({
+    status: "unknown",
+    profiles: [],
+    selectedProfileId: null,
+    errorCode: null,
+  });
+  const [workStatus, setWorkStatus] = useState<WorkspaceConversationWorkStatus>("unknown");
   const [sessionMutation, setSessionMutation] = useState<WorkspaceSessionMutationState>({
     phase: "idle",
   });
@@ -228,6 +283,14 @@ export function useWorkspaceConversation(
     setTurnState({ phase: "idle" });
     setStreamingReply("");
     setActiveTaskSessionId(null);
+    setModeState("chat");
+    setProvider({
+      status: "unknown",
+      profiles: [],
+      selectedProfileId: null,
+      errorCode: null,
+    });
+    setWorkStatus("unknown");
     setSessionMutation({ phase: "idle" });
     setPendingResources([]);
     setPendingResourceTurnOperationId(null);
@@ -274,9 +337,15 @@ export function useWorkspaceConversation(
   }, [dataSource]);
 
   useEffect(() => {
-    if (!dataSource?.loadMarkdownMemory) return;
+    if (
+      !dataSource?.loadMarkdownMemory ||
+      (dataSource.loadConversation && (mode !== "work" || workStatus !== "ready"))
+    ) {
+      setMarkdownMemory({ phase: "loading", model: null });
+      return;
+    }
     void reloadMarkdownMemory();
-  }, [dataSource, reloadMarkdownMemory]);
+  }, [dataSource, mode, reloadMarkdownMemory, workStatus]);
 
   const selectMarkdownMemoryRoot = useCallback(
     async (scope: MarkdownMemoryScope): Promise<boolean> => {
@@ -377,7 +446,7 @@ export function useWorkspaceConversation(
 
   useEffect(() => {
     let active = true;
-    if (!dataSource?.listSkills || !dataSource.listToolCandidates || loadStatus !== "ready") {
+    if (!dataSource?.listSkills || loadStatus !== "ready") {
       setSkills([]);
       setSelectedSkillId(null);
       setToolCandidates(null);
@@ -388,9 +457,13 @@ export function useWorkspaceConversation(
     }
 
     setCapabilityState({ phase: "loading" });
+    const shouldLoadWorkTools =
+      mode === "work" && workStatus === "ready" && Boolean(dataSource.listToolCandidates);
     void Promise.all([
       dataSource.listSkills(selectedSessionId ?? undefined),
-      dataSource.listToolCandidates(activeTaskSessionId ?? undefined),
+      shouldLoadWorkTools
+        ? dataSource.listToolCandidates!(activeTaskSessionId ?? undefined)
+        : Promise.resolve(null),
     ])
       .then(([nextSkills, nextTools]) => {
         if (!active) return;
@@ -410,35 +483,56 @@ export function useWorkspaceConversation(
     return () => {
       active = false;
     };
-  }, [activeTaskSessionId, dataSource, loadStatus, selectedSessionId]);
+  }, [activeTaskSessionId, dataSource, loadStatus, mode, selectedSessionId, workStatus]);
 
   const loadHistory = useCallback(
     async (sessionId: string, requestId: number): Promise<void> => {
       if (!dataSource) throw new Error("workspace_conversation_data_source_unavailable");
-      const history = await dataSource.loadHistory(sessionId);
+      const canonical = dataSource.loadConversation
+        ? await dataSource.loadConversation(sessionId)
+        : null;
+      if (canonical && canonical.selectedConversationId !== sessionId) {
+        throw new Error("conversation_view_model_selection_mismatch");
+      }
+      const history = canonical?.messages ?? (await requireLegacyHistory(dataSource, sessionId));
       let influence = null;
       let influenceError: string | null = null;
-      try {
-        influence = await dataSource.loadLifeModelInfluence(sessionId);
-      } catch (error) {
-        influenceError = errorText(error);
+      if (!canonical) {
+        try {
+          influence = dataSource.loadLifeModelInfluence
+            ? await dataSource.loadLifeModelInfluence(sessionId)
+            : null;
+        } catch (error) {
+          influenceError = errorText(error);
+        }
       }
       if (requestId !== requestRef.current) return;
       setSelectedSessionId(sessionId);
       setMessages(history);
-      setTurnState(
-        influenceError
-          ? { phase: "failed", stage: "refresh", reason: influenceError }
-          : influence
-            ? {
-                phase: "resolved",
-                sessionId,
-                status: influence.status,
-                blockers: [],
-                lifeModelInfluence: influence.lifeModelInfluence,
-              }
-            : { phase: "idle" }
-      );
+      if (influenceError) {
+        setTurnState({ phase: "failed", stage: "refresh", reason: influenceError });
+      } else if (
+        canonical?.latestTurn?.status === "failed" ||
+        canonical?.latestTurn?.status === "cancelled" ||
+        canonical?.latestTurn?.status === "interrupted"
+      ) {
+        setTurnState({
+          phase: "resolved",
+          sessionId,
+          status: canonical.latestTurn.status,
+          blockers: canonical.latestTurn.errorCode ? [canonical.latestTurn.errorCode] : [],
+        });
+      } else if (influence) {
+        setTurnState({
+          phase: "resolved",
+          sessionId,
+          status: influence.status,
+          blockers: [],
+          lifeModelInfluence: influence.lifeModelInfluence,
+        });
+      } else {
+        setTurnState({ phase: "idle" });
+      }
     },
     [dataSource]
   );
@@ -449,20 +543,57 @@ export function useWorkspaceConversation(
     setLoadError(null);
     try {
       if (!dataSource) throw new Error("workspace_conversation_data_source_unavailable");
-      const nextSessions = await dataSource.listSessions();
+      const canonical = dataSource.loadConversation
+        ? await dataSource.loadConversation(selectedSessionId ?? preferredSessionId ?? undefined)
+        : null;
+      const nextSessions = canonical?.conversations ?? (await requireLegacySessions(dataSource));
+      if (canonical) {
+        setProvider({
+          status: canonical.providerStatus,
+          profiles: canonical.providerProfiles,
+          selectedProfileId: canonical.selectedProviderProfileId,
+          errorCode: canonical.providerErrorCode,
+        });
+        setWorkStatus(canonical.workStatus);
+      } else {
+        // Compatibility-only data sources used by the pre-R2 Work behavior
+        // tests do not expose the canonical Conversation ViewModel. Production
+        // always does, so it cannot silently take this lane.
+        setWorkStatus("ready");
+      }
       if (requestId !== requestRef.current) return false;
       setSessions(nextSessions);
       const currentStillExists =
         selectedSessionId && nextSessions.some(item => item.session_id === selectedSessionId);
       const preferredStillExists =
         preferredSessionId && nextSessions.some(item => item.session_id === preferredSessionId);
-      const nextSessionId = currentStillExists
-        ? selectedSessionId
-        : preferredStillExists
-          ? preferredSessionId
-          : (nextSessions[0]?.session_id ?? null);
+      const nextSessionId = canonical?.selectedConversationId
+        ? canonical.selectedConversationId
+        : currentStillExists
+          ? selectedSessionId
+          : preferredStillExists
+            ? preferredSessionId
+            : (nextSessions[0]?.session_id ?? null);
       if (nextSessionId) {
-        await loadHistory(nextSessionId, requestId);
+        if (canonical && canonical.selectedConversationId === nextSessionId) {
+          setSelectedSessionId(nextSessionId);
+          setMessages(canonical.messages);
+          const turn = canonical.latestTurn;
+          setTurnState(
+            !turn || turn.status === "completed"
+              ? { phase: "idle" }
+              : turn.status === "running"
+                ? { phase: "idle" }
+                : {
+                    phase: "resolved",
+                    sessionId: nextSessionId,
+                    status: turn.status,
+                    blockers: turn.errorCode ? [turn.errorCode] : [],
+                  }
+          );
+        } else {
+          await loadHistory(nextSessionId, requestId);
+        }
       } else {
         setSelectedSessionId(null);
         setMessages([]);
@@ -663,6 +794,7 @@ export function useWorkspaceConversation(
         throw new Error("resource_import_duplicate_receipt");
       }
       setPendingResources(current => [...current, ...receipt.resources]);
+      setModeState("work");
       setResourceMutation({ phase: "idle" });
       announce(`已添加 ${receipt.resources.length} 个文件；它们只绑定到下一次发送。`);
       return true;
@@ -722,7 +854,11 @@ export function useWorkspaceConversation(
               ? "上一轮仍在发送或核对。"
               : !trimmedDraft
                 ? "先输入要发送的内容。"
-                : undefined);
+                : mode === "work" && workStatus !== "ready"
+                  ? "Work 正在按新任务架构重建，当前尚不可交办。"
+                  : mode === "chat" && provider.status === "unavailable"
+                    ? "当前选择的模型不可用；请先在设置中完成模型配置。"
+                    : undefined);
       return {
         id: selectedSessionId
           ? `workspace.continue:${selectedSessionId}`
@@ -734,7 +870,23 @@ export function useWorkspaceConversation(
         targetRef: selectedSessionId ?? "new-conversation",
       };
     },
-    [busy, dataSource, draft, loadStatus, selectedSessionId]
+    [busy, dataSource, draft, loadStatus, mode, provider.status, selectedSessionId, workStatus]
+  );
+
+  const setMode = useCallback(
+    (nextMode: WorkspaceConversationMode) => {
+      if (busy) {
+        announce("当前轮次结束前不能切换 Chat / Work。");
+        return;
+      }
+      if (nextMode === "chat" && pendingResources.length > 0) {
+        announce("已添加的文件属于 Work 范围；移除文件后才能切回 Chat。");
+        return;
+      }
+      setModeState(nextMode);
+      announce(nextMode === "chat" ? "已切换为 Chat。" : "已切换为 Work。");
+    },
+    [announce, busy, pendingResources.length]
   );
 
   const send = useCallback(
@@ -790,15 +942,17 @@ export function useWorkspaceConversation(
         const result = await dataSource.streamTurn(
           turnSessionId,
           requestMessages,
-          { operationId: turnOperationId, selectedSkillId: selectedSkillId ?? undefined },
+          {
+            operationId: turnOperationId,
+            selectedSkillId: selectedSkillId ?? undefined,
+            mode,
+          },
           {
             onStart: (payload: StreamMessageStartPayload) => {
               if (operationId !== operationRef.current) return;
               if (
                 pendingResources.length > 0 &&
-                (payload.session_id !== turnSessionId ||
-                  payload.operation_id !== turnOperationId ||
-                  payload.task_session_id !== turnOperationId)
+                !streamIdentityMatches(payload, mode, turnSessionId, turnOperationId)
               ) {
                 resourceStreamIdentityMismatch = true;
                 return;
@@ -809,22 +963,21 @@ export function useWorkspaceConversation(
                 setPendingResourceTurnOperationId(null);
                 setResourceMutation({ phase: "idle" });
               }
-              setActiveTaskSessionId(payload.task_session_id);
+              setActiveTaskSessionId(payload.task_session_id ?? null);
               setTurnState({
                 phase: "streaming",
                 sessionId: turnSessionId,
+                turnId: payload.turn_id ?? turnOperationId,
                 taskSessionId: payload.task_session_id,
                 runId: payload.run_id,
               });
-              announce("OpenLife 正在回复；现在可以取消这一项任务。");
+              announce("OpenLife 正在回复；现在可以取消这一轮对话。");
             },
             onChunk: (payload: StreamMessageChunkPayload) => {
               if (operationId !== operationRef.current) return;
               if (
                 pendingResources.length > 0 &&
-                (payload.session_id !== turnSessionId ||
-                  payload.operation_id !== turnOperationId ||
-                  payload.task_session_id !== turnOperationId)
+                !streamIdentityMatches(payload, mode, turnSessionId, turnOperationId)
               ) {
                 resourceStreamIdentityMismatch = true;
                 return;
@@ -837,9 +990,7 @@ export function useWorkspaceConversation(
         if (
           pendingResources.length > 0 &&
           (resourceStreamIdentityMismatch ||
-            result.session_id !== turnSessionId ||
-            result.operation_id !== turnOperationId ||
-            result.task_session_id !== turnOperationId)
+            !streamIdentityMatches(result, mode, turnSessionId, turnOperationId))
         ) {
           throw new Error("resource_turn_terminal_identity_mismatch");
         }
@@ -850,12 +1001,14 @@ export function useWorkspaceConversation(
         }
         cancelRequestRef.current += 1;
         const status = resolvedTurnStatus(result.status ?? result.turn_terminal?.status);
-        setActiveTaskSessionId(result.task_session_id);
+        setActiveTaskSessionId(result.task_session_id ?? null);
         setTurnState({ phase: "refreshing", sessionId, status });
 
         let refreshedHistory: ChatMessage[];
         try {
-          refreshedHistory = await dataSource.loadHistory(sessionId);
+          refreshedHistory = dataSource.loadConversation
+            ? (await dataSource.loadConversation(sessionId)).messages
+            : await requireLegacyHistory(dataSource, sessionId);
         } catch (error) {
           if (operationId !== operationRef.current) return;
           setTurnState({ phase: "failed", stage: "refresh", reason: errorText(error) });
@@ -893,7 +1046,9 @@ export function useWorkspaceConversation(
         );
         try {
           if (sessionId) {
-            const refreshedHistory = await dataSource.loadHistory(sessionId);
+            const refreshedHistory = dataSource.loadConversation
+              ? (await dataSource.loadConversation(sessionId)).messages
+              : await requireLegacyHistory(dataSource, sessionId);
             if (operationId === operationRef.current) setMessages(refreshedHistory);
           }
         } catch {
@@ -906,6 +1061,9 @@ export function useWorkspaceConversation(
       dataSource,
       draft,
       messages,
+      mode,
+      provider,
+      workStatus,
       onAfterTurn,
       pendingResourceTurnOperationId,
       pendingResources,
@@ -916,21 +1074,28 @@ export function useWorkspaceConversation(
   );
 
   const cancel = useCallback(async (): Promise<void> => {
-    if (!dataSource || turnState.phase !== "streaming" || !turnState.taskSessionId.trim()) {
-      announce("当前没有可以取消的运行中任务。");
+    if (!dataSource || turnState.phase !== "streaming" || !turnState.turnId.trim()) {
+      announce("当前没有可以取消的运行中对话。");
       return;
     }
-    const { sessionId, taskSessionId } = turnState;
+    const { sessionId, turnId, taskSessionId } = turnState;
     const cancelRequestId = ++cancelRequestRef.current;
-    setTurnState({ phase: "cancelling", sessionId, taskSessionId });
+    setTurnState({ phase: "cancelling", sessionId, turnId, taskSessionId });
     announce("正在请求取消；只有后端终态返回后才会显示已取消。");
     try {
-      await dataSource.cancelTask(taskSessionId);
+      if (!taskSessionId && dataSource.cancelChatTurn) {
+        await dataSource.cancelChatTurn(sessionId, turnId);
+      } else if (taskSessionId) {
+        await dataSource.cancelTask(taskSessionId);
+      } else {
+        throw new Error("canonical_chat_cancel_unavailable");
+      }
     } catch (error) {
       if (cancelRequestId !== cancelRequestRef.current) return;
       setTurnState({
         phase: "streaming",
         sessionId,
+        turnId,
         taskSessionId,
         runId: turnState.runId,
         cancelError: errorText(error),
@@ -946,6 +1111,7 @@ export function useWorkspaceConversation(
       turnState.phase !== "streaming" ||
       !selectedSessionId ||
       !activeTaskSessionId ||
+      !turnState.runId ||
       !text
     ) {
       announce("当前任务尚未到可接收调整的运行状态。");
@@ -1034,6 +1200,9 @@ export function useWorkspaceConversation(
       turnState,
       streamingReply,
       activeTaskSessionId,
+      mode,
+      provider,
+      workStatus,
       sessionMutation,
       pendingResources,
       pendingResourceTurnOperationId,
@@ -1049,6 +1218,7 @@ export function useWorkspaceConversation(
       selectSession,
       startNewConversation,
       setDraft: updateDraft,
+      setMode,
       attachResources,
       detachResource,
       selectSkill,
@@ -1076,6 +1246,7 @@ export function useWorkspaceConversation(
       loadError,
       loadStatus,
       messages,
+      mode,
       pendingResources,
       pendingResourceTurnOperationId,
       renameSelected,
@@ -1085,6 +1256,7 @@ export function useWorkspaceConversation(
       selectSkill,
       selectMarkdownMemoryRoot,
       selectSession,
+      setMode,
       selectedSessionId,
       selectedSkillId,
       sessionMutation,

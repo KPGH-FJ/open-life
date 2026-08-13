@@ -855,8 +855,32 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
       return Promise.resolve(mockStateAlerts as T);
     case "get_state_history":
       return Promise.resolve(mockStateHistory as T);
-    case "list_chat_sessions":
-      return Promise.resolve(mockChatSessions as T);
+    case "get_conversation_view_model": {
+      const requested = _args?.conversationId ?? _args?.conversation_id;
+      const selected =
+        mockChatSessions.find(session => session.session_id === requested)?.session_id ??
+        mockChatSessions[0]?.session_id;
+      return Promise.resolve({
+        status: mockChatSessions.length ? "ready" : "empty",
+        conversations: mockChatSessions,
+        selectedConversationId: selected,
+        messages: selected ? mockChatMessages : [],
+        providerStatus: "ready",
+        providerProfiles: [
+          {
+            profileId: "provider-profile:mock",
+            providerId: "deepseek",
+            modelId: "deepseek-chat",
+            endpointClass: "cloud",
+            selected: true,
+          },
+        ],
+        selectedProviderProfileId: "provider-profile:mock",
+        providerErrorCode: null,
+        latestTurn: null,
+        workStatus: "reconstructing",
+      } as T);
+    }
     case "list_provider_transmission_history":
       return Promise.resolve([] as T);
     case "get_main_chat_agent_task_state":
@@ -2148,10 +2172,6 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
           tags: ["execution", "web"],
         },
       ] as T);
-    case "get_chat_history":
-      return Promise.resolve(mockChatMessages as T);
-    case "get_chat_life_model_influence":
-      return Promise.resolve(null as T);
     case "run_multi_strategy_agent_preview":
       return Promise.resolve({
         runId: "run-preview-1",

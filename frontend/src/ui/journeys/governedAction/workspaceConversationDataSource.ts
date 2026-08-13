@@ -1,15 +1,14 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
+  cancelChatTurn,
   cancelMainChatAgentTask,
   createChatSession,
   deactivateMarkdownMemoryFileProposal,
   deleteChatSession,
   detachResourceFromTurn,
   draftMarkdownMemoryFileProposal,
-  getChatHistory,
-  getChatLifeModelInfluence,
+  getConversationViewModel,
   getMarkdownMemoryViewModel,
-  listChatSessions,
   listMainChatSkills,
   listMainChatToolCandidates,
   pickAndImportResources,
@@ -20,6 +19,7 @@ import {
   startStreamMessage,
   submitMainChatTaskSteering,
   type ChatSession,
+  type ConversationViewModel,
   type ChatLifeModelInfluenceSnapshot,
   type ResourceDetachReceipt,
   type ResourceImportSelectionResult,
@@ -45,9 +45,11 @@ export type WorkspaceStreamEvents = {
 };
 
 export interface WorkspaceConversationDataSource {
-  listSessions(): Promise<ChatSession[]>;
-  loadHistory(sessionId: string): Promise<ChatMessage[]>;
-  loadLifeModelInfluence(sessionId: string): Promise<ChatLifeModelInfluenceSnapshot | null>;
+  loadConversation?(conversationId?: string): Promise<ConversationViewModel>;
+  /** Test/Work compatibility only; canonical Chat UI reads loadConversation. */
+  listSessions?(): Promise<ChatSession[]>;
+  loadHistory?(sessionId: string): Promise<ChatMessage[]>;
+  loadLifeModelInfluence?(sessionId: string): Promise<ChatLifeModelInfluenceSnapshot | null>;
   createSession(sessionId: string, title: string): Promise<void>;
   renameSession(sessionId: string, title: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
@@ -66,6 +68,7 @@ export interface WorkspaceConversationDataSource {
     options: MainChatMessageOptions,
     events: WorkspaceStreamEvents
   ): Promise<StreamMessageDonePayload>;
+  cancelChatTurn?(conversationId: string, turnId: string): Promise<unknown>;
   cancelTask(taskSessionId: string): Promise<MainChatAgentTaskState>;
   steerTask?(request: {
     steeringId: string;
@@ -130,15 +133,14 @@ async function streamTurn(
 }
 
 export const tauriWorkspaceConversationDataSource: WorkspaceConversationDataSource = {
-  listSessions: listChatSessions,
-  loadHistory: getChatHistory,
-  loadLifeModelInfluence: getChatLifeModelInfluence,
+  loadConversation: getConversationViewModel,
   createSession: createChatSession,
   renameSession: renameChatSession,
   deleteSession: deleteChatSession,
   pickResources: pickAndImportResources,
   detachResource: detachResourceFromTurn,
   streamTurn,
+  cancelChatTurn,
   cancelTask: cancelMainChatAgentTask,
   steerTask: submitMainChatTaskSteering,
   listSkills: listMainChatSkills,

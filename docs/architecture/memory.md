@@ -161,8 +161,11 @@ canonical truth write path.
 memory snippets and bounded Markdown working-memory surfaces in Main Chat
 context. It labels them as bounded memory context and not trusted raw memory.
 
-Conversation history remains canonical in `MemoryStore.messages`. The runtime
-reconstructs a bounded provider context through
+Since R1, ordinary Chat history is canonical only in
+`ConversationStore.conversation_items`. `MemoryStore.messages` remains a
+compatibility input for the Work runtime until R2 and is not read by the Chat
+ViewModel or canonical Chat runtime. The runtime reconstructs a bounded
+provider context from the canonical Conversation Items through
 `agent/conversation_context.rs`; its deterministic summary is a derived
 projection with a source range and digest, not long-term Memory.
 

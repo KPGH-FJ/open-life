@@ -5256,6 +5256,9 @@ mod tests {
             ))),
             life_model_write_coordinator: Arc::new(Mutex::new(())),
             memory_store: Arc::new(Mutex::new(MemoryStore::new_in_memory().unwrap())),
+            conversation_store: Some(Arc::new(Mutex::new(
+                openlife_core::conversation::ConversationStore::new_in_memory().unwrap(),
+            ))),
             mcp_registry: Arc::new(Mutex::new(McpRegistry::new())),
             scheduler: Arc::new(Mutex::new(InferenceScheduler::new(
                 config.local_model.clone(),

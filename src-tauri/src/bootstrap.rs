@@ -24,6 +24,7 @@ use openlife_core::agent::{
     ReviewWorkflow, RiskLevel,
 };
 use openlife_core::config::AppConfig;
+use openlife_core::conversation::ConversationStore;
 use openlife_core::feedback::FeedbackStore;
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
@@ -2199,6 +2200,43 @@ fn bootstrap_with_secret_store(
             MemoryStore::unavailable_sentinel().map_err(|error| error.to_string())
         });
 
+    let conversation_db_path = data_dir.join("conversations.db");
+    let conversation_store = init_store(
+        || ConversationStore::new(&conversation_db_path).map_err(|error| error.to_string()),
+        || {
+            ConversationStore::open_read_only_existing(&conversation_db_path)
+                .map_err(|error| error.to_string())
+        },
+        || ConversationStore::new_in_memory().map_err(|error| error.to_string()),
+        "ConversationStore",
+        &startup_warnings,
+        &persistence,
+    );
+    let conversation_store = optional_store(
+        conversation_store,
+        "ConversationStore",
+        &startup_warnings,
+    )
+    .and_then(|store| match store.interrupt_incomplete_turns() {
+        Ok(interrupted) => {
+            if interrupted > 0 {
+                log::info!("[startup] marked {interrupted} incomplete Chat turns interrupted");
+            }
+            Some(store)
+        }
+        Err(error) => {
+            persistence.register_unavailable(
+                "ConversationStore",
+                "incomplete_turn_recovery_failed",
+                &error.to_string(),
+            );
+            startup_warnings.borrow_mut().push(format!(
+                "ConversationStore recovery failed; Chat is unavailable: {error}"
+            ));
+            None
+        }
+    });
+
     let feedback_db_path = data_dir.join("feedback.db");
     let feedback_store = init_store(
         || init_feedback_store(&feedback_db_path, &startup_warnings),
@@ -3192,6 +3230,7 @@ fn bootstrap_with_secret_store(
         life_model_manager: Arc::new(Mutex::new(life_model_manager)),
         life_model_write_coordinator: Arc::new(Mutex::new(())),
         memory_store: Arc::new(Mutex::new(memory_store)),
+        conversation_store: conversation_store.map(|store| Arc::new(Mutex::new(store))),
         mcp_registry: Arc::new(Mutex::new(mcp_registry)),
         scheduler: Arc::new(Mutex::new(scheduler)),
         privacy_engine: Arc::new(Mutex::new(privacy_engine)),

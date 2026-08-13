@@ -198,14 +198,19 @@ pub(crate) async fn get_system_diagnostics_with_state(
     let chat_session_count = {
         if state
             .persistence_coordinator
-            .require_trusted_read("MemoryStore")
+            .require_trusted_read("ConversationStore")
             .is_ok()
         {
-            let store = state.memory_store.lock().await;
-            store
-                .list_chat_sessions(1000)
-                .map(|sessions| sessions.len())
-                .unwrap_or_default()
+            if let Some(store) = state.conversation_store.as_ref() {
+                store
+                    .lock()
+                    .await
+                    .list_conversations(false, 1000)
+                    .map(|conversations| conversations.len())
+                    .unwrap_or_default()
+            } else {
+                0
+            }
         } else {
             0
         }

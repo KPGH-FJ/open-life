@@ -128,18 +128,14 @@ export function WorkspaceGovernedView({
       : null;
   const conversationDisabledReason = (() => {
     if (!conversation) return undefined;
-    if (envelope?.status !== "ready" && envelope?.status !== "empty") {
-      return "工作区读模型不是可用状态；请先重新读取。";
-    }
-    if (!conversationModel) return "工作区读模型没有提供可用 payload。";
-    const boundary = conversationModel.providerPrivacyBoundarySummary;
+    const boundary = conversationModel?.providerPrivacyBoundarySummary;
     // This summary describes evidence observed before the next turn. It is not
     // dispatch authority: the runtime must receive the turn to choose a route,
     // stop before HTTP when consent is required, and create the exact review
     // item. Blocking on pre-dispatch unknown/ask state makes both first-use and
     // permission recovery impossible.
     if (
-      boundary.localOnlyRequired &&
+      boundary?.localOnlyRequired &&
       boundary.routeType !== "local" &&
       boundary.routeType !== "unknown"
     ) {
@@ -157,19 +153,22 @@ export function WorkspaceGovernedView({
 
   if (!snapshot || !envelope || envelope.status === "loading") {
     return (
-      <div className="ol-governed-page ol-governed-page--centered" aria-busy="true">
+      <div className="ol-governed-page" aria-busy="true">
         <FoundationNotice title="正在读取当前任务" tone="neutral">
-          <p>读取完成前不开放权限决定或任务控制。</p>
+          <p>任务状态仍在读取；普通对话由独立的 Conversation 状态负责。</p>
         </FoundationNotice>
+        {conversation && (
+          <WorkspaceConversationPanel controller={conversation} onOpenLifeModel={onOpenLifeModel} />
+        )}
       </div>
     );
   }
 
   if (envelope.status === "error") {
     return (
-      <div className="ol-governed-page ol-governed-page--centered">
-        <FoundationNotice title="工作区状态暂时不可用" tone="error">
-          <p>后端没有返回可确认的工作区状态；缺失数据不会被解释成没有任务。</p>
+      <div className="ol-governed-page">
+        <FoundationNotice title="任务状态暂时不可用" tone="error">
+          <p>后端没有返回可确认的任务状态；这不会隐藏或禁用普通对话。</p>
         </FoundationNotice>
         <FoundationActionButton
           label="重新读取"
@@ -180,6 +179,9 @@ export function WorkspaceGovernedView({
           disabledReason={resumeDispatching ? "任务恢复请求正在发送；请等待状态核对。" : undefined}
           onClick={onRefresh}
         />
+        {conversation && (
+          <WorkspaceConversationPanel controller={conversation} onOpenLifeModel={onOpenLifeModel} />
+        )}
       </div>
     );
   }

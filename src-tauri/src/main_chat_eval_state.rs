@@ -93,6 +93,10 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         life_model_manager: Arc::new(Mutex::new(life_model_manager)),
         life_model_write_coordinator: Arc::new(Mutex::new(())),
         memory_store: Arc::new(Mutex::new(memory_store)),
+        conversation_store: Some(Arc::new(Mutex::new(
+            openlife_core::conversation::ConversationStore::new_in_memory()
+                .expect("initialize isolated ConversationStore"),
+        ))),
         mcp_registry: Arc::new(Mutex::new(openlife_core::mcp::McpRegistry::new())),
         scheduler: Arc::new(Mutex::new(
             openlife_core::scheduler::InferenceScheduler::new(

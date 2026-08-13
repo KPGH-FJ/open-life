@@ -174,7 +174,7 @@ pub struct MainChatProviderAuthorization {
 }
 
 impl MainChatProviderAuthorization {
-    fn from_ingress_decision(decision: &AgentIngressDecision) -> Result<Self, String> {
+    pub(crate) fn from_ingress_decision(decision: &AgentIngressDecision) -> Result<Self, String> {
         let policy_authorization = ProviderPolicyAuthorization::from_main_chat_ingress(decision)
             .map_err(|error| error.to_string())?;
         Ok(Self {
@@ -4808,6 +4808,7 @@ pub struct SchedulerMainChatModelClient {
     canonical_write_admission: Option<crate::main_chat_cancellation::MainChatExecutionEpoch>,
     terminal_owner_review_origin: Option<Arc<openlife_core::agent::TerminalOwnerReviewOriginProof>>,
     required_network_consent_proposal_id: Option<String>,
+    configured_provider_is_conversation_authorized: bool,
 }
 
 impl SchedulerMainChatModelClient {
@@ -4824,6 +4825,7 @@ impl SchedulerMainChatModelClient {
             canonical_write_admission: None,
             terminal_owner_review_origin: None,
             required_network_consent_proposal_id: None,
+            configured_provider_is_conversation_authorized: false,
         }
     }
 
@@ -4853,6 +4855,15 @@ impl SchedulerMainChatModelClient {
         proposal_id: Option<String>,
     ) -> Self {
         self.required_network_consent_proposal_id = proposal_id;
+        self
+    }
+
+    /// Ordinary Chat treats the user's configured provider/model selection as
+    /// the standing model-transmission grant. Explicit network deny/allowlist
+    /// policy still applies; only the repetitive `ask` disposition is narrowed
+    /// to this exact prepared provider endpoint.
+    pub(crate) fn with_configured_conversation_provider_grant(mut self) -> Self {
+        self.configured_provider_is_conversation_authorized = true;
         self
     }
 }
@@ -5244,6 +5255,39 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
         if prepared.provider_target != "ollama"
             && self.scheduler.scripted_generation_response.is_none()
         {
+            if self.configured_provider_is_conversation_authorized
+                && prepared.network_policy_decision.disposition
+                    == openlife_core::network_client::NetworkPolicyDisposition::Ask
+            {
+                let mut policy = prepared.network_policy.clone();
+                policy.tool_overrides.insert(
+                    prepared.network_policy_decision.capability.clone(),
+                    "allow".into(),
+                );
+                let decision = openlife_core::network_client::resolve_network_policy_decision(
+                    &policy,
+                    &prepared.provider_endpoint,
+                    &prepared.network_policy_decision.capability,
+                )
+                .map_err(|error| MainChatModelFailure {
+                    message: error.to_string(),
+                    provider_receipt: None,
+                    blocker_code: Some("provider_network_policy_invalid".into()),
+                    proposal_ids: Vec::new(),
+                })?;
+                if decision.disposition
+                    != openlife_core::network_client::NetworkPolicyDisposition::Allow
+                {
+                    return Err(MainChatModelFailure {
+                        message: decision.reason_code.clone(),
+                        provider_receipt: None,
+                        blocker_code: Some(decision.reason_code),
+                        proposal_ids: Vec::new(),
+                    });
+                }
+                prepared.network_policy = policy;
+                prepared.network_policy_decision = decision;
+            }
             if let Some(state) = self.consent_state.as_ref() {
                 let admission = self.canonical_write_admission.as_ref().ok_or_else(|| {
                     MainChatModelFailure {
@@ -6595,6 +6639,25 @@ where
             }
         }
         unreachable!("bounded Agent Memory binding retry returns from every terminal branch")
+    }
+
+    /// R1 ordinary Chat path. It deliberately exposes only the policy-governed
+    /// DirectAnswer kernel surface; Work tool/effect orchestration remains on
+    /// the existing runtime until R2-R4 migrate it.
+    pub(crate) async fn run_canonical_chat<S>(
+        &self,
+        input: MainChatTurnInput,
+        event_sink: &mut S,
+    ) -> MainChatTurnResult
+    where
+        S: MainChatEventSink + ?Sized,
+    {
+        if input.policy_decision.route_kind
+            != openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::DirectAnswer
+        {
+            return self.blocked("chat_requires_work_mode", event_sink);
+        }
+        self.run_turn(input, event_sink).await
     }
 
     fn blocked<S>(&self, code: &'static str, event_sink: &mut S) -> MainChatTurnResult

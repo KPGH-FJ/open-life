@@ -14,6 +14,14 @@ function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationContr
     turnState: { phase: "idle" },
     streamingReply: "",
     activeTaskSessionId: null,
+    mode: "work",
+    provider: {
+      status: "ready",
+      profiles: [],
+      selectedProfileId: null,
+      errorCode: null,
+    },
+    workStatus: "ready",
     sessionMutation: { phase: "idle" },
     pendingResources: [],
     pendingResourceTurnOperationId: null,
@@ -51,6 +59,7 @@ function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationContr
     selectSession: vi.fn(),
     startNewConversation: vi.fn(),
     setDraft: vi.fn(),
+    setMode: vi.fn(),
     attachResources: vi.fn().mockResolvedValue(true),
     detachResource: vi.fn().mockResolvedValue(true),
     selectSkill: vi.fn().mockResolvedValue(true),
@@ -132,13 +141,14 @@ describe("WorkspaceConversationPanel Markdown Memory", () => {
     expect(screen.queryByText("本轮按限定资料回答")).not.toBeInTheDocument();
   });
 
-  it("keeps the composer available for an exact in-flight task adjustment", () => {
+  it("keeps the composer visible while canonical Chat offers stop instead of task steering", () => {
     const controller = controllerWhileMarkdownMemoryIsSubmitting();
     controller.draft = "把风险结论放在最前面";
     controller.activeTaskSessionId = "task-steer";
     controller.turnState = {
       phase: "streaming",
       sessionId: "conversation-1",
+      turnId: "turn-steer",
       taskSessionId: "task-steer",
       runId: "run-steer",
     };
@@ -146,6 +156,7 @@ describe("WorkspaceConversationPanel Markdown Memory", () => {
     render(<WorkspaceConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
 
     expect(screen.getByPlaceholderText("告诉 OpenLife 你现在要处理什么")).toBeEnabled();
-    expect(screen.getByRole("button", { name: "调整当前任务" })).toBeEnabled();
+    expect(screen.queryByRole("button", { name: "调整当前任务" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "停止回复" })).toBeEnabled();
   });
 });

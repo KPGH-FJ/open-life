@@ -132,6 +132,7 @@ fn shipped_main_chat_debug_contract_redacts_message_reasoning_and_tool_bodies() 
             content: SECRET.into(),
         }],
         selected_skill_id: Some("debug-skill".into()),
+        mode: Some("work".into()),
     };
     let args_debug = format!("{args:?}");
     assert!(args_debug.contains("StartStreamMessageArgs"));
@@ -381,6 +382,13 @@ fn main_chat_invoke_request(
         let object = body
             .as_object_mut()
             .expect("Main Chat command fixture body must be an object");
+        // Historical command-surface fixtures exercise the pre-R2 Work
+        // consumer. Product IPC defaults to Chat, but legacy tests must state
+        // their mode explicitly so they cannot accidentally receive credit
+        // for the new canonical Chat path.
+        object
+            .entry("mode")
+            .or_insert_with(|| serde_json::Value::String("work".into()));
         object.insert(
             "operationId".into(),
             serde_json::Value::String(supplied_operation.clone()),
@@ -394,6 +402,8 @@ fn main_chat_invoke_request(
                 .get_mut("args")
                 .and_then(serde_json::Value::as_object_mut)
             {
+                args.entry("mode")
+                    .or_insert_with(|| serde_json::Value::String("work".into()));
                 args.insert(
                     "operationId".into(),
                     serde_json::Value::String(supplied_operation.clone()),

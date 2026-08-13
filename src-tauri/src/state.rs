@@ -4,6 +4,7 @@
 
 use crate::a2a_sidecar;
 use openlife_core::config::AppConfig;
+use openlife_core::conversation::ConversationStore;
 use openlife_core::feedback::FeedbackStore;
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
@@ -267,6 +268,9 @@ pub struct AppState {
     /// and derived projection protocol. It never owns product data itself.
     pub life_model_write_coordinator: Arc<Mutex<()>>,
     pub memory_store: Arc<Mutex<MemoryStore>>,
+    /// R1 canonical owner for ordinary Chat Conversation, Turn, and Item
+    /// lifecycle. It is intentionally independent of Memory and Task stores.
+    pub conversation_store: Option<Arc<Mutex<ConversationStore>>>,
     pub mcp_registry: Arc<Mutex<McpRegistry>>,
     pub scheduler: Arc<Mutex<InferenceScheduler>>,
     pub privacy_engine: Arc<Mutex<PrivacyEngine>>,

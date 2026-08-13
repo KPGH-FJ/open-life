@@ -8,6 +8,31 @@ use crate::main_chat_turn_runtime::{
 };
 use crate::{AppState, SendMessageResult};
 
+pub(crate) fn send_canonical_chat_with_state(
+    turn_id: String,
+    conversation_id: String,
+    messages: Vec<ChatMessage>,
+    selected_skill_id: Option<String>,
+    state: &Arc<AppState>,
+) -> Pin<Box<dyn Future<Output = Result<SendMessageResult, String>> + Send + '_>> {
+    Box::pin(async move {
+        let mut discard_stream_event = |_event: &str, _payload: serde_json::Value| {};
+        crate::canonical_chat_runtime::run_canonical_chat(
+            crate::canonical_chat_runtime::CanonicalChatInput {
+                turn_id,
+                conversation_id,
+                messages,
+                selected_skill_id,
+                stream: false,
+            },
+            state,
+            &mut discard_stream_event,
+        )
+        .await
+        .map(|output| output.result)
+    })
+}
+
 pub(crate) fn send_message_with_operation_state(
     operation_id: String,
     session_id: String,

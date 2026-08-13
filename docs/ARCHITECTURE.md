@@ -18,29 +18,40 @@ React Workbench
   -> SQLite, local files, Keychain, providers, and governed external tools
 ```
 
-Main Chat send and stream have separate transport entrypoints and converge on
-`OpenLifeTurnRuntime`:
+Chat send and stream have separate transport entrypoints and converge on the
+R1 `CanonicalChatRuntime`:
 
 ```text
-main_chat_send.rs | main_chat_streaming.rs
-  -> main_chat_turn_runtime.rs
+frontend Conversation ViewModel + Chat composer
+  -> main_chat_send.rs | main_chat_streaming.rs
+  -> canonical_chat_runtime.rs
   -> main_chat_kernel.rs
   -> openlife-core/src/agent/main_chat_agent_v1.rs
+  -> ConversationStore (Conversation -> Turn -> Item)
 ```
+
+The explicit compatibility `mode=work` branch still enters
+`OpenLifeTurnRuntime` while R2 migrates it. It is not a fallback from Chat and
+is not exposed as an available product mode in R1. The production Workbench
+reads Chat history, terminal state, exact provider/model binding, and Work
+availability through one backend `ConversationViewModel`; it no longer joins
+Tasks, Review, AgentRun, or durable Main Chat events to decide whether Chat is
+usable.
 
 Other product commands, including Review acceptance, Settings persistence, and
 direct Memory controls, use their command-specific gateways rather than passing
 through `OpenLifeTurnRuntime`.
 
-The current runtime already owns admission, durable user-message recording,
-bounded context, provider execution, cancellation, recovery, and terminal
-settlement. Its current persistence still splits some non-migrated lifecycle
-responsibility among task sessions, Agent runs, action queues, and event
-streams. The independent PlanExecute product owner, store, IPC, and frontend
-contracts are retired: ordinary planning now writes an Instruction and Plan
-Item into `CanonicalTaskRuntimeStore`. A current Main Chat operation is still
-effectively one task slice outside complete migrated paths. These are migration
-constraints, not the target product contract.
+Canonical Chat now owns exact UUID idempotency, atomic user/assistant Items,
+terminal transitions, cancellation, failed-provider state, restart
+interruption, and the immutable provider profile/model/configuration generation
+for each Turn. It never creates TaskSession, AgentRun, ActionQueue, durable Main
+Chat Event, Proposal, or Task. The retained Work runtime still splits its
+non-migrated lifecycle responsibility among those owners. The independent
+PlanExecute product owner, store, IPC, and frontend contracts are retired:
+ordinary planning currently writes an Instruction and Plan Item into
+`CanonicalTaskRuntimeStore`. These Work constraints are migration input for R2,
+not the target product contract.
 
 The first S2 vertical slice adds `CanonicalTaskRuntimeStore` on the
 provider-generated report path. It owns stable report Task identity, Run
@@ -138,10 +149,11 @@ materializers, effect certainty, cancellation fences, outbox recovery, backend
 ViewModels, and the report Artifact/Changes/Preview/Verification implementation.
 Memory and LifeModel remain retained stores behind future narrow typed ports.
 
-The following are current production consumers, not accepted target owners:
+The following are current Work migration consumers, not accepted target owners:
 
 - `AgentTaskSessionStore`, `AgentRunStore`, `ActionQueueStore`, and
-  `MainChatAgentEventStore` still divide ordinary Chat lifecycle and controls;
+  `MainChatAgentEventStore` still divide the compatibility Work lifecycle and
+  controls, but no longer own canonical Chat;
 - `CanonicalTaskRuntimeStore` still covers report/plan rather than all Tasks;
 - `PlanExecute` remains a selected execution strategy in runtime state; and
 - Today, Tasks, and Review remain top-level frontend surfaces during migration.

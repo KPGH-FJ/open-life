@@ -28,7 +28,7 @@ function turnFeedback(controller: WorkspaceConversationController) {
   if (state.phase === "streaming" && state.cancelError) {
     return (
       <FoundationNotice title="取消请求失败" tone="error" live>
-        <p>{state.cancelError}；任务仍按运行中处理，可以再次请求取消。</p>
+        <p>{state.cancelError}；当前轮次仍按运行中处理，可以再次请求取消。</p>
       </FoundationNotice>
     );
   }
@@ -543,7 +543,9 @@ export function WorkspaceConversationPanel({
         </FoundationNotice>
       )}
 
-      <MarkdownMemoryPanel controller={controller} />
+      {controller.mode === "work" && controller.workStatus === "ready" && (
+        <MarkdownMemoryPanel controller={controller} />
+      )}
 
       <form
         className="ol-workspace-composer"
@@ -552,128 +554,181 @@ export function WorkspaceConversationPanel({
           void controller.send(disabledReason);
         }}
       >
-        <div className="ol-workspace-resources" aria-labelledby="workspace-resources-title">
-          <div className="ol-workspace-resources__header">
-            <div>
-              <strong id="workspace-resources-title">本轮文件</strong>
+        <fieldset className="ol-workspace-mode" disabled={controller.busy}>
+          <legend>运行方式</legend>
+          <label>
+            <input
+              type="radio"
+              name="workspace-mode"
+              value="chat"
+              checked={controller.mode === "chat"}
+              onChange={() => controller.setMode("chat")}
+            />
+            Chat
+          </label>
+          <label>
+            <input
+              type="radio"
+              name="workspace-mode"
+              value="work"
+              checked={controller.mode === "work"}
+              disabled={controller.workStatus !== "ready"}
+              onChange={() => controller.setMode("work")}
+            />
+            Work
+          </label>
+          <small>
+            {controller.mode === "chat"
+              ? "直接对话，不创建任务。"
+              : "可使用文件、工具与受治理动作完成任务。"}
+            {controller.workStatus === "reconstructing" &&
+              " Work 正在迁移到新的 Task/Run 执行链，完成前不会回退到旧路径。"}
+          </small>
+        </fieldset>
+        {controller.mode === "chat" && (
+          <div className="ol-workspace-provider" aria-live="polite">
+            {controller.provider.status === "ready" ? (
               <span>
-                {pendingResourceCount > 0 ? `已添加 ${pendingResourceCount}/5` : "未添加"}
+                当前模型：
+                {controller.provider.profiles.find(profile => profile.selected)?.providerId ??
+                  "未知供应商"}
+                {" · "}
+                {controller.provider.profiles.find(profile => profile.selected)?.modelId ??
+                  "未知模型"}
               </span>
-            </div>
-            <button
-              type="button"
-              className="ol-workspace-resources__add"
-              disabled={
-                controller.loadStatus !== "ready" ||
-                controller.busy ||
-                resourceMutationBusy ||
-                pendingResourceCount >= 5
-              }
-              onClick={() => void controller.attachResources()}
-            >
-              <FilePlus2 size={16} aria-hidden="true" />
-              {controller.resourceMutation.phase === "importing" ? "正在读取" : "添加文件"}
-            </button>
+            ) : controller.provider.status === "unavailable" ? (
+              <span>当前模型不可用；请在设置中选择并配置模型。</span>
+            ) : (
+              <span>正在核对当前模型。</span>
+            )}
           </div>
-          {pendingResourceCount > 0 ? (
-            <ul className="ol-workspace-resources__list" aria-label="下一次发送包含的文件">
-              {controller.pendingResources.map(resource => (
-                <li key={resource.resourceId}>
-                  <div>
-                    <strong>{resource.filename}</strong>
-                    <span>{Math.max(1, Math.ceil(resource.byteCount / 1024))} KB</span>
-                  </div>
-                  <button
-                    type="button"
-                    aria-label={`移除 ${resource.filename}`}
-                    disabled={controller.busy || resourceMutationBusy}
-                    onClick={() => void controller.detachResource(resource.resourceId)}
-                  >
-                    <X size={15} aria-hidden="true" />
-                  </button>
-                </li>
-              ))}
-            </ul>
-          ) : (
-            <p>
-              只读取你通过原生选择器明确选中的文件；内容按当前 Provider
-              和已生效隐私许可处理，未授权外传不会执行。
-            </p>
-          )}
-        </div>
-        <div className="ol-workspace-capabilities" aria-labelledby="workspace-capabilities-title">
-          <div className="ol-workspace-capabilities__header">
-            <div>
-              <strong id="workspace-capabilities-title">技能与只读工具</strong>
-              <span>
-                {controller.capabilityState.phase === "loading"
-                  ? "正在核对"
-                  : controller.selectedSkillId
-                    ? "当前对话已选择技能"
-                    : "未选择技能"}
-              </span>
-            </div>
-          </div>
-          <div className="ol-workspace-capabilities__grid">
-            <label>
-              <span>
-                <Sparkles size={15} aria-hidden="true" />
-                当前技能
-              </span>
-              <select
-                value={controller.selectedSkillId ?? ""}
+        )}
+        {controller.mode === "work" && (
+          <div className="ol-workspace-resources" aria-labelledby="workspace-resources-title">
+            <div className="ol-workspace-resources__header">
+              <div>
+                <strong id="workspace-resources-title">本轮文件</strong>
+                <span>
+                  {pendingResourceCount > 0 ? `已添加 ${pendingResourceCount}/5` : "未添加"}
+                </span>
+              </div>
+              <button
+                type="button"
+                className="ol-workspace-resources__add"
                 disabled={
-                  !controller.selectedSessionId ||
+                  controller.loadStatus !== "ready" ||
                   controller.busy ||
-                  controller.capabilityState.phase === "loading" ||
-                  controller.capabilityState.phase === "selecting"
+                  resourceMutationBusy ||
+                  pendingResourceCount >= 5
                 }
-                onChange={event => void controller.selectSkill(event.target.value || null)}
+                onClick={() => void controller.attachResources()}
               >
-                <option value="">不使用技能</option>
-                {controller.skills
-                  .filter(skill => skill.available)
-                  .map(skill => (
-                    <option key={skill.skillId} value={skill.skillId}>
-                      {skill.name}
-                    </option>
-                  ))}
-              </select>
-              <small>
-                {controller.selectedSessionId
-                  ? "技能只提供有界指令，不会扩大模型、网络、工具或写入权限。"
-                  : "先发送第一条消息建立对话，再为后续回合选择技能。"}
-              </small>
-            </label>
-            <div className="ol-workspace-capabilities__tools">
-              <span>
-                <Wrench size={15} aria-hidden="true" />
-                已注册只读工具
-              </span>
-              {controller.toolCandidates?.candidates.length ? (
-                <ul>
-                  {controller.toolCandidates.candidates.slice(0, 4).map(candidate => (
-                    <li key={candidate.candidateId}>
-                      <strong>{candidate.toolName}</strong>
-                      <small>{candidate.capabilityLabels.join(" · ") || "read"}</small>
-                    </li>
-                  ))}
-                </ul>
-              ) : (
-                <small>当前没有后端确认可用的 MCP 只读工具。</small>
-              )}
-              {Boolean(controller.toolCandidates?.blockedTools.length) && (
-                <small>
-                  另有 {controller.toolCandidates!.blockedTools.length} 个工具因写入、风险或
-                  manifest 状态被后端阻断。
-                </small>
-              )}
+                <FilePlus2 size={16} aria-hidden="true" />
+                {controller.resourceMutation.phase === "importing" ? "正在读取" : "添加文件"}
+              </button>
             </div>
+            {pendingResourceCount > 0 ? (
+              <ul className="ol-workspace-resources__list" aria-label="下一次发送包含的文件">
+                {controller.pendingResources.map(resource => (
+                  <li key={resource.resourceId}>
+                    <div>
+                      <strong>{resource.filename}</strong>
+                      <span>{Math.max(1, Math.ceil(resource.byteCount / 1024))} KB</span>
+                    </div>
+                    <button
+                      type="button"
+                      aria-label={`移除 ${resource.filename}`}
+                      disabled={controller.busy || resourceMutationBusy}
+                      onClick={() => void controller.detachResource(resource.resourceId)}
+                    >
+                      <X size={15} aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p>
+                只读取你通过原生选择器明确选中的文件；内容按当前 Provider
+                和已生效隐私许可处理，未授权外传不会执行。
+              </p>
+            )}
           </div>
-          {controller.capabilityState.phase === "failed" && (
-            <small role="status">技能或工具状态不可用：{controller.capabilityState.reason}</small>
-          )}
-        </div>
+        )}
+        {controller.mode === "work" && (
+          <div className="ol-workspace-capabilities" aria-labelledby="workspace-capabilities-title">
+            <div className="ol-workspace-capabilities__header">
+              <div>
+                <strong id="workspace-capabilities-title">技能与只读工具</strong>
+                <span>
+                  {controller.capabilityState.phase === "loading"
+                    ? "正在核对"
+                    : controller.selectedSkillId
+                      ? "当前对话已选择技能"
+                      : "未选择技能"}
+                </span>
+              </div>
+            </div>
+            <div className="ol-workspace-capabilities__grid">
+              <label>
+                <span>
+                  <Sparkles size={15} aria-hidden="true" />
+                  当前技能
+                </span>
+                <select
+                  value={controller.selectedSkillId ?? ""}
+                  disabled={
+                    !controller.selectedSessionId ||
+                    controller.busy ||
+                    controller.capabilityState.phase === "loading" ||
+                    controller.capabilityState.phase === "selecting"
+                  }
+                  onChange={event => void controller.selectSkill(event.target.value || null)}
+                >
+                  <option value="">不使用技能</option>
+                  {controller.skills
+                    .filter(skill => skill.available)
+                    .map(skill => (
+                      <option key={skill.skillId} value={skill.skillId}>
+                        {skill.name}
+                      </option>
+                    ))}
+                </select>
+                <small>
+                  {controller.selectedSessionId
+                    ? "技能只提供有界指令，不会扩大模型、网络、工具或写入权限。"
+                    : "先发送第一条消息建立对话，再为后续回合选择技能。"}
+                </small>
+              </label>
+              <div className="ol-workspace-capabilities__tools">
+                <span>
+                  <Wrench size={15} aria-hidden="true" />
+                  已注册只读工具
+                </span>
+                {controller.toolCandidates?.candidates.length ? (
+                  <ul>
+                    {controller.toolCandidates.candidates.slice(0, 4).map(candidate => (
+                      <li key={candidate.candidateId}>
+                        <strong>{candidate.toolName}</strong>
+                        <small>{candidate.capabilityLabels.join(" · ") || "read"}</small>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <small>当前没有后端确认可用的 MCP 只读工具。</small>
+                )}
+                {Boolean(controller.toolCandidates?.blockedTools.length) && (
+                  <small>
+                    另有 {controller.toolCandidates!.blockedTools.length} 个工具因写入、风险或
+                    manifest 状态被后端阻断。
+                  </small>
+                )}
+              </div>
+            </div>
+            {controller.capabilityState.phase === "failed" && (
+              <small role="status">技能或工具状态不可用：{controller.capabilityState.reason}</small>
+            )}
+          </div>
+        )}
         <label htmlFor="workspace-composer-input">消息</label>
         <textarea
           id="workspace-composer-input"
@@ -700,7 +755,7 @@ export function WorkspaceConversationPanel({
             role="status"
           >
             {controller.turnState.phase === "streaming"
-              ? "正在执行；输入任务内调整后可发送到下一个安全检查点"
+              ? "正在生成回复；需要改变方向时可先取消，再发送新消息"
               : controller.turnState.phase === "cancelling"
                 ? "正在等待后端确认取消终态"
                 : action.enabled
@@ -711,23 +766,8 @@ export function WorkspaceConversationPanel({
             {(controller.turnState.phase === "streaming" ||
               controller.turnState.phase === "cancelling") && (
               <>
-                {controller.turnState.phase === "streaming" && (
-                  <FoundationActionButton
-                    label="调整当前任务"
-                    icon={<Send size={16} aria-hidden="true" />}
-                    disabled={!controller.draft.trim()}
-                    disabledReason={!controller.draft.trim() ? "先输入任务内调整。" : undefined}
-                    data-action-category="product"
-                    data-action-id={`workspace.steer:${controller.activeTaskSessionId ?? "unknown"}`}
-                    data-action-kind="continue"
-                    data-action-enabled={String(Boolean(controller.draft.trim()))}
-                    data-action-target-ref={controller.activeTaskSessionId ?? "unknown"}
-                    type="button"
-                    onClick={() => void controller.steer()}
-                  />
-                )}
                 <FoundationActionButton
-                  label="取消任务"
+                  label="停止回复"
                   icon={<Square size={16} aria-hidden="true" />}
                   loading={controller.turnState.phase === "cancelling"}
                   loadingLabel="正在取消"
@@ -738,10 +778,10 @@ export function WorkspaceConversationPanel({
                       : undefined
                   }
                   data-action-category="product"
-                  data-action-id={`workspace.cancel:${controller.activeTaskSessionId ?? "unknown"}`}
+                  data-action-id={`workspace.cancel:${controller.turnState.turnId}`}
                   data-action-kind="cancel"
                   data-action-enabled={String(controller.turnState.phase === "streaming")}
-                  data-action-target-ref={controller.activeTaskSessionId ?? "unknown"}
+                  data-action-target-ref={controller.turnState.turnId}
                   type="button"
                   onClick={() => void controller.cancel()}
                 />

@@ -22,6 +22,7 @@ pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
     "PrivacyPolicyStore",
     "McpAuditKeyReferenceStore",
     "MemoryStore",
+    "ConversationStore",
     "FeedbackStore",
     "VectorStore",
     "AgentRunStore",
