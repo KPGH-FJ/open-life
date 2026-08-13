@@ -2,21 +2,29 @@ use crate::agent::governor::{
     GovernanceDecision, GovernanceDecisionKind, GovernanceSubject, LifeModelGovernor,
     ToolGovernanceInput,
 };
+#[cfg(test)]
 use crate::agent::review_workflow::{
     DurableWriteRequest, DurableWriteSource, DurableWriteSubject, ReviewWorkflow,
 };
 use crate::agent::runtime_contract::{RuntimeInput, RuntimeOutput};
-use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
+use crate::agent::types::RiskLevel;
+#[cfg(test)]
+use crate::agent::types::{AgentProposal, ProposalSource, ProposalType};
+#[cfg(test)]
 use crate::agent::ProposalStore;
 use crate::life_model::v2::LifeModelSectionV2;
+#[cfg(test)]
 use anyhow::Result;
+#[cfg(test)]
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use uuid::Uuid;
 
 pub const WEEKLY_PLANNING_MAX_STEP_COUNT: usize = 5;
+#[cfg(test)]
 const PRODUCT_STEP_TITLE_MAX_LEN: usize = 96;
+#[cfg(test)]
 const PRODUCT_PROPOSAL_PAYLOAD_MAX_BYTES: usize = 2048;
 
 #[derive(Debug, Clone)]
@@ -53,6 +61,30 @@ impl PlanExecuteInput {
     pub fn with_life_model_hints(mut self, hints: Vec<PlanExecuteLifeModelHint>) -> Self {
         self.life_model_hints = hints;
         self
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlanExecuteSessionStatus {
+    Draft,
+    Finalized,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+#[cfg(test)]
+impl std::fmt::Display for PlanExecuteSessionStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Draft => write!(f, "draft"),
+            Self::Finalized => write!(f, "finalized"),
+            Self::InProgress => write!(f, "in_progress"),
+            Self::Completed => write!(f, "completed"),
+            Self::Cancelled => write!(f, "cancelled"),
+        }
     }
 }
 
@@ -490,28 +522,7 @@ impl PlanExecuteService {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PlanExecuteSessionStatus {
-    Draft,
-    Finalized,
-    InProgress,
-    Completed,
-    Cancelled,
-}
-
-impl std::fmt::Display for PlanExecuteSessionStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            PlanExecuteSessionStatus::Draft => write!(f, "draft"),
-            PlanExecuteSessionStatus::Finalized => write!(f, "finalized"),
-            PlanExecuteSessionStatus::InProgress => write!(f, "in_progress"),
-            PlanExecuteSessionStatus::Completed => write!(f, "completed"),
-            PlanExecuteSessionStatus::Cancelled => write!(f, "cancelled"),
-        }
-    }
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecuteStepRecord {
@@ -560,6 +571,7 @@ pub struct PlanExecuteStepRecord {
     pub metadata_safe_summary: Value,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecuteStepEdit {
@@ -572,6 +584,7 @@ pub struct PlanExecuteStepEdit {
     pub risk_level: Option<RiskLevel>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecuteStepExecutionResult {
@@ -596,6 +609,7 @@ pub struct PlanExecuteStepExecutionResult {
     pub metadata_safe_summary: Value,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecuteCancelResult {
@@ -608,6 +622,7 @@ pub struct PlanExecuteCancelResult {
     pub metadata_safe_summary: Value,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecuteReviewItem {
@@ -621,6 +636,7 @@ pub struct PlanExecuteReviewItem {
     pub blocker_ids: Vec<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecuteReviewSummary {
@@ -641,6 +657,7 @@ pub struct PlanExecuteReviewSummary {
     pub metadata_safe_summary: Value,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PlanExecuteSession {
@@ -678,22 +695,27 @@ pub struct PlanExecuteSession {
     pub metadata_safe_summary: Value,
 }
 
+#[cfg(test)]
 fn default_plan_revision() -> u64 {
     1
 }
 
+#[cfg(test)]
 fn default_revision_id() -> String {
     revision_id_for(1)
 }
 
+#[cfg(test)]
 fn default_step_kind() -> String {
     "read".into()
 }
 
+#[cfg(test)]
 fn revision_id_for(revision: u64) -> String {
     format!("rev-{revision}")
 }
 
+#[cfg(test)]
 impl PlanExecuteSession {
     pub fn new_draft(
         source_chat_session_id: Option<String>,
@@ -1257,6 +1279,7 @@ impl PlanExecuteSession {
     }
 }
 
+#[cfg(test)]
 impl PlanExecuteStepRecord {
     fn from_plan_step(step: &PlanStep, order: usize, plan_id: &str, revision: u64) -> Self {
         let mut record = Self {
@@ -1395,6 +1418,7 @@ fn bounded_product_step_text(value: &str, max_chars: usize) -> String {
     value.trim().chars().take(max_chars).collect()
 }
 
+#[cfg(test)]
 fn validate_step_title(title: &str) -> Result<()> {
     let title = title.trim();
     if title.is_empty() {
@@ -1408,6 +1432,7 @@ fn validate_step_title(title: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn validate_step_intent(intent: &str) -> Result<()> {
     if matches!(
         intent,
@@ -1423,6 +1448,7 @@ fn validate_step_intent(intent: &str) -> Result<()> {
     }
 }
 
+#[cfg(test)]
 fn validate_action_kind(contract: &PlanExecuteProductContract, action_kind: &str) -> Result<()> {
     if contract
         .allowed_action_kinds
@@ -1435,6 +1461,7 @@ fn validate_action_kind(contract: &PlanExecuteProductContract, action_kind: &str
     }
 }
 
+#[cfg(test)]
 fn validate_risk_level(contract: &PlanExecuteProductContract, risk_level: RiskLevel) -> Result<()> {
     if contract.allowed_risk_levels.contains(&risk_level) {
         Ok(())
@@ -1443,6 +1470,7 @@ fn validate_risk_level(contract: &PlanExecuteProductContract, risk_level: RiskLe
     }
 }
 
+#[cfg(test)]
 fn validate_step_record(
     contract: &PlanExecuteProductContract,
     step: &PlanExecuteStepRecord,
@@ -1459,6 +1487,7 @@ fn validate_step_record(
     Ok(())
 }
 
+#[cfg(test)]
 fn step_record_summary(step: &PlanExecuteStepRecord) -> Value {
     json!({
     "planId": step.plan_id,
@@ -1492,6 +1521,7 @@ fn step_record_summary(step: &PlanExecuteStepRecord) -> Value {
     })
 }
 
+#[cfg(test)]
 fn create_step_proposal(
     session_id: &str,
     source_run_id: Option<&str>,
@@ -1532,6 +1562,7 @@ fn create_step_proposal(
     Ok(outcome.proposal_id().to_string())
 }
 
+#[cfg(test)]
 fn minimized_step_proposal_payload(session_id: &str, step: &PlanExecuteStepRecord) -> Value {
     json!({
         "kind": "plan_execute_step_proposal",
@@ -1549,6 +1580,7 @@ fn minimized_step_proposal_payload(session_id: &str, step: &PlanExecuteStepRecor
     })
 }
 
+#[cfg(test)]
 fn step_proposal_type(step: &PlanExecuteStepRecord) -> ProposalType {
     if matches!(step.action_kind.as_str(), "schedule" | "create")
         || step.intent.contains("schedule")
@@ -1563,6 +1595,7 @@ fn step_proposal_type(step: &PlanExecuteStepRecord) -> ProposalType {
     }
 }
 
+#[cfg(test)]
 fn is_terminal_product_step(step: &PlanExecuteStepRecord) -> bool {
     matches!(
         step.status,
@@ -1574,6 +1607,7 @@ fn is_terminal_product_step(step: &PlanExecuteStepRecord) -> bool {
     ) || step.linked_proposal_id.is_some()
 }
 
+#[cfg(test)]
 fn build_review_summary(
     session: &PlanExecuteSession,
     base_revision: u64,
@@ -1702,6 +1736,7 @@ fn build_review_summary(
     })
 }
 
+#[cfg(test)]
 fn review_item_for_step(step: &PlanExecuteStepRecord) -> PlanExecuteReviewItem {
     PlanExecuteReviewItem {
         step_id: step.step_id.clone(),
@@ -1715,6 +1750,7 @@ fn review_item_for_step(step: &PlanExecuteStepRecord) -> PlanExecuteReviewItem {
     }
 }
 
+#[cfg(test)]
 fn recommended_next_action_for_review(
     session: &PlanExecuteSession,
     unresolved: &[PlanExecuteReviewItem],
@@ -1736,6 +1772,7 @@ fn recommended_next_action_for_review(
     vec!["No remaining plan action is required.".into()]
 }
 
+#[cfg(test)]
 fn step_execution_result(
     session_id: &str,
     step: &PlanExecuteStepRecord,
@@ -1788,12 +1825,14 @@ fn step_execution_result(
     }
 }
 
+#[cfg(test)]
 fn push_unique(values: &mut Vec<String>, value: String) {
     if !values.iter().any(|existing| existing == &value) {
         values.push(value);
     }
 }
 
+#[cfg(test)]
 fn step_kind_for_plan_step(step: &PlanStep) -> &'static str {
     if step.declared_write {
         "proposal"
@@ -1804,6 +1843,7 @@ fn step_kind_for_plan_step(step: &PlanStep) -> &'static str {
     }
 }
 
+#[cfg(test)]
 fn step_kind_for_record(step: &PlanExecuteStepRecord) -> String {
     match step.status {
         PlanStepStatus::Blocked => "blocked".into(),
@@ -1820,6 +1860,7 @@ fn step_kind_for_record(step: &PlanExecuteStepRecord) -> String {
     }
 }
 
+#[cfg(test)]
 fn step_description_for_record(step: &PlanExecuteStepRecord) -> String {
     if !step.intent.trim().is_empty() {
         step.intent.clone()
@@ -1828,14 +1869,17 @@ fn step_description_for_record(step: &PlanExecuteStepRecord) -> String {
     }
 }
 
+#[cfg(test)]
 fn plan_step_action_id(session_id: &str, step_id: &str, revision: u64) -> String {
     format!("plan-action:{session_id}:{step_id}:rev-{revision}")
 }
 
+#[cfg(test)]
 fn plan_step_observation_id(session_id: &str, step_id: &str, revision: u64) -> String {
     format!("plan-observation:{session_id}:{step_id}:rev-{revision}")
 }
 
+#[cfg(test)]
 fn plan_step_blocker_id(session_id: &str, step_id: &str, revision: u64) -> String {
     format!("plan-blocker:{session_id}:{step_id}:rev-{revision}")
 }

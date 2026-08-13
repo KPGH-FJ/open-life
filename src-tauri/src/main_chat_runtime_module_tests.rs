@@ -249,6 +249,32 @@ fn standalone_plan_execute_owner_stays_retired() {
     let core = std::fs::read_to_string(root.join("../openlife-core/src/agent/plan_execute.rs"))
         .expect("read plan algorithm source");
     assert!(!core.contains("struct PlanExecuteSessionStore"));
+    let public_exports = std::fs::read_to_string(root.join("../openlife-core/src/agent/mod.rs"))
+        .expect("read core agent exports");
+    for retired in [
+        "PlanExecuteSession,",
+        "PlanExecuteReviewSummary",
+        "PlanExecuteStepRecord",
+    ] {
+        assert!(
+            !public_exports.contains(retired),
+            "release core API must not re-export retired plan owner {retired}"
+        );
+    }
+    let frontend_contract = std::fs::read_to_string(root.join("../frontend/src/tauri.ts"))
+        .expect("read frontend Tauri contract");
+    for retired in ["planSessionId", "MainChatPlanArtifactView"] {
+        assert!(
+            !frontend_contract.contains(retired),
+            "frontend contract must not restore retired plan field {retired}"
+        );
+    }
+    assert!(
+        !root
+            .join("../frontend/src/utils/planExecuteProduct.ts")
+            .exists(),
+        "unused PlanExecute product trace adapter must stay deleted"
+    );
 }
 
 #[test]

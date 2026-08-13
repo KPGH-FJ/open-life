@@ -11216,7 +11216,7 @@ fn transcript_metadata_field_value_allowed(
         "fileWritten",
         "fixtureBacked",
         "hardBlocked",
-        "kernelBackedPlanExecuteDraft",
+        "canonicalPlanItem",
         "kernelBackedProposalOnlyWrite",
         "kernelBackedReadOnlyToolLoop",
         "legacyFallbackUsed",
@@ -13141,7 +13141,7 @@ fn run_one_main_chat_runtime_eval_case(
                     "file.read" => file_read_exercised = true,
                     "web.search" | "web.fetch" => web_read_exercised = true,
                     "mcp.read_only" => mcp_read_exercised = true,
-                    "plan_execute.create_session" => plan_execute_exercised = true,
+                    "task.plan_item.create" => plan_execute_exercised = true,
                     _ => {}
                 }
                 let policy_decision = policy.classify(&action);
@@ -14831,8 +14831,8 @@ fn runtime_eval_actions_for_strategy(
             }
         }
         MainChatAgentStrategy::PlanExecute => vec![ExecutionAction::new(
-            "plan_execute.create_session",
-            "Runtime eval PlanExecute draft",
+            "task.plan_item.create",
+            "Runtime eval canonical Plan item",
         )],
         MainChatAgentStrategy::TransientStateCommand => vec![ExecutionAction::new(
             "state.transient",

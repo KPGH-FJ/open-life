@@ -698,7 +698,7 @@ struct ProductStateProvider {
 struct ProductStatePlan {
     plan_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    plan_session_id: Option<String>,
+    canonical_task_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     task_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -712,39 +712,7 @@ struct ProductStatePlan {
     revision: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     revision_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    review_id: Option<String>,
     source_evidence_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    superseded_by_plan_id: Option<String>,
-    controls: Vec<String>,
-    steps: Vec<ProductStatePlanStep>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ProductStatePlanStep {
-    step_id: String,
-    plan_id: String,
-    index: usize,
-    title: &'static str,
-    description: &'static str,
-    kind: String,
-    status: String,
-    revision: u64,
-    base_plan_revision: u64,
-    linked_action_ids: Vec<String>,
-    linked_observation_ids: Vec<String>,
-    linked_proposal_ids: Vec<String>,
-    blocker_ids: Vec<String>,
-    linked_final_delivery_ids: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    skip_reason: Option<&'static str>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    policy_decision_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reason: Option<&'static str>,
-    evidence_ids: Vec<String>,
     controls: Vec<String>,
 }
 
@@ -947,7 +915,7 @@ fn product_state_action_type(value: &str) -> String {
         | "calendar.real_write"
         | "email.send"
         | "shell.destructive"
-        | "plan_execute.create_session"
+        | "task.plan_item.create"
         | "memory.governance.plan"
         | "lifemodel.learning_candidate.capture"
         | "builtin_tool" => value.into(),
@@ -1014,13 +982,6 @@ fn product_state_plan_source(value: &str) -> String {
     match value {
         "plan_execute" | "agent_loop" => value.into(),
         _ => "unknown".into(),
-    }
-}
-
-fn product_state_step_kind(value: &str) -> String {
-    match value {
-        "analysis" | "read" | "write" | "tool" | "review" | "governed_step" => value.into(),
-        _ => "governed_step".into(),
     }
 }
 
@@ -1158,10 +1119,10 @@ impl From<openlife_core::agent::main_chat_runtime_contract::MainChatAgentStateSn
         });
         let plan = plan.map(|plan| ProductStatePlan {
             plan_id: product_state_ref("plan", &plan.plan_id),
-            plan_session_id: plan
-                .plan_session_id
+            canonical_task_id: plan
+                .canonical_task_id
                 .as_deref()
-                .map(|value| product_state_ref("plan_session", value)),
+                .map(|value| product_state_ref("task", value)),
             task_session_id: plan
                 .task_session_id
                 .as_deref()
@@ -1180,79 +1141,15 @@ impl From<openlife_core::agent::main_chat_runtime_contract::MainChatAgentStateSn
                 .revision_id
                 .as_deref()
                 .map(|value| product_state_ref("plan_revision", value)),
-            review_id: plan
-                .review_id
-                .as_deref()
-                .map(|value| product_state_ref("review", value)),
             source_evidence_ids: plan
                 .source_evidence_ids
                 .iter()
                 .map(|value| product_state_ref("evidence", value))
                 .collect(),
-            superseded_by_plan_id: plan
-                .superseded_by_plan_id
-                .as_deref()
-                .map(|value| product_state_ref("plan", value)),
             controls: plan
                 .controls
                 .iter()
                 .filter_map(|value| product_state_control(value))
-                .collect(),
-            steps: plan
-                .steps
-                .into_iter()
-                .map(|step| ProductStatePlanStep {
-                    step_id: product_state_ref("plan_step", &step.step_id),
-                    plan_id: product_state_ref("plan", &step.plan_id),
-                    index: step.index,
-                    title: "plan_step",
-                    description: "content_in_canonical_plan",
-                    kind: product_state_step_kind(&step.kind),
-                    status: product_state_step_status(&step.status),
-                    revision: step.revision,
-                    base_plan_revision: step.base_plan_revision,
-                    linked_action_ids: step
-                        .linked_action_ids
-                        .iter()
-                        .map(|value| product_state_ref("action", value))
-                        .collect(),
-                    linked_observation_ids: step
-                        .linked_observation_ids
-                        .iter()
-                        .map(|value| product_state_ref("observation", value))
-                        .collect(),
-                    linked_proposal_ids: step
-                        .linked_proposal_ids
-                        .iter()
-                        .map(|value| product_state_ref("proposal", value))
-                        .collect(),
-                    blocker_ids: step
-                        .blocker_ids
-                        .iter()
-                        .map(|value| product_state_ref("blocker", value))
-                        .collect(),
-                    linked_final_delivery_ids: step
-                        .linked_final_delivery_ids
-                        .iter()
-                        .map(|value| product_state_ref("delivery", value))
-                        .collect(),
-                    skip_reason: step.skip_reason.as_ref().map(|_| "step_skipped"),
-                    policy_decision_id: step
-                        .policy_decision_id
-                        .as_deref()
-                        .map(|value| product_state_ref("policy", value)),
-                    reason: step.reason.as_ref().map(|_| "step_state_recorded"),
-                    evidence_ids: step
-                        .evidence_ids
-                        .iter()
-                        .map(|value| product_state_ref("evidence", value))
-                        .collect(),
-                    controls: step
-                        .controls
-                        .iter()
-                        .filter_map(|value| product_state_control(value))
-                        .collect(),
-                })
                 .collect(),
         });
         let actions = actions
@@ -2255,7 +2152,7 @@ mod tests {
             }),
             plan: Some(state::PlanEvidence {
                 plan_id: HOSTILE.into(),
-                plan_session_id: Some(HOSTILE.into()),
+                canonical_task_id: Some(HOSTILE.into()),
                 task_session_id: Some(HOSTILE.into()),
                 run_id: Some(HOSTILE.into()),
                 status: CODE_SHAPED_HOSTILE.into(),
@@ -2265,34 +2162,8 @@ mod tests {
                 evidence_id: HOSTILE.into(),
                 revision: Some(4),
                 revision_id: Some(HOSTILE.into()),
-                confirmed_at: Some(HOSTILE.into()),
-                review_id: Some(HOSTILE.into()),
                 source_evidence_ids: vec![HOSTILE.into()],
-                superseded_by_plan_id: Some(HOSTILE.into()),
                 controls: vec!["open_trace".into(), HOSTILE.into()],
-                steps: vec![state::PlanStepEvidence {
-                    step_id: HOSTILE.into(),
-                    plan_id: HOSTILE.into(),
-                    index: 0,
-                    title: HOSTILE.into(),
-                    description: HOSTILE.into(),
-                    kind: CODE_SHAPED_HOSTILE.into(),
-                    status: CODE_SHAPED_HOSTILE.into(),
-                    revision: 4,
-                    base_plan_revision: 3,
-                    linked_action_ids: vec![HOSTILE.into()],
-                    linked_observation_ids: vec![HOSTILE.into()],
-                    linked_proposal_ids: vec![HOSTILE.into()],
-                    blocker_ids: vec![HOSTILE.into()],
-                    linked_final_delivery_ids: vec![HOSTILE.into()],
-                    skip_reason: Some(HOSTILE.into()),
-                    policy_decision_id: Some(HOSTILE.into()),
-                    reason: Some(HOSTILE.into()),
-                    evidence_ids: vec![HOSTILE.into()],
-                    controls: vec!["open_trace".into(), HOSTILE.into()],
-                }],
-                review_summary: None,
-                artifact_view: None,
             }),
             actions: vec![action],
             observations: vec![observation],

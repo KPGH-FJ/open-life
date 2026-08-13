@@ -1,12 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type {
-  LifeModel,
-  ChatMessage,
-  DailyGoal,
-  StateHistoryEntry,
-  StateAlert,
-  PlanExecuteReviewSummary,
-} from "./types";
+import type { LifeModel, ChatMessage, DailyGoal, StateHistoryEntry, StateAlert } from "./types";
 
 function isTauriEnv(): boolean {
   return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
@@ -845,69 +838,6 @@ export type MainChatAgentProductStrategyRoute =
   | "blocked"
   | "unknown";
 
-export interface MainChatPlanArtifactSourceEvidence {
-  evidenceId: string;
-  sourceKind: string;
-  sourceLabel: string;
-  toolName?: string | null;
-  preview?: string | null;
-}
-
-export interface MainChatPlanArtifactFactView {
-  label: string;
-  detail: string;
-  evidenceIds: string[];
-  sourceToolEvidence: MainChatPlanArtifactSourceEvidence[];
-}
-
-export interface MainChatPlanArtifactStepView {
-  stepId: string;
-  index: number;
-  title: string;
-  description: string;
-  status: string;
-  kind: string;
-  evidenceIds: string[];
-  sourceToolEvidence: MainChatPlanArtifactSourceEvidence[];
-  controls: string[];
-}
-
-export interface MainChatPlanArtifactRouteEvidence {
-  strategy: string;
-  reason: string;
-  confidence?: number | null;
-  evidenceIds: string[];
-}
-
-export interface MainChatPlanArtifactRunEvidence {
-  taskSessionId: string;
-  runId: string;
-  planSessionId: string;
-  actionIds: string[];
-  observationIds: string[];
-  proposalIds: string[];
-  blockerIds: string[];
-  finalDeliveryId?: string | null;
-  metadataSafe: boolean;
-}
-
-export interface MainChatPlanArtifactView {
-  planId: string;
-  planSessionId: string;
-  taskSessionId: string;
-  runId: string;
-  status: string;
-  title: string;
-  summary: string;
-  body: string;
-  steps: MainChatPlanArtifactStepView[];
-  assumptions: MainChatPlanArtifactFactView[];
-  unknowns: MainChatPlanArtifactFactView[];
-  controls: string[];
-  routeEvidence: MainChatPlanArtifactRouteEvidence;
-  runEvidence: MainChatPlanArtifactRunEvidence;
-}
-
 export interface MainChatAgentStateSnapshot {
   task: {
     taskId: string;
@@ -944,7 +874,7 @@ export interface MainChatAgentStateSnapshot {
   };
   plan?: {
     planId: string;
-    planSessionId?: string | null;
+    canonicalTaskId?: string | null;
     taskSessionId?: string | null;
     runId?: string | null;
     status: string;
@@ -954,34 +884,8 @@ export interface MainChatAgentStateSnapshot {
     evidenceId: string;
     revision?: number | null;
     revisionId?: string | null;
-    confirmedAt?: string | null;
-    reviewId?: string | null;
-    reviewSummary?: PlanExecuteReviewSummary | null;
     sourceEvidenceIds?: string[];
-    supersededByPlanId?: string | null;
     controls?: string[];
-    steps?: Array<{
-      stepId: string;
-      planId: string;
-      index: number;
-      title: string;
-      description: string;
-      kind: string;
-      status: string;
-      revision: number;
-      basePlanRevision: number;
-      linkedActionIds: string[];
-      linkedObservationIds: string[];
-      linkedProposalIds: string[];
-      blockerIds: string[];
-      linkedFinalDeliveryIds?: string[];
-      skipReason?: string | null;
-      policyDecisionId?: string | null;
-      reason?: string | null;
-      evidenceIds?: string[];
-      controls?: string[];
-    }>;
-    artifactView?: MainChatPlanArtifactView | null;
   };
   actions: Array<{
     actionId: string;

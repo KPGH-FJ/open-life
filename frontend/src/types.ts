@@ -221,35 +221,6 @@ export interface ChatMessage {
   run_id?: string;
 }
 
-export interface PlanExecuteReviewItem {
-  stepId: string;
-  title: string;
-  status: string;
-  evidenceIds: string[];
-  linkedActionIds: string[];
-  linkedObservationIds: string[];
-  linkedProposalIds: string[];
-  blockerIds: string[];
-}
-
-export interface PlanExecuteReviewSummary {
-  reviewId: string;
-  planId: string;
-  planSessionId: string;
-  planStatus: string;
-  basePlanRevision: number;
-  reviewedAt?: string;
-  completedSteps: PlanExecuteReviewItem[];
-  skippedSteps: PlanExecuteReviewItem[];
-  blockedSteps: PlanExecuteReviewItem[];
-  proposalsCreated: PlanExecuteReviewItem[];
-  observationsUsed: PlanExecuteReviewItem[];
-  unresolved: PlanExecuteReviewItem[];
-  recommendedNextAction: string[];
-  completionClaimed: boolean;
-  metadataSafeSummary?: Record<string, any>;
-}
-
 export interface LifeModelVersion {
   version: string;
   timestamp: string;

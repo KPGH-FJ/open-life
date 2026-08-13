@@ -2577,7 +2577,7 @@ fn product_task_action_type(value: &str) -> String {
         | "calendar.real_write"
         | "email.send"
         | "shell.destructive"
-        | "plan_execute.create_session"
+        | "task.plan_item.create"
         | "memory.governance.plan"
         | "lifemodel.learning_candidate.capture" => value.into(),
         _ => "unknown_action_type".into(),

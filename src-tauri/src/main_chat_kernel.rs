@@ -2364,7 +2364,7 @@ where
         }
         MainChatAgentStrategy::PlanExecute => {
             execution_transcript.extend(
-                append_main_chat_kernel_plan_execute_contract_transcript(
+                append_main_chat_kernel_plan_contract_transcript(
                     state,
                     main_chat_agent_turn,
                     session_id,
@@ -4027,7 +4027,7 @@ async fn append_main_chat_kernel_read_tool_contract_transcript(
     .await
 }
 
-async fn append_main_chat_kernel_plan_execute_contract_transcript(
+async fn append_main_chat_kernel_plan_contract_transcript(
     state: &Arc<AppState>,
     main_chat_agent_turn: &MainChatAgentTurn,
     conversation_owner_id: &str,
@@ -4047,15 +4047,15 @@ async fn append_main_chat_kernel_plan_execute_contract_transcript(
             state,
             Some(task_session_id),
             ExecutionTranscriptEntryKind::Plan,
-            "MainChatKernel PlanExecute draft contract was prepared.",
+            "MainChatKernel canonical Plan item contract was prepared.",
             serde_json::json!({
                 "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
-                "promptContract": "kernel_plan_execute_draft",
+                "promptContract": "canonical_task_plan_item",
                 "toolExecutionAllowed": true,
                 "writeExecutionAllowed": false,
                 "silentWritesAllowed": false,
                 "legacyFallbackUsed": false,
-                "kernelBackedPlanExecuteDraft": true,
+                "canonicalPlanItem": true,
                 "selectedSkillId": selected_skill_id,
             }),
         )
@@ -4093,7 +4093,7 @@ async fn append_main_chat_kernel_plan_execute_contract_transcript(
                 "rawTopKMemoryTrusted": compiled_context.raw_topk_memory_trusted,
                 "workspacePolicyOverrideBlocked": compiled_context.workspace_policy_override_blocked,
                 "selectedSkillInstructionLoaded": compiled_context.selected_skill_instruction_loaded,
-                "kernelBackedPlanExecuteDraft": true,
+                "canonicalPlanItem": true,
                 "sources": compiled_context.selected_sources,
             }),
         )
