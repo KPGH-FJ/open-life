@@ -2626,7 +2626,7 @@ async fn shipped_task_evidence_subtrees_reject_hostile_body_authority_and_untype
             openlife_core::agent::ActionExecutionStatus::Failed,
             serde_json::json!({
                 "proposalId": BODY_SENTINEL,
-                "planExecuteSessionId": BODY_SENTINEL,
+                "canonicalTaskId": BODY_SENTINEL,
                 "contextSnapshotRef": AUTHORITY_SENTINEL,
                 "directWritesExecuted": false,
             }),
@@ -2658,7 +2658,7 @@ async fn shipped_task_evidence_subtrees_reject_hostile_body_authority_and_untype
                     summary: BODY_SENTINEL.into(),
                     metadata: serde_json::json!({
                         "proposalId": proposal_id,
-                        "planExecuteSessionId": plan_ref,
+                        "canonicalTaskId": plan_ref,
                         "contextSnapshotRef": context_ref,
                         "directWritesExecuted": false,
                     }),
@@ -2672,7 +2672,7 @@ async fn shipped_task_evidence_subtrees_reject_hostile_body_authority_and_untype
                 summary: BODY_SENTINEL.into(),
                 metadata: serde_json::json!({
                     "final_delivery_status": "failed",
-                    "planExecuteSessionId": BODY_SENTINEL,
+                    "canonicalTaskId": BODY_SENTINEL,
                     "proposalId": BODY_SENTINEL,
                     "directWritesExecuted": false,
                 }),

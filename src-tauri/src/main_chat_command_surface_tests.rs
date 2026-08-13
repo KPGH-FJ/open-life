@@ -5871,18 +5871,6 @@ async fn roadshow_rc01_exact_prompt_streams_one_writing_and_plan_final_without_r
     );
     assert!(done["tool_calls"].as_array().is_some_and(Vec::is_empty));
     assert!(list_command_surface_proposals(&state).await.is_empty());
-    let plan_sessions = state
-        .plan_execute_session_store
-        .as_ref()
-        .expect("RC01 PlanExecute store")
-        .lock()
-        .await
-        .list_sessions(10)
-        .expect("list RC01 PlanExecute sessions");
-    assert!(
-        plan_sessions.is_empty(),
-        "a writing and plan-decomposition answer cannot silently create a tracked PlanExecute session"
-    );
     assert_eq!(
         captured_requests
             .lock()
@@ -5988,15 +5976,6 @@ async fn roadshow_rc01_provider_failure_is_terminal_and_never_becomes_plan_succe
         .as_array()
         .is_some_and(|blockers| !blockers.is_empty()));
     assert!(list_command_surface_proposals(&state).await.is_empty());
-    assert!(state
-        .plan_execute_session_store
-        .as_ref()
-        .expect("RC01 failure PlanExecute store")
-        .lock()
-        .await
-        .list_sessions(10)
-        .expect("list RC01 failure PlanExecute sessions")
-        .is_empty());
     assert_eq!(
         captured_requests
             .lock()

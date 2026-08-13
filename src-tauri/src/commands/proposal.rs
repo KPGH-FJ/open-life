@@ -5303,9 +5303,6 @@ mod tests {
             life_model_learning_store: Some(Arc::new(Mutex::new(
                 openlife_core::agent::LifeModelLearningStore::new_in_memory().unwrap(),
             ))),
-            plan_execute_session_store: Some(Arc::new(Mutex::new(
-                openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),
-            ))),
             main_chat_agent_session_store: Some(Arc::new(Mutex::new(
                 openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStore::new_in_memory()
                     .unwrap(),

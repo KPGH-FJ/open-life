@@ -15655,8 +15655,8 @@ where
     let queued = enqueue_main_chat_agent_action(
         state,
         task_session_id,
-        "plan_execute.create_session",
-        "Create a governed PlanExecute draft session from MainChatKernel.",
+        "task.plan_item.create",
+        "Create a canonical Plan item inside the current Task.",
         &mut execution_transcript,
     )
     .await?;
@@ -15665,37 +15665,66 @@ where
         &queued.id,
         ExecutionQueueStatus::Executing,
         Some(serde_json::json!({
-            "executor": "plan_execute.create_session",
-            "kernelBackedPlanExecuteDraft": true,
+            "executor": "task.plan_item.create",
+            "canonicalPlanItem": true,
             "directWritesExecuted": false,
         })),
     )
     .await?;
-    let plan_session =
-        crate::commands::agent_runtime::create_plan_execute_session_for_main_chat_with_state(
-            crate::commands::agent_runtime::CreatePlanExecuteSessionInput {
-                scenario_id: Some("weekly_planning".into()),
-                source_chat_session_id: Some(session_id.to_string()),
-                max_steps: Some(5),
-            },
-            state,
-            canonical_run_id,
-            execution_epoch,
-            user_text,
-            life_model_planning_hints.clone(),
-        )
-        .await?;
+    let plan_session = crate::commands::agent_runtime::draft_plan_for_main_chat(
+        state,
+        canonical_run_id,
+        session_id,
+        user_text,
+        life_model_planning_hints.clone(),
+    )
+    .await?;
+    let instruction_digest = openlife_core::agent::metadata_safe_text_digest(user_text).1;
+    let plan_digest = openlife_core::agent::metadata_safe_text_digest(
+        &serde_json::to_string(&plan_session.steps)
+            .map_err(|error| format!("serialize canonical plan item failed: {error}"))?,
+    )
+    .1;
+    let canonical_plan = {
+        let store = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .ok_or_else(|| "Canonical Task runtime store not available".to_string())?
+            .lock()
+            .await;
+        let permit = execution_epoch
+            .begin_canonical_commit("task_runtime", format!("plan:{canonical_run_id}"))
+            .map_err(|rejection| format!("canonical Plan item commit rejected: {rejection:?}"))?;
+        match store.begin_plan_run(openlife_core::task_runtime::BeginPlanRunInput {
+            conversation_id: session_id,
+            execution_session_id: task_session_id,
+            run_id: canonical_run_id,
+            instruction_digest: &instruction_digest,
+            plan_digest: &plan_digest,
+        }) {
+            Ok(plan) => {
+                permit.finish_committed();
+                plan
+            }
+            Err(error) => {
+                permit.finish_failed();
+                return Err(format!("create canonical Plan item failed: {error}"));
+            }
+        }
+    };
     let observation_metadata = serde_json::json!({
-        "kernelBackedPlanExecuteDraft": true,
+        "canonicalPlanItem": true,
         "actionId": queued.id,
-        "sourceKind": "plan_execute",
-        "sourceLabel": "plan_execute.create_session",
-        "preview": format!("PlanExecute draft with {} steps", plan_session.steps.len()),
-        "planExecuteSessionId": plan_session.session_id,
+        "sourceKind": "canonical_task_item",
+        "sourceLabel": "task.plan_item.create",
+        "preview": format!("Canonical plan with {} steps", plan_session.steps.len()),
+        "planId": format!("plan:{}", canonical_plan.task_id),
+        "canonicalTaskId": canonical_plan.task_id,
+        "planRevision": canonical_plan.plan_revision,
         "stepCount": plan_session.steps.len(),
         "lifeModelPlanningHintCount": life_model_planning_hints.len(),
         "lifeModelPlanningApplied": !life_model_planning_hints.is_empty(),
-        "status": plan_session.status,
+        "status": "completed",
         "directWritesExecuted": false,
         "legacyFallbackUsed": false,
     });
@@ -15712,11 +15741,7 @@ where
             state,
             task_session_id,
             crate::terminal_owner_write_gateway::TaskSessionWrite::UpdatePlanSummary(Some(
-                format!(
-                    "PlanExecute draft {} has {} steps.",
-                    plan_session.session_id,
-                    plan_session.steps.len()
-                ),
+                format!("Canonical plan has {} steps.", plan_session.steps.len()),
             )),
         )
         .await
@@ -15729,11 +15754,13 @@ where
             state,
             Some(task_session_id),
             ExecutionTranscriptEntryKind::Plan,
-            "Governed PlanExecute draft session was created.",
+            "Canonical Plan item was created inside the current Task.",
             serde_json::json!({
-                "kernelBackedPlanExecuteDraft": true,
-                "planExecuteSessionId": plan_session.session_id,
-                "status": plan_session.status,
+                "canonicalPlanItem": true,
+                "planId": format!("plan:{}", canonical_plan.task_id),
+                "canonicalTaskId": canonical_plan.task_id,
+                "revision": canonical_plan.plan_revision,
+                "status": "completed",
                 "stepCount": plan_session.steps.len(),
                 "directWritesExecuted": false,
                 "legacyFallbackUsed": false,
@@ -15746,7 +15773,7 @@ where
             state,
             Some(task_session_id),
             ExecutionTranscriptEntryKind::Observation,
-            "Governed PlanExecute draft observation recorded for the queued action.",
+            "Canonical Plan item observation recorded for the queued action.",
             observation_metadata.clone(),
         )
         .await,
@@ -15760,7 +15787,7 @@ where
             state,
             task_session_id,
             external_action_type,
-            "External write step from a PlanExecute draft requires explicit confirmation.",
+            "External write step from a plan requires explicit confirmation.",
             &mut execution_transcript,
         )
         .await?;
@@ -15769,7 +15796,7 @@ where
             "policyLevel": blocked_external_write.policy.level.as_str(),
             "reasonCode": blocked_external_write.policy.reason_code.clone(),
             "requiresConfirmation": blocked_external_write.policy.requires_confirmation,
-            "kernelBackedPlanExecuteDraft": true,
+            "canonicalPlanItem": true,
             "directWritesExecuted": false,
             "externalWritesExecuted": false,
         });
@@ -15813,7 +15840,7 @@ where
         "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
         "legacyFallbackUsed": false,
         "directWritesExecuted": false,
-        "kernelBackedPlanExecuteDraft": true,
+        "canonicalPlanItem": true,
         "kernelEventSink": event_sink_label,
         "kernelEventCount": kernel_events.len(),
         "kernelContextSnapshotRef": context_metadata.context_snapshot_ref,
@@ -15824,7 +15851,7 @@ where
         "modelGenerated": false,
         "schedulerGenerationCalled": false,
         "turnProviderRuntimeGeneration": scheduler.provider_config_generation(),
-        "providerGenerationPath": "main_chat_kernel_plan_execute_draft",
+        "providerGenerationPath": "main_chat_kernel_canonical_plan_item",
         "provider": route_metadata.provider,
         "model": route_metadata.model,
         "routeType": route_metadata.route_type,
@@ -15835,7 +15862,9 @@ where
             &route_metadata,
             main_chat_provider_endpoint_kind(&scheduler, route_metadata.scripted_response_configured),
         ),
-        "planExecuteSessionId": plan_session.session_id,
+        "canonicalTaskId": canonical_plan.task_id,
+        "planId": format!("plan:{}", canonical_plan.task_id),
+        "planRevision": canonical_plan.plan_revision,
         "stepCount": plan_session.steps.len(),
     });
     let model_route = model_route_from_kernel_route(&route_metadata);
@@ -15923,9 +15952,11 @@ where
                 "selectedStrategy": main_chat_agent_turn.decision.selected_strategy.as_str(),
                 "legacyFallbackUsed": false,
                 "directWritesExecuted": false,
-                "kernelBackedPlanExecuteDraft": true,
+                "canonicalPlanItem": true,
                 "toolCallCount": tool_calls.len(),
-                "planExecuteSessionId": plan_session.session_id,
+                "canonicalTaskId": canonical_plan.task_id,
+                "planId": format!("plan:{}", canonical_plan.task_id),
+                "revision": canonical_plan.plan_revision,
                 "pendingBlockers": pending_blockers.clone(),
                 "pendingBlockerCount": pending_blockers.len(),
             }),

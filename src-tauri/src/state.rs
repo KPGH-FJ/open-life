@@ -291,8 +291,6 @@ pub struct AppState {
     /// Bounded Observation/Candidate bridge for LifeModel learning. It does
     /// not own proposals or canonical LifeModel state.
     pub life_model_learning_store: Option<Arc<Mutex<openlife_core::agent::LifeModelLearningStore>>>,
-    pub plan_execute_session_store:
-        Option<Arc<Mutex<openlife_core::agent::PlanExecuteSessionStore>>>,
     pub main_chat_agent_session_store:
         Option<Arc<Mutex<openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStore>>>,
     pub main_chat_action_queue_store:

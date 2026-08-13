@@ -4,7 +4,7 @@ use tauri::State;
 
 mod plan_execute_product;
 
-pub use plan_execute_product::*;
+pub(crate) use plan_execute_product::*;
 
 #[tauri::command]
 pub async fn list_main_chat_skills(

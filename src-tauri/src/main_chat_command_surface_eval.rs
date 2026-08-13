@@ -1644,11 +1644,11 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
             }
             let plan_action = actions
                 .iter()
-                .find(|action| action.action.action_type == "plan_execute.create_session")
-                .ok_or_else(|| "missing plan_execute.create_session action".to_string())?;
+                .find(|action| action.action.action_type == "task.plan_item.create")
+                .ok_or_else(|| "missing task.plan_item.create action".to_string())?;
             if plan_action.status != ExecutionQueueStatus::Completed {
                 return Err(format!(
-                    "plan_execute.create_session action status {:?}",
+                    "task.plan_item.create action status {:?}",
                     plan_action.status
                 ));
             }
@@ -1656,10 +1656,10 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 .observation_metadata
                 .as_ref()
                 .ok_or_else(|| "missing PlanExecute observation metadata".to_string())?;
-            let plan_session_id = metadata
-                .get("planExecuteSessionId")
+            let canonical_task_id = metadata
+                .get("canonicalTaskId")
                 .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| "PlanExecute observation missing session id".to_string())?;
+                .ok_or_else(|| "canonical plan observation missing task id".to_string())?;
             let step_count = metadata
                 .get("stepCount")
                 .and_then(serde_json::Value::as_u64)
@@ -1668,20 +1668,23 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 return Err("PlanExecute draft has no steps".into());
             }
             let store_arc = state
-                .plan_execute_session_store
+                .canonical_task_runtime_store
                 .as_ref()
-                .ok_or_else(|| "missing PlanExecute session store".to_string())?;
+                .ok_or_else(|| "missing canonical Task runtime store".to_string())?;
             let store = store_arc.lock().await;
-            let plan_session = store
-                .get_session(plan_session_id)
-                .map_err(|error| format!("load PlanExecute session failed: {error}"))?
-                .ok_or_else(|| "PlanExecute session was not persisted".to_string())?;
-            if plan_session.status != openlife_core::agent::PlanExecuteSessionStatus::Draft
-                || plan_session.source_chat_session_id.as_deref()
-                    != Some(session.chat_session_id.as_str())
-                || plan_session.steps.len() != step_count as usize
+            let task = store
+                .load_task(canonical_task_id)
+                .map_err(|error| format!("load canonical plan task failed: {error}"))?
+                .ok_or_else(|| "canonical plan task was not persisted".to_string())?;
+            let items = store
+                .list_items(canonical_task_id)
+                .map_err(|error| format!("load canonical plan items failed: {error}"))?;
+            if task.task_kind != "plan"
+                || !items.iter().any(|item| {
+                    item.kind == openlife_core::task_runtime::CanonicalTaskItemKind::Plan
+                })
             {
-                return Err("persisted PlanExecute draft metadata mismatch".into());
+                return Err("canonical Plan item metadata mismatch".into());
             }
         }
         MainChatCommandSurfaceEvalScenario::SelectedSkillContextSuccess => {
@@ -1701,7 +1704,7 @@ pub(crate) async fn assert_main_chat_command_surface_eval_case(
                 return Err("selected skill turn has no canonical context snapshot ref".into());
             }
             if !actions.iter().any(|action| {
-                action.action.action_type == "plan_execute.create_session"
+                action.action.action_type == "task.plan_item.create"
                     && action.status == ExecutionQueueStatus::Completed
             }) {
                 return Err("selected skill plan review did not complete a governed action".into());
@@ -2849,7 +2852,7 @@ fn main_chat_command_surface_eval_kernel_evidence(
             metadata_flag(metadata, "kernelBackedReadOnlyToolLoop");
         evidence.kernel_proposal_only_write |=
             metadata_flag(metadata, "kernelBackedProposalOnlyWrite");
-        evidence.kernel_plan_execute |= metadata_flag(metadata, "kernelBackedPlanExecuteDraft");
+        evidence.kernel_plan_execute |= metadata_flag(metadata, "canonicalPlanItem");
         evidence.kernel_governed_blocker |= metadata_flag(metadata, "kernelBackedGovernedBlocker");
         evidence.kernel_web_tool |= metadata_string_equals(metadata, "toolName", "web.search")
             || metadata_string_equals(metadata, "queueActionType", "web.search")
@@ -2865,7 +2868,7 @@ fn main_chat_command_surface_eval_kernel_evidence(
                 metadata_flag(metadata, "kernelBackedReadOnlyToolLoop");
             evidence.kernel_proposal_only_write |=
                 metadata_flag(metadata, "kernelBackedProposalOnlyWrite");
-            evidence.kernel_plan_execute |= metadata_flag(metadata, "kernelBackedPlanExecuteDraft");
+            evidence.kernel_plan_execute |= metadata_flag(metadata, "canonicalPlanItem");
             evidence.kernel_governed_blocker |=
                 metadata_flag(metadata, "kernelBackedGovernedBlocker");
             evidence.kernel_web_tool |= action.action.action_type == "web.search"
@@ -2881,7 +2884,7 @@ fn main_chat_command_surface_eval_kernel_evidence(
             metadata_flag(response, "kernelBackedReadOnlyToolLoop");
         evidence.kernel_proposal_only_write |=
             metadata_flag(response, "kernelBackedProposalOnlyWrite");
-        evidence.kernel_plan_execute |= metadata_flag(response, "kernelBackedPlanExecuteDraft");
+        evidence.kernel_plan_execute |= metadata_flag(response, "canonicalPlanItem");
         evidence.kernel_governed_blocker |= metadata_flag(response, "kernelBackedGovernedBlocker");
     }
 

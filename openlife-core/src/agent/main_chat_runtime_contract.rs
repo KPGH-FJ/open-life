@@ -1827,7 +1827,7 @@ fn plan_from_evidence(
             .map(str::to_string)
             .unwrap_or_else(|| format!("plan:{}", session.id)),
         plan_session_id: plan_entry
-            .and_then(|entry| entry.metadata.get("planExecuteSessionId"))
+            .and_then(|entry| entry.metadata.get("canonicalTaskId"))
             .and_then(Value::as_str)
             .map(str::to_string),
         task_session_id: Some(session.id.clone()),
@@ -1843,7 +1843,7 @@ fn plan_from_evidence(
             AgentTaskSessionStatus::Running | AgentTaskSessionStatus::WaitingPermission
         ),
         source: match session.selected_strategy {
-            MainChatAgentStrategy::PlanExecute => "plan_execute".into(),
+            MainChatAgentStrategy::PlanExecute => "canonical_task_item".into(),
             _ => "agent_loop".into(),
         },
         evidence_id: plan_entry

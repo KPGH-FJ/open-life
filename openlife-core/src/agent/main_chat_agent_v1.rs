@@ -11258,7 +11258,7 @@ fn transcript_metadata_field_value_allowed(
         "contextSnapshotRef",
         "executorActionId",
         "observedCanonicalRunId",
-        "planExecuteSessionId",
+        "canonicalTaskId",
         "planId",
         "proposalId",
         "receiptId",

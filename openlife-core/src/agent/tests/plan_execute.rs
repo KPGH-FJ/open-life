@@ -2,8 +2,8 @@ use crate::agent::{
     AgentExecutionBudget, AgentTask, AgentTaskKind, GovernanceDecisionKind, LifeModelGovernor,
     PlanDraft, PlanExecuteInput, PlanExecuteLifeModelHint, PlanExecuteProductContract,
     PlanExecuteProductScenario, PlanExecuteService, PlanExecuteSession, PlanExecuteSessionStatus,
-    PlanExecuteSessionStore, PlanExecuteStepEdit, PlanStep, PlanStepStatus, ProposalStore,
-    RiskLevel, RuntimeInput, RuntimePolicyContext,
+    PlanExecuteStepEdit, PlanStep, PlanStepStatus, ProposalStore, RiskLevel, RuntimeInput,
+    RuntimePolicyContext,
 };
 use crate::layer::Layer;
 use crate::life_model::v2::LifeModelSectionV2;
@@ -403,41 +403,6 @@ fn plan_execute_product_contract_debug_output_excludes_raw_content() {
     assert!(!serialized.contains("alice@example.com"));
     assert!(!serialized.contains("raw draft"));
     assert!(!serialized.contains("memory context should not be copied"));
-}
-
-#[test]
-fn plan_execute_session_store_creates_gets_and_lists_draft_sessions() {
-    let store = PlanExecuteSessionStore::new_in_memory().unwrap();
-    let service = PlanExecuteService;
-    let contract = PlanExecuteProductContract::weekly_planning();
-    let draft = service.draft_product_plan(
-        &plan_input(
-            "Use my LifeModel to plan this week.",
-            contract.max_step_count,
-        ),
-        PlanExecuteProductScenario::WeeklyPlanning,
-    );
-    let session = PlanExecuteSession::new_draft(
-        Some("chat-weekly".into()),
-        Some("run-weekly".into()),
-        contract,
-        draft,
-    )
-    .unwrap();
-    let session_id = session.session_id.clone();
-
-    store.create_session(&session).unwrap();
-
-    let fetched = store.get_session(&session_id).unwrap().unwrap();
-    let sessions = store.list_sessions(10).unwrap();
-    assert_eq!(fetched.status, PlanExecuteSessionStatus::Draft);
-    assert_eq!(fetched.scenario, PlanExecuteProductScenario::WeeklyPlanning);
-    assert_eq!(fetched.source_agent_run_id.as_deref(), Some("run-weekly"));
-    assert_eq!(
-        fetched.source_chat_session_id.as_deref(),
-        Some("chat-weekly")
-    );
-    assert_eq!(sessions.len(), 1);
 }
 
 #[test]

@@ -225,6 +225,33 @@ fn main_chat_retired_fallback_delivery_is_absent_from_product_modules() {
 }
 
 #[test]
+fn standalone_plan_execute_owner_stays_retired() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let production_sources = [
+        "src/state.rs",
+        "src/bootstrap.rs",
+        "src/persistence_coordinator.rs",
+        "src/lib.rs",
+    ];
+    for relative in production_sources {
+        let source = std::fs::read_to_string(root.join(relative)).expect("read production source");
+        for retired in [
+            "PlanExecuteSessionStore",
+            "plan_execute_session_store",
+            "plan_execute_sessions.db",
+        ] {
+            assert!(
+                !source.contains(retired),
+                "{relative} must not restore retired owner {retired}"
+            );
+        }
+    }
+    let core = std::fs::read_to_string(root.join("../openlife-core/src/agent/plan_execute.rs"))
+        .expect("read plan algorithm source");
+    assert!(!core.contains("struct PlanExecuteSessionStore"));
+}
+
+#[test]
 fn ordinary_chat_entrypoints_delegate_to_openlife_turn_runtime_only() {
     let send_module_path = format!("{}/src/main_chat_send.rs", env!("CARGO_MANIFEST_DIR"));
     let send_source = std::fs::read_to_string(send_module_path).expect("read main_chat_send.rs");

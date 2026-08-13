@@ -1734,8 +1734,8 @@ fn run_evidence_plan_refs(
     }
     for entry in transcript {
         for key in [
-            "planExecuteSessionId",
-            "planSessionId",
+            "canonicalTaskId",
+            "planId",
             "contextSnapshotRef",
             "lastSafeResumePoint",
         ] {
@@ -1745,7 +1745,7 @@ fn run_evidence_plan_refs(
         }
     }
     if let Some(final_delivery) = final_delivery {
-        if let Some(value) = string_from_metadata(final_delivery, &["planExecuteSessionId"]) {
+        if let Some(value) = string_from_metadata(final_delivery, &["canonicalTaskId", "planId"]) {
             refs.push(value);
         }
     }
@@ -2455,27 +2455,32 @@ async fn plan_revision_mismatch_detected(
     state: &Arc<AppState>,
     transcript: &[openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry],
 ) -> Result<bool, String> {
-    let Some((plan_session_id, revision)) = transcript.iter().rev().find_map(|entry| {
-        let plan_session_id = string_from_metadata(&entry.metadata, &["planExecuteSessionId"])?;
+    let Some((canonical_task_id, revision)) = transcript.iter().rev().find_map(|entry| {
+        let task_id = string_from_metadata(&entry.metadata, &["canonicalTaskId"])?;
         let revision = entry
             .metadata
             .get("revision")
             .and_then(serde_json::Value::as_u64)?;
-        Some((plan_session_id, revision))
+        Some((task_id, revision))
     }) else {
         return Ok(false);
     };
-    let Some(ref plan_store_arc) = state.plan_execute_session_store else {
+    let Some(ref store_arc) = state.canonical_task_runtime_store else {
         return Ok(true);
     };
-    let plan_store = plan_store_arc.lock().await;
-    let Some(plan_session) = plan_store
-        .get_session(&plan_session_id)
-        .map_err(|err| format!("load Plan-Execute session for continuity failed: {err}"))?
+    let store = store_arc.lock().await;
+    let Some(snapshot) = store
+        .list_task_snapshots(500)
+        .map_err(|err| format!("load canonical Plan item for continuity failed: {err}"))?
+        .into_iter()
+        .find(|snapshot| snapshot.task.id == canonical_task_id)
     else {
         return Ok(true);
     };
-    Ok(plan_session.revision != revision)
+    Ok(snapshot
+        .runs
+        .last()
+        .is_none_or(|run| run.plan_revision != revision))
 }
 
 fn main_chat_context_digest(

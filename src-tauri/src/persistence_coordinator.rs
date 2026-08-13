@@ -30,7 +30,6 @@ pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
     "LifeEventStore",
     "ProposalStore",
     "MemoryLifecycleStore",
-    "PlanExecuteSessionStore",
     "MainChatAgentSessionStore",
     "MainChatActionQueueStore",
     "MainChatAgentEventStore",

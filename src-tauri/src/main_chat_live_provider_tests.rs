@@ -822,16 +822,6 @@ async fn roadshow_rc01_external_live_exact_writing_and_plan_is_streamed_once() {
         .list_pending_proposals(20)
         .expect("list RC01 external live proposals")
         .is_empty());
-    assert!(state
-        .plan_execute_session_store
-        .as_ref()
-        .expect("RC01 external live PlanExecute store")
-        .lock()
-        .await
-        .list_sessions(20)
-        .expect("list RC01 external live PlanExecute sessions")
-        .is_empty());
-
     let durable_before_replay = state
         .main_chat_agent_event_store
         .as_ref()

@@ -18,8 +18,8 @@ use crate::storage::{load_mcp_audit_keyring_from_path, privacy_policy_path, McpA
 use openlife_core::agent::{
     main_chat_agent_v1::{ActionQueueAuthorityKey, ActionQueueStore, AgentTaskSessionStore},
     AgentProposal, AgentRunReceiptKey, DurableWriteRequest, DurableWriteSource,
-    DurableWriteSubject, MemoryLifecycleStore, PlanExecuteSessionStore, ProposalSource,
-    ProposalStore, ProposalType, ReviewWorkflow, RiskLevel,
+    DurableWriteSubject, MemoryLifecycleStore, ProposalSource, ProposalStore, ProposalType,
+    ReviewWorkflow, RiskLevel,
 };
 use openlife_core::config::AppConfig;
 use openlife_core::feedback::FeedbackStore;
@@ -1652,42 +1652,6 @@ fn init_memory_lifecycle_store(
     }
 }
 
-fn init_plan_execute_session_store(
-    db_path: &Path,
-    startup_warnings: &std::cell::RefCell<Vec<String>>,
-) -> Result<PlanExecuteSessionStore, String> {
-    match PlanExecuteSessionStore::new(db_path) {
-        Ok(store) => Ok(store),
-        Err(primary_err) => {
-            if !ephemeral_store_fallback_allowed() {
-                return Err(format!(
-                    "plan_execute_sessions.db durable initialization failed: {primary_err}"
-                ));
-            }
-            let fallback = recovery_db_path("plan_execute_sessions.db");
-            startup_warnings.borrow_mut().push(format!(
-                "plan_execute_sessions.db 初始化失败，正在使用临时数据库：{}",
-                primary_err
-            ));
-            match PlanExecuteSessionStore::new(&fallback) {
-                Ok(store) => Ok(store),
-                Err(fallback_err) => {
-                    startup_warnings.borrow_mut().push(format!(
-                        "临时 plan_execute_sessions.db 初始化也失败，已降级为内存数据库：{}",
-                        fallback_err
-                    ));
-                    PlanExecuteSessionStore::new_in_memory().map_err(|memory_err| {
-                        format!(
-                            "所有 Plan-Execute session store 初始化失败: primary={}, fallback={}, in_memory={}",
-                            primary_err, fallback_err, memory_err
-                        )
-                    })
-                }
-            }
-        }
-    }
-}
-
 fn init_main_chat_agent_session_store(
     db_path: &Path,
     startup_warnings: &std::cell::RefCell<Vec<String>>,
@@ -2458,24 +2422,6 @@ fn bootstrap_with_secret_store(
         &startup_warnings,
     );
 
-    let plan_execute_sessions_db_path = data_dir.join("plan_execute_sessions.db");
-    let plan_execute_session_store = init_store(
-        || init_plan_execute_session_store(&plan_execute_sessions_db_path, &startup_warnings),
-        || {
-            PlanExecuteSessionStore::open_read_only_existing(&plan_execute_sessions_db_path)
-                .map_err(|e| e.to_string())
-        },
-        || PlanExecuteSessionStore::new_in_memory().map_err(|e| e.to_string()),
-        "PlanExecuteSessionStore",
-        &startup_warnings,
-        &persistence,
-    );
-    let plan_execute_session_store = optional_store(
-        plan_execute_session_store,
-        "PlanExecuteSessionStore",
-        &startup_warnings,
-    );
-
     let main_chat_agent_sessions_db_path = data_dir.join("main_chat_agent_sessions.db");
     let main_chat_agent_session_store = init_store(
         || {
@@ -3241,8 +3187,6 @@ fn bootstrap_with_secret_store(
         proposal_store: proposal_store.map(|store| Arc::new(Mutex::new(store))),
         memory_lifecycle_store: memory_lifecycle_store.map(|store| Arc::new(Mutex::new(store))),
         life_model_learning_store: life_model_learning_store
-            .map(|store| Arc::new(Mutex::new(store))),
-        plan_execute_session_store: plan_execute_session_store
             .map(|store| Arc::new(Mutex::new(store))),
         main_chat_agent_session_store: main_chat_agent_session_store
             .map(|store| Arc::new(Mutex::new(store))),

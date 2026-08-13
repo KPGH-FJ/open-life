@@ -1,7 +1,8 @@
 //! Canonical Task/Item/Artifact metadata for the general Agent runtime.
 //!
-//! This store is introduced vertically on the generated-report path. It owns
-//! stable Task identity, Run membership, typed Items, and Artifact versions.
+//! This store owns stable Task identity, Run membership, typed Items, and
+//! Artifact versions. Reports use the full Artifact lifecycle; ordinary plans
+//! use Instruction + Plan Items without a parallel PlanExecute session.
 //! Existing AgentRun persistence remains the execution/receipt owner while the
 //! migration proceeds; this module does not copy AgentRun status or bodies.
 
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 5;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -318,6 +319,14 @@ pub struct BeginReportRunInput<'a> {
     pub plan_digest: &'a str,
 }
 
+pub struct BeginPlanRunInput<'a> {
+    pub conversation_id: &'a str,
+    pub execution_session_id: &'a str,
+    pub run_id: &'a str,
+    pub instruction_digest: &'a str,
+    pub plan_digest: &'a str,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BegunReportRun {
     pub task_id: String,
@@ -453,7 +462,7 @@ impl CanonicalTaskRuntimeStore {
              CREATE TABLE IF NOT EXISTS canonical_tasks (
                 id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL UNIQUE,
-                task_kind TEXT NOT NULL CHECK(task_kind = 'report'),
+                task_kind TEXT NOT NULL CHECK(task_kind IN ('report', 'plan')),
                 initial_outcome_digest TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN (
                     'running', 'waiting_review', 'completed', 'blocked',
@@ -548,7 +557,7 @@ impl CanonicalTaskRuntimeStore {
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '5')
+             VALUES ('schema_version', '6')
              ON CONFLICT(key) DO NOTHING;",
         )?;
         if Self::schema_version(&conn)? == 1 {
@@ -562,6 +571,9 @@ impl CanonicalTaskRuntimeStore {
         }
         if Self::schema_version(&conn)? == 4 {
             Self::migrate_v4_to_v5(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 5 {
+            Self::migrate_v5_to_v6(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -906,6 +918,57 @@ impl CanonicalTaskRuntimeStore {
         Ok(())
     }
 
+    fn migrate_v5_to_v6(conn: &mut Connection) -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;")?;
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "ALTER TABLE canonical_tasks RENAME TO canonical_tasks_v5;
+                 CREATE TABLE canonical_tasks (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL UNIQUE,
+                    task_kind TEXT NOT NULL CHECK(task_kind IN ('report', 'plan')),
+                    initial_outcome_digest TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'running', 'waiting_review', 'completed', 'blocked',
+                        'failed', 'effect_unknown'
+                    )),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO canonical_tasks (
+                    id, conversation_id, task_kind, initial_outcome_digest,
+                    status, created_at, updated_at
+                 ) SELECT id, conversation_id, task_kind, initial_outcome_digest,
+                          status, created_at, updated_at
+                   FROM canonical_tasks_v5;
+                 DROP TABLE canonical_tasks_v5;",
+            )?;
+            let changed = tx.execute(
+                "UPDATE canonical_task_runtime_metadata SET value = '6'
+                 WHERE key = 'schema_version' AND value = '5'",
+                [],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("canonical_task_runtime_v5_migration_version_conflict");
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        let pragma_restore =
+            conn.execute_batch("PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON;");
+        migration?;
+        pragma_restore?;
+        let violation = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_row([], |_| Ok(()))
+            .optional()?;
+        if violation.is_some() {
+            anyhow::bail!("canonical_task_runtime_v5_migration_foreign_key_violation");
+        }
+        Ok(())
+    }
+
     fn validate_schema(conn: &Connection) -> Result<()> {
         let version = Self::schema_version(conn)?;
         if version != TASK_RUNTIME_SCHEMA_VERSION {
@@ -1022,6 +1085,88 @@ impl CanonicalTaskRuntimeStore {
             task_id,
             run_id: input.run_id.to_string(),
             plan_revision: u64::try_from(plan_revision)?,
+        })
+    }
+
+    pub fn begin_plan_run(&self, input: BeginPlanRunInput<'_>) -> Result<BegunReportRun> {
+        validate_nonempty("conversation_id", input.conversation_id, 512)?;
+        validate_nonempty("execution_session_id", input.execution_session_id, 512)?;
+        validate_nonempty("run_id", input.run_id, 512)?;
+        validate_digest("instruction_digest", input.instruction_digest)?;
+        validate_digest("plan_digest", input.plan_digest)?;
+        let task_id = stable_id("task", &["plan", input.conversation_id]);
+        let instruction_item_id = stable_id("item", &["instruction", &task_id, input.run_id]);
+        let plan_item_id = stable_id("item", &["plan", &task_id, input.run_id]);
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO canonical_tasks (
+                id, conversation_id, task_kind, initial_outcome_digest,
+                status, created_at, updated_at
+             ) VALUES (?1, ?2, 'plan', ?3, 'running', ?4, ?4)
+             ON CONFLICT(conversation_id) DO NOTHING",
+            params![
+                task_id,
+                input.conversation_id,
+                input.instruction_digest,
+                now
+            ],
+        )?;
+        let stored: (String, String, String) = tx.query_row(
+            "SELECT id, task_kind, initial_outcome_digest FROM canonical_tasks
+             WHERE conversation_id = ?1",
+            [input.conversation_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if stored.0 != task_id || stored.1 != "plan" || stored.2 != input.instruction_digest {
+            anyhow::bail!("canonical_plan_task_identity_conflict");
+        }
+        tx.execute(
+            "INSERT INTO canonical_task_runs (
+                task_id, run_id, execution_session_id, ordinal,
+                execution_facts_version, plan_revision, created_at
+             ) VALUES (?1, ?2, ?3, 1, 5, 1, ?4)
+             ON CONFLICT(run_id) DO NOTHING",
+            params![task_id, input.run_id, input.execution_session_id, now],
+        )?;
+        let membership: (String, String) = tx.query_row(
+            "SELECT task_id, execution_session_id FROM canonical_task_runs WHERE run_id = ?1",
+            [input.run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if membership.0 != task_id || membership.1 != input.execution_session_id {
+            anyhow::bail!("canonical_plan_run_membership_conflict");
+        }
+        ensure_completed_item(
+            &tx,
+            CompletedItemInput {
+                item_id: &instruction_item_id,
+                task_id: &task_id,
+                run_id: input.run_id,
+                kind: CanonicalTaskItemKind::Instruction,
+                summary_code: "plan_instruction_bound",
+                payload_digest: input.instruction_digest,
+                now: &now,
+            },
+        )?;
+        ensure_completed_item(
+            &tx,
+            CompletedItemInput {
+                item_id: &plan_item_id,
+                task_id: &task_id,
+                run_id: input.run_id,
+                kind: CanonicalTaskItemKind::Plan,
+                summary_code: "plan_draft_bound",
+                payload_digest: input.plan_digest,
+                now: &now,
+            },
+        )?;
+        tx.commit()?;
+        Ok(BegunReportRun {
+            task_id,
+            run_id: input.run_id.to_string(),
+            plan_revision: 1,
         })
     }
 
@@ -2851,6 +2996,45 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn canonical_plan_run_owns_instruction_and_plan_items_without_artifact() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let instruction_digest = digest_of("plan this week");
+        let plan_digest = digest_of("bounded plan steps");
+        let begun = store
+            .begin_plan_run(BeginPlanRunInput {
+                conversation_id: "conversation-plan",
+                execution_session_id: "task-session-plan",
+                run_id: "run-plan",
+                instruction_digest: &instruction_digest,
+                plan_digest: &plan_digest,
+            })
+            .unwrap();
+
+        let task = store.load_task(&begun.task_id).unwrap().unwrap();
+        assert_eq!(task.task_kind, "plan");
+        let items = store.list_items(&begun.task_id).unwrap();
+        assert_eq!(
+            items.iter().map(|item| item.kind).collect::<Vec<_>>(),
+            vec![
+                CanonicalTaskItemKind::Instruction,
+                CanonicalTaskItemKind::Plan
+            ]
+        );
+
+        let replay = store
+            .begin_plan_run(BeginPlanRunInput {
+                conversation_id: "conversation-plan",
+                execution_session_id: "task-session-plan",
+                run_id: "run-plan",
+                instruction_digest: &instruction_digest,
+                plan_digest: &plan_digest,
+            })
+            .unwrap();
+        assert_eq!(replay, begun);
+        assert_eq!(store.list_items(&begun.task_id).unwrap().len(), 2);
+    }
+
     fn prepare_artifact_with_facts(
         store: &CanonicalTaskRuntimeStore,
         conversation: &str,
@@ -3855,6 +4039,70 @@ mod tests {
             Some("proposal-1")
         );
         assert_eq!(reopened.run_count(&prepared.task_id).unwrap(), 1);
+    }
+
+    #[test]
+    fn v5_runtime_migrates_report_references_and_admits_canonical_plan_tasks() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task_runtime_v5.db");
+        let prepared = {
+            let store = CanonicalTaskRuntimeStore::new(&path).unwrap();
+            prepare_test_artifact(&store, "conversation-v5", "run-v5")
+        };
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys = OFF;
+             PRAGMA legacy_alter_table = ON;
+             ALTER TABLE canonical_tasks RENAME TO canonical_tasks_v6;
+             CREATE TABLE canonical_tasks (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL UNIQUE,
+                task_kind TEXT NOT NULL CHECK(task_kind = 'report'),
+                initial_outcome_digest TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN (
+                    'running', 'waiting_review', 'completed', 'blocked',
+                    'failed', 'effect_unknown'
+                )),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             INSERT INTO canonical_tasks SELECT * FROM canonical_tasks_v6;
+             DROP TABLE canonical_tasks_v6;
+             UPDATE canonical_task_runtime_metadata
+                SET value = '5' WHERE key = 'schema_version';
+             PRAGMA legacy_alter_table = OFF;
+             PRAGMA foreign_keys = ON;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let store = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        let report_snapshot = store
+            .list_task_snapshots(100)
+            .unwrap()
+            .into_iter()
+            .find(|snapshot| snapshot.task.id == prepared.task_id)
+            .expect("migrated report task");
+        assert_eq!(report_snapshot.task.task_kind, "report");
+        assert_eq!(report_snapshot.runs.len(), 1);
+        assert_eq!(
+            report_snapshot.artifacts[0].artifact.id,
+            prepared.artifact_id
+        );
+
+        let plan = store
+            .begin_plan_run(BeginPlanRunInput {
+                conversation_id: "conversation-plan-after-v5",
+                execution_session_id: "task-session-plan-after-v5",
+                run_id: "run-plan-after-v5",
+                instruction_digest: &digest_of("plan after migration"),
+                plan_digest: &digest_of("bounded plan after migration"),
+            })
+            .unwrap();
+        assert_eq!(
+            store.load_task(&plan.task_id).unwrap().unwrap().task_kind,
+            "plan"
+        );
     }
 
     #[test]

@@ -16,9 +16,9 @@ use openlife_core::agent::{
     AgentRunReviewRelationProjectionLane, AgentRunReviewRelationProjectionOutcome, AgentRunStatus,
     AgentRunStore, CanonicalWriteAdmission, CanonicalWriteAdmissionRequest, ContextSummary,
     DurableWriteRequest, HSBehaviorCheckSummary, HSSelectionAudit, MemoryLifecycleAcceptanceInput,
-    MemoryLifecycleStore, ModelRouteTrace, PlanExecuteSession, PlanExecuteSessionStatus,
-    ProposalStatus, ProposalStore, ProposalTerminalRelationKind, ProposalType, ReasoningTrace,
-    ReviewWorkflow, TerminalOwnerReviewOriginProof, TerminalOwnerReviewSubmission,
+    MemoryLifecycleStore, ModelRouteTrace, ProposalStatus, ProposalStore,
+    ProposalTerminalRelationKind, ProposalType, ReasoningTrace, ReviewWorkflow,
+    TerminalOwnerReviewOriginProof, TerminalOwnerReviewSubmission,
 };
 use openlife_core::persistence_outbox::CanonicalMutationReceipt;
 
@@ -2043,21 +2043,6 @@ fn load_live_agent_run(
     Ok(run)
 }
 
-async fn load_plan_execute_session(
-    state: &Arc<AppState>,
-    session_id: &str,
-) -> Result<PlanExecuteSession, String> {
-    state
-        .plan_execute_session_store
-        .as_ref()
-        .ok_or_else(|| "plan_execute_session_store_unavailable".to_string())?
-        .lock()
-        .await
-        .get_session(session_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "agent_run_review_projection_plan_session_missing".to_string())
-}
-
 fn review_owned_error(error: &AgentRunError) -> bool {
     matches!(
         error.phase.as_str(),
@@ -2276,21 +2261,6 @@ async fn project_canonical_review_lifecycle(
     run: &mut AgentRun,
     lane: AgentRunWriteLane,
 ) -> Result<(), String> {
-    let plan = if run.kind == openlife_core::agent::AgentTaskKind::Planning {
-        Some(load_plan_execute_session(state, &run.task_id).await?)
-    } else {
-        None
-    };
-    project_canonical_review_lifecycle_with_plan(state, store, run, lane, plan).await
-}
-
-async fn project_canonical_review_lifecycle_with_plan(
-    state: &Arc<AppState>,
-    store: &AgentRunStore,
-    run: &mut AgentRun,
-    lane: AgentRunWriteLane,
-    plan: Option<PlanExecuteSession>,
-) -> Result<(), String> {
     let counts = canonical_agent_run_review_counts(state, &run.generated_proposals).await?;
     let unresolved_action_count = unresolved_agent_run_action_count(state, &run.task_id).await?;
     let task_waiting_for_action_resume = if counts.confirmed_action_resume > 0 {
@@ -2313,9 +2283,6 @@ async fn project_canonical_review_lifecycle_with_plan(
         return Ok(());
     }
 
-    let plan_cancelled = plan
-        .as_ref()
-        .is_some_and(|session| session.status == PlanExecuteSessionStatus::Cancelled);
     if counts.effect_unknown() > 0 {
         if !has_exact_review_failure(
             store,
@@ -2423,9 +2390,6 @@ async fn project_canonical_review_lifecycle_with_plan(
                 .saturating_add(counts.failed_before_effect)
                 .saturating_add(usize::from(staging_failed)),
         );
-    } else if plan_cancelled {
-        run.cancel();
-        clear_review_owned_error(run);
     } else if counts.waiting > 0 {
         run.status = AgentRunStatus::WaitingPermission;
         run.finished_at = None;
@@ -2434,17 +2398,7 @@ async fn project_canonical_review_lifecycle_with_plan(
         }
     } else if counts.confirmed > 0 {
         debug_assert!(counts.terminal_without_unknown_or_waiting());
-        match plan.as_ref().map(|session| session.status) {
-            Some(PlanExecuteSessionStatus::Cancelled) => {
-                run.cancel();
-                run.finished_at = Some(terminal_review_projection_time(lane, counts)?);
-                clear_review_owned_error(run);
-            }
-            Some(status) if status != PlanExecuteSessionStatus::Completed => {
-                run.status = AgentRunStatus::Running;
-                run.finished_at = None;
-                clear_review_owned_error(run);
-            }
+        match () {
             _ if task_waiting_for_action_resume => {
                 // An accepted ActionResumePrerequisite grants only the exact
                 // continuation capability. The explicit replay owner below
@@ -2478,25 +2432,6 @@ async fn project_canonical_review_lifecycle_with_plan(
             run.cancel();
             run.finished_at = Some(terminal_review_projection_time(lane, counts)?);
             clear_review_owned_error(run);
-        }
-    } else if let Some(plan) = plan.as_ref() {
-        match plan.status {
-            PlanExecuteSessionStatus::Cancelled => run.cancel(),
-            PlanExecuteSessionStatus::Completed if unresolved_action_count == 0 => {
-                run.status = AgentRunStatus::Completed;
-                run.finished_at = Some(chrono::Utc::now());
-                clear_review_owned_error(run);
-            }
-            PlanExecuteSessionStatus::Completed => {
-                run.status = AgentRunStatus::WaitingPermission;
-                run.finished_at = None;
-                clear_review_owned_error(run);
-            }
-            _ => {
-                run.status = AgentRunStatus::Running;
-                run.finished_at = None;
-                clear_review_owned_error(run);
-            }
         }
     } else if run.error.as_ref().is_some_and(review_owned_error) {
         run.status = AgentRunStatus::Failed;
