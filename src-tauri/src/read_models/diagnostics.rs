@@ -284,4 +284,61 @@ mod tests {
             "ai.openlife.desktop"
         );
     }
+
+    #[tokio::test]
+    async fn product_diagnostics_reads_two_hundred_canonical_tasks_inside_controlled_budget() {
+        let state = crate::test_utils::test_app_state();
+        let identities = (0..200)
+            .map(|_| {
+                (
+                    uuid::Uuid::new_v4().to_string(),
+                    uuid::Uuid::new_v4().to_string(),
+                    uuid::Uuid::new_v4().to_string(),
+                    uuid::Uuid::new_v4().to_string(),
+                )
+            })
+            .collect::<Vec<_>>();
+        {
+            let conversations = state.conversation_store.as_ref().unwrap().lock().await;
+            for (ordinal, (conversation_id, _, _, _)) in identities.iter().enumerate() {
+                conversations
+                    .create_conversation(&conversation_id, &format!("Diagnostics {ordinal}"))
+                    .unwrap();
+            }
+        }
+        {
+            let tasks = state
+                .canonical_task_runtime_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await;
+            for (conversation_id, task_id, run_id, session_id) in &identities {
+                tasks
+                    .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                        task_id,
+                        conversation_id,
+                        run_id,
+                        execution_session_id: session_id,
+                        instruction_digest: &format!("sha256:{}", "2".repeat(64)),
+                        plan_digest: None,
+                        project_id: None,
+                        project_revision: None,
+                        scope_digest: None,
+                    })
+                    .unwrap();
+            }
+        }
+
+        let started = std::time::Instant::now();
+        let diagnostics = get_product_diagnostics_view_model_with_state(&state).await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(diagnostics.counts.conversation_count, Some(200));
+        assert_eq!(diagnostics.counts.task_count, Some(200));
+        assert!(
+            elapsed < std::time::Duration::from_millis(750),
+            "controlled ProductDiagnostics read exceeded 750ms: {elapsed:?}"
+        );
+    }
 }

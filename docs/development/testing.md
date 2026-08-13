@@ -102,3 +102,27 @@ not credited until a stable Developer ID/distribution identity is available.
 R0's measured exact-binary baseline on 2026-08-13 was 216.7 ms from launch to
 all protected execution stores open, 70,592 KiB RSS at that boundary, and zero
 observed network sockets. These are comparison measurements, not a release SLA.
+
+## Reconstruction golden matrix
+
+Run the controlled R8 reconstruction matrix with:
+
+```sh
+scripts/r8-golden-matrix.zsh
+```
+
+It covers the canonical Chat and Work runtimes, tool/document/Web behavior,
+steering, review and Artifact Undo contracts, restart/retry, bounded
+concurrency, background frontend behavior, independent personal-intelligence
+ports, and Product Diagnostics. The diagnostics row enforces a controlled
+750 ms ceiling for reading 200 canonical Conversations and Tasks. This is a
+regression budget for the test environment, not a native startup or UI SLA.
+
+The matrix also asserts bounded provider invocation counts inside the runtime
+tests: exact Chat/Work replay performs no second request and Web citation retry
+records each real attempt. It never estimates token price from text or upgrades
+a local HTTP adapter to external-live evidence.
+
+Passing this script is only controlled evidence. R8 still requires the exact
+signed bundle and purpose-specific native profile; external-live provider/Web
+checks remain separately gated through `scripts/live-eval.zsh`.
