@@ -348,6 +348,10 @@ pub struct TaskViewModelItem {
     #[serde(default)]
     pub pending_blockers: Vec<String>,
     #[serde(default)]
+    pub needs_attention: bool,
+    #[serde(default)]
+    pub attention_reason_codes: Vec<String>,
+    #[serde(default)]
     pub pending_review_item_refs: Vec<BackendEntityRef>,
     #[serde(default)]
     pub allowed_controls: Vec<TaskControl>,
@@ -364,6 +368,7 @@ pub struct TaskViewModelItem {
 #[serde(rename_all = "camelCase")]
 pub struct TasksViewModelSummary {
     pub total: usize,
+    pub needs_attention_count: usize,
     pub active_count: usize,
     pub waiting_review_count: usize,
     pub waiting_permission_count: usize,
@@ -575,6 +580,8 @@ pub struct TaskViewModelTaskInput {
     pub canonical_items: Vec<TaskItemViewModel>,
     pub canonical_artifacts: Vec<TaskArtifactViewModel>,
     pub pending_blockers: Vec<String>,
+    pub needs_attention: bool,
+    pub attention_reason_codes: Vec<String>,
     pub pending_review_item_refs: Vec<BackendEntityRef>,
     pub review_projection_authoritative: bool,
     pub allowed_control_ids: Vec<String>,
@@ -774,6 +781,8 @@ fn task_item_from_input(input: TaskViewModelTaskInput) -> TaskViewModelItem {
         items: input.canonical_items,
         artifacts: input.canonical_artifacts,
         pending_blockers: dedup_strings(input.pending_blockers),
+        needs_attention: input.needs_attention,
+        attention_reason_codes: dedup_strings(input.attention_reason_codes),
         pending_review_item_refs,
         allowed_controls: controls,
         next_recommended_control,
@@ -850,6 +859,8 @@ fn run_only_item(run: AgentRun) -> TaskViewModelItem {
         items: Vec::new(),
         artifacts: Vec::new(),
         pending_blockers: dedup_strings(pending_blockers),
+        needs_attention: false,
+        attention_reason_codes: Vec::new(),
         pending_review_item_refs: Vec::new(),
         allowed_controls: vec![
             TaskControl::new(
@@ -1108,6 +1119,9 @@ fn summarize_tasks(items: &[TaskViewModelItem]) -> TasksViewModelSummary {
         ..Default::default()
     };
     for item in items {
+        if item.needs_attention {
+            summary.needs_attention_count += 1;
+        }
         *summary
             .by_lifecycle_status
             .entry(item.lifecycle_status.as_str().into())

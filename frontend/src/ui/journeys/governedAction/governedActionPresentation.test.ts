@@ -138,6 +138,7 @@ function snapshot(status: ViewModelEnvelope<unknown>["status"] = "ready"): Gover
         items: [activeTask()],
         summary: {
           total: 1,
+          needsAttentionCount: 0,
           activeCount: 1,
           waitingReviewCount: 0,
           waitingPermissionCount: 1,

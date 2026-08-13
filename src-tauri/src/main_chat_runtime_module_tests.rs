@@ -289,6 +289,7 @@ fn canonical_work_release_surface_has_no_legacy_task_control_or_runtime_fallback
         "resume_main_chat_agent_task,",
         "cancel_main_chat_agent_task,",
         "retry_main_chat_agent_action,",
+        "accept_proposal_and_continue,",
     ] {
         assert!(
             !lib.contains(retired_command),
@@ -305,12 +306,17 @@ fn canonical_work_release_surface_has_no_legacy_task_control_or_runtime_fallback
         "resume_main_chat_agent_task",
         "cancel_main_chat_agent_task",
         "retry_main_chat_agent_action",
+        "acceptProposalAndContinue",
     ] {
         assert!(
             !frontend.contains(retired_command),
             "frontend must not invoke retired TaskSession command {retired_command}"
         );
     }
+    assert!(
+        lib.contains("#[cfg(test)]\npub(crate) mod main_chat_task_controls;"),
+        "legacy TaskSession controls must compile only as compatibility tests"
+    );
     for relative in ["src/main_chat_send.rs", "src/main_chat_streaming.rs"] {
         let source = std::fs::read_to_string(root.join(relative)).expect("read Work entrypoint");
         let canonical = source.split("canonical_work").skip(1).collect::<String>();

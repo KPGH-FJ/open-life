@@ -98,24 +98,36 @@ It also contains typed Steering Items and a monotonic plan
 revision. Workspace submits authenticated steering while work is active.
 Conversation remains the only body owner; `CanonicalTaskRuntimeStore` keeps the
 exact message reference and digests. One pending in-scope Steering Item is
-consumed exactly once before the next report provider generation and survives
+consumed exactly once before the Work provider-generation checkpoint and survives
 restart. Steering that asks for a new workspace, provider, network route, tool,
 destructive action, or other scope is recorded blocked and grants nothing. The
-process also bounds independent Main Chat executions before any message or task
+process bounds independent Work executions before any message or Task
 persistence, while the cancellation registry retains one execution owner per
-task.
+Task. Once provider generation has started, late steering is rejected instead
+of being displayed as if it could still change that Run.
 
-Review approval can use one inline approve-and-continue command. The backend
-first proves acceptance and, when required, materialization; it then reloads
-task truth and resumes only when the existing control owner says the same task
-is resumable. Approval, effect confirmation, and continuation remain separate
-facts even though the product presents one action.
+Projects are canonical Conversation groupings with an optional workspace root,
+monotonic revision, and exact scope digest. A Work Run snapshots Project id,
+revision, and digest at admission. Moving a Conversation or changing that scope
+does not rewrite historical Runs; retry fails closed with a `scope_stale`
+attention fact until the user starts work under the current scope. Multiple
+Work Runs can continue in the background up to the bounded global admission
+limit while the user opens another Conversation.
+
+Review approval addresses the exact Proposal and effect. For canonical Work
+Artifacts, confirmed materialization projects back into the same Task, Run,
+ArtifactVersion, and FinalResult. There is no release
+`accept_proposal_and_continue` or compatibility TaskSession-resume command.
+Approval, effect confirmation, and canonical completion remain separate facts
+even though the product can present one decision.
 
 The backend-owned `TasksViewModel` and `WorkspaceViewModel` now read canonical
 Task snapshots directly. They project Work and report Run membership, typed
 Items, attempts, FinalResult, Artifact versions, Review wait, rejection,
 verified delivery, and effect-unknown states. They do not overlay TaskSession
 or AgentRun state. Current Work controls use canonical cancel and retry IPCs.
+Unresolved review, blocked, failed, effect-unknown, and stale-scope facts are
+projected as backend-owned Needs Attention state rather than inferred by React.
 
 The canonical Artifact path adds backend-owned Result, Change, Preview,
 Verification, and Undo projections to each Work ArtifactVersion. A pending

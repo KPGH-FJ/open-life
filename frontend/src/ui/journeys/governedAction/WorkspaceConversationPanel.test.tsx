@@ -6,6 +6,8 @@ import { WorkspaceConversationPanel } from "./WorkspaceConversationPanel";
 function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationController {
   return {
     sessions: [],
+    projects: [],
+    selectedProjectId: null,
     selectedSessionId: null,
     messages: [],
     draft: "",
@@ -58,6 +60,8 @@ function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationContr
     reload: vi.fn().mockResolvedValue(true),
     selectSession: vi.fn(),
     startNewConversation: vi.fn(),
+    createProject: vi.fn().mockResolvedValue(true),
+    assignProject: vi.fn().mockResolvedValue(true),
     setDraft: vi.fn(),
     setMode: vi.fn(),
     attachResources: vi.fn().mockResolvedValue(true),
@@ -141,7 +145,7 @@ describe("WorkspaceConversationPanel Markdown Memory", () => {
     expect(screen.queryByText("本轮按限定资料回答")).not.toBeInTheDocument();
   });
 
-  it("keeps the composer visible while canonical Chat offers stop instead of task steering", () => {
+  it("keeps the composer visible while Work offers steering and stop", () => {
     const controller = controllerWhileMarkdownMemoryIsSubmitting();
     controller.draft = "把风险结论放在最前面";
     controller.activeTaskSessionId = "task-steer";
@@ -156,7 +160,7 @@ describe("WorkspaceConversationPanel Markdown Memory", () => {
     render(<WorkspaceConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
 
     expect(screen.getByPlaceholderText("告诉 OpenLife 你现在要处理什么")).toBeEnabled();
-    expect(screen.queryByRole("button", { name: "调整当前任务" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "追加指令" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "停止回复" })).toBeEnabled();
   });
 });

@@ -340,6 +340,13 @@ async fn canonical_task_input(
         "plan" => "Plan",
         _ => "Work task",
     };
+    let attention_reason_codes = snapshot
+        .attention
+        .iter()
+        .filter(|attention| attention.resolved_at.is_none())
+        .map(|attention| attention.reason_code.clone())
+        .collect::<Vec<_>>();
+    let needs_attention = !attention_reason_codes.is_empty();
     (
         TaskViewModelTaskInput {
             task_session_id: snapshot.task.id.clone(),
@@ -357,6 +364,8 @@ async fn canonical_task_input(
             canonical_items,
             canonical_artifacts,
             pending_blockers: blockers,
+            needs_attention,
+            attention_reason_codes,
             pending_review_item_refs,
             review_projection_authoritative,
             allowed_control_ids: match snapshot.task.status {
@@ -1241,6 +1250,9 @@ mod tests {
                     Sha256::digest(b"artifact view outcome")
                 ),
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         let prepared = state

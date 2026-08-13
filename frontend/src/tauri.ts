@@ -720,6 +720,7 @@ export interface StreamMessageStartPayload {
   operation_id: string;
   conversation_id?: string;
   turn_id?: string;
+  task_id?: string;
   task_session_id?: string;
   run_id?: string;
   status?: MainChatTurnStatus;
@@ -739,6 +740,7 @@ export interface StreamMessageChunkPayload {
   operation_id: string;
   conversation_id?: string;
   turn_id?: string;
+  task_id?: string;
   task_session_id?: string;
   run_id?: string;
   request_id?: string;
@@ -750,6 +752,7 @@ export interface StreamMessageDonePayload {
   operation_id: string;
   conversation_id?: string;
   turn_id?: string;
+  task_id?: string;
   task_session_id?: string;
   run_id?: string;
   reply: string;
@@ -1451,7 +1454,7 @@ export interface SubmitMainChatSteeringResponse {
 
 export async function submitMainChatTaskSteering(request: {
   steeringId: string;
-  taskSessionId: string;
+  taskId: string;
   runId: string;
   sessionId: string;
   content: string;
@@ -2825,6 +2828,8 @@ export type TaskViewModelItem = {
   items: TaskItemViewModel[];
   artifacts: TaskArtifactViewModel[];
   pendingBlockers: string[];
+  needsAttention?: boolean;
+  attentionReasonCodes?: string[];
   pendingReviewItemRefs: BackendEntityRef[];
   allowedControls: TaskControl[];
   nextRecommendedControl: string;
@@ -2835,6 +2840,7 @@ export type TaskViewModelItem = {
 
 export type TasksViewModelSummary = {
   total: number;
+  needsAttentionCount: number;
   activeCount: number;
   waitingReviewCount: number;
   waitingPermissionCount: number;
@@ -3662,9 +3668,20 @@ export interface ProviderProfileViewModel {
   selected: boolean;
 }
 
+export interface ProjectRecord {
+  id: string;
+  name: string;
+  workspaceRoot?: string;
+  revision: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export interface ConversationViewModel {
   status: "ready" | "empty";
   conversations: ChatSession[];
+  projects: ProjectRecord[];
+  selectedProjectId: string | null;
   selectedConversationId: string | null;
   messages: ChatMessage[];
   latestTurn: ConversationTurnViewModel | null;
@@ -3686,6 +3703,26 @@ export async function getConversationViewModel(
 
 export async function createChatSession(sessionId: string, title: string): Promise<void> {
   return safeInvoke("create_chat_session", { ...sessionArgs(sessionId), title });
+}
+
+export async function createProject(projectId: string, name: string): Promise<ProjectRecord> {
+  return safeInvoke<ProjectRecord>("create_project", {
+    projectId,
+    project_id: projectId,
+    name,
+  });
+}
+
+export async function assignConversationProject(
+  conversationId: string,
+  projectId: string | null
+): Promise<void> {
+  return safeInvoke("assign_conversation_project", {
+    conversationId,
+    conversation_id: conversationId,
+    projectId,
+    project_id: projectId,
+  });
 }
 
 export async function renameChatSession(sessionId: string, title: string): Promise<void> {
@@ -4601,24 +4638,6 @@ export type AcceptProposalResult = ConfirmedAcceptProposalResult | DeferredAccep
 
 export async function acceptProposal(proposalId: string): Promise<AcceptProposalResult> {
   return safeInvoke("accept_proposal", { proposalId, proposal_id: proposalId });
-}
-
-export interface AcceptProposalAndContinueResult {
-  acceptance: AcceptProposalResult;
-  taskState?: MainChatAgentTaskState;
-  continuedSameRun: boolean;
-}
-
-export async function acceptProposalAndContinue(
-  proposalId: string,
-  taskSessionId: string
-): Promise<AcceptProposalAndContinueResult> {
-  return safeInvoke<AcceptProposalAndContinueResult>("accept_proposal_and_continue", {
-    proposalId,
-    proposal_id: proposalId,
-    taskSessionId,
-    task_session_id: taskSessionId,
-  });
 }
 
 export async function rollbackMemoryAsset(

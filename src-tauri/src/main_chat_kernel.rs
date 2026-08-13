@@ -2806,7 +2806,10 @@ where
     .with_canonical_run_id(canonical_run_id)
     .with_canonical_steering_sources(
         state.canonical_task_runtime_store.clone(),
-        Arc::clone(&state.memory_store),
+        state
+            .conversation_store
+            .clone()
+            .ok_or_else(|| "conversation_store_unavailable".to_string())?,
     )
     .with_replayed_read_observations(replayed_read_observations)
     .with_read_tool_executor(Arc::new(AppStateMainChatReadToolExecutor::new(
@@ -6000,7 +6003,8 @@ pub struct MainChatKernel<C = SchedulerMainChatModelClient> {
     canonical_run_id: Option<String>,
     canonical_task_store:
         Option<Arc<tokio::sync::Mutex<openlife_core::task_runtime::CanonicalTaskRuntimeStore>>>,
-    memory_store: Option<Arc<tokio::sync::Mutex<openlife_core::memory::MemoryStore>>>,
+    conversation_store:
+        Option<Arc<tokio::sync::Mutex<openlife_core::conversation::ConversationStore>>>,
     replayed_read_observations: Vec<MainChatReplayedReadObservation>,
 }
 
@@ -6022,14 +6026,14 @@ impl<C> MainChatKernel<C>
 where
     C: MainChatModelClient,
 {
-    async fn consume_report_steering_at_provider_checkpoint(
+    async fn consume_work_steering_at_provider_checkpoint(
         &self,
         session_id: &str,
         system_prompt: &mut String,
     ) -> Result<(), String> {
-        let (Some(task_store), Some(memory_store), Some(run_id)) = (
+        let (Some(task_store), Some(conversation_store), Some(run_id)) = (
             self.canonical_task_store.as_ref(),
-            self.memory_store.as_ref(),
+            self.conversation_store.as_ref(),
             self.canonical_run_id.as_deref(),
         ) else {
             return Ok(());
@@ -6037,7 +6041,7 @@ where
         let task_id = task_store
             .lock()
             .await
-            .resolve_report_task_id_for_conversation(session_id, run_id)
+            .resolve_general_task_id_for_conversation(session_id, run_id)
             .map_err(|error| format!("load steering task failed: {error}"))?;
         let Some(task_id) = task_id else {
             return Ok(());
@@ -6045,13 +6049,13 @@ where
         let pending = task_store
             .lock()
             .await
-            .consume_pending_report_steering(&task_id, run_id)
-            .map_err(|error| format!("consume report steering failed: {error}"))?;
+            .consume_pending_steering(&task_id, run_id)
+            .map_err(|error| format!("consume Work steering failed: {error}"))?;
         let mut steering = task_store
             .lock()
             .await
-            .list_consumed_report_steering(&task_id, run_id)
-            .map_err(|error| format!("load consumed report steering failed: {error}"))?;
+            .list_consumed_steering(&task_id, run_id)
+            .map_err(|error| format!("load consumed Work steering failed: {error}"))?;
         if let Some(pending) = pending {
             if !steering
                 .iter()
@@ -6067,17 +6071,28 @@ where
             "\n\nThe authenticated user added this in-scope constraint before provider generation. Apply it without expanding tools, data routes, workspace scope, or side-effect authority:\n",
         );
         for record in steering {
-            let message = memory_store
+            let item_id = record
+                .source_message_ref
+                .rsplit_once("/item/")
+                .map(|(_, item_id)| item_id)
+                .ok_or_else(|| "canonical_steering_source_ref_invalid".to_string())?;
+            let message = conversation_store
                 .lock()
                 .await
-                .load_active_conversation_message_by_ref(&record.source_message_ref)
+                .get_item(item_id)
                 .map_err(|error| format!("load steering body failed: {error}"))?
-                .filter(|message| message.role == "user")
-                .ok_or_else(|| "canonical_report_steering_source_missing".to_string())?;
+                .filter(|message| {
+                    message.kind == openlife_core::conversation::ConversationItemKind::UserSteering
+                        && message.conversation_id == session_id
+                        && record
+                            .source_message_ref
+                            .contains(&format!("/turn/{}/item/{}", message.turn_id, message.id))
+                })
+                .ok_or_else(|| "canonical_steering_source_missing".to_string())?;
             if openlife_core::agent::metadata_safe_text_digest(&message.content).1
                 != record.steering_digest
             {
-                return Err("canonical_report_steering_source_digest_drift".into());
+                return Err("canonical_steering_source_digest_drift".into());
             }
             system_prompt.push_str("- ");
             system_prompt.push_str(&bounded_text(&message.content, 4_000));
@@ -6093,7 +6108,7 @@ where
             read_tool_executor: None,
             canonical_run_id: None,
             canonical_task_store: None,
-            memory_store: None,
+            conversation_store: None,
             replayed_read_observations: Vec::new(),
         }
     }
@@ -6122,10 +6137,10 @@ where
         task_store: Option<
             Arc<tokio::sync::Mutex<openlife_core::task_runtime::CanonicalTaskRuntimeStore>>,
         >,
-        memory_store: Arc<tokio::sync::Mutex<openlife_core::memory::MemoryStore>>,
+        conversation_store: Arc<tokio::sync::Mutex<openlife_core::conversation::ConversationStore>>,
     ) -> Self {
         self.canonical_task_store = task_store;
-        self.memory_store = Some(memory_store);
+        self.conversation_store = Some(conversation_store);
         self
     }
 
@@ -6892,8 +6907,16 @@ where
             .task_session_id
             .clone()
             .unwrap_or_else(|| input.session_id.clone());
+        let conversation_store = state.conversation_store.clone();
         self.clone_for_canonical_work()
             .with_canonical_run_id(canonical_run_id)
+            .with_canonical_steering_sources(
+                state.canonical_task_runtime_store.clone(),
+                match conversation_store {
+                    Some(store) => store,
+                    None => return self.blocked("conversation_store_unavailable", event_sink),
+                },
+            )
             .with_read_tool_executor(Arc::new(AppStateMainChatReadToolExecutor::new(
                 state,
                 execution_epoch,
@@ -6915,7 +6938,7 @@ where
             read_tool_executor: None,
             canonical_run_id: None,
             canonical_task_store: self.canonical_task_store.clone(),
-            memory_store: self.memory_store.clone(),
+            conversation_store: self.conversation_store.clone(),
             replayed_read_observations: Vec::new(),
         }
     }
@@ -8031,7 +8054,7 @@ where
             None => (None, Vec::new()),
         };
         if let Err(code) = self
-            .consume_report_steering_at_provider_checkpoint(&input.session_id, &mut system_prompt)
+            .consume_work_steering_at_provider_checkpoint(&input.session_id, &mut system_prompt)
             .await
         {
             event_sink.emit(MainChatKernelEvent::Blocker { code: code.clone() });

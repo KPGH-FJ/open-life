@@ -4334,113 +4334,6 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
     Ok(response)
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AcceptProposalAndContinueResponse {
-    pub acceptance: AcceptProposalResponse,
-    pub task_state: Option<crate::main_chat_task_controls::MainChatAgentTaskState>,
-    pub continued_same_run: bool,
-}
-
-pub(crate) async fn ensure_proposal_task_owner(
-    state: &Arc<AppState>,
-    proposal_id: &str,
-    task_session_id: &str,
-) -> Result<(), String> {
-    if task_session_id.trim().is_empty() {
-        return Err("accept_proposal_and_continue_task_missing".to_string());
-    }
-    let origin = {
-        let store = state
-            .proposal_store
-            .as_ref()
-            .ok_or_else(proposal_store_missing)?
-            .lock()
-            .await;
-        store
-            .terminal_owner_origin_binding(proposal_id)
-            .map_err(|error| error.to_string())?
-    }
-    .ok_or_else(|| "accept_proposal_and_continue_owner_missing".to_string())?;
-    if origin.task_session_id() != task_session_id {
-        return Err("accept_proposal_and_continue_owner_mismatch".to_string());
-    }
-    Ok(())
-}
-
-#[tauri::command]
-pub(crate) async fn accept_proposal_and_continue(
-    proposal_id: String,
-    task_session_id: String,
-    window: tauri::WebviewWindow,
-    state: State<'_, Arc<AppState>>,
-) -> Result<AcceptProposalAndContinueResponse, String> {
-    ensure_proposal_task_owner(state.inner(), &proposal_id, &task_session_id).await?;
-    let proposal = get_proposal_with_state(state.inner(), &proposal_id).await?;
-    let mut expected_native_confirmation_digest = None;
-    if proposal_requires_native_confirmation(&proposal)
-        && proposal_may_dispatch_effect(state.inner(), &proposal).await?
-    {
-        ensure_pending_or_postponed(&proposal)?;
-        validate_proposal_for_acceptance(&proposal)?;
-        let snapshot_digest = proposal_native_confirmation_digest(&proposal);
-        let affected_path_digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
-            &serde_json::json!({ "affected_path": proposal.affected_path }),
-        )
-        .1;
-        require_native_danger_action_confirmation(
-            &window,
-            NativeDangerActionRequest {
-                action_type: "proposal_accept",
-                target_ids_for_new_challenge: std::slice::from_ref(&proposal_id),
-                requested_target: Some(proposal_id.as_str()),
-                affected_count: 1,
-                arguments: &serde_json::json!({
-                    "proposal_snapshot_digest": snapshot_digest.clone(),
-                    "proposal_type": proposal.proposal_type,
-                    "risk_level": proposal.risk_level,
-                    "affected_path_digest": affected_path_digest,
-                }),
-                arguments_summary: "接受当前任务的精确 Review checkpoint 并继续同一任务。",
-                scope_summary: "仅恢复这个 proposal 绑定的同一 Task/Run；不扩大权限。",
-                challenge_id: None,
-            },
-        )
-        .await
-        .map_err(|error| error.to_string())?;
-        expected_native_confirmation_digest = Some(snapshot_digest);
-    }
-    let acceptance_value = accept_proposal_with_state_and_confirmation(
-        proposal_id,
-        state.inner(),
-        expected_native_confirmation_digest.as_deref(),
-    )
-    .await?;
-    let acceptance = typed_accept_proposal_response(acceptance_value)?;
-    let current = crate::main_chat_task_controls::load_main_chat_agent_task_state(
-        &task_session_id,
-        state.inner(),
-    )
-    .await?;
-    let should_resume = acceptance.success && current.can_resume;
-    let task_state = if should_resume {
-        Some(
-            crate::main_chat_task_controls::resume_main_chat_agent_task_with_state(
-                &task_session_id,
-                state.inner(),
-            )
-            .await?,
-        )
-    } else {
-        Some(current)
-    };
-    Ok(AcceptProposalAndContinueResponse {
-        acceptance,
-        task_state,
-        continued_same_run: should_resume,
-    })
-}
-
 fn proposal_type_resolves_main_chat_review_blocker(proposal_type: ProposalType) -> bool {
     matches!(
         proposal_type,
@@ -7620,6 +7513,9 @@ mod tests {
                     Sha256::digest(b"canonical Work artifact outcome")
                 ),
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         let prepared = runtime
@@ -7750,6 +7646,9 @@ mod tests {
                 execution_session_id: "turn-undo",
                 instruction_digest: &format!("sha256:{:x}", Sha256::digest(b"create file")),
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         let prepared = runtime
@@ -7933,6 +7832,9 @@ mod tests {
                     Sha256::digest(b"reject canonical Work artifact")
                 ),
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         let prepared = runtime

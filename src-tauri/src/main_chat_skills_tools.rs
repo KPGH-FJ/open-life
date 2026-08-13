@@ -1006,6 +1006,9 @@ mod tests {
                 execution_session_id: &turn_id,
                 instruction_digest: &format!("sha256:{}", "1".repeat(64)),
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         store

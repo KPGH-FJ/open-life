@@ -12,7 +12,18 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRecord {
+    pub id: String,
+    pub name: String,
+    pub workspace_root: Option<String>,
+    pub revision: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -68,6 +79,7 @@ impl TurnStatus {
 #[serde(rename_all = "snake_case")]
 pub enum ConversationItemKind {
     UserMessage,
+    UserSteering,
     AssistantMessage,
     SystemNotice,
 }
@@ -76,6 +88,7 @@ impl ConversationItemKind {
     fn from_db(value: &str) -> Result<Self> {
         match value {
             "user_message" => Ok(Self::UserMessage),
+            "user_steering" => Ok(Self::UserSteering),
             "assistant_message" => Ok(Self::AssistantMessage),
             "system_notice" => Ok(Self::SystemNotice),
             _ => anyhow::bail!("conversation_item_kind_invalid:{value}"),
@@ -88,6 +101,7 @@ impl ConversationItemKind {
 pub struct ConversationRecord {
     pub id: String,
     pub title: String,
+    pub project_id: Option<String>,
     pub selected_skill_id: Option<String>,
     pub status: ConversationStatus,
     pub created_at: DateTime<Utc>,
@@ -203,6 +217,12 @@ pub struct BeginChatTurn<'a> {
     pub provider: &'a ProviderBinding,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AppendedWorkSteering {
+    pub item: ConversationItemRecord,
+    pub replayed: bool,
+}
+
 #[derive(Clone)]
 pub struct ConversationStore {
     conn: Arc<Mutex<Connection>>,
@@ -237,7 +257,12 @@ impl ConversationStore {
         let conn = crate::sqlite_migration::open_existing_read_only(
             path,
             "conversation_store",
-            &["conversations", "conversation_turns", "conversation_items"],
+            &[
+                "projects",
+                "conversations",
+                "conversation_turns",
+                "conversation_items",
+            ],
         )?;
         Self::validate_schema(&conn)?;
         Ok(Self {
@@ -257,20 +282,30 @@ impl ConversationStore {
     }
 
     fn initialize(&self) -> Result<()> {
-        let conn = self.lock_conn()?;
+        let mut conn = self.lock_conn()?;
         conn.execute_batch(
             "PRAGMA foreign_keys=ON;
              PRAGMA journal_mode=WAL;
              CREATE TABLE IF NOT EXISTS conversation_store_metadata (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
              ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS projects (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                workspace_root TEXT,
+                revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
+                project_id TEXT,
                 selected_skill_id TEXT,
                 status TEXT NOT NULL CHECK(status IN ('active','archived')),
                 created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT
              );
              CREATE TABLE IF NOT EXISTS conversation_turns (
                 id TEXT PRIMARY KEY,
@@ -300,34 +335,111 @@ impl ConversationStore {
                 turn_id TEXT NOT NULL,
                 sequence INTEGER NOT NULL CHECK(sequence > 0),
                 kind TEXT NOT NULL CHECK(kind IN (
-                    'user_message','assistant_message','system_notice'
+                    'user_message','user_steering','assistant_message','system_notice'
                 )),
                 content TEXT NOT NULL,
                 content_digest TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 UNIQUE(conversation_id, sequence),
-                UNIQUE(turn_id, kind),
                 FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
                 FOREIGN KEY(turn_id) REFERENCES conversation_turns(id) ON DELETE CASCADE
              );
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turn_user_message
+                ON conversation_items(turn_id) WHERE kind='user_message';
+             CREATE UNIQUE INDEX IF NOT EXISTS idx_conversation_turn_assistant_message
+                ON conversation_items(turn_id) WHERE kind='assistant_message';
              CREATE INDEX IF NOT EXISTS idx_conversation_items_turn
                 ON conversation_items(turn_id, sequence);
              INSERT INTO conversation_store_metadata(key,value)
-             VALUES('schema_version','1') ON CONFLICT(key) DO NOTHING;",
+             VALUES('schema_version','2') ON CONFLICT(key) DO NOTHING;",
         )?;
+        if Self::schema_version(&conn)? == 1 {
+            Self::migrate_v1_to_v2(&mut conn)?;
+        }
         Self::validate_schema(&conn)
     }
 
-    fn validate_schema(conn: &Connection) -> Result<()> {
-        let version = conn
-            .query_row(
-                "SELECT value FROM conversation_store_metadata WHERE key='schema_version'",
+    fn schema_version(conn: &Connection) -> Result<i64> {
+        conn.query_row(
+            "SELECT value FROM conversation_store_metadata WHERE key='schema_version'",
+            [],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .context("conversation_store_schema_version_missing")?
+        .parse::<i64>()
+        .context("conversation_store_schema_version_invalid")
+    }
+
+    fn migrate_v1_to_v2(conn: &mut Connection) -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;")?;
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    workspace_root TEXT,
+                    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 ALTER TABLE conversations ADD COLUMN project_id TEXT
+                    REFERENCES projects(id) ON DELETE RESTRICT;
+                 DROP INDEX IF EXISTS idx_conversation_turn_user_message;
+                 DROP INDEX IF EXISTS idx_conversation_turn_assistant_message;
+                 DROP INDEX IF EXISTS idx_conversation_items_turn;
+                 ALTER TABLE conversation_items RENAME TO conversation_items_v1;
+                 CREATE TABLE conversation_items (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK(sequence > 0),
+                    kind TEXT NOT NULL CHECK(kind IN (
+                        'user_message','user_steering','assistant_message','system_notice'
+                    )),
+                    content TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(conversation_id, sequence),
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+                    FOREIGN KEY(turn_id) REFERENCES conversation_turns(id) ON DELETE CASCADE
+                 );
+                 INSERT INTO conversation_items SELECT * FROM conversation_items_v1;
+                 DROP TABLE conversation_items_v1;
+                 CREATE UNIQUE INDEX idx_conversation_turn_user_message
+                    ON conversation_items(turn_id) WHERE kind='user_message';
+                 CREATE UNIQUE INDEX idx_conversation_turn_assistant_message
+                    ON conversation_items(turn_id) WHERE kind='assistant_message';
+                 CREATE INDEX idx_conversation_items_turn
+                    ON conversation_items(turn_id, sequence);",
+            )?;
+            let changed = tx.execute(
+                "UPDATE conversation_store_metadata SET value='2'
+                 WHERE key='schema_version' AND value='1'",
                 [],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .context("conversation_store_schema_version_missing")?
-            .parse::<i64>()?;
+            )?;
+            if changed != 1 {
+                anyhow::bail!("conversation_store_v1_migration_version_conflict");
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        let restore = conn.execute_batch("PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;");
+        migration?;
+        restore?;
+        let violation = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_row([], |_| Ok(()))
+            .optional()?;
+        if violation.is_some() {
+            anyhow::bail!("conversation_store_v1_migration_foreign_key_violation");
+        }
+        Ok(())
+    }
+
+    fn validate_schema(conn: &Connection) -> Result<()> {
+        let version = Self::schema_version(conn)?;
         if version != SCHEMA_VERSION {
             anyhow::bail!("conversation_store_schema_version_unsupported:{version}");
         }
@@ -349,6 +461,113 @@ impl ConversationStore {
             .context("conversation_create_missing")
     }
 
+    pub fn create_project(
+        &self,
+        id: &str,
+        name: &str,
+        workspace_root: Option<&str>,
+    ) -> Result<ProjectRecord> {
+        validate_uuid("project_id", id)?;
+        validate_label("project_name", name, 512)?;
+        if let Some(root) = workspace_root {
+            validate_label("project_workspace_root", root, 4096)?;
+        }
+        let now = Utc::now().to_rfc3339();
+        self.lock_conn()?.execute(
+            "INSERT INTO projects(id,name,workspace_root,revision,created_at,updated_at)
+             VALUES(?1,?2,?3,1,?4,?4)",
+            params![id, name.trim(), workspace_root, now],
+        )?;
+        self.get_project(id)?.context("project_create_missing")
+    }
+
+    pub fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
+        self.lock_conn()?
+            .query_row(
+                "SELECT id,name,workspace_root,revision,created_at,updated_at
+                 FROM projects WHERE id=?1",
+                [id],
+                project_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    pub fn project_scope_digest(project: &ProjectRecord) -> String {
+        content_digest(&format!(
+            "{}\0{}\0{}\0{}",
+            project.id,
+            project.name,
+            project.workspace_root.as_deref().unwrap_or(""),
+            project.revision
+        ))
+    }
+
+    pub fn list_projects(&self, limit: usize) -> Result<Vec<ProjectRecord>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id,name,workspace_root,revision,created_at,updated_at
+             FROM projects ORDER BY updated_at DESC,id DESC LIMIT ?1",
+        )?;
+        let projects = statement
+            .query_map([limit.clamp(1, 500) as i64], project_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(anyhow::Error::from)?;
+        Ok(projects)
+    }
+
+    pub fn assign_conversation_project(
+        &self,
+        conversation_id: &str,
+        project_id: Option<&str>,
+    ) -> Result<()> {
+        validate_uuid("conversation_id", conversation_id)?;
+        if let Some(project_id) = project_id {
+            validate_uuid("project_id", project_id)?;
+        }
+        let changed = self.lock_conn()?.execute(
+            "UPDATE conversations SET project_id=?2,updated_at=?3
+             WHERE id=?1 AND status='active'
+               AND NOT EXISTS (
+                   SELECT 1 FROM conversation_turns turn
+                   WHERE turn.conversation_id=?1 AND turn.status='running'
+               )",
+            params![conversation_id, project_id, Utc::now().to_rfc3339()],
+        )?;
+        require_one(changed, "conversation_project_assignment_unavailable")
+    }
+
+    pub fn update_project_scope(
+        &self,
+        project_id: &str,
+        name: &str,
+        workspace_root: Option<&str>,
+        expected_revision: u64,
+    ) -> Result<ProjectRecord> {
+        validate_uuid("project_id", project_id)?;
+        validate_label("project_name", name, 512)?;
+        if let Some(root) = workspace_root {
+            validate_label("project_workspace_root", root, 4096)?;
+        }
+        if expected_revision == 0 {
+            anyhow::bail!("project_revision_invalid");
+        }
+        let changed = self.lock_conn()?.execute(
+            "UPDATE projects SET name=?2,workspace_root=?3,revision=revision+1,updated_at=?4
+             WHERE id=?1 AND revision=?5",
+            params![
+                project_id,
+                name.trim(),
+                workspace_root,
+                Utc::now().to_rfc3339(),
+                i64::try_from(expected_revision)?
+            ],
+        )?;
+        require_one(changed, "project_scope_revision_conflict")?;
+        self.get_project(project_id)?
+            .context("project_update_missing")
+    }
+
     pub fn list_conversations(
         &self,
         include_archived: bool,
@@ -357,7 +576,7 @@ impl ConversationStore {
         let limit = limit.clamp(1, 500) as i64;
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id,title,selected_skill_id,status,created_at,updated_at
+            "SELECT id,title,project_id,selected_skill_id,status,created_at,updated_at
              FROM conversations WHERE (?1=1 OR status='active')
              ORDER BY updated_at DESC,id DESC LIMIT ?2",
         )?;
@@ -371,7 +590,7 @@ impl ConversationStore {
     pub fn get_conversation(&self, id: &str) -> Result<Option<ConversationRecord>> {
         let conn = self.lock_conn()?;
         conn.query_row(
-            "SELECT id,title,selected_skill_id,status,created_at,updated_at
+            "SELECT id,title,project_id,selected_skill_id,status,created_at,updated_at
              FROM conversations WHERE id=?1",
             [id],
             conversation_from_row,
@@ -520,6 +739,95 @@ impl ConversationStore {
         })
     }
 
+    pub fn append_work_steering(
+        &self,
+        steering_id: &str,
+        conversation_id: &str,
+        turn_id: &str,
+        content: &str,
+    ) -> Result<AppendedWorkSteering> {
+        validate_uuid("steering_id", steering_id)?;
+        validate_uuid("conversation_id", conversation_id)?;
+        validate_uuid("turn_id", turn_id)?;
+        validate_content("steering_content", content)?;
+        let item_id = stable_id("item", &[turn_id, "steering", steering_id]);
+        let steering_digest = content_digest(content);
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(existing) = tx
+            .query_row(
+                "SELECT id,conversation_id,turn_id,sequence,kind,content,content_digest,created_at
+                 FROM conversation_items WHERE id=?1",
+                [&item_id],
+                item_from_row,
+            )
+            .optional()?
+        {
+            if existing.conversation_id != conversation_id
+                || existing.turn_id != turn_id
+                || existing.kind != ConversationItemKind::UserSteering
+                || existing.content != content
+                || existing.content_digest != steering_digest
+            {
+                anyhow::bail!("conversation_steering_idempotency_payload_drift");
+            }
+            tx.commit()?;
+            return Ok(AppendedWorkSteering {
+                item: existing,
+                replayed: true,
+            });
+        }
+        let target: Option<(String, String)> = tx
+            .query_row(
+                "SELECT conversation_id,status FROM conversation_turns WHERE id=?1",
+                [turn_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if target
+            .as_ref()
+            .map(|(conversation, status)| (conversation.as_str(), status.as_str()))
+            != Some((conversation_id, "running"))
+        {
+            anyhow::bail!("conversation_steering_target_not_running");
+        }
+        let sequence: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(sequence),0)+1 FROM conversation_items WHERE conversation_id=?1",
+            [conversation_id],
+            |row| row.get(0),
+        )?;
+        let now = Utc::now().to_rfc3339();
+        tx.execute(
+            "INSERT INTO conversation_items(
+                id,conversation_id,turn_id,sequence,kind,content,content_digest,created_at
+             ) VALUES(?1,?2,?3,?4,'user_steering',?5,?6,?7)",
+            params![
+                item_id,
+                conversation_id,
+                turn_id,
+                sequence,
+                content,
+                steering_digest,
+                now
+            ],
+        )?;
+        let item = tx.query_row(
+            "SELECT id,conversation_id,turn_id,sequence,kind,content,content_digest,created_at
+             FROM conversation_items WHERE id=?1",
+            [&item_id],
+            item_from_row,
+        )?;
+        tx.execute(
+            "UPDATE conversations SET updated_at=?2 WHERE id=?1",
+            params![conversation_id, now],
+        )?;
+        tx.commit()?;
+        Ok(AppendedWorkSteering {
+            item,
+            replayed: false,
+        })
+    }
+
     pub fn complete_chat_turn(
         &self,
         turn_id: &str,
@@ -651,6 +959,19 @@ impl ConversationStore {
         }))
     }
 
+    pub fn get_item(&self, item_id: &str) -> Result<Option<ConversationItemRecord>> {
+        validate_label("conversation_item_id", item_id, 512)?;
+        self.lock_conn()?
+            .query_row(
+                "SELECT id,conversation_id,turn_id,sequence,kind,content,content_digest,created_at
+                 FROM conversation_items WHERE id=?1",
+                [item_id],
+                item_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn latest_turn(&self, conversation_id: &str) -> Result<Option<TurnRecord>> {
         let conn = self.lock_conn()?;
         conn.query_row(
@@ -778,12 +1099,27 @@ fn parse_time(value: String) -> rusqlite::Result<DateTime<Utc>> {
 }
 
 fn conversation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationRecord> {
-    let status: String = row.get(3)?;
+    let status: String = row.get(4)?;
     Ok(ConversationRecord {
         id: row.get(0)?,
         title: row.get(1)?,
-        selected_skill_id: row.get(2)?,
+        project_id: row.get(2)?,
+        selected_skill_id: row.get(3)?,
         status: ConversationStatus::from_db(&status).map_err(to_sql_error)?,
+        created_at: parse_time(row.get(5)?)?,
+        updated_at: parse_time(row.get(6)?)?,
+    })
+}
+
+fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRecord> {
+    let revision = u64::try_from(row.get::<_, i64>(3)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Integer, error.into())
+    })?;
+    Ok(ProjectRecord {
+        id: row.get(0)?,
+        name: row.get(1)?,
+        workspace_root: row.get(2)?,
+        revision,
         created_at: parse_time(row.get(4)?)?,
         updated_at: parse_time(row.get(5)?)?,
     })
@@ -871,6 +1207,117 @@ mod tests {
             endpoint_class: "cloud".into(),
             config_generation: "generation-1".into(),
         }
+    }
+
+    #[test]
+    fn v1_store_migrates_projects_and_repeated_steering_without_losing_history() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conversation-v1.db");
+        let conversation_id = id();
+        let turn_id = id();
+        let item_id = id();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "PRAGMA foreign_keys=ON;
+                 CREATE TABLE conversation_store_metadata (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO conversation_store_metadata VALUES('schema_version','1');
+                 CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    selected_skill_id TEXT,
+                    status TEXT NOT NULL CHECK(status IN ('active','archived')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE conversation_turns (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'running','completed','failed','cancelled','interrupted'
+                    )),
+                    request_digest TEXT NOT NULL,
+                    provider_profile_id TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    endpoint_class TEXT NOT NULL,
+                    config_generation TEXT NOT NULL,
+                    error_code TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                 );
+                 CREATE TABLE conversation_items (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK(sequence > 0),
+                    kind TEXT NOT NULL CHECK(kind IN (
+                        'user_message','assistant_message','system_notice'
+                    )),
+                    content TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(conversation_id, sequence),
+                    UNIQUE(turn_id, kind),
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE,
+                    FOREIGN KEY(turn_id) REFERENCES conversation_turns(id) ON DELETE CASCADE
+                 );",
+            )
+            .unwrap();
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO conversations VALUES(?1,'Migrated',NULL,'active',?2,?2)",
+                params![conversation_id, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO conversation_turns VALUES(
+                    ?1,?2,'running','digest','profile-default','openai','gpt-test',
+                    'cloud','generation-1',NULL,?3,?3,NULL
+                 )",
+                params![turn_id, conversation_id, now],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO conversation_items VALUES(
+                    ?1,?2,?3,1,'user_message','hello','digest',?4
+                 )",
+                params![item_id, conversation_id, turn_id, now],
+            )
+            .unwrap();
+        }
+
+        let store = ConversationStore::new(&path).unwrap();
+        assert_eq!(
+            store
+                .get_conversation(&conversation_id)
+                .unwrap()
+                .unwrap()
+                .project_id,
+            None
+        );
+        assert_eq!(store.get_turn(&turn_id).unwrap().unwrap().items.len(), 1);
+        store
+            .append_work_steering(&id(), &conversation_id, &turn_id, "first adjustment")
+            .unwrap();
+        store
+            .append_work_steering(&id(), &conversation_id, &turn_id, "second adjustment")
+            .unwrap();
+        assert_eq!(
+            store
+                .get_turn(&turn_id)
+                .unwrap()
+                .unwrap()
+                .items
+                .iter()
+                .filter(|item| item.kind == ConversationItemKind::UserSteering)
+                .count(),
+            2
+        );
     }
 
     #[test]
@@ -1002,5 +1449,93 @@ mod tests {
         store.delete_conversation(&conversation_id).unwrap();
         assert!(store.get_turn(&turn_id).unwrap().is_none());
         assert!(store.list_items(&conversation_id, 100).unwrap().is_empty());
+    }
+
+    #[test]
+    fn project_scope_is_revisioned_and_cannot_change_during_a_running_turn() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let conversation_id = id();
+        let project_id = id();
+        store
+            .create_conversation(&conversation_id, "Scoped Work")
+            .unwrap();
+        let project = store
+            .create_project(&project_id, "Research", Some("/tmp/research"))
+            .unwrap();
+        store
+            .assign_conversation_project(&conversation_id, Some(&project_id))
+            .unwrap();
+        assert_eq!(
+            store
+                .get_conversation(&conversation_id)
+                .unwrap()
+                .unwrap()
+                .project_id
+                .as_deref(),
+            Some(project_id.as_str())
+        );
+
+        let turn_id = id();
+        store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &turn_id,
+                conversation_id: &conversation_id,
+                user_message: "work inside this scope",
+                provider: &provider(),
+            })
+            .unwrap();
+        assert!(store
+            .assign_conversation_project(&conversation_id, None)
+            .unwrap_err()
+            .to_string()
+            .contains("conversation_project_assignment_unavailable"));
+        store.cancel_chat_turn(&turn_id).unwrap();
+        let updated = store
+            .update_project_scope(
+                &project_id,
+                "Research v2",
+                Some("/tmp/research-v2"),
+                project.revision,
+            )
+            .unwrap();
+        assert_eq!(updated.revision, project.revision + 1);
+        assert_ne!(
+            ConversationStore::project_scope_digest(&project),
+            ConversationStore::project_scope_digest(&updated)
+        );
+    }
+
+    #[test]
+    fn work_steering_is_an_ordered_conversation_item_and_replays_exactly() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let conversation_id = id();
+        let turn_id = id();
+        let steering_id = id();
+        store
+            .create_conversation(&conversation_id, "Steering")
+            .unwrap();
+        store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &turn_id,
+                conversation_id: &conversation_id,
+                user_message: "prepare the report",
+                provider: &provider(),
+            })
+            .unwrap();
+        let first = store
+            .append_work_steering(&steering_id, &conversation_id, &turn_id, "put risks first")
+            .unwrap();
+        let replay = store
+            .append_work_steering(&steering_id, &conversation_id, &turn_id, "put risks first")
+            .unwrap();
+        assert!(!first.replayed);
+        assert!(replay.replayed);
+        assert_eq!(first.item.kind, ConversationItemKind::UserSteering);
+        assert_eq!(first.item.sequence, 2);
+        assert!(store
+            .append_work_steering(&steering_id, &conversation_id, &turn_id, "different",)
+            .unwrap_err()
+            .to_string()
+            .contains("conversation_steering_idempotency_payload_drift"));
     }
 }

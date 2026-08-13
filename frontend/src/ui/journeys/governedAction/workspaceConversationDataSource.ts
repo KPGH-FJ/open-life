@@ -1,7 +1,10 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   cancelChatTurn,
+  cancelWorkTask,
+  assignConversationProject,
   createChatSession,
+  createProject,
   deactivateMarkdownMemoryFileProposal,
   deleteChatSession,
   detachResourceFromTurn,
@@ -23,6 +26,7 @@ import {
   type ResourceDetachReceipt,
   type ResourceImportSelectionResult,
   type MainChatMessageOptions,
+  type ProjectRecord,
   type MainChatSelectedSkill,
   type MainChatSkillSummary,
   type MainChatToolCandidateList,
@@ -49,6 +53,8 @@ export interface WorkspaceConversationDataSource {
   loadHistory?(sessionId: string): Promise<ChatMessage[]>;
   loadLifeModelInfluence?(sessionId: string): Promise<ChatLifeModelInfluenceSnapshot | null>;
   createSession(sessionId: string, title: string): Promise<void>;
+  createProject?(projectId: string, name: string): Promise<ProjectRecord>;
+  assignProject?(conversationId: string, projectId: string | null): Promise<void>;
   renameSession(sessionId: string, title: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
   pickResources(
@@ -67,9 +73,10 @@ export interface WorkspaceConversationDataSource {
     events: WorkspaceStreamEvents
   ): Promise<StreamMessageDonePayload>;
   cancelChatTurn?(conversationId: string, turnId: string): Promise<unknown>;
+  cancelWorkTask?(taskId: string): Promise<unknown>;
   steerTask?(request: {
     steeringId: string;
-    taskSessionId: string;
+    taskId: string;
     runId: string;
     sessionId: string;
     content: string;
@@ -132,12 +139,15 @@ async function streamTurn(
 export const tauriWorkspaceConversationDataSource: WorkspaceConversationDataSource = {
   loadConversation: getConversationViewModel,
   createSession: createChatSession,
+  createProject,
+  assignProject: assignConversationProject,
   renameSession: renameChatSession,
   deleteSession: deleteChatSession,
   pickResources: pickAndImportResources,
   detachResource: detachResourceFromTurn,
   streamTurn,
   cancelChatTurn,
+  cancelWorkTask,
   steerTask: submitMainChatTaskSteering,
   listSkills: listMainChatSkills,
   selectSkill: selectMainChatSkill,

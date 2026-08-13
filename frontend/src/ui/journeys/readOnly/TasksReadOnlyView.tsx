@@ -36,6 +36,7 @@ function taskMatchesFilter(item: TaskViewModelItem, filter: TaskFilter): boolean
   }
   if (filter === "attention") {
     return (
+      item.needsAttention === true ||
       [
         "waiting_permission",
         "waiting_review",
@@ -64,6 +65,7 @@ function taskSearchText(item: TaskViewModelItem): string {
     item.title,
     item.lifecycleStatus,
     item.pendingBlockers.join(" "),
+    (item.attentionReasonCodes ?? []).join(" "),
     item.pendingReviewItemRefs.map(ref => ref.label).join(" "),
     item.latestResultPreview?.label ?? "",
     item.latestResultPreview?.preview ?? "",
@@ -74,6 +76,9 @@ function taskSearchText(item: TaskViewModelItem): string {
 }
 
 function statusDetail(item: TaskViewModelItem): string {
+  if (item.needsAttention && item.attentionReasonCodes?.[0]) {
+    return `需要处理：${item.attentionReasonCodes[0]}`;
+  }
   if (item.lifecycleStatus === "waiting_review") return "报告产物正在等待你的审核，任务尚未完成。";
   if (item.pendingReviewItemRefs.length > 0) return "有事项等待决定，任务尚未完成。";
   if (item.pendingBlockers.length > 0) return item.pendingBlockers[0];

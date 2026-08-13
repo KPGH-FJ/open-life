@@ -59,6 +59,7 @@ pub(crate) mod main_chat_skills_tools;
 pub(crate) mod main_chat_source_bound;
 pub(crate) mod main_chat_steering;
 pub(crate) mod main_chat_streaming;
+#[cfg(test)]
 pub(crate) mod main_chat_task_controls;
 #[allow(dead_code)]
 pub mod main_chat_turn_runtime;
@@ -136,7 +137,8 @@ use commands::agent_runtime::{
 };
 
 use commands::chat::{
-    create_chat_session, delete_chat_session, get_conversation_view_model, rename_chat_session,
+    assign_conversation_project, create_chat_session, create_project, delete_chat_session,
+    get_conversation_view_model, rename_chat_session,
 };
 use commands::diagnostics::{
     check_ollama_status, get_policy_router_status, get_runtime_build_info, get_system_diagnostics,
@@ -170,9 +172,9 @@ use commands::memory::{
     run_memory_tier_maintenance, search_memory,
 };
 use commands::proposal::{
-    accept_proposal, accept_proposal_and_continue, batch_accept_low_risk_proposals, edit_proposal,
-    get_memory_asset, get_pending_proposals, list_memory_assets, list_proposals, postpone_proposal,
-    reject_proposal, request_artifact_undo, rollback_memory_asset,
+    accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_memory_asset,
+    get_pending_proposals, list_memory_assets, list_proposals, postpone_proposal, reject_proposal,
+    request_artifact_undo, rollback_memory_asset,
 };
 use commands::router::get_model_router_status;
 use commands::settings::{
@@ -1078,7 +1080,6 @@ pub fn run() {
             list_proposals,
             batch_accept_low_risk_proposals,
             accept_proposal,
-            accept_proposal_and_continue,
             reject_proposal,
             request_artifact_undo,
             edit_proposal,
@@ -1155,6 +1156,8 @@ pub fn run() {
             test_llm_connection,
             get_last_model_error,
             create_chat_session,
+            create_project,
+            assign_conversation_project,
             rename_chat_session,
             delete_chat_session,
             get_state_history,

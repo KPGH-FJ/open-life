@@ -276,6 +276,7 @@ function tasksEnvelope(
     items,
     summary: {
       total: items.length,
+      needsAttentionCount: items.filter(item => item.needsAttention).length,
       activeCount: items.filter(item =>
         ["running", "waiting_review", "waiting_permission", "blocked"].includes(
           item.lifecycleStatus

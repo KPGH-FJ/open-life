@@ -11,6 +11,7 @@ import type {
   MarkdownMemoryScope,
   MarkdownMemoryViewModel,
   ProductAction,
+  ProjectRecord,
   StreamMessageChunkPayload,
   StreamMessageStartPayload,
 } from "@/tauri";
@@ -33,7 +34,9 @@ export type WorkspaceSessionMutationState =
   | { phase: "idle" }
   | { phase: "renaming"; sessionId: string }
   | { phase: "deleting"; sessionId: string }
-  | { phase: "failed"; action: "rename" | "delete"; reason: string };
+  | { phase: "creating_project" }
+  | { phase: "assigning_project"; projectId: string | null }
+  | { phase: "failed"; action: "rename" | "delete" | "project"; reason: string };
 
 export type WorkspaceResourceMutationState =
   | { phase: "idle" }
@@ -133,6 +136,7 @@ function streamIdentityMatches(
     operation_id: string;
     conversation_id?: string;
     turn_id?: string;
+    task_id?: string;
     task_session_id?: string;
   },
   mode: WorkspaceConversationMode,
@@ -142,7 +146,7 @@ function streamIdentityMatches(
   if (payload.session_id !== sessionId || payload.operation_id !== operationId) return false;
   return mode === "chat"
     ? payload.conversation_id === sessionId && payload.turn_id === operationId
-    : payload.task_session_id === operationId;
+    : payload.conversation_id === sessionId && payload.turn_id === operationId;
 }
 
 function turnAnnouncement(status: MainChatTurnStatus): string {
@@ -166,6 +170,8 @@ function turnAnnouncement(status: MainChatTurnStatus): string {
 
 export type WorkspaceConversationController = {
   sessions: ChatSession[];
+  projects: ProjectRecord[];
+  selectedProjectId: string | null;
   selectedSessionId: string | null;
   messages: ChatMessage[];
   draft: string;
@@ -191,6 +197,8 @@ export type WorkspaceConversationController = {
   reload: () => Promise<boolean>;
   selectSession: (sessionId: string) => void;
   startNewConversation: () => void;
+  createProject: (name: string) => Promise<boolean>;
+  assignProject: (projectId: string | null) => Promise<boolean>;
   setDraft: (value: string) => void;
   setMode: (mode: WorkspaceConversationMode) => void;
   attachResources: () => Promise<boolean>;
@@ -224,6 +232,8 @@ export function useWorkspaceConversation(
   preferredSessionId?: string | null
 ): WorkspaceConversationController {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
@@ -275,6 +285,8 @@ export function useWorkspaceConversation(
     loadedRef.current = false;
     explicitConversationChoiceRef.current = false;
     setSessions([]);
+    setProjects([]);
+    setSelectedProjectId(null);
     setSelectedSessionId(null);
     setMessages([]);
     setDraft("");
@@ -494,6 +506,10 @@ export function useWorkspaceConversation(
       if (canonical && canonical.selectedConversationId !== sessionId) {
         throw new Error("conversation_view_model_selection_mismatch");
       }
+      if (canonical) {
+        setProjects(canonical.projects);
+        setSelectedProjectId(canonical.selectedProjectId);
+      }
       const history = canonical?.messages ?? (await requireLegacyHistory(dataSource, sessionId));
       let influence = null;
       let influenceError: string | null = null;
@@ -548,6 +564,8 @@ export function useWorkspaceConversation(
         : null;
       const nextSessions = canonical?.conversations ?? (await requireLegacySessions(dataSource));
       if (canonical) {
+        setProjects(canonical.projects);
+        setSelectedProjectId(canonical.selectedProjectId);
         setProvider({
           status: canonical.providerStatus,
           profiles: canonical.providerProfiles,
@@ -578,6 +596,7 @@ export function useWorkspaceConversation(
         if (canonical && canonical.selectedConversationId === nextSessionId) {
           setSelectedSessionId(nextSessionId);
           setMessages(canonical.messages);
+          setSelectedProjectId(canonical.selectedProjectId);
           const turn = canonical.latestTurn;
           setTurnState(
             !turn || turn.status === "completed"
@@ -708,12 +727,20 @@ export function useWorkspaceConversation(
 
   const selectSession = useCallback(
     (sessionId: string) => {
-      if (!sessionId || sessionId === selectedSessionId || busy) return;
+      const canDetachBackgroundWork = mode === "work" && turnState.phase === "streaming";
+      if (!sessionId || sessionId === selectedSessionId || (busy && !canDetachBackgroundWork)) {
+        return;
+      }
       if (pendingResources.length > 0) {
         announce("当前有文件绑定到下一次发送；请先发送或逐个移除文件。");
         return;
       }
       explicitConversationChoiceRef.current = true;
+      if (canDetachBackgroundWork) {
+        operationRef.current += 1;
+        cancelRequestRef.current += 1;
+        announce("任务会在后台继续；已切换到另一段对话，可在需要处理中查看后续状态。");
+      }
       const requestId = ++requestRef.current;
       setLoadStatus("loading");
       setLoadError(null);
@@ -731,16 +758,22 @@ export function useWorkspaceConversation(
           setMessages([]);
         });
     },
-    [announce, busy, loadHistory, pendingResources.length, selectedSessionId]
+    [announce, busy, loadHistory, mode, pendingResources.length, selectedSessionId, turnState.phase]
   );
 
   const startNewConversation = useCallback(() => {
-    if (busy) return;
+    const canDetachBackgroundWork = mode === "work" && turnState.phase === "streaming";
+    if (busy && !canDetachBackgroundWork) return;
     if (pendingResources.length > 0) {
       announce("当前有文件绑定到下一次发送；请先发送或逐个移除文件。");
       return;
     }
     explicitConversationChoiceRef.current = true;
+    if (canDetachBackgroundWork) {
+      operationRef.current += 1;
+      cancelRequestRef.current += 1;
+      announce("任务会在后台继续；已打开新对话，可在需要处理中查看后续状态。");
+    }
     requestRef.current += 1;
     setSelectedSessionId(null);
     setMessages([]);
@@ -750,8 +783,10 @@ export function useWorkspaceConversation(
     setTurnState({ phase: "idle" });
     setStreamingReply("");
     setActiveTaskSessionId(null);
-    announce("已打开新对话草稿；发送前不会创建会话或写入记录。");
-  }, [announce, busy, pendingResources.length]);
+    if (!canDetachBackgroundWork) {
+      announce("已打开新对话草稿；发送前不会创建会话或写入记录。");
+    }
+  }, [announce, busy, mode, pendingResources.length, turnState.phase]);
 
   const updateDraft = useCallback((value: string) => {
     if (value.trim()) explicitConversationChoiceRef.current = true;
@@ -916,6 +951,9 @@ export function useWorkspaceConversation(
           setTurnState({ phase: "creating_session" });
           sessionId = crypto.randomUUID();
           await dataSource.createSession(sessionId, sessionTitle(text));
+          if (selectedProjectId && dataSource.assignProject) {
+            await dataSource.assignProject(sessionId, selectedProjectId);
+          }
           sessionCreated = true;
           if (operationId !== operationRef.current) return;
           const timestamp = new Date().toISOString();
@@ -967,12 +1005,13 @@ export function useWorkspaceConversation(
                 setPendingResourceTurnOperationId(null);
                 setResourceMutation({ phase: "idle" });
               }
-              setActiveTaskSessionId(payload.task_session_id ?? null);
+              const activeTaskId = payload.task_id ?? payload.task_session_id ?? null;
+              setActiveTaskSessionId(activeTaskId);
               setTurnState({
                 phase: "streaming",
                 sessionId: turnSessionId,
                 turnId: payload.turn_id ?? turnOperationId,
-                taskSessionId: payload.task_session_id,
+                taskSessionId: activeTaskId ?? undefined,
                 runId: payload.run_id,
               });
               announce("OpenLife 正在回复；现在可以取消这一轮对话。");
@@ -1073,6 +1112,7 @@ export function useWorkspaceConversation(
       pendingResources,
       selectedSessionId,
       selectedSkillId,
+      selectedProjectId,
       sendAction,
     ]
   );
@@ -1087,7 +1127,9 @@ export function useWorkspaceConversation(
     setTurnState({ phase: "cancelling", sessionId, turnId, taskSessionId });
     announce("正在请求取消；只有后端终态返回后才会显示已取消。");
     try {
-      if (dataSource.cancelChatTurn) {
+      if (mode === "work" && taskSessionId && dataSource.cancelWorkTask) {
+        await dataSource.cancelWorkTask(taskSessionId);
+      } else if (dataSource.cancelChatTurn) {
         await dataSource.cancelChatTurn(sessionId, turnId);
       } else {
         throw new Error("canonical_turn_cancel_unavailable");
@@ -1104,7 +1146,7 @@ export function useWorkspaceConversation(
       });
       announce("取消请求失败；当前不会把任务显示为已取消。");
     }
-  }, [announce, dataSource, turnState]);
+  }, [announce, dataSource, mode, turnState]);
 
   const steer = useCallback(async (): Promise<void> => {
     const text = draft.trim();
@@ -1122,7 +1164,7 @@ export function useWorkspaceConversation(
     try {
       const result = await dataSource.steerTask({
         steeringId: crypto.randomUUID(),
-        taskSessionId: activeTaskSessionId,
+        taskId: activeTaskSessionId,
         runId: turnState.runId,
         sessionId: selectedSessionId,
         content: text,
@@ -1191,9 +1233,59 @@ export function useWorkspaceConversation(
     }
   }, [announce, busy, dataSource, pendingResources.length, reload, selectedSessionId]);
 
+  const createProject = useCallback(
+    async (name: string): Promise<boolean> => {
+      const normalized = name.replace(/\s+/g, " ").trim();
+      if (!dataSource?.createProject || !normalized || busy) {
+        announce("当前不能创建 Project。");
+        return false;
+      }
+      setSessionMutation({ phase: "creating_project" });
+      try {
+        const project = await dataSource.createProject(crypto.randomUUID(), normalized);
+        if (selectedSessionId && dataSource.assignProject) {
+          await dataSource.assignProject(selectedSessionId, project.id);
+        }
+        if (!(await reload())) throw new Error("project_refresh_failed_after_create");
+        setSessionMutation({ phase: "idle" });
+        announce(selectedSessionId ? "Project 已创建并绑定到当前对话。" : "Project 已创建。");
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
+        announce("Project 创建或绑定未得到后端确认。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload, selectedSessionId]
+  );
+
+  const assignProject = useCallback(
+    async (projectId: string | null): Promise<boolean> => {
+      if (!dataSource?.assignProject || !selectedSessionId || busy) {
+        announce("当前不能改变这段对话的 Project。");
+        return false;
+      }
+      setSessionMutation({ phase: "assigning_project", projectId });
+      try {
+        await dataSource.assignProject(selectedSessionId, projectId);
+        if (!(await reload())) throw new Error("project_refresh_failed_after_assign");
+        setSessionMutation({ phase: "idle" });
+        announce(projectId ? "当前对话已绑定到 Project。" : "当前对话已移出 Project。");
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
+        announce("Project 绑定未得到后端确认。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload, selectedSessionId]
+  );
+
   return useMemo(
     () => ({
       sessions,
+      projects,
+      selectedProjectId,
       selectedSessionId,
       messages,
       draft,
@@ -1219,6 +1311,8 @@ export function useWorkspaceConversation(
       reload,
       selectSession,
       startNewConversation,
+      createProject,
+      assignProject,
       setDraft: updateDraft,
       setMode,
       attachResources,
@@ -1239,6 +1333,7 @@ export function useWorkspaceConversation(
       busy,
       cancel,
       capabilityState,
+      createProject,
       markdownMemory,
       deleteSelected,
       detachResource,
@@ -1251,6 +1346,7 @@ export function useWorkspaceConversation(
       mode,
       pendingResources,
       pendingResourceTurnOperationId,
+      projects,
       renameSelected,
       reloadMarkdownMemory,
       reload,
@@ -1258,6 +1354,7 @@ export function useWorkspaceConversation(
       selectSkill,
       selectMarkdownMemoryRoot,
       selectSession,
+      selectedProjectId,
       setMode,
       selectedSessionId,
       selectedSkillId,
@@ -1268,6 +1365,7 @@ export function useWorkspaceConversation(
       sessions,
       skills,
       startNewConversation,
+      assignProject,
       streamingReply,
       activeTaskSessionId,
       turnState,

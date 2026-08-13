@@ -349,6 +349,8 @@ impl MainChatEventSink for CanonicalChatEventSink<'_> {
                     "operation_id": self.turn_id,
                     "conversation_id": self.conversation_id,
                     "turn_id": self.turn_id,
+                    "task_id": self.work_provider_lifecycle.as_ref().map(|owner| &owner.task_id),
+                    "run_id": self.work_provider_lifecycle.as_ref().map(|owner| &owner.run_id),
                     "request_id": request_id,
                     "chunk": chunk,
                 }),
@@ -452,7 +454,8 @@ pub(crate) async fn run_canonical_chat(
                     content: item.content,
                 })
             }
-            openlife_core::conversation::ConversationItemKind::SystemNotice => None,
+            openlife_core::conversation::ConversationItemKind::UserSteering
+            | openlife_core::conversation::ConversationItemKind::SystemNotice => None,
         })
         .collect::<Vec<_>>();
     let ingress = AgentIngress::default()

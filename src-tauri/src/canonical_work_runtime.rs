@@ -23,7 +23,7 @@ use openlife_core::llm::ChatMessage;
 #[cfg(test)]
 use openlife_core::task_runtime::CanonicalTaskItemKind;
 use openlife_core::task_runtime::{
-    BeginGeneralTaskRunInput, CanonicalTaskItemStatus, CanonicalTaskStatus,
+    BeginGeneralTaskRunInput, CanonicalAttentionKind, CanonicalTaskItemStatus, CanonicalTaskStatus,
     CompleteGeneralTaskInput, DeferGeneralTaskResultInput, GeneralArtifactDraftInput,
 };
 use serde_json::Value;
@@ -151,13 +151,51 @@ pub(crate) async fn retry_canonical_work_task(
         .iter()
         .find(|item| item.kind == ConversationItemKind::UserMessage)
         .ok_or_else(|| "canonical_work_prior_user_item_missing".to_string())?;
-    let selected_skill_id = conversation_store
+    let conversation = conversation_store
         .lock()
         .await
         .get_conversation(&snapshot.task.conversation_id)
         .map_err(|error| error.to_string())?
-        .ok_or_else(|| "canonical_work_conversation_missing".to_string())?
-        .selected_skill_id;
+        .ok_or_else(|| "canonical_work_conversation_missing".to_string())?;
+    let selected_skill_id = conversation.selected_skill_id;
+    if conversation.project_id.as_ref() != prior_run.project_id.as_ref() {
+        task_store
+            .lock()
+            .await
+            .record_attention(
+                &task_id,
+                &prior_run_id,
+                CanonicalAttentionKind::ScopeStale,
+                "work_project_assignment_stale",
+            )
+            .map_err(|error| error.to_string())?;
+        return Err("canonical_work_project_scope_stale".into());
+    }
+    if let Some(prior_scope) = prior_run.project_id.as_ref() {
+        let project = conversation_store
+            .lock()
+            .await
+            .get_project(prior_scope)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "canonical_work_project_scope_missing".to_string())?;
+        let current_digest =
+            openlife_core::conversation::ConversationStore::project_scope_digest(&project);
+        if prior_run.project_revision != Some(project.revision)
+            || prior_run.scope_digest.as_deref() != Some(current_digest.as_str())
+        {
+            task_store
+                .lock()
+                .await
+                .record_attention(
+                    &task_id,
+                    &prior_run_id,
+                    CanonicalAttentionKind::ScopeStale,
+                    "work_project_scope_stale",
+                )
+                .map_err(|error| error.to_string())?;
+            return Err("canonical_work_project_scope_stale".into());
+        }
+    }
     let retry_resource_scope_turn_id = prior_run.execution_session_id.clone();
     let mut discard = |_: &str, _: Value| {};
     run_canonical_work_with_resource_scope(
@@ -195,6 +233,15 @@ async fn run_canonical_work_with_resource_scope(
     retry_resource_scope_turn_id: Option<&str>,
 ) -> Result<CanonicalWorkOutput, String> {
     validate_input(&input)?;
+    let execution_slots = state
+        .main_chat_runtime_state
+        .lock()
+        .await
+        .execution_slots
+        .clone();
+    let _execution_slot = execution_slots
+        .try_acquire_owned()
+        .map_err(|_| "canonical_work_concurrency_limit_reached".to_string())?;
     state
         .persistence_coordinator
         .require_effects_allowed()
@@ -253,7 +300,7 @@ async fn run_canonical_work_with_resource_scope(
                 role: "assistant".into(),
                 content: item.content,
             }),
-            ConversationItemKind::SystemNotice => None,
+            ConversationItemKind::UserSteering | ConversationItemKind::SystemNotice => None,
         })
         .collect::<Vec<_>>();
     let ingress = AgentIngress::default()
@@ -267,6 +314,28 @@ async fn run_canonical_work_with_resource_scope(
     let plan_digest = (ingress.policy_decision.route_kind
         == openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::PlanDraft)
         .then_some(instruction_digest.as_str());
+    let project_scope = {
+        let conversation = conversation_store
+            .lock()
+            .await
+            .get_conversation(&input.conversation_id)
+            .map_err(|error| format!("load canonical Work Conversation failed: {error}"))?
+            .ok_or_else(|| "canonical_work_conversation_missing".to_string())?;
+        match conversation.project_id {
+            Some(project_id) => {
+                let project = conversation_store
+                    .lock()
+                    .await
+                    .get_project(&project_id)
+                    .map_err(|error| format!("load canonical Work Project failed: {error}"))?
+                    .ok_or_else(|| "canonical_work_project_missing".to_string())?;
+                let digest =
+                    openlife_core::conversation::ConversationStore::project_scope_digest(&project);
+                Some((project.id, project.revision, digest))
+            }
+            None => None,
+        }
+    };
     task_store
         .lock()
         .await
@@ -279,6 +348,9 @@ async fn run_canonical_work_with_resource_scope(
             execution_session_id: &input.turn_id,
             instruction_digest: &instruction_digest,
             plan_digest,
+            project_id: project_scope.as_ref().map(|scope| scope.0.as_str()),
+            project_revision: project_scope.as_ref().map(|scope| scope.1),
+            scope_digest: project_scope.as_ref().map(|scope| scope.2.as_str()),
         })
         .map_err(|error| format!("begin canonical Work Task failed: {error}"))?;
     let (_, request_digest) = metadata_safe_text_digest(&format!(
@@ -455,6 +527,16 @@ async fn run_canonical_work_with_resource_scope(
                 summary_code: "work_artifact_completed",
             })
             .map_err(|error| format!("defer review-waiting Work result failed: {error}"))?;
+        task_store
+            .lock()
+            .await
+            .record_attention(
+                &input.task_id,
+                &input.run_id,
+                CanonicalAttentionKind::ReviewRequired,
+                "work_artifact_review_required",
+            )
+            .map_err(|error| format!("record Work Review attention failed: {error}"))?;
         let tool_calls = canonical_work_tool_call_results(&kernel_result.tool_calls, &input.run_id);
         return Ok(output(
             &input,
@@ -509,6 +591,11 @@ async fn run_canonical_work_with_resource_scope(
             summary_code: "work_completed",
         })
         .map_err(|error| format!("complete canonical Work Task failed: {error}"))?;
+    task_store
+        .lock()
+        .await
+        .resolve_attention_for_run(&input.task_id, &input.run_id)
+        .map_err(|error| format!("resolve Work attention failed: {error}"))?;
     Ok(output(
         &input,
         reply,
@@ -708,11 +795,21 @@ async fn terminalize_failure(
     code: &str,
 ) -> Result<(), String> {
     if let Some(store) = state.canonical_task_runtime_store.as_ref() {
+        let store = store.lock().await;
         store
-            .lock()
-            .await
             .terminalize_general_run(&input.task_id, &input.run_id, task_status)
             .map_err(|error| error.to_string())?;
+        let attention_kind = match task_status {
+            CanonicalTaskStatus::EffectUnknown => Some(CanonicalAttentionKind::EffectUnknown),
+            CanonicalTaskStatus::Failed => Some(CanonicalAttentionKind::Failed),
+            CanonicalTaskStatus::Blocked => Some(CanonicalAttentionKind::Blocked),
+            _ => None,
+        };
+        if let Some(kind) = attention_kind {
+            store
+                .record_attention(&input.task_id, &input.run_id, kind, code)
+                .map_err(|error| error.to_string())?;
+        }
     }
     if let Some(store) = state.conversation_store.as_ref() {
         match task_status {
@@ -1975,6 +2072,9 @@ mod tests {
                 execution_session_id: &prior_turn_id,
                 instruction_digest: begun.user_message_proof.content_digest(),
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         state
@@ -2231,6 +2331,9 @@ for line in sys.stdin:
                 execution_session_id: &prior_turn_id,
                 instruction_digest: begun.user_message_proof.content_digest(),
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         state
@@ -2264,6 +2367,183 @@ for line in sys.stdin:
         assert_eq!(snapshot.runs[0].status, CanonicalTaskStatus::Failed);
         assert_eq!(snapshot.runs[1].status, CanonicalTaskStatus::Completed);
         assert_eq!(snapshot.task.status, CanonicalTaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn retry_refuses_a_changed_project_scope_and_records_attention() {
+        let state = canonical_state("unused retry result").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let project_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let prior_run_id = uuid::Uuid::new_v4().to_string();
+        let prior_turn_id = uuid::Uuid::new_v4().to_string();
+        let project = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_project(&project_id, "Research", Some("/tmp/research"))
+            .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Scoped retry")
+            .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .assign_conversation_project(&conversation_id, Some(&project_id))
+            .unwrap();
+        let provider = crate::provider_registry::selected_provider_profile(&state)
+            .await
+            .unwrap()
+            .binding;
+        let begun = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_chat_turn_with_proof(BeginChatTurn {
+                turn_id: &prior_turn_id,
+                conversation_id: &conversation_id,
+                user_message: "Summarize the current situation.",
+                provider: &provider,
+            })
+            .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .fail_chat_turn(&prior_turn_id, "provider_failed")
+            .unwrap();
+        let scope_digest =
+            openlife_core::conversation::ConversationStore::project_scope_digest(&project);
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &prior_run_id,
+                execution_session_id: &prior_turn_id,
+                instruction_digest: begun.user_message_proof.content_digest(),
+                plan_digest: None,
+                project_id: Some(&project_id),
+                project_revision: Some(project.revision),
+                scope_digest: Some(&scope_digest),
+            })
+            .unwrap();
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .terminalize_general_run(&task_id, &prior_run_id, CanonicalTaskStatus::Failed)
+            .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .update_project_scope(
+                &project_id,
+                "Research expanded",
+                Some("/tmp/research-expanded"),
+                project.revision,
+            )
+            .unwrap();
+
+        let error = retry_canonical_work_task(
+            task_id.clone(),
+            prior_run_id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            &state,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error, "canonical_work_project_scope_stale");
+        let snapshot = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.runs.len(), 1);
+        assert!(snapshot.attention.iter().any(|attention| {
+            attention.run_id == prior_run_id
+                && attention.kind == CanonicalAttentionKind::ScopeStale
+                && attention.resolved_at.is_none()
+        }));
+    }
+
+    #[tokio::test]
+    async fn concurrency_admission_rejects_before_turn_or_task_persistence() {
+        let state = canonical_state("unused result").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Concurrency admission")
+            .unwrap();
+        let execution_slots = state
+            .main_chat_runtime_state
+            .lock()
+            .await
+            .execution_slots
+            .clone();
+        let permit_count = execution_slots.available_permits() as u32;
+        let _all_permits = execution_slots
+            .acquire_many_owned(permit_count)
+            .await
+            .unwrap();
+        let request = input(&conversation_id);
+        let task_id = request.task_id.clone();
+        let turn_id = request.turn_id.clone();
+
+        let error = run_canonical_work(request, &state, &mut |_, _| {})
+            .await
+            .unwrap_err();
+        assert_eq!(error, "canonical_work_concurrency_limit_reached");
+        assert!(state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_turn(&turn_id)
+            .unwrap()
+            .is_none());
+        assert!(state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .is_none());
     }
 
     #[tokio::test]

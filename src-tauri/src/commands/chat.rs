@@ -36,6 +36,8 @@ pub struct ConversationTurnViewModel {
 pub struct ConversationViewModel {
     pub status: String,
     pub conversations: Vec<openlife_core::memory::ChatSession>,
+    pub projects: Vec<openlife_core::conversation::ProjectRecord>,
+    pub selected_project_id: Option<String>,
     pub selected_conversation_id: Option<String>,
     pub messages: Vec<ChatMessage>,
     pub latest_turn: Option<ConversationTurnViewModel>,
@@ -84,6 +86,14 @@ pub(crate) async fn get_conversation_view_model_with_state(
             updated_at: record.updated_at.to_rfc3339(),
         })
         .collect::<Vec<_>>();
+    let projects = store.list_projects(200).map_err(AppError::from)?;
+    let selected_project_id = selected
+        .as_deref()
+        .map(|conversation_id| store.get_conversation(conversation_id))
+        .transpose()
+        .map_err(AppError::from)?
+        .flatten()
+        .and_then(|conversation| conversation.project_id);
     let (messages, latest_turn) = if let Some(conversation_id) = selected.as_deref() {
         let messages = store
             .list_items(conversation_id, 200)
@@ -102,7 +112,8 @@ pub(crate) async fn get_conversation_view_model_with_state(
                         content: item.content,
                     })
                 }
-                openlife_core::conversation::ConversationItemKind::SystemNotice => None,
+                openlife_core::conversation::ConversationItemKind::UserSteering
+                | openlife_core::conversation::ConversationItemKind::SystemNotice => None,
             })
             .collect();
         let latest_turn = store
@@ -140,6 +151,8 @@ pub(crate) async fn get_conversation_view_model_with_state(
         }
         .into(),
         conversations,
+        projects,
+        selected_project_id,
         selected_conversation_id: selected,
         messages,
         latest_turn,
@@ -555,6 +568,47 @@ pub async fn create_chat_session(
 }
 
 #[tauri::command]
+pub async fn create_project(
+    project_id: String,
+    name: String,
+    workspace_root: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<openlife_core::conversation::ProjectRecord, AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
+    state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("conversation_store_unavailable"))?
+        .lock()
+        .await
+        .create_project(&project_id, &name, workspace_root.as_deref())
+        .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn assign_conversation_project(
+    conversation_id: String,
+    project_id: Option<String>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_allowed()
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
+    state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("conversation_store_unavailable"))?
+        .lock()
+        .await
+        .assign_conversation_project(&conversation_id, project_id.as_deref())
+        .map_err(AppError::from)
+}
+
+#[tauri::command]
 pub async fn rename_chat_session(
     session_id: String,
     title: String,
@@ -731,6 +785,43 @@ mod tests {
         assert_eq!(view.conversations.len(), 1);
         assert_eq!(view.conversations[0].session_id, session_id);
         assert_eq!(view.conversations[0].title, "Test Session");
+    }
+
+    #[tokio::test]
+    async fn project_creation_and_assignment_are_visible_through_the_same_view_model() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let state = test_app_state(&temp_dir);
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let project_id = uuid::Uuid::new_v4().to_string();
+        create_chat_session_with_state(&conversation_id, "Scoped Session", &state)
+            .await
+            .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_project(&project_id, "Research Project", None)
+            .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .assign_conversation_project(&conversation_id, Some(&project_id))
+            .unwrap();
+
+        let view = get_conversation_view_model_with_state(Some(&conversation_id), &state)
+            .await
+            .unwrap();
+        assert_eq!(view.projects.len(), 1);
+        assert_eq!(view.projects[0].name, "Research Project");
+        assert_eq!(
+            view.selected_project_id.as_deref(),
+            Some(project_id.as_str())
+        );
     }
 
     #[tokio::test]

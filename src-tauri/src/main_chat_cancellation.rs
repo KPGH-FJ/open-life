@@ -1138,6 +1138,7 @@ impl MainChatCancellationRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn is_cancellation_requested(&self, task_session_id: &str) -> bool {
         let state = self
             .state

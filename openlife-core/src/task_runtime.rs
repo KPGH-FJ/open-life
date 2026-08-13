@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 10;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 12;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -255,6 +255,9 @@ pub struct CanonicalTaskRunRecord {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub completed_at: Option<DateTime<Utc>>,
+    pub project_id: Option<String>,
+    pub project_revision: Option<u64>,
+    pub scope_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -316,7 +319,7 @@ impl CanonicalSteeringStatus {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CanonicalReportSteeringRecord {
+pub struct CanonicalSteeringRecord {
     pub steering_id: String,
     pub item_id: String,
     pub task_id: String,
@@ -328,6 +331,51 @@ pub struct CanonicalReportSteeringRecord {
     pub status: CanonicalSteeringStatus,
     pub created_at: DateTime<Utc>,
     pub consumed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalAttentionKind {
+    ReviewRequired,
+    Blocked,
+    Failed,
+    EffectUnknown,
+    ScopeStale,
+}
+
+impl CanonicalAttentionKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::ReviewRequired => "review_required",
+            Self::Blocked => "blocked",
+            Self::Failed => "failed",
+            Self::EffectUnknown => "effect_unknown",
+            Self::ScopeStale => "scope_stale",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self> {
+        match value {
+            "review_required" => Ok(Self::ReviewRequired),
+            "blocked" => Ok(Self::Blocked),
+            "failed" => Ok(Self::Failed),
+            "effect_unknown" => Ok(Self::EffectUnknown),
+            "scope_stale" => Ok(Self::ScopeStale),
+            _ => anyhow::bail!("canonical_attention_kind_invalid:{value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalAttentionRecord {
+    pub attention_id: String,
+    pub task_id: String,
+    pub run_id: String,
+    pub kind: CanonicalAttentionKind,
+    pub reason_code: String,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -360,6 +408,7 @@ pub struct CanonicalTaskSnapshot {
     pub attempts: Vec<CanonicalTaskItemAttemptRecord>,
     pub final_result: Option<CanonicalFinalResultRecord>,
     pub artifacts: Vec<CanonicalArtifactSnapshot>,
+    pub attention: Vec<CanonicalAttentionRecord>,
 }
 
 #[derive(Clone, Copy)]
@@ -370,6 +419,9 @@ pub struct BeginGeneralTaskRunInput<'a> {
     pub execution_session_id: &'a str,
     pub instruction_digest: &'a str,
     pub plan_digest: Option<&'a str>,
+    pub project_id: Option<&'a str>,
+    pub project_revision: Option<u64>,
+    pub scope_digest: Option<&'a str>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -460,7 +512,7 @@ pub struct BegunReportRun {
     pub plan_revision: u64,
 }
 
-pub struct SubmitReportSteeringInput<'a> {
+pub struct SubmitSteeringInput<'a> {
     pub steering_id: &'a str,
     pub task_id: &'a str,
     pub run_id: &'a str,
@@ -469,6 +521,13 @@ pub struct SubmitReportSteeringInput<'a> {
     pub steering_digest: &'a str,
     pub base_plan_revision: u64,
     pub scope_expansion_blocked: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CanonicalRunSteeringTarget {
+    pub task_id: String,
+    pub execution_session_id: String,
+    pub plan_revision: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -605,7 +664,8 @@ impl CanonicalTaskRuntimeStore {
                 "canonical_task_item_attempts",
                 "canonical_task_final_results",
                 "canonical_task_deferred_results",
-                "canonical_report_steering",
+                "canonical_steering",
+                "canonical_task_attention",
                 "canonical_artifacts",
                 "canonical_artifact_versions",
                 "canonical_artifact_undo",
@@ -671,6 +731,9 @@ impl CanonicalTaskRuntimeStore {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 completed_at TEXT,
+                project_id TEXT,
+                project_revision INTEGER CHECK(project_revision > 0),
+                scope_digest TEXT,
                 PRIMARY KEY(task_id, run_id),
                 FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
              ) WITHOUT ROWID;
@@ -697,7 +760,7 @@ impl CanonicalTaskRuntimeStore {
                 FOREIGN KEY(task_id, run_id)
                     REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
              );
-             CREATE TABLE IF NOT EXISTS canonical_report_steering (
+             CREATE TABLE IF NOT EXISTS canonical_steering (
                 steering_id TEXT PRIMARY KEY,
                 item_id TEXT NOT NULL UNIQUE,
                 task_id TEXT NOT NULL,
@@ -777,6 +840,20 @@ impl CanonicalTaskRuntimeStore {
                 FOREIGN KEY(task_id, run_id)
                     REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
              ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS canonical_task_attention (
+                attention_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN (
+                    'review_required','blocked','failed','effect_unknown','scope_stale'
+                )),
+                reason_code TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                UNIQUE(task_id, run_id, kind, reason_code),
+                FOREIGN KEY(task_id, run_id)
+                    REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+             );
              CREATE TABLE IF NOT EXISTS canonical_artifact_versions (
                 artifact_id TEXT NOT NULL,
                 version INTEGER NOT NULL CHECK(version > 0),
@@ -812,7 +889,7 @@ impl CanonicalTaskRuntimeStore {
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '10')
+             VALUES ('schema_version', '12')
              ON CONFLICT(key) DO NOTHING;
              INSERT INTO canonical_task_runtime_metadata(key, value)
              VALUES ('store_identity', 'canonical_task_runtime_store:' || lower(hex(randomblob(16))))
@@ -844,6 +921,12 @@ impl CanonicalTaskRuntimeStore {
         }
         if Self::schema_version(&conn)? == 9 {
             Self::migrate_v9_to_v10(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 10 {
+            Self::migrate_v10_to_v11(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 11 {
+            Self::migrate_v11_to_v12(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -1481,6 +1564,77 @@ impl CanonicalTaskRuntimeStore {
         Ok(())
     }
 
+    fn migrate_v10_to_v11(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let old_table_exists = tx
+            .query_row(
+                "SELECT 1 FROM sqlite_master
+                 WHERE type='table' AND name='canonical_report_steering'",
+                [],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if old_table_exists {
+            // initialize() creates the current empty table before applying old
+            // migrations. Copy v10 rows into that owner instead of attempting
+            // a rename that would conflict with it.
+            tx.execute_batch(
+                "INSERT INTO canonical_steering (
+                    steering_id,item_id,task_id,run_id,source_message_ref,
+                    source_message_digest,steering_digest,base_plan_revision,
+                    status,created_at,consumed_at
+                 ) SELECT steering_id,item_id,task_id,run_id,source_message_ref,
+                          source_message_digest,steering_digest,base_plan_revision,
+                          status,created_at,consumed_at
+                   FROM canonical_report_steering;
+                 DROP TABLE canonical_report_steering;",
+            )?;
+        }
+        tx.execute_batch(
+            "UPDATE canonical_task_items
+                SET summary_code = CASE summary_code
+                    WHEN 'report_steering_scope_expansion_blocked'
+                        THEN 'work_steering_scope_expansion_blocked'
+                    WHEN 'report_steering_pending' THEN 'work_steering_pending'
+                    WHEN 'report_steering_consumed' THEN 'work_steering_consumed'
+                    ELSE summary_code END
+              WHERE kind = 'steering';
+             UPDATE canonical_task_runtime_metadata SET value = '11'
+              WHERE key = 'schema_version' AND value = '10';",
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn migrate_v11_to_v12(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "ALTER TABLE canonical_task_runs ADD COLUMN project_id TEXT;
+             ALTER TABLE canonical_task_runs ADD COLUMN project_revision INTEGER
+                CHECK(project_revision > 0);
+             ALTER TABLE canonical_task_runs ADD COLUMN scope_digest TEXT;
+             CREATE TABLE IF NOT EXISTS canonical_task_attention (
+                attention_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN (
+                    'review_required','blocked','failed','effect_unknown','scope_stale'
+                )),
+                reason_code TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                UNIQUE(task_id, run_id, kind, reason_code),
+                FOREIGN KEY(task_id, run_id)
+                    REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+             );
+             UPDATE canonical_task_runtime_metadata SET value = '12'
+              WHERE key = 'schema_version' AND value = '11';",
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn validate_schema(conn: &Connection) -> Result<()> {
         let version = Self::schema_version(conn)?;
         if version != TASK_RUNTIME_SCHEMA_VERSION {
@@ -1500,6 +1654,17 @@ impl CanonicalTaskRuntimeStore {
         validate_digest("instruction_digest", input.instruction_digest)?;
         if let Some(plan_digest) = input.plan_digest {
             validate_digest("plan_digest", plan_digest)?;
+        }
+        match (input.project_id, input.project_revision, input.scope_digest) {
+            (None, None, None) => {}
+            (Some(project_id), Some(project_revision), Some(scope_digest)) => {
+                validate_uuid("project_id", project_id)?;
+                if project_revision == 0 {
+                    anyhow::bail!("canonical_project_revision_invalid");
+                }
+                validate_digest("scope_digest", scope_digest)?;
+            }
+            _ => anyhow::bail!("canonical_project_scope_incomplete"),
         }
         let instruction_item_id = stable_id("item", &["instruction", input.task_id, input.run_id]);
         let plan_item_id = input
@@ -1563,25 +1728,52 @@ impl CanonicalTaskRuntimeStore {
         tx.execute(
             "INSERT INTO canonical_task_runs (
                 task_id, run_id, execution_session_id, ordinal, status,
-                execution_facts_version, plan_revision, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, 'running', 5, 1, ?5, ?5)
+                execution_facts_version, plan_revision, created_at, updated_at,
+                project_id, project_revision, scope_digest
+             ) VALUES (?1, ?2, ?3, ?4, 'running', 5, 1, ?5, ?5, ?6, ?7, ?8)
              ON CONFLICT(run_id) DO NOTHING",
             params![
                 input.task_id,
                 input.run_id,
                 input.execution_session_id,
                 ordinal,
-                now
+                now,
+                input.project_id,
+                input.project_revision.map(i64::try_from).transpose()?,
+                input.scope_digest,
             ],
         )?;
-        let run: (String, String, i64) = tx.query_row(
-            "SELECT task_id, execution_session_id, ordinal
+        let run: (
+            String,
+            String,
+            i64,
+            Option<String>,
+            Option<i64>,
+            Option<String>,
+        ) = tx.query_row(
+            "SELECT task_id, execution_session_id, ordinal,
+                    project_id, project_revision, scope_digest
              FROM canonical_task_runs WHERE run_id = ?1",
             [input.run_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
         )?;
         if run.0 != input.task_id || run.1 != input.execution_session_id {
             anyhow::bail!("canonical_general_run_identity_conflict");
+        }
+        if run.3.as_deref() != input.project_id
+            || run.4.map(u64::try_from).transpose()? != input.project_revision
+            || run.5.as_deref() != input.scope_digest
+        {
+            anyhow::bail!("canonical_general_run_scope_conflict");
         }
         if run_existed {
             let stored_plan_digest = tx
@@ -1967,6 +2159,11 @@ impl CanonicalTaskRuntimeStore {
             "UPDATE canonical_tasks SET status = 'completed', updated_at = ?2 WHERE id = ?1",
             params![input.task_id, now],
         )?;
+        tx.execute(
+            "UPDATE canonical_task_attention SET resolved_at = ?3
+             WHERE task_id = ?1 AND run_id = ?2 AND resolved_at IS NULL",
+            params![input.task_id, input.run_id, now],
+        )?;
         let result = load_final_result_in_tx(&tx, input.task_id)?
             .ok_or_else(|| anyhow::anyhow!("canonical_final_result_missing_after_commit"))?;
         tx.commit()?;
@@ -2320,10 +2517,10 @@ impl CanonicalTaskRuntimeStore {
         })
     }
 
-    pub fn submit_report_steering(
+    pub fn submit_steering(
         &self,
-        input: SubmitReportSteeringInput<'_>,
-    ) -> Result<CanonicalReportSteeringRecord> {
+        input: SubmitSteeringInput<'_>,
+    ) -> Result<CanonicalSteeringRecord> {
         validate_nonempty("steering_id", input.steering_id, 512)?;
         validate_nonempty("task_id", input.task_id, 512)?;
         validate_nonempty("run_id", input.run_id, 512)?;
@@ -2331,7 +2528,7 @@ impl CanonicalTaskRuntimeStore {
         validate_digest("source_message_digest", input.source_message_digest)?;
         validate_digest("steering_digest", input.steering_digest)?;
         if input.base_plan_revision == 0 {
-            anyhow::bail!("canonical_report_steering_plan_revision_invalid");
+            anyhow::bail!("canonical_steering_plan_revision_invalid");
         }
         let item_id = stable_id(
             "item",
@@ -2351,43 +2548,56 @@ impl CanonicalTaskRuntimeStore {
                 || (existing.status == CanonicalSteeringStatus::Blocked)
                     != input.scope_expansion_blocked
             {
-                anyhow::bail!("canonical_report_steering_identity_conflict");
+                anyhow::bail!("canonical_steering_identity_conflict");
             }
             tx.commit()?;
             return Ok(existing);
         }
-        let (task_status, plan_revision, run_finalized): (String, i64, bool) = tx
+        let (task_status, plan_revision, run_finalized, provider_started): (
+            String,
+            i64,
+            bool,
+            bool,
+        ) = tx
             .query_row(
                 "SELECT task.status, run.plan_revision,
                         EXISTS(SELECT 1 FROM canonical_task_items terminal
                                WHERE terminal.task_id = task.id
                                  AND terminal.run_id = run.run_id
                                  AND terminal.kind = 'final_result'
-                                 AND terminal.status = 'completed')
+                                 AND terminal.status = 'completed'),
+                        EXISTS(SELECT 1 FROM canonical_task_items provider
+                               WHERE provider.task_id = task.id
+                                 AND provider.run_id = run.run_id
+                                 AND provider.kind = 'provider_generation'
+                                 AND provider.status IN ('running','completed'))
                  FROM canonical_tasks task
                  JOIN canonical_task_runs run ON run.task_id = task.id
                  WHERE task.id = ?1 AND run.run_id = ?2",
                 params![input.task_id, input.run_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
-            .with_context(|| "canonical_report_steering_target_missing")?;
+            .with_context(|| "canonical_steering_target_missing")?;
         if run_finalized || !matches!(task_status.as_str(), "running" | "waiting_review") {
-            anyhow::bail!("canonical_report_steering_target_terminal");
+            anyhow::bail!("canonical_steering_target_terminal");
         }
         if u64::try_from(plan_revision)? != input.base_plan_revision {
-            anyhow::bail!("canonical_report_steering_plan_revision_stale");
+            anyhow::bail!("canonical_steering_plan_revision_stale");
+        }
+        if !input.scope_expansion_blocked && provider_started {
+            anyhow::bail!("canonical_steering_checkpoint_passed");
         }
         if !input.scope_expansion_blocked {
             let pending: Option<String> = tx
                 .query_row(
-                    "SELECT steering_id FROM canonical_report_steering
+                    "SELECT steering_id FROM canonical_steering
                      WHERE task_id = ?1 AND run_id = ?2 AND status = 'pending'",
                     params![input.task_id, input.run_id],
                     |row| row.get(0),
                 )
                 .optional()?;
             if pending.is_some() {
-                anyhow::bail!("canonical_report_steering_pending_conflict");
+                anyhow::bail!("canonical_steering_pending_conflict");
             }
         }
         let item_status = if input.scope_expansion_blocked {
@@ -2417,16 +2627,16 @@ impl CanonicalTaskRuntimeStore {
                 sequence,
                 item_status.as_str(),
                 if input.scope_expansion_blocked {
-                    "report_steering_scope_expansion_blocked"
+                    "work_steering_scope_expansion_blocked"
                 } else {
-                    "report_steering_pending"
+                    "work_steering_pending"
                 },
                 input.steering_digest,
                 now
             ],
         )?;
         tx.execute(
-            "INSERT INTO canonical_report_steering (
+            "INSERT INTO canonical_steering (
                 steering_id, item_id, task_id, run_id, source_message_ref,
                 source_message_digest, steering_digest, base_plan_revision,
                 status, created_at, consumed_at
@@ -2445,16 +2655,16 @@ impl CanonicalTaskRuntimeStore {
             ],
         )?;
         let record = load_steering_in_tx(&tx, input.steering_id)?
-            .ok_or_else(|| anyhow::anyhow!("canonical_report_steering_missing_after_insert"))?;
+            .ok_or_else(|| anyhow::anyhow!("canonical_steering_missing_after_insert"))?;
         tx.commit()?;
         Ok(record)
     }
 
-    pub fn consume_pending_report_steering(
+    pub fn consume_pending_steering(
         &self,
         task_id: &str,
         run_id: &str,
-    ) -> Result<Option<CanonicalReportSteeringRecord>> {
+    ) -> Result<Option<CanonicalSteeringRecord>> {
         validate_nonempty("task_id", task_id, 512)?;
         validate_nonempty("run_id", run_id, 512)?;
         let now = Utc::now().to_rfc3339();
@@ -2462,7 +2672,7 @@ impl CanonicalTaskRuntimeStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let steering_id = tx
             .query_row(
-                "SELECT steering_id FROM canonical_report_steering
+                "SELECT steering_id FROM canonical_steering
                  WHERE task_id = ?1 AND run_id = ?2 AND status = 'pending'
                  ORDER BY created_at ASC, steering_id ASC LIMIT 1",
                 params![task_id, run_id],
@@ -2474,7 +2684,7 @@ impl CanonicalTaskRuntimeStore {
             return Ok(None);
         };
         let record = load_steering_in_tx(&tx, &steering_id)?
-            .ok_or_else(|| anyhow::anyhow!("canonical_report_steering_missing_before_consume"))?;
+            .ok_or_else(|| anyhow::anyhow!("canonical_steering_missing_before_consume"))?;
         let (task_status, plan_revision): (String, i64) = tx.query_row(
             "SELECT task.status, run.plan_revision
              FROM canonical_tasks task
@@ -2484,23 +2694,23 @@ impl CanonicalTaskRuntimeStore {
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         if task_status != "running" {
-            anyhow::bail!("canonical_report_steering_consume_target_not_running");
+            anyhow::bail!("canonical_steering_consume_target_not_running");
         }
         if u64::try_from(plan_revision)? != record.base_plan_revision {
-            anyhow::bail!("canonical_report_steering_consume_revision_conflict");
+            anyhow::bail!("canonical_steering_consume_revision_conflict");
         }
         let changed = tx.execute(
-            "UPDATE canonical_report_steering
+            "UPDATE canonical_steering
              SET status = 'consumed', consumed_at = ?2
              WHERE steering_id = ?1 AND status = 'pending'",
             params![steering_id, now],
         )?;
         if changed != 1 {
-            anyhow::bail!("canonical_report_steering_consume_conflict");
+            anyhow::bail!("canonical_steering_consume_conflict");
         }
         tx.execute(
             "UPDATE canonical_task_items
-             SET status = 'completed', summary_code = 'report_steering_consumed', updated_at = ?2
+             SET status = 'completed', summary_code = 'work_steering_consumed', updated_at = ?2
              WHERE id = ?1 AND kind = 'steering' AND status = 'waiting'",
             params![record.item_id, now],
         )?;
@@ -2510,15 +2720,12 @@ impl CanonicalTaskRuntimeStore {
             params![task_id, run_id, plan_revision],
         )?;
         let consumed = load_steering_in_tx(&tx, &record.steering_id)?
-            .ok_or_else(|| anyhow::anyhow!("canonical_report_steering_missing_after_consume"))?;
+            .ok_or_else(|| anyhow::anyhow!("canonical_steering_missing_after_consume"))?;
         tx.commit()?;
         Ok(Some(consumed))
     }
 
-    pub fn load_report_steering(
-        &self,
-        steering_id: &str,
-    ) -> Result<Option<CanonicalReportSteeringRecord>> {
+    pub fn load_steering(&self, steering_id: &str) -> Result<Option<CanonicalSteeringRecord>> {
         validate_nonempty("steering_id", steering_id, 512)?;
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
@@ -2569,6 +2776,68 @@ impl CanonicalTaskRuntimeStore {
         conn.query_row(
             "SELECT task_id FROM canonical_task_runs WHERE run_id = ?1",
             [run_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn resolve_general_run_target_for_conversation(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<CanonicalRunSteeringTarget>> {
+        validate_uuid("task_id", task_id)?;
+        validate_uuid("run_id", run_id)?;
+        validate_uuid("conversation_id", conversation_id)?;
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT task.id, run.execution_session_id, run.plan_revision
+             FROM canonical_tasks task
+             JOIN canonical_task_runs run ON run.task_id = task.id
+             WHERE task.id = ?1 AND run.run_id = ?2
+               AND task.conversation_id = ?3 AND task.task_kind = 'work'",
+            params![task_id, run_id, conversation_id],
+            |row| {
+                let revision = u64::try_from(row.get::<_, i64>(2)?).map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        2,
+                        rusqlite::types::Type::Integer,
+                        error.into(),
+                    )
+                })?;
+                Ok(CanonicalRunSteeringTarget {
+                    task_id: row.get(0)?,
+                    execution_session_id: row.get(1)?,
+                    plan_revision: revision,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn resolve_general_task_id_for_conversation(
+        &self,
+        conversation_id: &str,
+        run_id: &str,
+    ) -> Result<Option<String>> {
+        // This is a compatibility-safe lookup used at the kernel checkpoint.
+        // Pre-reconstruction Conversation labels can still reach test/migration
+        // consumers, where the correct answer is "no canonical Work target",
+        // not a blocker that replaces the actual terminal reason. Product Work
+        // admission and steering commands enforce UUID identities before this
+        // read-only lookup is reached.
+        validate_nonempty("conversation_id", conversation_id, 512)?;
+        validate_nonempty("run_id", run_id, 512)?;
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT task.id FROM canonical_tasks task
+             JOIN canonical_task_runs run ON run.task_id = task.id
+             WHERE task.conversation_id = ?1 AND run.run_id = ?2
+               AND task.task_kind = 'work'",
+            params![conversation_id, run_id],
             |row| row.get(0),
         )
         .optional()
@@ -2654,17 +2923,17 @@ impl CanonicalTaskRuntimeStore {
         .map_err(Into::into)
     }
 
-    pub fn list_consumed_report_steering(
+    pub fn list_consumed_steering(
         &self,
         task_id: &str,
         run_id: &str,
-    ) -> Result<Vec<CanonicalReportSteeringRecord>> {
+    ) -> Result<Vec<CanonicalSteeringRecord>> {
         validate_nonempty("task_id", task_id, 512)?;
         validate_nonempty("run_id", run_id, 512)?;
         let conn = self.lock_conn()?;
         let ids = {
             let mut statement = conn.prepare(
-                "SELECT steering_id FROM canonical_report_steering
+                "SELECT steering_id FROM canonical_steering
                  WHERE task_id = ?1 AND run_id = ?2 AND status = 'consumed'
                  ORDER BY consumed_at ASC, steering_id ASC",
             )?;
@@ -2679,12 +2948,12 @@ impl CanonicalTaskRuntimeStore {
                     "SELECT steering_id, item_id, task_id, run_id, source_message_ref,
                             source_message_digest, steering_digest, base_plan_revision,
                             status, created_at, consumed_at
-                     FROM canonical_report_steering WHERE steering_id = ?1",
+                     FROM canonical_steering WHERE steering_id = ?1",
                     [steering_id],
                     row_to_steering,
                 )
                 .optional()?
-                .ok_or_else(|| anyhow::anyhow!("canonical_report_steering_missing_during_list"))?;
+                .ok_or_else(|| anyhow::anyhow!("canonical_steering_missing_during_list"))?;
             records.push(record);
         }
         Ok(records)
@@ -3273,6 +3542,22 @@ impl CanonicalTaskRuntimeStore {
                AND status IN ('running', 'waiting_review')",
             params![task_id, source_run_id, now],
         )?;
+        let attention_id = stable_id(
+            "attention",
+            &[
+                &task_id,
+                &source_run_id,
+                "review_required",
+                "work_review_required",
+            ],
+        );
+        tx.execute(
+            "INSERT INTO canonical_task_attention(
+                attention_id,task_id,run_id,kind,reason_code,created_at,resolved_at
+             ) VALUES(?1,?2,?3,'review_required','work_review_required',?4,NULL)
+             ON CONFLICT(task_id,run_id,kind,reason_code) DO NOTHING",
+            params![attention_id, task_id, source_run_id, now],
+        )?;
         tx.commit()?;
         Ok(BoundReportReview {
             task_id,
@@ -3614,6 +3899,13 @@ impl CanonicalTaskRuntimeStore {
                 now
             ],
         )?;
+        if all_verified {
+            tx.execute(
+                "UPDATE canonical_task_attention SET resolved_at = ?3
+                 WHERE task_id = ?1 AND run_id = ?2 AND resolved_at IS NULL",
+                params![task_id, run_id, now],
+            )?;
+        }
         tx.commit()?;
         drop(conn);
         self.load_artifact(&artifact_id)?
@@ -3682,8 +3974,67 @@ impl CanonicalTaskRuntimeStore {
              WHERE task_id = ?1 AND run_id = ?2 AND status != 'completed'",
             params![task_id, run_id, now],
         )?;
+        let attention_id = stable_id(
+            "attention",
+            &[&task_id, &run_id, "effect_unknown", reason_code],
+        );
+        tx.execute(
+            "INSERT INTO canonical_task_attention(
+                attention_id,task_id,run_id,kind,reason_code,created_at,resolved_at
+             ) VALUES(?1,?2,?3,'effect_unknown',?4,?5,NULL)
+             ON CONFLICT(task_id,run_id,kind,reason_code) DO NOTHING",
+            params![attention_id, task_id, run_id, reason_code, now],
+        )?;
         tx.commit()?;
         Ok(())
+    }
+
+    pub fn record_attention(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        kind: CanonicalAttentionKind,
+        reason_code: &str,
+    ) -> Result<CanonicalAttentionRecord> {
+        validate_uuid("task_id", task_id)?;
+        validate_uuid("run_id", run_id)?;
+        validate_nonempty("attention_reason_code", reason_code, 256)?;
+        let attention_id = stable_id("attention", &[task_id, run_id, kind.as_str(), reason_code]);
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock_conn()?;
+        conn.execute(
+            "INSERT INTO canonical_task_attention(
+                attention_id,task_id,run_id,kind,reason_code,created_at,resolved_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,NULL)
+             ON CONFLICT(task_id,run_id,kind,reason_code) DO NOTHING",
+            params![
+                attention_id,
+                task_id,
+                run_id,
+                kind.as_str(),
+                reason_code,
+                now
+            ],
+        )?;
+        conn.query_row(
+            "SELECT attention_id,task_id,run_id,kind,reason_code,created_at,resolved_at
+             FROM canonical_task_attention WHERE attention_id=?1",
+            [&attention_id],
+            row_to_attention,
+        )
+        .map_err(Into::into)
+    }
+
+    pub fn resolve_attention_for_run(&self, task_id: &str, run_id: &str) -> Result<usize> {
+        validate_uuid("task_id", task_id)?;
+        validate_uuid("run_id", run_id)?;
+        self.lock_conn()?
+            .execute(
+                "UPDATE canonical_task_attention SET resolved_at=?3
+                 WHERE task_id=?1 AND run_id=?2 AND resolved_at IS NULL",
+                params![task_id, run_id, Utc::now().to_rfc3339()],
+            )
+            .map_err(Into::into)
     }
 
     pub fn mark_artifact_failed_before_effect(
@@ -3751,6 +4102,14 @@ impl CanonicalTaskRuntimeStore {
              WHERE task_id = ?1 AND run_id = ?2 AND status != 'completed'",
             params![task_id, run_id, now],
         )?;
+        let attention_id = stable_id("attention", &[&task_id, &run_id, "failed", reason_code]);
+        tx.execute(
+            "INSERT INTO canonical_task_attention(
+                attention_id,task_id,run_id,kind,reason_code,created_at,resolved_at
+             ) VALUES(?1,?2,?3,'failed',?4,?5,NULL)
+             ON CONFLICT(task_id,run_id,kind,reason_code) DO NOTHING",
+            params![attention_id, task_id, run_id, reason_code, now],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -3808,6 +4167,17 @@ impl CanonicalTaskRuntimeStore {
                     completed_at = ?3
              WHERE task_id = ?1 AND run_id = ?2 AND status != 'blocked'",
             params![task_id, run_id, now],
+        )?;
+        let attention_id = stable_id(
+            "attention",
+            &[&task_id, &run_id, "blocked", "artifact_review_rejected"],
+        );
+        tx.execute(
+            "INSERT INTO canonical_task_attention(
+                attention_id,task_id,run_id,kind,reason_code,created_at,resolved_at
+             ) VALUES(?1,?2,?3,'blocked','artifact_review_rejected',?4,NULL)
+             ON CONFLICT(task_id,run_id,kind,reason_code) DO NOTHING",
+            params![attention_id, task_id, run_id, now],
         )?;
         tx.commit()?;
         drop(conn);
@@ -4178,7 +4548,7 @@ impl CanonicalTaskRuntimeStore {
                 let mut statement = tx.prepare(
                     "SELECT task_id, run_id, execution_session_id, ordinal,
                             status, execution_facts_version, plan_revision, created_at,
-                            updated_at, completed_at
+                            updated_at, completed_at, project_id, project_revision, scope_digest
                      FROM canonical_task_runs WHERE task_id = ?1
                      ORDER BY ordinal ASC, run_id ASC",
                 )?;
@@ -4232,6 +4602,7 @@ impl CanonicalTaskRuntimeStore {
                 }
                 snapshots
             };
+            let attention = load_attention_for_task(&tx, &task.id)?;
             snapshots.push(CanonicalTaskSnapshot {
                 task,
                 runs,
@@ -4239,6 +4610,7 @@ impl CanonicalTaskRuntimeStore {
                 attempts,
                 final_result,
                 artifacts,
+                attention,
             });
         }
         tx.commit()?;
@@ -4406,17 +4778,58 @@ fn validate_report_execution_items_v3(
 fn load_steering_in_tx(
     tx: &rusqlite::Transaction<'_>,
     steering_id: &str,
-) -> Result<Option<CanonicalReportSteeringRecord>> {
+) -> Result<Option<CanonicalSteeringRecord>> {
     tx.query_row(
         "SELECT steering_id, item_id, task_id, run_id, source_message_ref,
                 source_message_digest, steering_digest, base_plan_revision,
                 status, created_at, consumed_at
-         FROM canonical_report_steering WHERE steering_id = ?1",
+         FROM canonical_steering WHERE steering_id = ?1",
         [steering_id],
         row_to_steering,
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn load_attention_for_task(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Vec<CanonicalAttentionRecord>> {
+    let mut statement = conn.prepare(
+        "SELECT attention_id,task_id,run_id,kind,reason_code,created_at,resolved_at
+         FROM canonical_task_attention WHERE task_id=?1
+         ORDER BY created_at ASC,attention_id ASC",
+    )?;
+    let rows = statement.query_map([task_id], row_to_attention)?;
+    rows.collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(Into::into)
+}
+
+fn row_to_attention(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalAttentionRecord> {
+    let kind = CanonicalAttentionKind::from_db(&row.get::<_, String>(3)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, error.into())
+    })?;
+    Ok(CanonicalAttentionRecord {
+        attention_id: row.get(0)?,
+        task_id: row.get(1)?,
+        run_id: row.get(2)?,
+        kind,
+        reason_code: row.get(4)?,
+        created_at: parse_timestamp(row.get(5)?, "attention_created_at").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, error.into())
+        })?,
+        resolved_at: row
+            .get::<_, Option<String>>(6)?
+            .map(|value| parse_timestamp(value, "attention_resolved_at"))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?,
+    })
 }
 
 fn load_attempt_in_tx(
@@ -4458,7 +4871,7 @@ fn load_snapshot_for_task(
         let mut statement = conn.prepare(
             "SELECT task_id, run_id, execution_session_id, ordinal,
                     status, execution_facts_version, plan_revision, created_at,
-                    updated_at, completed_at
+                    updated_at, completed_at, project_id, project_revision, scope_digest
              FROM canonical_task_runs WHERE task_id = ?1
              ORDER BY ordinal ASC, run_id ASC",
         )?;
@@ -4528,6 +4941,7 @@ fn load_snapshot_for_task(
         }
         snapshots
     };
+    let attention = load_attention_for_task(conn, &task.id)?;
     Ok(CanonicalTaskSnapshot {
         task,
         runs,
@@ -4535,17 +4949,18 @@ fn load_snapshot_for_task(
         attempts,
         final_result,
         artifacts,
+        attention,
     })
 }
 
-fn row_to_steering(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalReportSteeringRecord> {
+fn row_to_steering(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalSteeringRecord> {
     let status = CanonicalSteeringStatus::from_db(&row.get::<_, String>(8)?).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, error.into())
     })?;
     let base_plan_revision = u64::try_from(row.get::<_, i64>(7)?).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Integer, error.into())
     })?;
-    Ok(CanonicalReportSteeringRecord {
+    Ok(CanonicalSteeringRecord {
         steering_id: row.get(0)?,
         item_id: row.get(1)?,
         task_id: row.get(2)?,
@@ -4941,6 +5356,19 @@ fn row_to_task_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalTaskRun
                     error.into(),
                 )
             })?,
+        project_id: row.get(10)?,
+        project_revision: row
+            .get::<_, Option<i64>>(11)?
+            .map(u64::try_from)
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    11,
+                    rusqlite::types::Type::Integer,
+                    error.into(),
+                )
+            })?,
+        scope_digest: row.get(12)?,
     })
 }
 
@@ -5440,7 +5868,7 @@ mod tests {
         assert_eq!(store.list_items(&begun.task_id).unwrap().len(), 2);
         let steering_digest = digest_of("focus on privacy risks");
         let steering = store
-            .submit_report_steering(SubmitReportSteeringInput {
+            .submit_steering(SubmitSteeringInput {
                 steering_id: "steering-1",
                 task_id: &begun.task_id,
                 run_id: &begun.run_id,
@@ -5453,13 +5881,13 @@ mod tests {
             .unwrap();
         assert_eq!(steering.status, CanonicalSteeringStatus::Pending);
         let consumed = store
-            .consume_pending_report_steering(&begun.task_id, &begun.run_id)
+            .consume_pending_steering(&begun.task_id, &begun.run_id)
             .unwrap()
             .unwrap();
         assert_eq!(consumed.status, CanonicalSteeringStatus::Consumed);
         assert!(consumed.consumed_at.is_some());
         assert!(store
-            .consume_pending_report_steering(&begun.task_id, &begun.run_id)
+            .consume_pending_steering(&begun.task_id, &begun.run_id)
             .unwrap()
             .is_none());
         let snapshot = store.list_task_snapshots(10).unwrap().pop().unwrap();
@@ -5473,7 +5901,7 @@ mod tests {
         let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
         let begun = begin_steerable_report(&store);
         let steering_digest = digest_of("shorter summary");
-        let input = || SubmitReportSteeringInput {
+        let input = || SubmitSteeringInput {
             steering_id: "steering-replay",
             task_id: &begun.task_id,
             run_id: &begun.run_id,
@@ -5483,11 +5911,11 @@ mod tests {
             base_plan_revision: 1,
             scope_expansion_blocked: false,
         };
-        let first = store.submit_report_steering(input()).unwrap();
-        assert_eq!(store.submit_report_steering(input()).unwrap(), first);
+        let first = store.submit_steering(input()).unwrap();
+        assert_eq!(store.submit_steering(input()).unwrap(), first);
         let changed_digest = digest_of("longer summary");
         let error = store
-            .submit_report_steering(SubmitReportSteeringInput {
+            .submit_steering(SubmitSteeringInput {
                 steering_id: "steering-replay",
                 task_id: &begun.task_id,
                 run_id: &begun.run_id,
@@ -5500,8 +5928,142 @@ mod tests {
             .unwrap_err();
         assert!(error
             .to_string()
-            .contains("canonical_report_steering_identity_conflict"));
+            .contains("canonical_steering_identity_conflict"));
         assert_eq!(store.list_items(&begun.task_id).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn steering_after_provider_start_is_rejected_without_an_extra_item() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: &uuid::Uuid::new_v4().to_string(),
+                instruction_digest: &digest_of("write a report"),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+        store
+            .append_general_item(
+                &task_id,
+                &run_id,
+                "provider-item",
+                CanonicalTaskItemKind::ProviderGeneration,
+                "work_provider_generation",
+                &digest_of("provider request"),
+            )
+            .unwrap();
+        store
+            .begin_item_attempt(BeginItemAttemptInput {
+                attempt_id: &uuid::Uuid::new_v4().to_string(),
+                task_id: &task_id,
+                run_id: &run_id,
+                item_id: "provider-item",
+                executor_kind: "provider",
+                provider_profile_id: None,
+                provider_model_id: None,
+                request_digest: &digest_of("provider request"),
+            })
+            .unwrap();
+        let before = store.list_items(&task_id).unwrap().len();
+        let steering_digest = digest_of("change the conclusion");
+        let error = store
+            .submit_steering(SubmitSteeringInput {
+                steering_id: "late-steering",
+                task_id: &task_id,
+                run_id: &run_id,
+                source_message_ref: "conversation://late",
+                source_message_digest: &steering_digest,
+                steering_digest: &steering_digest,
+                base_plan_revision: 1,
+                scope_expansion_blocked: false,
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("canonical_steering_checkpoint_passed"));
+        assert_eq!(store.list_items(&task_id).unwrap().len(), before);
+    }
+
+    #[test]
+    fn compatibility_conversation_label_is_not_misreported_as_a_work_steering_failure() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        assert_eq!(
+            store
+                .resolve_general_task_id_for_conversation(
+                    "pre-reconstruction-conversation-label",
+                    "pre-reconstruction-run-label",
+                )
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn project_scope_and_attention_survive_restart_and_completion_resolves_attention() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("r5-runtime.db");
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let project_id = uuid::Uuid::new_v4().to_string();
+        {
+            let store = CanonicalTaskRuntimeStore::new(&path).unwrap();
+            store
+                .begin_general_task_run(BeginGeneralTaskRunInput {
+                    task_id: &task_id,
+                    conversation_id: &uuid::Uuid::new_v4().to_string(),
+                    run_id: &run_id,
+                    execution_session_id: &uuid::Uuid::new_v4().to_string(),
+                    instruction_digest: &digest_of("scoped task"),
+                    plan_digest: None,
+                    project_id: Some(&project_id),
+                    project_revision: Some(3),
+                    scope_digest: Some(&digest_of("scope revision 3")),
+                })
+                .unwrap();
+            store
+                .record_attention(
+                    &task_id,
+                    &run_id,
+                    CanonicalAttentionKind::ReviewRequired,
+                    "work_review_required",
+                )
+                .unwrap();
+        }
+        let reopened = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        let snapshot = reopened.load_task_snapshot(&task_id).unwrap().unwrap();
+        assert_eq!(
+            snapshot.runs[0].project_id.as_deref(),
+            Some(project_id.as_str())
+        );
+        assert_eq!(snapshot.runs[0].project_revision, Some(3));
+        assert_eq!(snapshot.attention.len(), 1);
+        let final_item_id = stable_id("item", &["final_result", &task_id, &run_id]);
+        reopened
+            .complete_general_task(CompleteGeneralTaskInput {
+                task_id: &task_id,
+                run_id: &run_id,
+                final_item_id: &final_item_id,
+                conversation_item_id: "conversation-item:r5",
+                result_digest: &digest_of("done"),
+                summary_code: "work_completed",
+            })
+            .unwrap();
+        assert!(reopened
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap()
+            .attention
+            .iter()
+            .all(|attention| attention.resolved_at.is_some()));
     }
 
     #[test]
@@ -5510,7 +6072,7 @@ mod tests {
         let begun = begin_steerable_report(&store);
         let steering_digest = digest_of("use another workspace");
         let steering = store
-            .submit_report_steering(SubmitReportSteeringInput {
+            .submit_steering(SubmitSteeringInput {
                 steering_id: "steering-blocked",
                 task_id: &begun.task_id,
                 run_id: &begun.run_id,
@@ -5523,7 +6085,7 @@ mod tests {
             .unwrap();
         assert_eq!(steering.status, CanonicalSteeringStatus::Blocked);
         assert!(store
-            .consume_pending_report_steering(&begun.task_id, &begun.run_id)
+            .consume_pending_steering(&begun.task_id, &begun.run_id)
             .unwrap()
             .is_none());
         let items = store.list_items(&begun.task_id).unwrap();
@@ -5539,7 +6101,7 @@ mod tests {
             let begun = begin_steerable_report(&store);
             let digest = digest_of("use a table");
             store
-                .submit_report_steering(SubmitReportSteeringInput {
+                .submit_steering(SubmitSteeringInput {
                     steering_id: "steering-restart",
                     task_id: &begun.task_id,
                     run_id: &begun.run_id,
@@ -5555,7 +6117,7 @@ mod tests {
         let restarted = CanonicalTaskRuntimeStore::new(&path).unwrap();
         assert_eq!(
             restarted
-                .consume_pending_report_steering(&task_id, &run_id)
+                .consume_pending_steering(&task_id, &run_id)
                 .unwrap()
                 .unwrap()
                 .status,
@@ -5571,7 +6133,7 @@ mod tests {
             .unwrap();
         let digest = digest_of("late input");
         let error = restarted
-            .submit_report_steering(SubmitReportSteeringInput {
+            .submit_steering(SubmitSteeringInput {
                 steering_id: "steering-late",
                 task_id: &task_id,
                 run_id: &run_id,
@@ -5584,7 +6146,7 @@ mod tests {
             .unwrap_err();
         assert!(error
             .to_string()
-            .contains("canonical_report_steering_target_terminal"));
+            .contains("canonical_steering_target_terminal"));
     }
 
     #[test]
@@ -5614,7 +6176,7 @@ mod tests {
         assert_eq!(store.run_count(&prepared.task_id).unwrap(), 2);
         let late_digest = digest_of("late old run steering");
         let error = store
-            .submit_report_steering(SubmitReportSteeringInput {
+            .submit_steering(SubmitSteeringInput {
                 steering_id: "old-run-late",
                 task_id: &prepared.task_id,
                 run_id: "run-old",
@@ -5627,7 +6189,7 @@ mod tests {
             .unwrap_err();
         assert!(error
             .to_string()
-            .contains("canonical_report_steering_target_terminal"));
+            .contains("canonical_steering_target_terminal"));
     }
 
     #[test]
@@ -6151,6 +6713,9 @@ mod tests {
                 execution_session_id: "turn-undo",
                 instruction_digest: &sha256_text("generate artifact"),
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         let prepared = store
@@ -6239,6 +6804,9 @@ mod tests {
                     execution_session_id: "turn-restart-artifact",
                     instruction_digest: &sha256_text("create restart-safe artifact"),
                     plan_digest: None,
+                    project_id: None,
+                    project_revision: None,
+                    scope_digest: None,
                 })
                 .unwrap();
             let prepared = store
@@ -6725,6 +7293,9 @@ mod tests {
                 execution_session_id: &first_run,
                 instruction_digest: &instruction,
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         let second = store
@@ -6735,6 +7306,9 @@ mod tests {
                 execution_session_id: &second_run,
                 instruction_digest: &digest_of("prepare another bounded result"),
                 plan_digest: Some(&digest_of("one step")),
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         assert_ne!(first.task_id, second.task_id);
@@ -6762,6 +7336,9 @@ mod tests {
                 execution_session_id: &run_id,
                 instruction_digest: &digest_of("answer with evidence"),
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         let provider_item_id = stable_id("item", &["provider_generation", &task_id, &run_id]);
@@ -6831,6 +7408,9 @@ mod tests {
                 execution_session_id: &run_id,
                 instruction_digest: &digest_of("review bounded evidence"),
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         let item_id = stable_id("item", &["observation", &task_id, &run_id]);
@@ -6883,6 +7463,9 @@ mod tests {
                 execution_session_id: &first_run,
                 instruction_digest: &instruction_digest,
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         assert_eq!(store.recover_interrupted_general_runs().unwrap(), 1);
@@ -6898,6 +7481,9 @@ mod tests {
                 execution_session_id: &retry_run,
                 instruction_digest: &instruction_digest,
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         assert_eq!(retry.ordinal, 2);
@@ -6920,6 +7506,9 @@ mod tests {
             execution_session_id: &run_id,
             instruction_digest: &instruction_digest,
             plan_digest: None,
+            project_id: None,
+            project_revision: None,
+            scope_digest: None,
         };
         let first = store.begin_general_task_run(input.clone()).unwrap();
         let replay = store.begin_general_task_run(input).unwrap();
@@ -6934,6 +7523,9 @@ mod tests {
                 execution_session_id: &parallel_run,
                 instruction_digest: &instruction_digest,
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap_err();
         assert!(error
@@ -6957,6 +7549,9 @@ mod tests {
                 execution_session_id: &run_id,
                 instruction_digest: &instruction_digest,
                 plan_digest: Some(&digest_of("changed plan presence")),
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap_err();
         assert!(plan_drift
@@ -6979,6 +7574,9 @@ mod tests {
                 execution_session_id: &run_id,
                 instruction_digest: &instruction_digest,
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         store
@@ -6993,6 +7591,9 @@ mod tests {
                 execution_session_id: &retry_run,
                 instruction_digest: &instruction_digest,
                 plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
             })
             .unwrap();
         assert_eq!(retried.ordinal, 2);

@@ -425,8 +425,41 @@ completion credit. These controlled tests do not claim external-live
 provider/Web/MCP or exact-native product evidence; R8 owns those evidence
 levels.
 
-## Current stage: R5 - bounded concurrency, steering, recovery, and task control
+## Completed stage: R5 - Project scope, background Work, and task attention
 
-R5 will migrate remaining active steering and control semantics onto general
-Work identity, then delete the report-named steering and compatibility control
-consumers. R5 has not started.
+R5 completed the general Work control and continuity boundary:
+
+- canonical Projects group Conversations and carry an optional workspace root,
+  revision, and exact scope digest; every admitted Work Run snapshots that
+  immutable Project scope;
+- retry compares the prior Run scope with the Conversation's current Project
+  and revision. Changed or missing scope fails closed and records a canonical
+  `scope_stale` attention fact instead of silently widening access;
+- authenticated steering bodies are ordered Conversation Items. The Task store
+  retains only exact references and digests, consumes an in-scope adjustment at
+  the provider checkpoint, and blocks scope expansion without granting access;
+- global Work concurrency is bounded before Turn or Task persistence. Running
+  Work can continue while the user changes Conversation, and canonical cancel
+  remains available on the exact Task;
+- ReviewRequired, Blocked, Failed, EffectUnknown, and ScopeStale are durable
+  attention facts projected by `TasksViewModel`; React can filter Needs
+  Attention without rebuilding lifecycle truth; and
+- the release `accept_proposal_and_continue` and compatibility TaskSession
+  control consumer were removed. Confirmed Artifact effects complete the same
+  canonical Work identity; the legacy control module is test-only migration
+  evidence and has no Tauri handler or frontend caller.
+
+Focused migration, Project freshness, admission, steering, cancellation,
+attention, command, hook, and React tests pass. Full locked gates passed: core
+1470 passed / 2 ignored, scheduler 8 passed, Tauri 1214 passed / 24 ignored,
+resource worker 2 passed, doc tests 8 passed, frontend 273 passed, production
+build and absence guard passed, and 8 browser-shell E2E cases passed. R5 claims
+controlled source/product evidence only; exact-native and external-live
+evidence remain R8.
+
+## Current stage: R6 - bounded Memory and LifeModel ports
+
+R6 will place Agent Memory and LifeModel participation behind narrow typed
+ports, prove that either system can evolve or be unavailable without changing
+Task/Run/Item/Artifact ownership, and preserve proposal-governed durable writes.
+R6 has not started.

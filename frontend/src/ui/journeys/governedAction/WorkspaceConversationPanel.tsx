@@ -410,17 +410,26 @@ export function WorkspaceConversationPanel({
 }) {
   const [sessionDialog, setSessionDialog] = useState<"rename" | "delete" | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
+  const [projectNameDraft, setProjectNameDraft] = useState("");
   const action = controller.sendAction(disabledReason);
   const visibleMessages = controller.messages.filter(message => message.role !== "system");
   const selectedSession = controller.sessions.find(
     session => session.session_id === controller.selectedSessionId
   );
-  const sessionMutationBusy = ["renaming", "deleting"].includes(controller.sessionMutation.phase);
+  const sessionMutationBusy = [
+    "renaming",
+    "deleting",
+    "creating_project",
+    "assigning_project",
+  ].includes(controller.sessionMutation.phase);
   const resourceMutationBusy = ["importing", "detaching"].includes(
     controller.resourceMutation.phase
   );
   const pendingResourceCount = controller.pendingResources.length;
-  const conversationSwitchLocked = controller.busy || pendingResourceCount > 0;
+  const backgroundWorkCanDetach =
+    controller.mode === "work" && controller.turnState.phase === "streaming";
+  const conversationSwitchLocked =
+    (controller.busy && !backgroundWorkCanDetach) || pendingResourceCount > 0;
   const sessionMutationDisabledReason = sessionMutationBusy
     ? "会话操作正在等待后端保存并重新读取。"
     : undefined;
@@ -433,6 +442,43 @@ export function WorkspaceConversationPanel({
           <h3 id="workspace-conversation-title">继续当前工作</h3>
         </div>
         <div className="ol-workspace-conversation__tools">
+          <label>
+            <span className="ol-visually-hidden">选择 Project</span>
+            <select
+              value={controller.selectedProjectId ?? ""}
+              disabled={!controller.selectedSessionId || controller.busy || sessionMutationBusy}
+              onChange={event => void controller.assignProject(event.target.value || null)}
+            >
+              <option value="">不属于 Project</option>
+              {controller.projects.map(project => (
+                <option key={project.id} value={project.id}>
+                  {project.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span className="ol-visually-hidden">新 Project 名称</span>
+            <input
+              value={projectNameDraft}
+              placeholder="新 Project"
+              disabled={controller.busy || sessionMutationBusy}
+              onChange={event => setProjectNameDraft(event.target.value)}
+            />
+          </label>
+          <button
+            type="button"
+            className="ol-workspace-conversation__new"
+            disabled={!projectNameDraft.trim() || controller.busy || sessionMutationBusy}
+            onClick={() => {
+              const name = projectNameDraft;
+              void controller.createProject(name).then(created => {
+                if (created) setProjectNameDraft("");
+              });
+            }}
+          >
+            <FolderOpen size={15} aria-hidden="true" />新 Project
+          </button>
           {controller.sessions.length > 0 && (
             <label>
               <span className="ol-visually-hidden">选择对话</span>
@@ -755,7 +801,9 @@ export function WorkspaceConversationPanel({
             role="status"
           >
             {controller.turnState.phase === "streaming"
-              ? "正在生成回复；需要改变方向时可先取消，再发送新消息"
+              ? controller.mode === "work"
+                ? "任务正在执行；可追加指令，或切换对话让它在后台继续"
+                : "正在生成回复；需要改变方向时可先取消，再发送新消息"
               : controller.turnState.phase === "cancelling"
                 ? "正在等待后端确认取消终态"
                 : action.enabled
@@ -766,6 +814,29 @@ export function WorkspaceConversationPanel({
             {(controller.turnState.phase === "streaming" ||
               controller.turnState.phase === "cancelling") && (
               <>
+                {controller.mode === "work" && controller.turnState.phase === "streaming" && (
+                  <FoundationActionButton
+                    label="追加指令"
+                    icon={<Send size={16} aria-hidden="true" />}
+                    disabled={!controller.draft.trim() || !controller.activeTaskSessionId}
+                    disabledReason={
+                      !controller.activeTaskSessionId
+                        ? "后端尚未返回当前 Work Task 身份。"
+                        : !controller.draft.trim()
+                          ? "先输入要追加的指令。"
+                          : undefined
+                    }
+                    data-action-category="product"
+                    data-action-id={`workspace.steer:${controller.activeTaskSessionId ?? "unknown"}`}
+                    data-action-kind="continue"
+                    data-action-enabled={String(
+                      Boolean(controller.draft.trim() && controller.activeTaskSessionId)
+                    )}
+                    data-action-target-ref={controller.activeTaskSessionId ?? "unknown"}
+                    type="button"
+                    onClick={() => void controller.steer()}
+                  />
+                )}
                 <FoundationActionButton
                   label="停止回复"
                   icon={<Square size={16} aria-hidden="true" />}

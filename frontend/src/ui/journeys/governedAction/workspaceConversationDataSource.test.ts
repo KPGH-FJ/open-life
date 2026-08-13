@@ -6,6 +6,9 @@ const mocks = vi.hoisted(() => ({
   unlisten: vi.fn(),
   startStreamMessage: vi.fn(),
   cancelChatTurn: vi.fn(),
+  cancelWorkTask: vi.fn(),
+  createProject: vi.fn(),
+  assignConversationProject: vi.fn(),
   pickAndImportResources: vi.fn(),
   detachResourceFromTurn: vi.fn(),
   listMainChatSkills: vi.fn(),
@@ -30,7 +33,10 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("@/tauri", () => ({
   cancelMainChatAgentTask: vi.fn(),
   cancelChatTurn: mocks.cancelChatTurn,
+  cancelWorkTask: mocks.cancelWorkTask,
   createChatSession: vi.fn(),
+  createProject: mocks.createProject,
+  assignConversationProject: mocks.assignConversationProject,
   deleteChatSession: vi.fn(),
   getConversationViewModel: mocks.getConversationViewModel,
   renameChatSession: vi.fn(),
@@ -55,6 +61,9 @@ describe("workspace conversation Tauri stream adapter", () => {
     mocks.listeners.clear();
     mocks.unlisten.mockClear();
     mocks.startStreamMessage.mockReset();
+    mocks.cancelWorkTask.mockReset();
+    mocks.createProject.mockReset();
+    mocks.assignConversationProject.mockReset();
     mocks.pickAndImportResources.mockReset();
     mocks.detachResourceFromTurn.mockReset();
     mocks.listMainChatSkills.mockReset();

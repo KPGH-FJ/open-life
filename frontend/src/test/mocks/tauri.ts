@@ -340,6 +340,7 @@ export function createMockTasksViewModelEnvelope(
       ],
       summary: {
         total: 1,
+        needsAttentionCount: 0,
         activeCount: 0,
         waitingReviewCount: 0,
         waitingPermissionCount: 0,
