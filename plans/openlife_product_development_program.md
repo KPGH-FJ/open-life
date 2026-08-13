@@ -1,6 +1,6 @@
 # Current OpenLife Product Development Plan
 
-Status: active
+Status: complete
 
 ## Objective
 
@@ -87,3 +87,26 @@ owners are absent, current-source tests and product guards pass, the report
 path remains verified, the exact release bundle builds, and the repository is
 clean. If a legacy store still has a real production consumer, stop deletion
 at that boundary and migrate the consumer before removing the store.
+
+## Current result
+
+- The standalone PlanExecute IPC, frontend contracts, mocks, release command
+  registration, compatibility turn wrapper, and PlanExecute session store are
+  absent from the shipped product path.
+- Main Chat planning now creates canonical `plan` Tasks with Instruction and
+  Plan Items. Historical plan event decoding remains read-only compatibility;
+  static guards reject a new production writer.
+- The report path still has one application runtime owner and preserves its
+  canonical Task / Run / Item / Artifact, Review, recovery, cancellation, and
+  projection behavior. Compatibility task sessions remain only where current
+  task controls still consume them; they are not replaced by a parallel owner.
+- Full Rust and frontend gates and the controlled report behavior matrix pass.
+  The exact current source builds both a macOS application bundle and DMG.
+- The exact application bundle started successfully with a fresh isolated data
+  profile and remained stable until explicitly stopped. It did not use the
+  default profile or make a provider request.
+- The local bundle is an unsigned development release baseline, not evidence of
+  Developer ID signing, notarization, installation, or an external-live run.
+
+S7 is complete. S0 through S7 now form the closed product-development baseline;
+the next feature or distribution objective should begin in a new small plan.
