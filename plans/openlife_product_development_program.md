@@ -1,6 +1,6 @@
 # Current OpenLife Product Development Plan
 
-Status: blocked
+Status: complete
 
 ## Objective
 
@@ -103,18 +103,22 @@ clean release baseline.
 - Full Rust and frontend gates pass. The exact current release bundle builds.
 - The explicitly gated external-live document + Web report completes through
   one pending Review item and materializes once after acceptance.
-- The exact native bundle was reviewed with a fresh isolated data profile and
-  correctly fails closed when its credential store is unavailable.
+- The exact native bundle was reviewed from a fresh isolated profile after the
+  user confirmed macOS Keychain recovery and MCP audit credential
+  initialization. The first run exposed a strict Review acceptance IPC mismatch;
+  the response contract was repaired, covered by focused tests, and the exact
+  bundle was rebuilt before revalidation.
+- The rebuilt native application bound `comparison.pdf`, paused for one exact
+  DeepSeek network grant, continued the same Task through real provider
+  synthesis, created one reviewable Markdown Artifact, and materialized it only
+  after the native high-risk confirmation.
+- The refreshed Tasks read model showed one completed task with matching
+  Result, Changes, bounded Preview, and expected/observed Verification digests.
+  Restarting the same isolated profile preserved that single verified result
+  without duplicating the Task or filesystem effect.
+- The generated report file was removed after verification so the repository
+  does not retain native-trial content. The isolated profile remains outside
+  the repository and the default OpenLife profile was not used.
 
-## Current blocker
-
-Completing the report workflow inside that exact isolated native profile needs
-macOS Keychain initialization/recovery. That creates or accesses persistent
-credentials, so it requires the user's confirmation at action time. Do not use
-the default OpenLife profile or substitute fixture credentials.
-
-After the user completed Keychain recovery/initialization, native Review exposed
-a strict IPC contract mismatch: the backend returned canonical report runtime
-projection truth that the typed acceptance response did not model. The effect
-was not replayed. S6 remains blocked until the patched exact bundle completes a
-fresh isolated report task through Review and verified Results.
+S6 is complete. The next product-development pointer is S7: remaining old-path
+deletion and a clean release baseline.
