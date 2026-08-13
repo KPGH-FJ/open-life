@@ -386,7 +386,23 @@ async fn run_canonical_work_with_resource_scope(
     .with_consent_state(Arc::clone(state))
     .with_canonical_write_admission(execution_epoch.clone())
     .with_configured_conversation_provider_grant();
+    let personal_context = crate::personal_intelligence_ports::load_personal_intelligence_context(
+        state,
+        crate::personal_intelligence_ports::PersonalIntelligenceContextRequest {
+            conversation_id: &input.conversation_id,
+            user_text: &current_user.content,
+        },
+    )
+    .await;
+    debug_assert!(!personal_context.life_model_contract_version.is_empty());
     let kernel = MainChatKernel::new(client).with_context_config(MainChatKernelContextConfig {
+        extra_candidates: personal_context.memory.candidates,
+        life_model_context: Some(personal_context.life_model),
+        authorized_memory_routing: Some(
+            ingress
+                .policy_decision
+                .authorized_memory_routing(&ingress.intent_frame.memory_routing),
+        ),
         stream_provider_tokens: input.stream,
         ..MainChatKernelContextConfig::default()
     });
@@ -448,6 +464,53 @@ async fn run_canonical_work_with_resource_scope(
             }
         }
     };
+    let personal_suggestion =
+        match crate::personal_intelligence_ports::apply_authorized_personal_intelligence_suggestion(
+            state,
+            crate::personal_intelligence_ports::PersonalIntelligenceSuggestionRequest {
+                conversation_id: &input.conversation_id,
+                task_id: &input.task_id,
+                run_id: &input.run_id,
+                user_text: &current_user.content,
+                policy: &ingress.policy_decision,
+                memory_routing: &ingress.intent_frame.memory_routing,
+                execution_epoch: &execution_epoch,
+            },
+        )
+        .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                terminalize_failure(
+                    state,
+                    &input,
+                    CanonicalTaskStatus::Blocked,
+                    CanonicalTaskItemStatus::Blocked,
+                    "personal_intelligence_suggestion_failed",
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+    project_personal_intelligence_suggestion_observation(state, &input, &personal_suggestion)
+        .await?;
+    let personal_suggestion_reply = match personal_suggestion {
+        crate::personal_intelligence_ports::PersonalIntelligenceSuggestionReceipt::MemoryCommitted {
+            memory_id,
+            receipt_id,
+            newly_committed,
+            undo_available,
+        } => Some(format!(
+            "已按你的明确要求记录为可撤销的 Agent Memory。memory_id={memory_id} receipt_id={receipt_id} newly_committed={newly_committed} undo_available={undo_available}"
+        )),
+        crate::personal_intelligence_ports::PersonalIntelligenceSuggestionReceipt::LifeModelCandidateCaptured {
+            candidate_id,
+            replayed,
+        } => Some(format!(
+            "已记录一条 LifeModel 候选供你在个人智能中查看；尚未创建提案，也没有修改 LifeModel。candidate_id={candidate_id} replayed={replayed}"
+        )),
+        crate::personal_intelligence_ports::PersonalIntelligenceSuggestionReceipt::NotApplicable => None,
+    };
     let invocation = provider_state(sink.events());
     if let Some(error) = sink.work_provider_lifecycle_error.clone() {
         terminalize_failure(
@@ -488,7 +551,11 @@ async fn run_canonical_work_with_resource_scope(
     }
     project_selected_skill_observation(state, &input, kernel_result.context_metadata.as_ref())
         .await?;
-    if let Some(write_outcome) = kernel_result.write_outcome.as_ref() {
+    if let Some(write_outcome) = kernel_result
+        .write_outcome
+        .as_ref()
+        .filter(|_| personal_suggestion_reply.is_none())
+    {
         let staged = stage_canonical_work_artifacts_for_review(
             state,
             &input,
@@ -545,12 +612,19 @@ async fn run_canonical_work_with_resource_scope(
             invocation,
             route,
             tool_calls,
+            kernel_result
+                .context_metadata
+                .as_ref()
+                .and_then(|metadata| metadata.life_model_context.as_ref())
+                .map(|metadata| metadata.product_receipt()),
         ));
     }
-    let reply = kernel_result
-        .assistant_message
-        .map(|message| message.content)
-        .filter(|reply| !reply.trim().is_empty());
+    let reply = personal_suggestion_reply.or_else(|| {
+        kernel_result
+            .assistant_message
+            .map(|message| message.content)
+            .filter(|reply| !reply.trim().is_empty())
+    });
     let Some(reply) = reply else {
         let code = kernel_result
             .blockers
@@ -603,6 +677,11 @@ async fn run_canonical_work_with_resource_scope(
         invocation,
         route,
         tool_calls,
+        kernel_result
+            .context_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.life_model_context.as_ref())
+            .map(|metadata| metadata.product_receipt()),
     ))
 }
 
@@ -759,6 +838,61 @@ async fn project_selected_skill_observation(
     Ok(())
 }
 
+async fn project_personal_intelligence_suggestion_observation(
+    state: &Arc<AppState>,
+    input: &CanonicalWorkInput,
+    receipt: &crate::personal_intelligence_ports::PersonalIntelligenceSuggestionReceipt,
+) -> Result<(), String> {
+    use crate::personal_intelligence_ports::PersonalIntelligenceSuggestionReceipt;
+
+    let (summary_code, payload) = match receipt {
+        PersonalIntelligenceSuggestionReceipt::MemoryCommitted {
+            memory_id,
+            receipt_id,
+            newly_committed,
+            undo_available,
+        } => (
+            "work_memory_suggestion_committed",
+            serde_json::json!({
+                "memoryId": memory_id,
+                "receiptId": receipt_id,
+                "newlyCommitted": newly_committed,
+                "undoAvailable": undo_available,
+            }),
+        ),
+        PersonalIntelligenceSuggestionReceipt::LifeModelCandidateCaptured {
+            candidate_id,
+            replayed,
+        } => (
+            "work_lifemodel_candidate_captured",
+            serde_json::json!({
+                "candidateId": candidate_id,
+                "replayed": replayed,
+                "proposalCreated": false,
+                "canonicalChanged": false,
+            }),
+        ),
+        PersonalIntelligenceSuggestionReceipt::NotApplicable => return Ok(()),
+    };
+    let payload_digest =
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&payload).1;
+    state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
+        .lock()
+        .await
+        .append_completed_observation(
+            &input.task_id,
+            &input.run_id,
+            &format!("item:personal-intelligence:{}", input.run_id),
+            summary_code,
+            &payload_digest,
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
 fn provider_non_success_terminal(
     invocation: ProviderInvocationState,
 ) -> Option<(CanonicalTaskStatus, CanonicalTaskItemStatus, &'static str)> {
@@ -873,6 +1007,7 @@ async fn replay_completed(
             ProviderInvocationState::Completed,
             route,
             Vec::new(),
+            None,
         ));
     }
     if snapshot.task.status == CanonicalTaskStatus::Completed && snapshot.final_result.is_some() {
@@ -883,6 +1018,7 @@ async fn replay_completed(
             ProviderInvocationState::Completed,
             route,
             Vec::new(),
+            None,
         ));
     }
     let final_item_id = format!("item:final:{}", input.run_id);
@@ -905,6 +1041,7 @@ async fn replay_completed(
         ProviderInvocationState::Completed,
         route,
         Vec::new(),
+        None,
     ))
 }
 
@@ -955,6 +1092,7 @@ fn output(
     invocation: ProviderInvocationState,
     route: openlife_core::agent::ModelRouteTrace,
     tool_calls: Vec<ToolCallResult>,
+    life_model_influence: Option<crate::main_chat_kernel::MainChatLifeModelProductReceipt>,
 ) -> CanonicalWorkOutput {
     let tool_invoked = !tool_calls.is_empty();
     let product_tool_calls = tool_calls
@@ -987,7 +1125,7 @@ fn output(
         legacy_runtime_invoked: false,
         provider_invocation_status: invocation,
         model_invoked: invocation.observed_adapter_start(),
-        life_model_influence: None,
+        life_model_influence: life_model_influence.clone(),
         turn_terminal: None,
     };
     CanonicalWorkOutput {
@@ -1008,6 +1146,7 @@ fn output(
             "tool_invoked": tool_invoked,
             "reasoning_trace": reasoning_trace,
             "tool_calls": product_tool_calls,
+            "life_model_influence": life_model_influence,
             "runtime_owner": "CanonicalWorkRuntime",
         }),
     }
@@ -1150,6 +1289,117 @@ mod tests {
                 .len(),
             legacy_runs_before
         );
+    }
+
+    #[tokio::test]
+    async fn explicit_memory_uses_suggestion_port_without_provider_or_proposal() {
+        let state = canonical_state("provider must not run").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "R6 Memory")
+            .unwrap();
+        let mut request = input(&conversation_id);
+        request.messages[0].content = "请记住：发布复核代号是 OL-R6-MEM-417。".into();
+        let proposals_before = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_all_proposals(100, 0)
+            .unwrap()
+            .len();
+        let task_id = request.task_id.clone();
+        let output = run_canonical_work(request, &state, &mut |_, _| {})
+            .await
+            .unwrap();
+        assert!(output.result.reply.contains("Agent Memory"));
+        assert!(!output.result.model_invoked);
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list_all_proposals(100, 0)
+                .unwrap()
+                .len(),
+            proposals_before
+        );
+        let snapshot = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.task.status, CanonicalTaskStatus::Completed);
+        assert!(snapshot.final_result.is_some());
+        assert!(snapshot.items.iter().any(|item| {
+            item.kind == CanonicalTaskItemKind::Observation
+                && item.summary_code == "work_memory_suggestion_committed"
+        }));
+    }
+
+    #[tokio::test]
+    async fn lifemodel_suggestion_port_stages_candidate_without_proposal_or_version() {
+        let state = canonical_state("provider must not run").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "R6 LifeModel")
+            .unwrap();
+        let mut request = input(&conversation_id);
+        request.messages[0].content =
+            "Update my life model: communication style is concise and direct.".into();
+        let task_id = request.task_id.clone();
+        let output = run_canonical_work(request, &state, &mut |_, _| {})
+            .await
+            .unwrap();
+        assert!(output.result.reply.contains("LifeModel 候选"));
+        assert!(!output.result.model_invoked);
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_all_proposals(100, 0)
+            .unwrap()
+            .is_empty());
+        assert!(state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+            .unwrap()
+            .is_none());
+        let snapshot = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.task.status, CanonicalTaskStatus::Completed);
+        assert!(snapshot.items.iter().any(|item| {
+            item.kind == CanonicalTaskItemKind::Observation
+                && item.summary_code == "work_lifemodel_candidate_captured"
+        }));
     }
 
     #[tokio::test]

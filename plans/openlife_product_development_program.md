@@ -462,4 +462,30 @@ evidence remain R8.
 R6 will place Agent Memory and LifeModel participation behind narrow typed
 ports, prove that either system can evolve or be unavailable without changing
 Task/Run/Item/Artifact ownership, and preserve proposal-governed durable writes.
-R6 has not started.
+
+R6 is implemented. Canonical Chat and Work now load optional personalization
+through `AgentMemoryContextPort` and `LifeModelContextPort`; neither runtime
+reads legacy TaskSession conversation-memory ownership. Optional context
+failure degrades explicitly without granting permission or changing Task
+completion. Canonical Work applies already policy-authorized suggestions only
+through `PersonalIntelligenceSuggestionPort`: explicit low-risk facts use the
+reversible Memory gateway without provider invocation or Proposal creation,
+while stable preferences create only a LifeModel candidate and leave the
+canonical LifeModel unchanged. Both paths record a completed canonical
+Observation Item. Suggestion failure terminalizes the Work Task as blocked.
+
+Focused source, port, canonical Chat/Work, classification, failure, and absence
+guards pass. Full locked gates passed: core 1470 passed / 2 ignored, scheduler
+8 passed, Tauri 1220 passed / 24 ignored, resource worker 2 passed, doc tests 8
+passed, frontend 273 passed, production build and absence guard passed, and 8
+browser-shell E2E cases passed. R6 claims controlled source/product evidence
+only; exact-native and external-live evidence remain R8.
+
+## Current stage: R7 - final Workbench product surface
+
+R7 will reduce the frontend to one coherent Workbench around Projects,
+Conversations, Chat/Work, Results, Changes, Preview, Verification, inline
+attention and resumable work. It will remove remaining user-facing remnants of
+the retired lifecycle, make first-run and unavailable states actionable, and
+verify accessibility, localization, and responsive desktop behavior. R7 has
+not started.

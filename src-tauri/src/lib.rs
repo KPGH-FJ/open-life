@@ -67,6 +67,7 @@ pub(crate) mod markdown_memory;
 #[allow(dead_code)]
 pub(crate) mod memory_gateway;
 pub(crate) mod persistence_coordinator;
+pub(crate) mod personal_intelligence_ports;
 pub(crate) mod product_agent_dto;
 pub(crate) mod provider_network_consent;
 pub(crate) mod provider_registry;

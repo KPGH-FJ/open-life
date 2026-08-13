@@ -209,3 +209,20 @@ Memory lifecycle and vector retrieval enrich the Agent. If an optional
 enrichment store is unavailable, Main Chat carries an explicit degraded marker
 and continues with healthy base context; exact reads and writes against the
 missing store remain unavailable.
+
+## Canonical Chat And Work Port
+
+Release Chat and Work depend on `AgentMemoryContextPort` in
+`src-tauri/src/personal_intelligence_ports.rs`, not on legacy TaskSession or
+AgentRun conversation-memory tables. The port retrieves bounded lifecycle
+Memory, may use confirmed LifeModel terms only for reranking, and returns
+context candidates that grant no permission or completion authority. A missing
+optional port degrades context without making the Conversation or Task owner
+unavailable.
+
+For an explicit, policy-authorized, low-risk fact, canonical Work invokes
+`PersonalIntelligenceSuggestionPort`, which delegates to the existing
+reversible Memory gateway and records a completed Observation Item. It does not
+invoke a model or create a Proposal. Failure remains fail-closed and terminalizes
+the Work Task as blocked instead of leaving a running Task. Stable identity or
+preference statements are not misclassified into this lane.

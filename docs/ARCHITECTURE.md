@@ -167,7 +167,8 @@ contracts, production document/Web/Skill/MCP reads, ReviewWorkflow,
 materializers, effect certainty, cancellation fences, outbox recovery, backend
 ViewModels, and the Work Artifact/Changes/Preview/Verification/Undo
 implementation.
-Memory and LifeModel remain retained stores behind future narrow typed ports.
+Memory and LifeModel remain retained stores behind the narrow typed ports in
+`src-tauri/src/personal_intelligence_ports.rs`.
 
 The following remain capability migration consumers, not Work lifecycle owners:
 
@@ -297,6 +298,16 @@ materialization ports. They do not own Task state, permission, execution
 strategy, artifacts, or completion. A later LifeModel implementation change,
 including possible AI-assisted maintenance, must not require rewriting the
 Agent harness.
+
+Canonical Chat and Work load bounded optional context only through
+`AgentMemoryContextPort` and `LifeModelContextPort`. Port failure contributes a
+typed degraded context marker rather than taking over Task state. Canonical
+Work applies an already policy-authorized explicit suggestion through
+`PersonalIntelligenceSuggestionPort`: low-risk explicit facts may use the
+existing reversible Memory gateway, while stable LifeModel preferences create
+only a reviewable learning candidate. Each successful suggestion is projected
+as a completed canonical Observation Item. The port does not select the route,
+grant capability, create an Artifact, or terminalize a Task.
 
 ## Source maps
 

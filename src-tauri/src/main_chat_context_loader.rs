@@ -710,7 +710,7 @@ impl RuntimeMemoryScope {
 async fn runtime_memory_scope(
     state: &Arc<AppState>,
     conversation_owner_id: &str,
-    records: &[MemoryLifecycleRecord],
+    _records: &[MemoryLifecycleRecord],
 ) -> Result<RuntimeMemoryScope, String> {
     let (workspace_root, project_root) = {
         let config = state.config.lock().await;
@@ -726,52 +726,16 @@ async fn runtime_memory_scope(
             })
             .transpose()
     };
-    let mut legacy_conversations = HashSet::new();
-    if let Some(task_store) = state.main_chat_agent_session_store.as_ref() {
-        let task_store = task_store.lock().await;
-        let mut source_chat_ids: HashMap<String, Option<String>> = HashMap::new();
-        for record in records.iter().filter(|record| {
-            record.scope == MemoryLifecycleScope::Conversation
-                && record.source_task_session_id.is_some()
-                && record.scope_owner_ref.is_some()
-        }) {
-            let source_task_session_id = record
-                .source_task_session_id
-                .as_deref()
-                .expect("filtered source task session");
-            let expected_legacy_owner =
-                memory_scope_owner_ref(MemoryLifecycleScope::Conversation, source_task_session_id)
-                    .map_err(|error| error.to_string())?;
-            if record.scope_owner_ref.as_deref() != Some(expected_legacy_owner.as_str()) {
-                continue;
-            }
-            let source_chat_id = if let Some(cached) = source_chat_ids.get(source_task_session_id) {
-                cached.clone()
-            } else {
-                let loaded = task_store
-                    .chat_session_id_for_task(source_task_session_id)
-                    .map_err(|error| format!("legacy conversation owner lookup failed: {error}"))?;
-                source_chat_ids.insert(source_task_session_id.to_string(), loaded.clone());
-                loaded
-            };
-            let Some(source_chat_id) = source_chat_id else {
-                continue;
-            };
-            if source_chat_id == conversation_owner_id {
-                legacy_conversations.insert(expected_legacy_owner);
-            }
-        }
-    }
     Ok(RuntimeMemoryScope {
         conversation: memory_scope_owner_ref(
             MemoryLifecycleScope::Conversation,
             conversation_owner_id,
         )
         .map_err(|error| error.to_string())?,
-        // Compatibility is deliberately limited to old conversation records
-        // whose task-owned ref can be proven to belong to this same chat.
-        // Remove this set after those rows are migrated to chat-session owners.
-        legacy_conversations,
+        // Retained pre-reconstruction rows stay visible in Personal
+        // Intelligence, but production recall never guesses a canonical
+        // Conversation owner through the retired TaskSession store.
+        legacy_conversations: HashSet::new(),
         workspace: scoped_ref(MemoryLifecycleScope::Workspace, workspace_root)?,
         project: scoped_ref(MemoryLifecycleScope::Project, project_root)?,
     })
@@ -1950,7 +1914,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn legacy_task_owned_conversation_memory_is_recalled_only_by_its_chat_session() {
+    async fn legacy_task_owned_conversation_memory_is_not_recalled_by_canonical_chat() {
         const SENTINEL: &str = "LEGACY_CONVERSATION_OWNER_SAME_CHAT_ONLY";
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let source_task = {
@@ -2007,7 +1971,7 @@ mod tests {
         )
         .await
         .expect("same-chat legacy retrieval");
-        assert!(same_chat
+        assert!(!same_chat
             .iter()
             .any(|candidate| candidate.source_id == accepted.memory_id));
 

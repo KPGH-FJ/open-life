@@ -418,6 +418,7 @@ pub(crate) async fn run_canonical_chat(
             Vec::new(),
             ProviderInvocationState::Completed,
             route,
+            None,
         ));
     }
     if begun.snapshot.turn.status != TurnStatus::Running {
@@ -481,7 +482,18 @@ pub(crate) async fn run_canonical_chat(
         provider_runtime.config.system.network_policy,
     )
     .with_configured_conversation_provider_grant();
+    let personal_context = crate::personal_intelligence_ports::load_personal_intelligence_context(
+        state,
+        crate::personal_intelligence_ports::PersonalIntelligenceContextRequest {
+            conversation_id: &input.conversation_id,
+            user_text: &current_user.content,
+        },
+    )
+    .await;
+    debug_assert!(!personal_context.life_model_contract_version.is_empty());
     let kernel = MainChatKernel::new(client).with_context_config(MainChatKernelContextConfig {
+        extra_candidates: personal_context.memory.candidates,
+        life_model_context: Some(personal_context.life_model),
         stream_provider_tokens: input.stream,
         ..MainChatKernelContextConfig::default()
     });
@@ -569,6 +581,11 @@ pub(crate) async fn run_canonical_chat(
         kernel_result.blockers,
         invocation,
         route,
+        kernel_result
+            .context_metadata
+            .as_ref()
+            .and_then(|metadata| metadata.life_model_context.as_ref())
+            .map(|metadata| metadata.product_receipt()),
     ))
 }
 
@@ -642,6 +659,7 @@ fn output_from_result(
     blockers: Vec<String>,
     invocation: ProviderInvocationState,
     route: openlife_core::agent::ModelRouteTrace,
+    life_model_influence: Option<crate::main_chat_kernel::MainChatLifeModelProductReceipt>,
 ) -> CanonicalChatOutput {
     let reasoning_trace = ReasoningTrace {
         generation_result: Some(serde_json::json!({
@@ -667,7 +685,7 @@ fn output_from_result(
         provider_invocation_status: invocation,
         model_invoked: invocation.observed_adapter_start(),
         tool_invoked: false,
-        life_model_influence: None,
+        life_model_influence: life_model_influence.clone(),
         turn_terminal: None,
     };
     let done_payload = serde_json::json!({
@@ -683,6 +701,7 @@ fn output_from_result(
         "tool_invoked": false,
         "reasoning_trace": reasoning_trace,
         "tool_calls": [],
+        "life_model_influence": life_model_influence,
         "runtime_owner": "CanonicalChatRuntime",
     });
     CanonicalChatOutput {

@@ -216,9 +216,9 @@ digests, stable item IDs, source references, confirmation times, selection
 reasons, and an exact content digest. It contains no raw model and grants no
 permission.
 
-Both Main Chat send and stream enter `OpenLifeTurnRuntime` and use the same
-packet builder. The packet is a distinct ContextCompiler source; it is not an
-HS summary or Agent Memory. Confirmed goals and boundaries can add bounded
+Canonical Chat and Work load this packet through `LifeModelContextPort` in
+`src-tauri/src/personal_intelligence_ports.rs`. The packet is a distinct
+ContextCompiler source; it is not an HS summary or Agent Memory. Confirmed goals and boundaries can add bounded
 planning hints, eligible Memory results can receive a capped rerank bonus, and
 confirmed collaboration preferences can affect communication style or order
 already-legal equivalent tool candidates. Scope, lifecycle, privacy, Policy,
@@ -230,6 +230,14 @@ selected item IDs, confirmation times, reasons and affected surfaces. It exposes
 no hidden reasoning. An explicit current instruction can disable LifeModel use;
 irrelevant, unavailable, invalid or tampered models contribute no facts, and
 ordinary Agent work continues without personalization.
+
+An explicit stable preference in canonical Work goes through
+`PersonalIntelligenceSuggestionPort`. That boundary can capture a typed
+LifeModel learning candidate, but it does not create a Proposal or mutate the
+canonical version. Existing candidate maturation, typed-diff Review, and
+`LifeModelWriteGateway` materialization remain the only durable path. The
+successful capture appears as a canonical Observation Item without giving
+LifeModel any Task, permission, Artifact, or terminal-state authority.
 
 `src-tauri/src/life_model_materializer_guard.rs` limits allowed caller
 contexts. Governed manual override, restore/import, source-data compatibility,

@@ -348,6 +348,58 @@ fn canonical_work_release_surface_has_no_legacy_task_control_or_runtime_fallback
 }
 
 #[test]
+fn canonical_chat_and_work_depend_on_bounded_personal_intelligence_ports_only() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let ports = std::fs::read_to_string(root.join("src/personal_intelligence_ports.rs"))
+        .expect("read personal intelligence ports");
+    for contract in [
+        "trait AgentMemoryContextPort",
+        "trait LifeModelContextPort",
+        "trait PersonalIntelligenceSuggestionPort",
+        "PersonalIntelligenceSuggestionRequest",
+        "permission_granted: false",
+        "durable_write_authorized: false",
+    ] {
+        assert!(
+            ports.contains(contract),
+            "missing R6 port contract {contract}"
+        );
+    }
+    for runtime in [
+        "src/canonical_chat_runtime.rs",
+        "src/canonical_work_runtime.rs",
+    ] {
+        let source = std::fs::read_to_string(root.join(runtime)).expect("read canonical runtime");
+        assert!(
+            source.contains("load_personal_intelligence_context"),
+            "{runtime} must consume the bounded personal-intelligence snapshot"
+        );
+        for forbidden in [
+            "life_model_manager.lock()",
+            "memory_lifecycle_store.lock()",
+            "memory_store.lock()",
+            "main_chat_agent_session_store.lock()",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "{runtime} must not depend on personal-intelligence store detail {forbidden}"
+            );
+        }
+    }
+    let loader = std::fs::read_to_string(root.join("src/main_chat_context_loader.rs"))
+        .expect("read context loader");
+    let scope = loader
+        .split("async fn runtime_memory_scope")
+        .nth(1)
+        .and_then(|source| source.split("enum MemoryFreshness").next())
+        .expect("runtime memory scope body");
+    assert!(
+        !scope.contains("main_chat_agent_session_store"),
+        "canonical Memory recall must not consult retired TaskSession ownership"
+    );
+}
+
+#[test]
 fn retired_plan_events_have_no_production_writer() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_stream = root.join("src/main_chat_event_stream.rs");

@@ -5,7 +5,7 @@ use crate::main_chat_runtime_facts::{
     RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
 };
 use async_trait::async_trait;
-use chrono::{TimeZone, Utc};
+use chrono::TimeZone;
 use futures::StreamExt;
 #[cfg(test)]
 use once_cell::sync::Lazy as LazyLock;
@@ -105,6 +105,12 @@ use crate::main_chat_source_bound::{
     complete_sentence_count, direct_answer_structure_contract, MainChatSourceBoundFact,
 };
 use crate::persistence_coordinator::{CanonicalCommitPermit, GovernedDataImportRecoveryOwner};
+pub use crate::personal_intelligence_ports::{
+    LifeModelContextMetadata as MainChatKernelLifeModelContextMetadata,
+    LifeModelContextSnapshot as MainChatKernelLifeModelContext,
+    LifeModelProductReceipt as MainChatLifeModelProductReceipt,
+    LifeModelSelectedItemReceipt as MainChatLifeModelSelectedItemReceipt,
+};
 use crate::provider_network_consent::{
     authorize_provider_network_dispatch, NetworkConsentSubmissionScope,
     ProviderNetworkAuthorization,
@@ -432,95 +438,6 @@ pub struct MainChatKernelContextMetadata {
     pub source_bound_source_types: Vec<String>,
     #[serde(default)]
     pub life_model_context: Option<MainChatKernelLifeModelContextMetadata>,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MainChatLifeModelInfluenceReceipt {
-    pub schema: String,
-    pub status: String,
-    pub applied_surfaces: Vec<String>,
-    pub selected_item_refs: Vec<String>,
-    pub reason_codes: Vec<String>,
-    pub current_instruction_priority_preserved: bool,
-    pub policy_priority_preserved: bool,
-    pub permission_granted: bool,
-    pub durable_write_authorized: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MainChatLifeModelSelectedItemReceipt {
-    pub item_ref: String,
-    pub statement: String,
-    pub source_refs: Vec<String>,
-    pub confirmed_at: String,
-    pub reason_code: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MainChatLifeModelProductReceipt {
-    pub status: String,
-    pub source_id: Option<String>,
-    pub model_version: Option<u64>,
-    pub version_digest: Option<String>,
-    pub document_digest: Option<String>,
-    pub selected_items: Vec<MainChatLifeModelSelectedItemReceipt>,
-    pub applied_surfaces: Vec<String>,
-    pub current_instruction_priority_preserved: bool,
-    pub policy_priority_preserved: bool,
-    pub permission_granted: bool,
-    pub durable_write_authorized: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MainChatKernelLifeModelContextMetadata {
-    pub available: bool,
-    pub source_id: Option<String>,
-    pub model_id: Option<String>,
-    pub model_version: Option<u64>,
-    pub version_digest: Option<String>,
-    pub document_digest: Option<String>,
-    pub selected_sections: Vec<String>,
-    pub selected_item_refs: Vec<String>,
-    pub selected_items: Vec<MainChatLifeModelSelectedItemReceipt>,
-    pub context_digest: Option<String>,
-    pub context_chars: usize,
-    pub omitted_relevant_fact_count: usize,
-    pub warning_codes: Vec<String>,
-    pub influence_receipt: MainChatLifeModelInfluenceReceipt,
-}
-
-impl MainChatKernelLifeModelContextMetadata {
-    fn product_receipt(&self) -> MainChatLifeModelProductReceipt {
-        MainChatLifeModelProductReceipt {
-            status: self.influence_receipt.status.clone(),
-            source_id: self.source_id.clone(),
-            model_version: self.model_version,
-            version_digest: self.version_digest.clone(),
-            document_digest: self.document_digest.clone(),
-            selected_items: self.selected_items.clone(),
-            applied_surfaces: self.influence_receipt.applied_surfaces.clone(),
-            current_instruction_priority_preserved: self
-                .influence_receipt
-                .current_instruction_priority_preserved,
-            policy_priority_preserved: self.influence_receipt.policy_priority_preserved,
-            permission_granted: self.influence_receipt.permission_granted,
-            durable_write_authorized: self.influence_receipt.durable_write_authorized,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MainChatKernelLifeModelContext {
-    pub metadata: MainChatKernelLifeModelContextMetadata,
-    pub candidates: Vec<ContextSourceCandidate>,
-    pub planning_hints: Vec<openlife_core::agent::PlanExecuteLifeModelHint>,
-    pub memory_rerank_terms: Vec<String>,
-    pub tool_preference_hints: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -6890,7 +6807,6 @@ where
         if matches!(
             input.policy_decision.route_kind,
             openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::TransientStateCommand
-                | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ReversibleMemoryCommit
                 | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ConfirmationRequest
         ) {
             return self.blocked("work_capability_not_available", event_sink);
@@ -13687,233 +13603,14 @@ async fn command_surface_kernel_context_candidates(
 fn build_kernel_lifemodel_context(
     life_model: Option<&openlife_core::life_model::v2::LifeModelVersionV2>,
     task_text: &str,
-    mut warning_codes: Vec<String>,
+    warning_codes: Vec<String>,
 ) -> MainChatKernelLifeModelContext {
-    let current_instruction_override =
-        openlife_core::agent::life_model_runtime_context::task_explicitly_disables_lifemodel(
-            task_text,
-        );
-    let life_model_runtime_packet = match life_model {
-        Some(version) => match openlife_core::agent::LifeModelRuntimeContextV2::build(
-            version,
-            task_text,
-            Utc::now(),
-        ) {
-            Ok(packet) => packet,
-            Err(error) => {
-                log::warn!(
-                    "[MainChatKernel] canonical LifeModel v2 runtime packet rejected: {}",
-                    error
-                );
-                warning_codes.push("lifemodel_v2_runtime_packet_rejected".into());
-                None
-            }
-        },
-        None => None,
-    };
-    warning_codes.sort();
-    warning_codes.dedup();
-    let selected_sections = life_model_runtime_packet
-        .as_ref()
-        .map(|packet| {
-            packet
-                .selected_sections
-                .iter()
-                .map(|section| life_model_section_label(*section).to_string())
-                .collect()
-        })
-        .unwrap_or_default();
-    let selected_item_refs = life_model_runtime_packet
-        .as_ref()
-        .map(|packet| {
-            packet
-                .facts
-                .iter()
-                .map(|fact| {
-                    format!(
-                        "{}:{}",
-                        life_model_section_label(fact.section),
-                        fact.item_id
-                    )
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let selected_items = life_model_runtime_packet
-        .as_ref()
-        .map(|packet| {
-            packet
-                .facts
-                .iter()
-                .map(|fact| MainChatLifeModelSelectedItemReceipt {
-                    item_ref: format!(
-                        "{}:{}",
-                        life_model_section_label(fact.section),
-                        fact.item_id
-                    ),
-                    statement: bounded_label(&fact.value, MAX_LIFEMODEL_STATEMENT_CHARS),
-                    source_refs: fact.source_refs.to_vec(),
-                    confirmed_at: fact.confirmed_at.clone(),
-                    reason_code: bounded_label(&fact.selected_reason, MAX_REASON_CHARS),
-                })
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let mut reason_codes = life_model_runtime_packet
-        .as_ref()
-        .map(|packet| {
-            packet
-                .facts
-                .iter()
-                .map(|fact| bounded_label(&fact.selected_reason, MAX_REASON_CHARS))
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    if current_instruction_override {
-        reason_codes.push("current_instruction_override".into());
-    }
-    let source_id = life_model_runtime_packet
-        .as_ref()
-        .map(|_| "lifemodel.v2.runtime".to_string());
-    let content = life_model_runtime_packet
-        .as_ref()
-        .map(|packet| bounded_text(&packet.render_prompt(), MAX_CONTEXT_CONTENT_CHARS));
-    let context_digest = content.as_ref().map(|content| {
-        let (bytes, hash) = openlife_core::agent::metadata_safe::metadata_safe_text_digest(content);
-        format!("bytes:{bytes} hash:{hash}")
-    });
-    let context_chars = content
-        .as_ref()
-        .map(|content| content.chars().count())
-        .unwrap_or_default();
-    let metadata = MainChatKernelLifeModelContextMetadata {
-        available: false,
-        source_id: source_id.clone(),
-        model_id: life_model_runtime_packet
-            .as_ref()
-            .map(|packet| packet.model_id.clone()),
-        model_version: life_model_runtime_packet
-            .as_ref()
-            .map(|packet| packet.model_version),
-        version_digest: life_model_runtime_packet
-            .as_ref()
-            .map(|packet| packet.version_digest.clone()),
-        document_digest: life_model_runtime_packet
-            .as_ref()
-            .map(|packet| packet.document_digest.clone()),
-        selected_sections,
-        selected_item_refs: selected_item_refs.clone(),
-        selected_items,
-        context_digest,
-        context_chars,
-        omitted_relevant_fact_count: life_model_runtime_packet
-            .as_ref()
-            .map(|packet| packet.omitted_relevant_fact_count)
-            .unwrap_or_default(),
+    crate::personal_intelligence_ports::build_life_model_context(
+        life_model,
+        task_text,
         warning_codes,
-        influence_receipt: MainChatLifeModelInfluenceReceipt {
-            schema: "openlife.lifemodel.influence-receipt.v1".into(),
-            status: if current_instruction_override {
-                "current_instruction_override".into()
-            } else if life_model_runtime_packet.is_some() {
-                "eligible_for_context".into()
-            } else if life_model.is_some() {
-                "not_task_relevant".into()
-            } else {
-                "canonical_model_unavailable".into()
-            },
-            applied_surfaces: Vec::new(),
-            selected_item_refs,
-            reason_codes,
-            current_instruction_priority_preserved: true,
-            policy_priority_preserved: true,
-            permission_granted: false,
-            durable_write_authorized: false,
-        },
-    };
-    let candidates = match (source_id, content) {
-        (Some(source_id), Some(content)) => vec![ContextSourceCandidate::new(
-            ContextSourceKind::LifeModelContext,
-            source_id,
-            content,
-            "bounded canonical LifeModel v2 context with item-level provenance",
-            "private",
-            18,
-        )],
-        _ => Vec::new(),
-    };
-    let planning_hints = life_model_runtime_packet
-        .as_ref()
-        .map(|packet| {
-            packet
-                .facts
-                .iter()
-                .filter(|fact| {
-                    matches!(
-                        fact.section,
-                        openlife_core::life_model::v2::LifeModelSectionV2::LongTermGoals
-                            | openlife_core::life_model::v2::LifeModelSectionV2::Values
-                            | openlife_core::life_model::v2::LifeModelSectionV2::PersonalBoundaries
-                            | openlife_core::life_model::v2::LifeModelSectionV2::DecisionPrinciples
-                    )
-                })
-                .map(|fact| openlife_core::agent::PlanExecuteLifeModelHint {
-                    item_id: fact.item_id.clone(),
-                    section: fact.section,
-                    value: fact.value.clone(),
-                    selected_reason: fact.selected_reason.clone(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-    let memory_rerank_terms = life_model_runtime_packet
-        .as_ref()
-        .map(|packet| packet.facts.iter().map(|fact| fact.value.clone()).collect())
-        .unwrap_or_default();
-    let tool_preference_hints = life_model_runtime_packet
-        .as_ref()
-        .map(|packet| {
-            packet
-                .facts
-                .iter()
-                .filter(|fact| {
-                    matches!(
-                        fact.section,
-                        openlife_core::life_model::v2::LifeModelSectionV2::StablePreferences
-                            | openlife_core::life_model::v2::LifeModelSectionV2::CollaborationPreferences
-                    )
-                })
-                .map(|fact| fact.value.clone())
-                .collect()
-        })
-        .unwrap_or_default();
-    MainChatKernelLifeModelContext {
-        metadata,
-        candidates,
-        planning_hints,
-        memory_rerank_terms,
-        tool_preference_hints,
-    }
+    )
 }
-
-fn life_model_section_label(
-    section: openlife_core::life_model::v2::LifeModelSectionV2,
-) -> &'static str {
-    use openlife_core::life_model::v2::LifeModelSectionV2;
-    match section {
-        LifeModelSectionV2::Identity => "identity",
-        LifeModelSectionV2::Values => "values",
-        LifeModelSectionV2::LongTermGoals => "long_term_goals",
-        LifeModelSectionV2::StablePreferences => "stable_preferences",
-        LifeModelSectionV2::PersonalBoundaries => "personal_boundaries",
-        LifeModelSectionV2::ImportantRelationships => "important_relationships",
-        LifeModelSectionV2::Capabilities => "capabilities",
-        LifeModelSectionV2::Resources => "resources",
-        LifeModelSectionV2::DecisionPrinciples => "decision_principles",
-        LifeModelSectionV2::CollaborationPreferences => "collaboration_preferences",
-    }
-}
-
 fn plan_kernel_read_tools(
     input: &MainChatTurnInput,
     model_arguments_ignored: bool,
