@@ -68,6 +68,12 @@ describe("Workbench desktop read-only journey", () => {
     expect(permissionTask).toHaveAttribute("aria-pressed", "true");
     expect(screen.queryByRole("button", { name: /恢复|重试|取消任务/ })).not.toBeInTheDocument();
 
+    await user.click(screen.getByRole("button", { name: /把本周项目进展汇总成一页周报/ }));
+    const progress = screen.getByTestId("canonical-task-items");
+    expect(within(progress).getByText("工具调用")).toBeInTheDocument();
+    expect(within(progress).getByText("调用 本地文档")).toBeInTheDocument();
+    expect(within(progress).getByText("模型正在生成结果")).toBeInTheDocument();
+
     await user.click(screen.getByRole("button", { name: /生成周末出行的行前清单/ }));
     const artifacts = screen.getByTestId("canonical-task-artifacts");
     expect(within(artifacts).getByText(/Markdown 结果 · v1/)).toBeInTheDocument();

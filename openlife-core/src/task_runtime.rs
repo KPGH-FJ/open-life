@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 7;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -483,29 +483,75 @@ pub struct BoundReportReview {
 pub struct CanonicalTaskRuntimeStore {
     conn: Arc<Mutex<Connection>>,
     db_path: Option<PathBuf>,
+    receipt_key: Option<crate::agent::AgentRunReceiptKey>,
+    store_identity: String,
 }
 
 impl CanonicalTaskRuntimeStore {
     pub fn new(path: impl Into<PathBuf>) -> Result<Self> {
+        Self::new_internal(path.into(), None)
+    }
+
+    pub fn new_with_receipt_key(
+        path: impl Into<PathBuf>,
+        installation_key: crate::agent::AgentRunReceiptKey,
+    ) -> Result<Self> {
         let path = path.into();
+        Self::new_internal(path, Some(installation_key))
+    }
+
+    fn new_internal(
+        path: PathBuf,
+        installation_key: Option<crate::agent::AgentRunReceiptKey>,
+    ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
         let conn = Connection::open(&path)?;
-        let store = Self {
+        let receipt_key = installation_key
+            .map(|key| {
+                let canonical_path = crate::sqlite_migration::canonical_opened_main_database_path(
+                    &conn,
+                    "canonical_task_runtime_store",
+                )?
+                .ok_or_else(|| {
+                    anyhow::anyhow!("canonical_task_runtime_persistent_database_path_missing")
+                })?;
+                key.derive_for_canonical_database_slot(&canonical_path)
+            })
+            .transpose()?;
+        let mut store = Self {
             conn: Arc::new(Mutex::new(conn)),
             db_path: Some(path),
+            receipt_key,
+            store_identity: String::new(),
         };
         store.initialize()?;
+        store.store_identity = store.load_store_identity()?;
         Ok(store)
     }
 
     pub fn new_in_memory() -> Result<Self> {
-        let store = Self {
+        Self::new_in_memory_internal(None)
+    }
+
+    pub fn new_in_memory_with_receipt_key(
+        receipt_key: crate::agent::AgentRunReceiptKey,
+    ) -> Result<Self> {
+        Self::new_in_memory_internal(Some(receipt_key))
+    }
+
+    fn new_in_memory_internal(
+        receipt_key: Option<crate::agent::AgentRunReceiptKey>,
+    ) -> Result<Self> {
+        let mut store = Self {
             conn: Arc::new(Mutex::new(Connection::open_in_memory()?)),
             db_path: None,
+            receipt_key,
+            store_identity: String::new(),
         };
         store.initialize()?;
+        store.store_identity = store.load_store_identity()?;
         Ok(store)
     }
 
@@ -526,9 +572,16 @@ impl CanonicalTaskRuntimeStore {
             ],
         )?;
         Self::validate_schema(&conn)?;
+        let store_identity: String = conn.query_row(
+            "SELECT value FROM canonical_task_runtime_metadata WHERE key = 'store_identity'",
+            [],
+            |row| row.get(0),
+        )?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             db_path: Some(path.to_path_buf()),
+            receipt_key: None,
+            store_identity,
         })
     }
 
@@ -696,7 +749,10 @@ impl CanonicalTaskRuntimeStore {
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '7')
+             VALUES ('schema_version', '8')
+             ON CONFLICT(key) DO NOTHING;
+             INSERT INTO canonical_task_runtime_metadata(key, value)
+             VALUES ('store_identity', 'canonical_task_runtime_store:' || lower(hex(randomblob(16))))
              ON CONFLICT(key) DO NOTHING;",
         )?;
         if Self::schema_version(&conn)? == 1 {
@@ -717,7 +773,35 @@ impl CanonicalTaskRuntimeStore {
         if Self::schema_version(&conn)? == 6 {
             Self::migrate_v6_to_v7(&mut conn)?;
         }
+        if Self::schema_version(&conn)? == 7 {
+            Self::migrate_v7_to_v8(&mut conn)?;
+        }
         Self::validate_schema(&conn)
+    }
+
+    fn load_store_identity(&self) -> Result<String> {
+        let identity: String = self.lock_conn()?.query_row(
+            "SELECT value FROM canonical_task_runtime_metadata WHERE key = 'store_identity'",
+            [],
+            |row| row.get(0),
+        )?;
+        let suffix = identity
+            .strip_prefix("canonical_task_runtime_store:")
+            .ok_or_else(|| anyhow::anyhow!("canonical_task_runtime_store_identity_invalid"))?;
+        if suffix.len() != 32 || !suffix.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            anyhow::bail!("canonical_task_runtime_store_identity_invalid");
+        }
+        let uuid = format!(
+            "{}-{}-{}-{}-{}",
+            &suffix[0..8],
+            &suffix[8..12],
+            &suffix[12..16],
+            &suffix[16..20],
+            &suffix[20..32]
+        );
+        let parsed = uuid::Uuid::parse_str(&uuid)
+            .map_err(|_| anyhow::anyhow!("canonical_task_runtime_store_identity_invalid"))?;
+        Ok(format!("canonical_task_runtime_store:{parsed}"))
     }
 
     fn schema_version(conn: &Connection) -> Result<i64> {
@@ -1265,6 +1349,26 @@ impl CanonicalTaskRuntimeStore {
         Ok(())
     }
 
+    fn migrate_v7_to_v8(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO canonical_task_runtime_metadata(key, value)
+             VALUES ('store_identity', 'canonical_task_runtime_store:' || lower(hex(randomblob(16))))
+             ON CONFLICT(key) DO NOTHING",
+            [],
+        )?;
+        let changed = tx.execute(
+            "UPDATE canonical_task_runtime_metadata SET value = '8'
+             WHERE key = 'schema_version' AND value = '7'",
+            [],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("canonical_task_runtime_v7_migration_version_conflict");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn validate_schema(conn: &Connection) -> Result<()> {
         let version = Self::schema_version(conn)?;
         if version != TASK_RUNTIME_SCHEMA_VERSION {
@@ -1581,6 +1685,58 @@ impl CanonicalTaskRuntimeStore {
         )?;
         tx.commit()?;
         Ok(item)
+    }
+
+    /// Append an execution observation that is already mechanically complete.
+    ///
+    /// This is intentionally narrower than a caller-selected status setter:
+    /// live provider and tool work must still pass through `ItemAttempt`.
+    /// It is used for bounded, post-execution facts such as a verified tool
+    /// observation or selected Skill context receipt.
+    pub fn append_completed_observation(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        item_id: &str,
+        summary_code: &str,
+        payload_digest: &str,
+    ) -> Result<CanonicalTaskItemRecord> {
+        let item = self.append_general_item(
+            task_id,
+            run_id,
+            item_id,
+            CanonicalTaskItemKind::Observation,
+            summary_code,
+            payload_digest,
+        )?;
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE canonical_task_items SET status = 'completed', updated_at = ?2
+             WHERE id = ?1 AND status = 'waiting'",
+            params![item_id, now],
+        )?;
+        let completed = tx.query_row(
+            "SELECT id, task_id, run_id, sequence, kind, status, summary_code,
+                    payload_digest, created_at, updated_at
+             FROM canonical_task_items WHERE id = ?1",
+            [item_id],
+            row_to_item,
+        )?;
+        if changed == 0 && completed.status != CanonicalTaskItemStatus::Completed {
+            anyhow::bail!("canonical_completed_observation_terminal_conflict");
+        }
+        if completed.task_id != item.task_id
+            || completed.run_id != item.run_id
+            || completed.kind != CanonicalTaskItemKind::Observation
+            || completed.summary_code != summary_code
+            || completed.payload_digest != payload_digest
+        {
+            anyhow::bail!("canonical_completed_observation_identity_conflict");
+        }
+        tx.commit()?;
+        Ok(completed)
     }
 
     pub fn terminalize_item_attempt(
@@ -2235,6 +2391,18 @@ impl CanonicalTaskRuntimeStore {
              WHERE run.execution_session_id = ?1 AND task.task_kind = 'work'",
             [execution_session_id],
             |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
+    pub fn resolve_general_task_id_by_run(&self, run_id: &str) -> Result<Option<String>> {
+        validate_uuid("run_id", run_id)?;
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT task_id FROM canonical_task_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
         )
         .optional()
         .map_err(Into::into)
@@ -3322,6 +3490,70 @@ impl CanonicalTaskRuntimeStore {
                     .map_err(Into::into)
             })
             .unwrap_or(false)
+    }
+}
+
+impl crate::agent::action_executor::BoundContentReceiptIssuer for CanonicalTaskRuntimeStore {
+    fn issue_bound_content_receipt(
+        &self,
+        admission: crate::agent::action_executor::tool_executor::ObservedToolBodyAdmission,
+        action: &crate::agent::AgentAction,
+        observation: &crate::agent::AgentObservation,
+    ) -> Result<crate::agent::ContentReceipt> {
+        let key = self
+            .receipt_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("canonical_task_content_receipt_key_unavailable"))?;
+        let evidence = admission.into_issue_evidence();
+        let field = crate::agent::types::BoundContentField::for_kind(evidence.kind());
+        let run_id = action
+            .react_trace
+            .as_ref()
+            .and_then(|trace| trace.run_id.as_deref())
+            .ok_or_else(|| anyhow::anyhow!("bound_content_receipt_run_identity_missing"))?;
+        let run_status: String = self.lock_conn()?.query_row(
+            "SELECT status FROM canonical_task_runs WHERE run_id = ?1",
+            [run_id],
+            |row| row.get(0),
+        )?;
+        if run_status != CanonicalTaskStatus::Running.as_str() {
+            anyhow::bail!("canonical_task_content_receipt_run_not_running");
+        }
+        let observed_binding = crate::agent::types::ContentReceiptBinding::from_action_graph(
+            run_id,
+            action,
+            observation,
+            field,
+        )?;
+        let body = match field {
+            crate::agent::types::BoundContentField::ActionOutputObservationContent => action
+                .output
+                .as_ref()
+                .and_then(|value| value.get("text"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| anyhow::anyhow!("bound_content_receipt_action_output_missing"))?,
+            crate::agent::types::BoundContentField::ActionErrorObservationContent => action
+                .error
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("bound_content_receipt_action_error_missing"))?,
+        };
+        if observation.content != body || evidence.body() != body {
+            anyhow::bail!("bound_content_receipt_observed_body_mismatch");
+        }
+        let canonical_binding =
+            crate::agent::types::ContentReceiptBinding::from_canonical_action_graph(
+                &self.store_identity,
+                run_id,
+                action,
+                observation,
+                field,
+            )?;
+        crate::agent::ContentReceipt::issue_durable(
+            key,
+            evidence,
+            &observed_binding,
+            &canonical_binding,
+        )
     }
 }
 
@@ -5606,6 +5838,57 @@ mod tests {
         assert!(store
             .terminalize_general_run(&task_id, &run_id, CanonicalTaskStatus::Failed)
             .is_err());
+    }
+
+    #[test]
+    fn completed_observation_is_idempotent_and_rejects_payload_drift() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: &run_id,
+                instruction_digest: &digest_of("review bounded evidence"),
+                plan_digest: None,
+            })
+            .unwrap();
+        let item_id = stable_id("item", &["observation", &task_id, &run_id]);
+        let digest = digest_of("bounded observation");
+        let first = store
+            .append_completed_observation(
+                &task_id,
+                &run_id,
+                &item_id,
+                "work_bounded_observation",
+                &digest,
+            )
+            .unwrap();
+        let replay = store
+            .append_completed_observation(
+                &task_id,
+                &run_id,
+                &item_id,
+                "work_bounded_observation",
+                &digest,
+            )
+            .unwrap();
+        assert_eq!(first.status, CanonicalTaskItemStatus::Completed);
+        assert_eq!(replay, first);
+        assert!(store
+            .append_completed_observation(
+                &task_id,
+                &run_id,
+                &item_id,
+                "work_bounded_observation",
+                &digest_of("drifted observation"),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("canonical_general_item_identity_conflict"));
     }
 
     #[test]

@@ -50,12 +50,19 @@ and Work Task before provider execution, records the provider Item and exact
 ItemAttempt, and completes with one FinalResult bound to the exact assistant
 Item. Cancellation, interruption, failure, retry, and replay terminalize the
 same Task/Run owner; retry creates a new Run and Turn for the same Task.
+Production document, Web, selected Skill, and registered read-only MCP work
+now executes inside this general coordinator. Each real tool or provider
+invocation has its own canonical ItemAttempt; successful tool output adds a
+digest-only Observation Item. Citation repair is a second provider Attempt,
+not a rewrite of the first attempt. Document retry can reuse only the failed
+Run's exact Turn-bound resource scope.
 
 One Conversation may retain multiple Tasks. Planning is a typed Item inside a
 Run, not a PlanExecute session or strategy-owned lifecycle. Release Work does
 not create or read TaskSession, AgentRun, ActionQueue, or durable Main Chat
-Event lifecycle state. Those stores remain only as capability-materialization
-migration consumers for R3/R4 and are not Task truth.
+Event lifecycle state. Those stores remain only as effect/materialization,
+scheduling, or test migration consumers for R4 and later stages and are not
+Task truth.
 
 The historical S2-S5 report implementation remains reusable capability and
 Artifact evidence. It owns stable report Task identity, Run
@@ -154,11 +161,11 @@ Memory and LifeModel remain retained stores behind future narrow typed ports.
 The following remain capability migration consumers, not Work lifecycle owners:
 
 - `AgentTaskSessionStore`, `AgentRunStore`, `ActionQueueStore`, and
-  `MainChatAgentEventStore` are still used by pre-R3/R4 capability,
-  materialization, evaluation, or scheduling paths, but no longer own release
-  Chat or Work lifecycle;
-- retained report execution still needs migration into the general Work
-  coordinator in R3/R4;
+  `MainChatAgentEventStore` are still used by pre-R4 materialization,
+  evaluation, or scheduling paths, but no longer own release Chat, Work, or
+  the migrated read-capability lifecycle;
+- retained report Artifact/effect execution still needs migration into the
+  general Work coordinator in R4;
 - PlanExecute session/store/IPC ownership is retired; remaining PlanExecute
   names are drafting algorithms or test fixtures; and
 - Today, Tasks, and Review remain top-level frontend surfaces during migration.

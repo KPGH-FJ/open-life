@@ -4,8 +4,8 @@ use crate::main_chat_react_tool_selection::{
 };
 use crate::AppState;
 use chrono::{DateTime, Utc};
-use openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus;
 use openlife_core::skills::{SkillExecutionStatus, SkillManifest, SkillSourceKind};
+use openlife_core::task_runtime::{CanonicalTaskItemKind, CanonicalTaskItemStatus};
 use openlife_core::tool_manifest::ToolManifest;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -371,7 +371,7 @@ pub(crate) async fn list_main_chat_tool_candidates_with_state(
     let failure_recovery = tool_failure_recovery(state, task_session_id.as_deref()).await;
     let mut controls = Vec::new();
     if failure_recovery.is_some() {
-        controls.extend(["retry_tool".into(), "switch_tool".into()]);
+        controls.extend(["retry_task".into(), "choose_another_registered_tool".into()]);
     }
     let evidence_digest = digest_label_for_value(&json!({
         "taskSessionId": task_session_id,
@@ -392,33 +392,36 @@ pub(crate) async fn list_main_chat_tool_candidates_with_state(
 
 async fn tool_failure_recovery(
     state: &Arc<AppState>,
-    task_session_id: Option<&str>,
+    task_id: Option<&str>,
 ) -> Option<MainChatToolFailureRecovery> {
-    let task_session_id = task_session_id?;
-    let store_arc = state.main_chat_action_queue_store.as_ref()?;
-    let store = store_arc.lock().await;
-    let failed = store
-        .list_for_session(task_session_id)
-        .ok()?
-        .into_iter()
-        .find(|action| {
-            action.status == ExecutionQueueStatus::Failed
-                && openlife_core::agent::main_chat_agent_v1::typed_tool_receipt_allows_automatic_retry(
-                    action,
-                )
-        })?;
+    let task_id = task_id?;
+    let snapshot = state
+        .canonical_task_runtime_store
+        .as_ref()?
+        .lock()
+        .await
+        .load_task_snapshot(task_id)
+        .ok()??;
+    let failed = snapshot.attempts.iter().rev().find(|attempt| {
+        attempt.executor_kind == "tool" && attempt.status == CanonicalTaskItemStatus::Failed
+    })?;
+    let item = snapshot
+        .items
+        .iter()
+        .find(|item| item.id == failed.item_id && item.kind == CanonicalTaskItemKind::ToolCall)?;
+    let tool_name = item
+        .summary_code
+        .strip_prefix("work_tool_call:")
+        .unwrap_or("tool");
     Some(MainChatToolFailureRecovery {
-        failed_candidate_id: failed
-            .observation_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("candidateId"))
-            .and_then(Value::as_str)
-            .unwrap_or(&failed.action.action_type)
-            .to_string(),
-        failure_reason: failed.error.unwrap_or_else(|| "tool_failed_once".into()),
-        retry_available: true,
-        alternative_candidate_id: Some("builtin_echo".into()),
-        controls: vec!["retry_tool".into(), "switch_tool".into()],
+        failed_candidate_id: tool_name.to_string(),
+        failure_reason: "canonical_tool_attempt_failed".into(),
+        // R2 owns retry at Task/Run granularity. A failed Item does not mint a
+        // second hidden retry owner or claim that arbitrary tool fallback is
+        // safe.
+        retry_available: false,
+        alternative_candidate_id: None,
+        controls: vec!["retry_task".into(), "choose_another_registered_tool".into()],
     })
 }
 
@@ -978,5 +981,73 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(conversation.selected_skill_id, None);
+    }
+
+    #[tokio::test]
+    async fn tool_failure_recovery_reads_canonical_attempts_not_action_queue() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let item_id = uuid::Uuid::new_v4().to_string();
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let store = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .expect("canonical task store")
+            .lock()
+            .await;
+        store
+            .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: &turn_id,
+                instruction_digest: &format!("sha256:{}", "1".repeat(64)),
+                plan_digest: None,
+            })
+            .unwrap();
+        store
+            .append_general_item(
+                &task_id,
+                &run_id,
+                &item_id,
+                CanonicalTaskItemKind::ToolCall,
+                "work_tool_call:web.search",
+                &format!("sha256:{}", "2".repeat(64)),
+            )
+            .unwrap();
+        store
+            .begin_item_attempt(openlife_core::task_runtime::BeginItemAttemptInput {
+                attempt_id: &attempt_id,
+                task_id: &task_id,
+                run_id: &run_id,
+                item_id: &item_id,
+                executor_kind: "tool",
+                provider_profile_id: None,
+                provider_model_id: None,
+                request_digest: &format!("sha256:{}", "3".repeat(64)),
+            })
+            .unwrap();
+        store
+            .terminalize_item_attempt(
+                &attempt_id,
+                CanonicalTaskItemStatus::Failed,
+                Some(&format!("sha256:{}", "4".repeat(64))),
+            )
+            .unwrap();
+        drop(store);
+
+        let recovery = tool_failure_recovery(&state, Some(&task_id))
+            .await
+            .expect("canonical failed tool projection");
+        assert_eq!(recovery.failed_candidate_id, "web.search");
+        assert!(!recovery.retry_available);
+        assert_eq!(recovery.alternative_candidate_id, None);
+        assert_eq!(
+            recovery.controls,
+            vec!["retry_task", "choose_another_registered_tool"]
+        );
     }
 }

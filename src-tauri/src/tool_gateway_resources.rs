@@ -59,6 +59,7 @@ pub(crate) struct DevToolGatewayResources {
 
 pub(crate) struct MainChatReadToolGatewayResources {
     pub(crate) governed: GovernedToolGatewayResources,
+    #[cfg(test)]
     pub(crate) agent_run_store: openlife_core::agent::AgentRunStore,
 }
 
@@ -230,9 +231,11 @@ pub(crate) async fn snapshot_tool_gateway_resources_for_main_chat_read(
     state: &Arc<AppState>,
 ) -> Result<MainChatReadToolGatewayResources, String> {
     let (governed, _) = capture_governed(state).await;
+    #[cfg(test)]
     let agent_run_store = require_agent_run_store(state).await?;
     Ok(MainChatReadToolGatewayResources {
         governed,
+        #[cfg(test)]
         agent_run_store,
     })
 }

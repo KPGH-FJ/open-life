@@ -266,6 +266,40 @@
   margin-top: var(--ol-space-4);
 }
 
+.ol-task-item-timeline {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-task-item-timeline li {
+  display: flex;
+  gap: var(--ol-space-4);
+  align-items: flex-start;
+  justify-content: space-between;
+  padding: var(--ol-space-3) 0;
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-task-item-timeline li > div:first-child {
+  min-width: 0;
+}
+
+.ol-task-item-timeline strong {
+  color: var(--ol-ink);
+  font-size: var(--ol-type-reading);
+}
+
+.ol-task-item-timeline p {
+  margin: var(--ol-space-1) 0 0;
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
 .ol-task-result-card {
   display: grid;
   gap: var(--ol-space-4);

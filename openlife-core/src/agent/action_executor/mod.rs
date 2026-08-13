@@ -738,6 +738,14 @@ impl<'a> ActionExecutionContext<'a> {
         self
     }
 
+    pub fn with_canonical_task_runtime_store(
+        mut self,
+        store: &'a crate::task_runtime::CanonicalTaskRuntimeStore,
+    ) -> Self {
+        self.bound_content_receipt_issuer = Some(store);
+        self
+    }
+
     pub fn with_action_bound_tool_permission(
         mut self,
         authorization: &'a crate::tool_permissions::ActionBoundToolPermissionAuthorization,

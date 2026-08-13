@@ -1165,6 +1165,9 @@ fn main_chat_send_command_uses_canonical_runtime_executors() {
     assert!(module_source.contains("pub(crate) fn send_canonical_chat_with_state("));
     assert!(module_source.contains("pub(crate) fn send_canonical_work_with_state("));
     assert!(
+        module_source.contains("#[cfg(test)]\npub(crate) fn send_message_with_operation_state(")
+    );
+    assert!(
         module_source.contains("Pin<Box<dyn Future<Output = Result<SendMessageResult, String>>")
             && module_source.contains("Box::pin(async move"),
         "send executor must own the boxed command-to-runtime future seam"
@@ -1197,6 +1200,8 @@ fn main_chat_stream_command_uses_canonical_runtime_executors() {
     let module_source = std::fs::read_to_string(&module_path).expect("read main_chat_streaming.rs");
     assert!(module_source.contains("pub(crate) fn start_canonical_chat_stream_with_state<'a>("));
     assert!(module_source.contains("pub(crate) fn start_canonical_work_stream_with_state<'a>("));
+    assert!(module_source
+        .contains("#[cfg(test)]\npub(crate) fn start_stream_message_with_operation_state<'a>("));
     assert!(
         module_source.contains(
             "Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>"

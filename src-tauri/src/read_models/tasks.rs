@@ -323,7 +323,7 @@ async fn canonical_task_input(
             WorkspaceActivityItem::from_product_event(
                 item.id.clone(),
                 item.kind.as_str(),
-                item.summary_code.clone(),
+                canonical_item_activity_summary(item.kind, &item.summary_code),
                 Some(item.status.as_str()),
                 None,
                 vec![EvidenceRef {
@@ -376,6 +376,44 @@ async fn canonical_task_input(
         },
         activity,
     )
+}
+
+fn canonical_item_activity_summary(
+    kind: openlife_core::task_runtime::CanonicalTaskItemKind,
+    summary_code: &str,
+) -> String {
+    let tool_name = summary_code.split_once(':').map(|(_, tool)| tool);
+    match (kind, tool_name) {
+        (openlife_core::task_runtime::CanonicalTaskItemKind::ToolCall, Some(tool)) => {
+            format!("正在使用 {}。", canonical_tool_label(tool))
+        }
+        (openlife_core::task_runtime::CanonicalTaskItemKind::Observation, Some(tool)) => {
+            format!("已取得 {} 的可核对结果。", canonical_tool_label(tool))
+        }
+        (openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration, _) => {
+            "模型正在根据已授权的上下文生成结果。".into()
+        }
+        (openlife_core::task_runtime::CanonicalTaskItemKind::Instruction, _) => {
+            "用户任务已经绑定到本次执行。".into()
+        }
+        (openlife_core::task_runtime::CanonicalTaskItemKind::Plan, _) => {
+            "任务执行计划已经记录。".into()
+        }
+        (openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult, _) => {
+            "最终结果已经记录并可供核对。".into()
+        }
+        _ => summary_code.replace('_', " "),
+    }
+}
+
+fn canonical_tool_label(tool: &str) -> &str {
+    match tool {
+        "document.read" => "本地文档读取",
+        "web.search" => "Web 搜索",
+        "web.fetch" => "网页读取",
+        "mcp.read_only" => "MCP 只读工具",
+        other => other,
+    }
 }
 
 fn canonical_general_delivery_status(

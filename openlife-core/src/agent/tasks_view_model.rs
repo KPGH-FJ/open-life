@@ -399,21 +399,25 @@ pub enum WorkspaceActivityKind {
 impl WorkspaceActivityKind {
     pub fn from_product_code(value: &str) -> Self {
         match value {
-            "user_input" => Self::UserInput,
+            "user_input" | "instruction" => Self::UserInput,
             "route_decision" => Self::RouteDecision,
             "plan" => Self::Plan,
-            "action" => Self::Action,
-            "observation" => Self::Observation,
-            "follow_up" => Self::FollowUp,
+            "action" | "tool_call" | "provider_generation" => Self::Action,
+            "observation" | "verification" => Self::Observation,
+            "follow_up" | "steering" => Self::FollowUp,
             "permission_request" => Self::PermissionRequest,
-            "proposal_request" => Self::ProposalRequest,
+            "proposal_request" | "review_checkpoint" => Self::ProposalRequest,
             "error" => Self::Error,
             "retry" => Self::Retry,
             "final_result" => Self::FinalResult,
             "reflection" => Self::Reflection,
             "fallback" => Self::Fallback,
             "blocker" => Self::Blocker,
-            value if value.starts_with("turn_") || value.contains("lifecycle") => {
+            value
+                if value.starts_with("turn_")
+                    || value.contains("lifecycle")
+                    || matches!(value, "artifact_draft" | "artifact_materialized") =>
+            {
                 Self::DurableLifecycle
             }
             _ => Self::Unknown,
@@ -1565,6 +1569,39 @@ mod tests {
             workspace.provider_privacy_boundary_summary.risk,
             ProductRiskLevel::Unknown
         );
+    }
+
+    #[test]
+    fn canonical_work_items_map_to_product_activity_kinds() {
+        let cases = [
+            ("instruction", WorkspaceActivityKind::UserInput),
+            ("tool_call", WorkspaceActivityKind::Action),
+            ("provider_generation", WorkspaceActivityKind::Action),
+            ("observation", WorkspaceActivityKind::Observation),
+            ("verification", WorkspaceActivityKind::Observation),
+            ("steering", WorkspaceActivityKind::FollowUp),
+            ("review_checkpoint", WorkspaceActivityKind::ProposalRequest),
+            ("artifact_draft", WorkspaceActivityKind::DurableLifecycle),
+            (
+                "artifact_materialized",
+                WorkspaceActivityKind::DurableLifecycle,
+            ),
+            ("final_result", WorkspaceActivityKind::FinalResult),
+        ];
+
+        for (kind_code, expected) in cases {
+            let item = WorkspaceActivityItem::from_product_event(
+                format!("item-{kind_code}"),
+                kind_code,
+                "bounded summary",
+                Some("completed"),
+                None,
+                Vec::new(),
+                None,
+            );
+            assert_eq!(item.kind, expected, "kind_code={kind_code}");
+            assert_eq!(item.status, WorkspaceActivityStatus::Completed);
+        }
     }
 
     #[test]

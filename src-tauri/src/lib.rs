@@ -22,9 +22,9 @@ pub(crate) mod life_model_write_gateway;
 pub(crate) mod life_state_projection;
 pub(crate) mod main_chat_agent_state_payload;
 pub(crate) mod main_chat_cancellation;
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) mod main_chat_capability_eval;
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) mod main_chat_command_surface_eval;
 pub(crate) mod main_chat_context_loader;
 #[allow(dead_code)]
@@ -37,7 +37,7 @@ pub(crate) mod main_chat_final_gate;
 pub(crate) mod main_chat_generation_support;
 #[allow(dead_code)]
 pub(crate) mod main_chat_kernel;
-#[allow(dead_code)]
+#[cfg(test)]
 pub(crate) mod main_chat_live_provider_harness;
 pub(crate) mod main_chat_memory_proposals;
 pub(crate) mod main_chat_policy_runtime;

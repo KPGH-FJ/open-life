@@ -381,8 +381,9 @@ impl ContentReceiptBinding {
         observation: &AgentObservation,
         field: BoundContentField,
     ) -> anyhow::Result<Self> {
-        if canonical_store_identity
-            .strip_prefix("agent_run_store:")
+        if ["agent_run_store:", "canonical_task_runtime_store:"]
+            .into_iter()
+            .find_map(|prefix| canonical_store_identity.strip_prefix(prefix))
             .and_then(|value| Uuid::parse_str(value).ok())
             .is_none()
         {

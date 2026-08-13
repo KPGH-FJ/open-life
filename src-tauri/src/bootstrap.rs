@@ -2331,8 +2331,12 @@ fn bootstrap_with_secret_store(
     let canonical_task_runtime_db_path = data_dir.join("task_runtime.db");
     let canonical_task_runtime_store = init_store(
         || {
-            openlife_core::task_runtime::CanonicalTaskRuntimeStore::new(
+            let key = agent_run_receipt_key
+                .as_ref()
+                .ok_or_else(|| "canonical_task_receipt_key_unavailable".to_string())?;
+            openlife_core::task_runtime::CanonicalTaskRuntimeStore::new_with_receipt_key(
                 &canonical_task_runtime_db_path,
+                key.clone(),
             )
             .map_err(|error| error.to_string())
         },
@@ -2343,8 +2347,13 @@ fn bootstrap_with_secret_store(
             .map_err(|error| error.to_string())
         },
         || {
-            openlife_core::task_runtime::CanonicalTaskRuntimeStore::new_in_memory()
-                .map_err(|error| error.to_string())
+            let key = agent_run_receipt_key
+                .as_ref()
+                .ok_or_else(|| "canonical_task_receipt_key_unavailable".to_string())?;
+            openlife_core::task_runtime::CanonicalTaskRuntimeStore::new_in_memory_with_receipt_key(
+                key.clone(),
+            )
+            .map_err(|error| error.to_string())
         },
         "CanonicalTaskRuntimeStore",
         &startup_warnings,

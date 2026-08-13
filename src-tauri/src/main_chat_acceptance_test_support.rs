@@ -68,6 +68,20 @@ pub(crate) async fn configure_live_web_eval_state_with_citation_echo_local_http_
     captured_requests
 }
 
+pub(crate) async fn configure_live_web_eval_state_with_citation_retry_local_http_provider(
+    state: &Arc<AppState>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_base = fake_local_chat_provider_endpoint(
+        "",
+        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::WebAfterRetry,
+    )
+    .await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
+}
+
 pub(crate) async fn configure_live_resource_and_web_eval_state_with_citation_echo_local_http_provider(
     state: &Arc<AppState>,
 ) -> Arc<std::sync::Mutex<Vec<String>>> {
@@ -341,6 +355,7 @@ async fn fake_local_chat_provider_endpoint(
 enum LocalCitationEcho {
     None,
     Web,
+    WebAfterRetry,
     WebArtifact,
     AllResources,
     ResourceArtifact,
@@ -375,6 +390,17 @@ impl LocalCitationEcho {
             Self::Web => issued_citation("webref_", 31)
                 .map(|citation| format!("The retrieved Web evidence is available [{citation}]."))
                 .unwrap_or_else(|| "No issued Web citation was observed.".into()),
+            Self::WebAfterRetry => {
+                if request_text.contains("TRUSTED OPENLIFE ONE-SHOT CITATION RETRY") {
+                    issued_citation("webref_", 31)
+                        .map(|citation| {
+                            format!("The retrieved Web evidence is available [{citation}].")
+                        })
+                        .unwrap_or_else(|| "No issued Web citation was observed.".into())
+                } else {
+                    "The first draft intentionally omitted its citation.".into()
+                }
+            }
             Self::WebArtifact => issued_citation("webref_", 31)
                 .map(|citation| {
                     serde_json::json!({

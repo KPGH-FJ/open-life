@@ -43,6 +43,9 @@ use openlife_core::resource_selection::{DeterministicResourceSelector, ResourceC
 use openlife_core::scheduler::{
     InferenceScheduler, PreparedProviderStreamEvent, PreparedProviderStreamTerminal,
 };
+use openlife_core::task_runtime::{
+    BeginItemAttemptInput, CanonicalTaskItemKind, CanonicalTaskItemStatus,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -946,24 +949,181 @@ trait MainChatKernelReadToolExecutor: Send + Sync {
 struct AppStateMainChatReadToolExecutor {
     state: Arc<AppState>,
     execution_epoch: crate::main_chat_cancellation::MainChatExecutionEpoch,
-    task_session_id: String,
+    execution_owner_id: String,
     conversation_session_id: String,
+    project_canonical_items: bool,
 }
 
 impl AppStateMainChatReadToolExecutor {
     fn new(
         state: Arc<AppState>,
         execution_epoch: crate::main_chat_cancellation::MainChatExecutionEpoch,
-        task_session_id: impl Into<String>,
+        execution_owner_id: impl Into<String>,
         conversation_session_id: impl Into<String>,
+        project_canonical_items: bool,
     ) -> Self {
         Self {
             state,
             execution_epoch,
-            task_session_id: task_session_id.into(),
+            execution_owner_id: execution_owner_id.into(),
             conversation_session_id: conversation_session_id.into(),
+            project_canonical_items,
         }
     }
+}
+
+struct CanonicalWorkToolIdentity {
+    task_id: String,
+    run_id: String,
+    tool_item_id: String,
+    attempt_id: String,
+    request_digest: String,
+}
+
+async fn canonical_work_tool_identity(
+    state: &Arc<AppState>,
+    run_id: &str,
+    decision: &MainChatKernelReadToolDecision,
+) -> Result<CanonicalWorkToolIdentity, String> {
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let (input_bytes, request_digest) =
+        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+            "runId": run_id,
+            "actionType": decision.executor_action_type,
+            "target": decision.target,
+            "input": decision.governed_input,
+        }));
+    let task_id = store
+        .lock()
+        .await
+        .resolve_general_task_id_by_run(run_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_work_tool_run_missing".to_string())?;
+    let (_, suffix) = openlife_core::agent::metadata_safe::metadata_safe_text_digest(&format!(
+        "{}\0{}\0{}\0{}",
+        run_id, decision.executor_action_type, decision.target, request_digest
+    ));
+    let suffix = suffix.trim_start_matches("sha256:");
+    let tool_item_id = format!("item:tool:{}:{}", run_id, suffix);
+    let attempt_id = uuid::Uuid::new_v4().to_string();
+    let store = store.lock().await;
+    store
+        .append_general_item(
+            &task_id,
+            run_id,
+            &tool_item_id,
+            CanonicalTaskItemKind::ToolCall,
+            &format!("work_tool_call:{}", decision.queue_action_type),
+            &request_digest,
+        )
+        .map_err(|error| error.to_string())?;
+    store
+        .begin_item_attempt(BeginItemAttemptInput {
+            attempt_id: &attempt_id,
+            task_id: &task_id,
+            run_id,
+            item_id: &tool_item_id,
+            executor_kind: "tool",
+            provider_profile_id: None,
+            provider_model_id: None,
+            request_digest: &request_digest,
+        })
+        .map_err(|error| error.to_string())?;
+    let _ = input_bytes;
+    Ok(CanonicalWorkToolIdentity {
+        task_id,
+        run_id: run_id.to_string(),
+        tool_item_id,
+        attempt_id,
+        request_digest,
+    })
+}
+
+fn canonical_tool_terminal_status(
+    status: &ActionExecutionStatus,
+    receipt: &openlife_core::tool_execution_receipt::ToolExecutionReceipt,
+) -> CanonicalTaskItemStatus {
+    use openlife_core::tool_execution_receipt::ToolTransportStatus;
+    if matches!(
+        receipt.transport_status,
+        ToolTransportStatus::RemoteUnknown | ToolTransportStatus::Dispatched
+    ) {
+        return CanonicalTaskItemStatus::EffectUnknown;
+    }
+    if receipt.transport_status == ToolTransportStatus::LocalAborted {
+        return CanonicalTaskItemStatus::Interrupted;
+    }
+    match status {
+        ActionExecutionStatus::Succeeded => CanonicalTaskItemStatus::Completed,
+        ActionExecutionStatus::Blocked | ActionExecutionStatus::NeedsConfirmation => {
+            CanonicalTaskItemStatus::Blocked
+        }
+        ActionExecutionStatus::Failed => CanonicalTaskItemStatus::Failed,
+    }
+}
+
+async fn project_canonical_work_tool_result(
+    state: &Arc<AppState>,
+    identity: &CanonicalWorkToolIdentity,
+    decision: &MainChatKernelReadToolDecision,
+    result: &ActionExecutionResult,
+) -> Result<(), String> {
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
+        .lock()
+        .await;
+    let status = canonical_tool_terminal_status(&result.status, &result.execution_receipt);
+    let receipt_digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+        &serde_json::json!(result.execution_receipt),
+    )
+    .1;
+    store
+        .terminalize_item_attempt(&identity.attempt_id, status, Some(&receipt_digest))
+        .map_err(|error| error.to_string())?;
+    if status == CanonicalTaskItemStatus::Completed {
+        let observation_digest =
+            openlife_core::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+                "toolItemId": identity.tool_item_id,
+                "requestDigest": identity.request_digest,
+                "receiptDigest": receipt_digest,
+                "observation": result.observation.content,
+            }))
+            .1;
+        let observation_item_id = format!("item:observation:{}", identity.tool_item_id);
+        store
+            .append_completed_observation(
+                &identity.task_id,
+                &identity.run_id,
+                &observation_item_id,
+                &format!("work_tool_observation:{}", decision.queue_action_type),
+                &observation_digest,
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+async fn terminalize_canonical_work_tool_error(
+    state: &Arc<AppState>,
+    identity: &CanonicalWorkToolIdentity,
+    status: CanonicalTaskItemStatus,
+    error: &str,
+) -> Result<(), String> {
+    let digest = openlife_core::agent::metadata_safe::metadata_safe_text_digest(error).1;
+    state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
+        .lock()
+        .await
+        .terminalize_item_attempt(&identity.attempt_id, status, Some(&digest))
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }
 
 #[async_trait]
@@ -1143,10 +1303,25 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             resources.governed.shared.persistence_coordinator.as_ref(),
         )
         .with_memory_store(&resources.governed.memory_store)
-        .with_agent_run_store(&resources.agent_run_store)
         .with_network_policy(&network_policy)
         .with_canonical_write_admission(&self.execution_epoch)
         .with_calendar_ics_paths(&calendar_ics_paths);
+        let canonical_task_store = if self.project_canonical_items {
+            if let Some(store) = self.state.canonical_task_runtime_store.as_ref() {
+                Some(store.lock().await.clone())
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        if let Some(store) = canonical_task_store.as_ref() {
+            action_ctx = action_ctx.with_canonical_task_runtime_store(store);
+        }
+        #[cfg(test)]
+        if !self.project_canonical_items {
+            action_ctx = action_ctx.with_agent_run_store(&resources.agent_run_store);
+        }
         let resource_store = self
             .state
             .resource_runtime
@@ -1165,14 +1340,20 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
         if let Some(canonical_state) = resources.governed.canonical_state.as_ref() {
             action_ctx = action_ctx.with_canonical_state(canonical_state);
         }
-        let lifecycle_observer = crate::main_chat_event_stream::MainChatToolLifecycleObserver::new(
-            Arc::clone(&self.state),
-            self.task_session_id.clone(),
-            canonical_run_id.to_string(),
-        );
-        action_ctx = action_ctx
-            .with_tool_dispatch_observer(&lifecycle_observer)
-            .with_tool_started_transition_observer(&lifecycle_observer);
+        #[cfg(test)]
+        let lifecycle_observer = (!self.project_canonical_items).then(|| {
+            crate::main_chat_event_stream::MainChatToolLifecycleObserver::new(
+                Arc::clone(&self.state),
+                self.execution_owner_id.clone(),
+                canonical_run_id.to_string(),
+            )
+        });
+        #[cfg(test)]
+        if let Some(observer) = lifecycle_observer.as_ref() {
+            action_ctx = action_ctx
+                .with_tool_dispatch_observer(observer)
+                .with_tool_started_transition_observer(observer);
+        }
         if let Some(ref fixture_output) = web_search_fixture_output {
             action_ctx = action_ctx.with_web_search_fixture_output(fixture_output);
         }
@@ -1189,27 +1370,70 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             source_run_id: Some(canonical_run_id.to_string()),
             step_index: 0,
         };
+        let canonical_identity = match if self.project_canonical_items {
+            canonical_work_tool_identity(&self.state, canonical_run_id, &decision)
+                .await
+                .map(Some)
+        } else {
+            Ok(None)
+        } {
+            Ok(identity) => identity,
+            Err(error) => {
+                return blocked_kernel_read_tool_execution(
+                    decision,
+                    "canonical_tool_item_begin_failed",
+                    &error,
+                    None,
+                );
+            }
+        };
         let execution_epoch = self.execution_epoch.clone();
-        match openlife_core::agent::ToolGateway::from_executor_config(ActionExecutorConfig {
-            allow_writes: false,
-            allow_cloud: true,
-            search_provider: resources.governed.search_provider.clone(),
-            ..Default::default()
-        })
-        .with_receipt_registration_sink(move |registration| {
-            execution_epoch.observe_tool_execution(registration);
-        })
-        .execute(request, &action_ctx)
-        .await
-        {
+        let result =
+            openlife_core::agent::ToolGateway::from_executor_config(ActionExecutorConfig {
+                allow_writes: false,
+                allow_cloud: true,
+                search_provider: resources.governed.search_provider.clone(),
+                ..Default::default()
+            })
+            .with_receipt_registration_sink(move |registration| {
+                execution_epoch.observe_tool_execution(registration);
+            })
+            .execute(request, &action_ctx)
+            .await;
+        match result {
             Ok(result) => {
+                if let Some(identity) = canonical_identity.as_ref() {
+                    if let Err(error) = project_canonical_work_tool_result(
+                        &self.state,
+                        identity,
+                        &decision,
+                        &result,
+                    )
+                    .await
+                    {
+                        return blocked_kernel_read_tool_execution(
+                            decision,
+                            "canonical_tool_item_terminal_failed",
+                            &error,
+                            Some(serde_json::json!({
+                                "receiptStatus": result.execution_receipt.transport_status,
+                            })),
+                        );
+                    }
+                }
                 kernel_read_tool_execution_from_action_result(decision, result, canonical_run_id)
             }
             Err(error) => {
-                crate::terminal_owner_write_gateway::register_agent_run_store_error(
-                    &self.state,
-                    &error,
-                );
+                if let Some(identity) = canonical_identity.as_ref() {
+                    let error_text = error.to_string();
+                    let _ = terminalize_canonical_work_tool_error(
+                        &self.state,
+                        identity,
+                        CanonicalTaskItemStatus::Failed,
+                        &error_text,
+                    )
+                    .await;
+                }
                 blocked_kernel_read_tool_execution(
                     decision,
                     "read_tool_gateway_failed",
@@ -2626,6 +2850,7 @@ where
         execution_epoch.clone(),
         task_session_id.clone(),
         session_id,
+        false,
     )));
 
     let use_agent_loop = !context_request.is_source_bound()
@@ -5288,8 +5513,9 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                 prepared.network_policy = policy;
                 prepared.network_policy_decision = decision;
             }
-            if let Some(state) = self.consent_state.as_ref() {
-                let admission = self.canonical_write_admission.as_ref().ok_or_else(|| {
+            if !self.configured_provider_is_conversation_authorized {
+                if let Some(state) = self.consent_state.as_ref() {
+                    let admission = self.canonical_write_admission.as_ref().ok_or_else(|| {
                     MainChatModelFailure {
                         message: "Main Chat provider network consent has no execution-owned canonical write admission".into(),
                         provider_receipt: None,
@@ -5299,11 +5525,11 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                         proposal_ids: Vec::new(),
                     }
                 })?;
-                let review_origin =
-                    self.terminal_owner_review_origin
-                        .as_deref()
-                        .ok_or_else(|| {
-                            MainChatModelFailure {
+                    let review_origin =
+                        self.terminal_owner_review_origin
+                            .as_deref()
+                            .ok_or_else(|| {
+                                MainChatModelFailure {
                         message:
                             "Main Chat provider network consent has no terminal-owner Review origin"
                                 .into(),
@@ -5311,58 +5537,62 @@ impl MainChatModelClient for SchedulerMainChatModelClient {
                         blocker_code: Some("provider_network_consent_origin_unavailable".into()),
                         proposal_ids: Vec::new(),
                     }
-                        })?;
-                let url = openlife_core::llm::chat_completions_url(
-                    &prepared.provider_target,
-                    &self.scheduler.openai_base,
-                );
-                let capability = prepared.network_policy_decision.capability.clone();
-                let authorization = authorize_provider_network_dispatch(
-                    state,
-                    &prepared.network_policy,
-                    &prepared.network_policy_decision,
-                    &url,
-                    &capability,
-                    &prepared.provider_target,
-                    task_session_id.as_deref(),
-                    NetworkConsentSubmissionScope::MainChatTurn {
-                        origin: review_origin,
-                        admission,
-                        required_proposal_id: self.required_network_consent_proposal_id.as_deref(),
-                    },
-                )
-                .await
-                .map_err(|error| MainChatModelFailure {
-                    message: error.to_string(),
-                    provider_receipt: None,
-                    blocker_code: Some("provider_network_consent_error".into()),
-                    proposal_ids: Vec::new(),
-                })?;
-                match authorization {
-                    ProviderNetworkAuthorization::Authorized {
-                        network_policy,
-                        network_policy_decision,
-                        ..
-                    } => {
-                        prepared.network_policy = *network_policy;
-                        prepared.network_policy_decision = network_policy_decision;
-                    }
-                    ProviderNetworkAuthorization::ConsentRequired { proposal_id } => {
-                        return Err(MainChatModelFailure {
-                            message: "provider network consent is pending Review Center approval"
-                                .into(),
-                            provider_receipt: None,
-                            blocker_code: Some("network_policy_consent_required".into()),
-                            proposal_ids: vec![proposal_id],
-                        });
-                    }
-                    ProviderNetworkAuthorization::Denied { reason_code } => {
-                        return Err(MainChatModelFailure {
-                            message: reason_code.clone(),
-                            provider_receipt: None,
-                            blocker_code: Some(reason_code),
-                            proposal_ids: Vec::new(),
-                        });
+                            })?;
+                    let url = openlife_core::llm::chat_completions_url(
+                        &prepared.provider_target,
+                        &self.scheduler.openai_base,
+                    );
+                    let capability = prepared.network_policy_decision.capability.clone();
+                    let authorization = authorize_provider_network_dispatch(
+                        state,
+                        &prepared.network_policy,
+                        &prepared.network_policy_decision,
+                        &url,
+                        &capability,
+                        &prepared.provider_target,
+                        task_session_id.as_deref(),
+                        NetworkConsentSubmissionScope::MainChatTurn {
+                            origin: review_origin,
+                            admission,
+                            required_proposal_id: self
+                                .required_network_consent_proposal_id
+                                .as_deref(),
+                        },
+                    )
+                    .await
+                    .map_err(|error| MainChatModelFailure {
+                        message: error.to_string(),
+                        provider_receipt: None,
+                        blocker_code: Some("provider_network_consent_error".into()),
+                        proposal_ids: Vec::new(),
+                    })?;
+                    match authorization {
+                        ProviderNetworkAuthorization::Authorized {
+                            network_policy,
+                            network_policy_decision,
+                            ..
+                        } => {
+                            prepared.network_policy = *network_policy;
+                            prepared.network_policy_decision = network_policy_decision;
+                        }
+                        ProviderNetworkAuthorization::ConsentRequired { proposal_id } => {
+                            return Err(MainChatModelFailure {
+                                message:
+                                    "provider network consent is pending Review Center approval"
+                                        .into(),
+                                provider_receipt: None,
+                                blocker_code: Some("network_policy_consent_required".into()),
+                                proposal_ids: vec![proposal_id],
+                            });
+                        }
+                        ProviderNetworkAuthorization::Denied { reason_code } => {
+                            return Err(MainChatModelFailure {
+                                message: reason_code.clone(),
+                                provider_receipt: None,
+                                blocker_code: Some(reason_code),
+                                proposal_ids: Vec::new(),
+                            });
+                        }
                     }
                 }
             }
@@ -6642,8 +6872,8 @@ where
     }
 
     /// R1 ordinary Chat path. It deliberately exposes only the policy-governed
-    /// DirectAnswer kernel surface; Work tool/effect orchestration remains on
-    /// the existing runtime until R2-R4 migrate it.
+    /// DirectAnswer kernel surface. General Work has its own canonical
+    /// coordinator; governed effects continue migrating in R4.
     pub(crate) async fn run_canonical_chat<S>(
         &self,
         input: MainChatTurnInput,
@@ -6660,22 +6890,25 @@ where
         self.run_turn(input, event_sink).await
     }
 
-    /// R2 provider-only Work path. The general Task owner is outside the
-    /// kernel; this method reuses provider/context policy without allowing a
-    /// second task lifecycle or any tool/effect execution. R3 expands the
-    /// typed Item executor for governed reads.
-    pub(crate) async fn run_canonical_work_provider_only<S>(
+    /// Canonical Work path for provider generation plus R3 governed reads.
+    /// The general Task owner remains outside the kernel; ToolGateway projects
+    /// every read into canonical Item/Attempt/Observation facts and no legacy
+    /// TaskSession/AgentRun/ActionQueue event owner is involved.
+    pub(crate) async fn run_canonical_work<S>(
         &self,
         input: MainChatTurnInput,
+        canonical_run_id: &str,
+        state: Arc<AppState>,
+        execution_epoch: crate::main_chat_cancellation::MainChatExecutionEpoch,
         event_sink: &mut S,
     ) -> MainChatTurnResult
     where
+        C: Clone,
         S: MainChatEventSink + ?Sized,
     {
         if matches!(
             input.policy_decision.route_kind,
-            openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ReadOnlyTool
-                | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::TransientStateCommand
+            openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::TransientStateCommand
                 | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ReversibleMemoryCommit
                 | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ProposalOnlyWrite
                 | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ConfirmationRequest
@@ -6689,7 +6922,37 @@ where
         ) {
             return self.blocked("work_request_blocked_by_policy", event_sink);
         }
-        self.run_turn(input, event_sink).await
+        let task_session_id = input
+            .provider_authorization
+            .task_session_id
+            .clone()
+            .unwrap_or_else(|| input.session_id.clone());
+        self.clone_for_canonical_work()
+            .with_canonical_run_id(canonical_run_id)
+            .with_read_tool_executor(Arc::new(AppStateMainChatReadToolExecutor::new(
+                state,
+                execution_epoch,
+                canonical_run_id,
+                task_session_id,
+                true,
+            )))
+            .run_turn(input, event_sink)
+            .await
+    }
+
+    fn clone_for_canonical_work(&self) -> Self
+    where
+        C: Clone,
+    {
+        Self {
+            model_client: self.model_client.clone(),
+            context_config: self.context_config.clone(),
+            read_tool_executor: None,
+            canonical_run_id: None,
+            canonical_task_store: self.canonical_task_store.clone(),
+            memory_store: self.memory_store.clone(),
+            replayed_read_observations: Vec::new(),
+        }
     }
 
     fn blocked<S>(&self, code: &'static str, event_sink: &mut S) -> MainChatTurnResult
@@ -19214,6 +19477,7 @@ mod tests {
             execution_epoch.clone(),
             task.id.clone(),
             task.chat_session_id.clone(),
+            false,
         );
         let action_plan = build_main_chat_react_action_plan(&task.chat_session_id, &task.user_goal)
             .expect("build exact MCP action plan");
@@ -19627,6 +19891,7 @@ mod tests {
             execution_epoch,
             task.id.clone(),
             task.chat_session_id.clone(),
+            false,
         );
         let decision = |target: &str| MainChatKernelReadToolDecision {
             tool_name: "mcp.read_only".into(),

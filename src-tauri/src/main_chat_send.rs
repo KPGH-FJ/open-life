@@ -3,6 +3,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+#[cfg(test)]
 use crate::main_chat_turn_runtime::{
     MainChatTurnDelivery, MainChatTurnStreamMode, OpenLifeTurnInput, OpenLifeTurnRuntime,
 };
@@ -33,6 +34,7 @@ pub(crate) fn send_canonical_chat_with_state(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn send_message_with_operation_state(
     operation_id: String,
     session_id: String,

@@ -329,7 +329,7 @@ R2 does not claim document/Web/Skill/MCP execution, Artifact approval or
 materialization, controlled concurrency, or final Workbench UX. Those migrate
 in R3-R7 through the same canonical runtime.
 
-## Current stage: R3 - production knowledge-work capability loop
+## Completed stage: R3 - production knowledge-work capability loop
 
 ### Outcome
 
@@ -343,3 +343,45 @@ the pre-reconstruction Work runtime instead of wrapping or dual-writing it.
 R3 begins only from the committed R2 canonical Task baseline. A capability is
 not migrated until its policy grant, execution receipt, failure/replay path,
 canonical read model, usable Workbench behavior, and old-path deletion agree.
+
+### R3 result
+
+Completed on 2026-08-13:
+
+- general Work now executes bounded `document.read`, `web.search`/`web.fetch`,
+  selected executable Skill context, and registered read-only MCP tools through
+  the production kernel and ToolGateway rather than the retired Work runtime;
+- every real tool dispatch is a canonical ToolCall Item and ItemAttempt, every
+  successful result adds a digest-only Observation Item, and every real model
+  invocation—including a one-shot citation repair—is its own
+  ProviderGeneration ItemAttempt;
+- the canonical Task store issues owner-bound content receipts for observed
+  tool bodies without persisting those bodies in Task lifecycle metadata;
+- document reads remain bound to the exact initiating Turn. Task retry creates
+  a new Run/Turn while reusing only the prior Run's bounded resource scope;
+  exact replay never redispatches tools or providers;
+- failed/blocked/uncertain tools and providers terminalize their exact Attempt
+  and Task truth before a FinalResult can exist; forged, absent, or stale
+  citations fail closed;
+- Tasks and the Workbench now expose the canonical Item timeline for tool,
+  observation, provider, plan, and final-result activity; tool recovery reads
+  canonical Attempts rather than ActionQueue state; and
+- the old OpenLifeTurnRuntime send/stream/evaluation surfaces are test-only,
+  while release read-tool resources no longer require AgentRunStore or durable
+  Main Chat Events. The retained historical capability suite remains explicit
+  compatibility evidence only and cannot become a release fallback.
+
+Rust formatting, Clippy, the full core/Tauri/integration suite, frontend
+formatting, typecheck, 269 Vitest cases, production frontend build, and
+browser-shell E2E passed. Controlled document, Web, Skill, builtin MCP,
+registered stdio MCP, failure, citation-retry, exact-replay, and document-retry
+tests passed. R3 does not claim external-live Web/provider/MCP or interactive
+native evidence; those remain R8 evidence.
+
+## Current stage: R4 - governed Artifact and effect lifecycle
+
+R4 migrates ArtifactVersion, Changes, Preview, Verification, ReviewCheckpoint,
+approval continuation, materialization receipts, Undo, and effect
+reconciliation into the same general Work Task/Run/Item lifecycle. It must
+delete each retained report-only or legacy effect consumer only after the
+general replacement is complete.

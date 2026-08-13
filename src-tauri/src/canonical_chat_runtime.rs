@@ -111,6 +111,98 @@ pub(crate) struct CanonicalChatEventSink<'a> {
     pub(crate) turn_id: &'a str,
     pub(crate) emit: &'a mut (dyn FnMut(&str, Value) + Send),
     pub(crate) cancellation_registry: crate::main_chat_cancellation::MainChatCancellationRegistry,
+    pub(crate) work_provider_lifecycle: Option<CanonicalWorkProviderLifecycle>,
+    pub(crate) work_provider_lifecycle_error: Option<String>,
+}
+
+pub(crate) struct CanonicalWorkProviderLifecycle {
+    pub(crate) store: openlife_core::task_runtime::CanonicalTaskRuntimeStore,
+    pub(crate) task_id: String,
+    pub(crate) run_id: String,
+    pub(crate) request_digest_seed: String,
+    pub(crate) provider_profile_id: String,
+    pub(crate) provider_model_id: String,
+    invocation_ordinal: u64,
+    active_attempt_id: Option<String>,
+}
+
+impl CanonicalWorkProviderLifecycle {
+    pub(crate) fn new(
+        store: openlife_core::task_runtime::CanonicalTaskRuntimeStore,
+        task_id: String,
+        run_id: String,
+        request_digest_seed: String,
+        provider_profile_id: String,
+        provider_model_id: String,
+    ) -> Self {
+        Self {
+            store,
+            task_id,
+            run_id,
+            request_digest_seed,
+            provider_profile_id,
+            provider_model_id,
+            invocation_ordinal: 0,
+            active_attempt_id: None,
+        }
+    }
+
+    fn begin(&mut self, request_id: &str) -> Result<(), String> {
+        if self.active_attempt_id.is_some() {
+            return Err("canonical_work_provider_attempt_already_active".into());
+        }
+        self.invocation_ordinal = self
+            .invocation_ordinal
+            .checked_add(1)
+            .ok_or_else(|| "canonical_work_provider_invocation_overflow".to_string())?;
+        let item_id = format!("item:provider:{}:{}", self.run_id, self.invocation_ordinal);
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let request_digest =
+            openlife_core::agent::metadata_safe::metadata_safe_text_digest(&format!(
+                "{}\0{}\0{}",
+                self.request_digest_seed, self.invocation_ordinal, request_id
+            ))
+            .1;
+        self.store
+            .append_general_item(
+                &self.task_id,
+                &self.run_id,
+                &item_id,
+                openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
+                "work_provider_generation",
+                &request_digest,
+            )
+            .map_err(|error| error.to_string())?;
+        self.store
+            .begin_item_attempt(openlife_core::task_runtime::BeginItemAttemptInput {
+                attempt_id: &attempt_id,
+                task_id: &self.task_id,
+                run_id: &self.run_id,
+                item_id: &item_id,
+                executor_kind: "provider",
+                provider_profile_id: Some(&self.provider_profile_id),
+                provider_model_id: Some(&self.provider_model_id),
+                request_digest: &request_digest,
+            })
+            .map_err(|error| error.to_string())?;
+        self.active_attempt_id = Some(attempt_id);
+        Ok(())
+    }
+
+    fn terminalize(
+        &mut self,
+        status: openlife_core::task_runtime::CanonicalTaskItemStatus,
+        receipt_digest: &str,
+    ) -> Result<(), String> {
+        let attempt_id = self
+            .active_attempt_id
+            .take()
+            .ok_or_else(|| "canonical_work_provider_attempt_missing".to_string())?;
+        self.store
+            .terminalize_item_attempt(&attempt_id, status, Some(receipt_digest))
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
 }
 
 impl MainChatEventSink for CanonicalChatEventSink<'_> {
@@ -122,6 +214,9 @@ impl MainChatEventSink for CanonicalChatEventSink<'_> {
         started_at: chrono::DateTime<chrono::Utc>,
         policy_evidence: openlife_core::llm::ProviderPolicyReceiptEvidence,
     ) -> Result<(), String> {
+        if let Some(lifecycle) = self.work_provider_lifecycle.as_mut() {
+            lifecycle.begin(&request_id)?;
+        }
         self.cancellation_registry
             .admit_provider_start(
                 self.turn_id,
@@ -154,6 +249,23 @@ impl MainChatEventSink for CanonicalChatEventSink<'_> {
                 model,
                 finished_at,
             } => {
+                if let Some(lifecycle) = self.work_provider_lifecycle.as_mut() {
+                    let digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                        &serde_json::json!({
+                            "requestId": request_id,
+                            "provider": provider,
+                            "model": model,
+                            "status": "completed",
+                        }),
+                    )
+                    .1;
+                    if let Err(error) = lifecycle.terminalize(
+                        openlife_core::task_runtime::CanonicalTaskItemStatus::Completed,
+                        &digest,
+                    ) {
+                        self.work_provider_lifecycle_error = Some(error);
+                    }
+                }
                 let _ = self.cancellation_registry.record_provider_completed(
                     self.turn_id,
                     request_id,
@@ -169,6 +281,24 @@ impl MainChatEventSink for CanonicalChatEventSink<'_> {
                 finished_at,
                 error_digest,
             } => {
+                if let Some(lifecycle) = self.work_provider_lifecycle.as_mut() {
+                    let digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                        &serde_json::json!({
+                            "requestId": request_id,
+                            "provider": provider,
+                            "model": model,
+                            "status": "failed",
+                            "errorDigest": error_digest,
+                        }),
+                    )
+                    .1;
+                    if let Err(error) = lifecycle.terminalize(
+                        openlife_core::task_runtime::CanonicalTaskItemStatus::Failed,
+                        &digest,
+                    ) {
+                        self.work_provider_lifecycle_error = Some(error);
+                    }
+                }
                 let _ = self.cancellation_registry.record_provider_failed(
                     self.turn_id,
                     request_id,
@@ -177,6 +307,32 @@ impl MainChatEventSink for CanonicalChatEventSink<'_> {
                     *finished_at,
                     error_digest,
                 );
+            }
+            MainChatKernelEvent::ProviderRemoteUnknown {
+                request_id,
+                provider,
+                model,
+                reason_digest,
+                ..
+            } => {
+                if let Some(lifecycle) = self.work_provider_lifecycle.as_mut() {
+                    let digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+                        &serde_json::json!({
+                            "requestId": request_id,
+                            "provider": provider,
+                            "model": model,
+                            "status": "effect_unknown",
+                            "reasonDigest": reason_digest,
+                        }),
+                    )
+                    .1;
+                    if let Err(error) = lifecycle.terminalize(
+                        openlife_core::task_runtime::CanonicalTaskItemStatus::EffectUnknown,
+                        &digest,
+                    ) {
+                        self.work_provider_lifecycle_error = Some(error);
+                    }
+                }
             }
             _ => {}
         }
@@ -332,6 +488,8 @@ pub(crate) async fn run_canonical_chat(
         turn_id: &input.turn_id,
         emit,
         cancellation_registry,
+        work_provider_lifecycle: None,
+        work_provider_lifecycle_error: None,
     };
     (sink.emit)(
         "stream-message-start",

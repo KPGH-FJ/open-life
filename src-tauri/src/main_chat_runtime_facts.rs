@@ -3,6 +3,7 @@
 mod agent_self_state;
 mod clock;
 mod contract;
+#[cfg(test)]
 mod eval;
 mod provider_route;
 mod registry;
@@ -35,6 +36,7 @@ pub(crate) use contract::{
     RUNTIME_FACT_PROVIDER_GENERATION_PATH, RUNTIME_FACT_PROVIDER_ROUTE_GENERATION_PATH,
     RUNTIME_FACT_SOURCE_TYPE, RUNTIME_FACT_TOOL_AVAILABILITY_GENERATION_PATH,
 };
+#[cfg(test)]
 pub(crate) use eval::{
     run_main_chat_runtime_facts_slice_a_backend_report,
     run_main_chat_runtime_facts_slice_b_provider_route_report,

@@ -2749,9 +2749,12 @@ export type CanonicalTaskItemKind =
 
 export type CanonicalTaskItemStatus =
   | "waiting"
+  | "running"
   | "completed"
   | "blocked"
   | "failed"
+  | "cancelled"
+  | "interrupted"
   | "effect_unknown";
 
 export type CanonicalArtifactStatus =

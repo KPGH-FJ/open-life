@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { FileSearch, Play, RefreshCw, RotateCcw, Search, XCircle } from "lucide-react";
 import type {
+  CanonicalTaskItemKind,
+  CanonicalTaskItemStatus,
   ProductAction,
   TaskControl,
   TaskViewModelItem,
@@ -112,6 +114,62 @@ function artifactChangeLabel(
   if (kind === "create") return "创建文件";
   if (kind === "replace") return "替换文件";
   return "变更范围未知";
+}
+
+function taskItemKindLabel(kind: CanonicalTaskItemKind): string {
+  if (kind === "instruction") return "任务输入";
+  if (kind === "plan") return "执行计划";
+  if (kind === "steering") return "追加指令";
+  if (kind === "tool_call") return "工具调用";
+  if (kind === "observation") return "工具结果";
+  if (kind === "provider_generation") return "模型生成";
+  if (kind === "artifact_draft") return "结果草稿";
+  if (kind === "review_checkpoint") return "审核节点";
+  if (kind === "artifact_materialized") return "结果写入";
+  if (kind === "verification") return "结果核验";
+  return "最终结果";
+}
+
+function taskItemStatusLabel(status: CanonicalTaskItemStatus): string {
+  if (status === "waiting") return "等待";
+  if (status === "running") return "执行中";
+  if (status === "completed") return "已完成";
+  if (status === "blocked") return "已阻塞";
+  if (status === "failed") return "失败";
+  if (status === "cancelled") return "已取消";
+  if (status === "interrupted") return "已中断";
+  return "结果未知";
+}
+
+function taskItemStatusTone(
+  status: CanonicalTaskItemStatus
+): "waiting" | "success" | "error" | "unknown" {
+  if (status === "completed") return "success";
+  if (["blocked", "failed", "cancelled", "interrupted"].includes(status)) return "error";
+  if (status === "effect_unknown") return "unknown";
+  return "waiting";
+}
+
+function taskItemSummary(summaryCode: string): string {
+  const [, tool] = summaryCode.split(":", 2);
+  const toolLabel =
+    tool === "document.read"
+      ? "本地文档"
+      : tool === "web.search"
+        ? "Web 搜索"
+        : tool === "web.fetch"
+          ? "网页读取"
+          : tool === "mcp.read_only"
+            ? "MCP 只读工具"
+            : tool;
+  if (summaryCode.startsWith("work_tool_call:") && toolLabel) return `调用 ${toolLabel}`;
+  if (summaryCode.startsWith("work_tool_observation:") && toolLabel)
+    return `已取得 ${toolLabel} 的结果`;
+  if (summaryCode === "work_selected_skill_context_applied") return "已应用所选 Skill 的指令";
+  if (summaryCode === "work_provider_generation") return "模型正在生成结果";
+  if (summaryCode === "work_provider_generation_completed") return "模型结果已经生成";
+  if (summaryCode === "work_completed") return "任务结果已经交付";
+  return summaryCode.split("_").join(" ");
 }
 
 function actionAttributes(action: ProductAction) {
@@ -369,6 +427,42 @@ export function TasksReadOnlyView({
           ) : (
             <p className="ol-readonly-empty-list">
               {items.length === 0 ? "当前没有可展示的任务。" : "当前搜索和筛选下没有任务。"}
+            </p>
+          )}
+        </section>
+      )}
+
+      {listAvailable && (
+        <section className="ol-readonly-section" aria-labelledby="tasks-progress-title">
+          <div className="ol-readonly-section-heading">
+            <div>
+              <span>执行过程</span>
+              <h3 id="tasks-progress-title">
+                {selectedTask ? selectedTask.title : "选择任务查看执行过程"}
+              </h3>
+            </div>
+          </div>
+          {selectedTask && selectedTask.items.length > 0 ? (
+            <ol className="ol-task-item-timeline" data-testid="canonical-task-items">
+              {selectedTask.items.map(item => (
+                <li key={item.id} data-item-status={item.status}>
+                  <div>
+                    <strong>{taskItemKindLabel(item.kind)}</strong>
+                    <p>{taskItemSummary(item.summaryCode)}</p>
+                  </div>
+                  <FoundationStatusLabel
+                    label={taskItemStatusLabel(item.status)}
+                    status={taskItemStatusTone(item.status)}
+                    verified={item.status === "completed"}
+                  />
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="ol-readonly-empty-list">
+              {selectedTask
+                ? "该任务还没有后端确认的执行记录。"
+                : "选择任务后显示后端 Task Item 记录。"}
             </p>
           )}
         </section>

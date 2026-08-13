@@ -130,7 +130,10 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         ))),
         agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
         canonical_task_runtime_store: Some(Arc::new(Mutex::new(
-            openlife_core::task_runtime::CanonicalTaskRuntimeStore::new_in_memory().unwrap(),
+            openlife_core::task_runtime::CanonicalTaskRuntimeStore::new_in_memory_with_receipt_key(
+                agent_run_receipt_key.clone(),
+            )
+            .unwrap(),
         ))),
         evidence_store: Arc::new(Mutex::new(
             openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
