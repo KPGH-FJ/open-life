@@ -39,7 +39,7 @@ evidence; they are not current product-completion credit.
    content. JSONL is diagnostic or export material only.
 6. Missing, stale, failed, or uncertain effects remain unknown or blocked.
 
-## Current stage: R0 - reconstruction baseline
+## Completed stage: R0 - reconstruction baseline
 
 ### Outcome
 
@@ -142,7 +142,7 @@ product proof and remains part of R8 release identity work.
 | R7 | Final Workbench, conversation organization, results, onboarding, diagnostics, i18n, accessibility, and old frontend deletion |
 | R8 | Golden behavior, performance/cost, profile migration, exact-native/live evidence, absence guards, and clean release baseline |
 
-## Current stage: R1 - canonical Conversation and reliable Chat
+## Completed stage: R1 - canonical Conversation and reliable Chat
 
 ### Outcome
 
@@ -236,3 +236,110 @@ compatibility Work runtime before the UI marks Work ready.
 R1 starts only after R0 is committed and its native evidence is current for the
 exact source. R1 must migrate ordinary Chat completely before deleting its old
 session/event/presentation consumers; it must not add a parallel Chat runtime.
+
+## Completed stage: R2 - general Work Task runtime
+
+### Outcome
+
+One canonical Task/Run/Item/ItemAttempt/FinalResult lifecycle owns every Work
+request. A Conversation may contain many independent Tasks; a Task may span
+multiple Runs and Turns. Planning is an Item, execution strategy is internal,
+and report/plan are capability outcomes rather than separate lifecycle owners.
+
+### In scope
+
+1. Generalize the existing `CanonicalTaskRuntimeStore`; do not create a second
+   task database or runtime owner.
+2. Remove the one-Conversation/one-Task and report/plan-only schema constraints.
+3. Add typed Task and Run terminal states, Item attempts, exact provider/tool
+   bindings, FinalResult references, cancellation, interruption, retry, and
+   restart recovery.
+4. Add one Work coordinator that starts from the canonical Conversation user
+   Item, creates the Task before execution, and commits a truthful terminal
+   result without using TaskSession, AgentRun, ActionQueue, or durable Main Chat
+   Event as lifecycle owners.
+5. Project Tasks and active Work state directly from canonical snapshots and
+   expose Work only when this runtime is usable.
+6. Delete migrated release Work entrypoints and compatibility state; retained
+   report/tool materializers may consume canonical Items but may not own Task
+   status.
+
+### Out of scope
+
+- broad document/Web/Skill/MCP tool execution, which is R3;
+- Artifact materialization and inline approval migration, which is R4;
+- background concurrency and notifications, which are R5; and
+- UI polish beyond the minimum Work task/result/control surface, which is R7.
+
+### Acceptance
+
+- two Tasks can exist in one Conversation without identity conflict;
+- one Task can own multiple Runs and each Run can own ordered Items and
+  attempts without duplicated lifecycle state;
+- exact replay returns the same terminal result without another provider call;
+- cancel, retry, crash recovery, provider failure, and effect-unknown are typed
+  terminal or resumable states and never remain falsely running;
+- a completed Task has one canonical FinalResult bound to its Run and exact
+  Conversation assistant Item; a failed/blocked/cancelled Task cannot claim one;
+- Tasks/Workspace ViewModels do not infer current state from TaskSession,
+  AgentRun, ActionQueue, or event-string overlays; and
+- release Work send/stream/control paths contain no compatibility fallback to
+  the pre-reconstruction runtime.
+
+### R2 result
+
+Completed on 2026-08-13:
+
+- `CanonicalTaskRuntimeStore` schema v7 now owns general `work`, `report`, and
+  `plan` Task identity without a Conversation uniqueness constraint, with
+  typed Task/Run terminal states, ordered Items, ItemAttempts, and one bounded
+  FinalResult reference;
+- `CanonicalWorkRuntime` begins the exact Conversation Turn and Work Task/Run
+  before provider execution, binds the user-selected provider/model to a
+  ProviderGeneration ItemAttempt, and completes only after the assistant Item
+  and FinalResult agree;
+- exact replay returns the existing assistant Item and FinalResult without a
+  second provider dispatch, while provider failure, cancellation, interrupted
+  startup recovery, and retry retain typed non-success history and cannot
+  claim completion;
+- one Conversation can retain multiple Tasks, and retry creates a new Run and
+  Turn for the same Task; planning is represented as an Item rather than a
+  separate PlanExecute lifecycle;
+- release Work send, stream, cancel, and retry IPCs use canonical Task/Run/Turn
+  identities. The old TaskSession list/detail/refresh/resume/cancel/retry IPCs
+  and frontend consumers are removed;
+- `TasksViewModel` and `WorkspaceViewModel` now project canonical snapshots
+  directly instead of overlaying TaskSession, AgentRun, ActionQueue, or event
+  strings; and
+- historical capability fixtures use a `cfg(test)`-only executor route so
+  R3/R4 evidence remains runnable without creating a release compatibility
+  fallback.
+
+Rust format, Clippy, and the full locked test suite passed: core 1460 passed / 2
+ignored, scheduler integration 8 passed, Tauri 1210 passed / 13 ignored,
+resource worker 2 passed, and doc tests 8 passed. Frontend formatting,
+typecheck, 269 Vitest cases, production build/absence guard, and 8 browser-shell
+E2E cases passed. The exact current macOS bundle was rebuilt at
+`target/release/bundle/macos/OpenLife.app`, retained bundle id
+`ai.openlife.desktop`, was signed by `OpenLife Local Code Signing`, and passed
+strict deep resource-seal verification. External-live provider evidence and
+interactive native Work behavior remain R8 evidence and are not claimed here.
+
+R2 does not claim document/Web/Skill/MCP execution, Artifact approval or
+materialization, controlled concurrency, or final Workbench UX. Those migrate
+in R3-R7 through the same canonical runtime.
+
+## Current stage: R3 - production knowledge-work capability loop
+
+### Outcome
+
+Move the proven document, Web, citation, Skill, and MCP read capabilities into
+the general Work coordinator so they execute as canonical Items and Attempts
+inside the same Task/Run lifecycle. Delete each migrated capability's use of
+the pre-reconstruction Work runtime instead of wrapping or dual-writing it.
+
+### Entry condition
+
+R3 begins only from the committed R2 canonical Task baseline. A capability is
+not migrated until its policy grant, execution receipt, failure/replay path,
+canonical read model, usable Workbench behavior, and old-path deletion agree.

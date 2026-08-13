@@ -162,6 +162,7 @@ pub(crate) struct MainChatCancelOutcome {
 #[derive(Debug, Clone)]
 pub(crate) struct MainChatCancellationRequest {
     pub(crate) outcome: MainChatCancelOutcome,
+    #[allow(dead_code)]
     pub(crate) execution_epoch: Option<MainChatExecutionEpoch>,
 }
 

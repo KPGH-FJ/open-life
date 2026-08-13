@@ -3,8 +3,9 @@
 //! This store owns stable Task identity, Run membership, typed Items, and
 //! Artifact versions. Reports use the full Artifact lifecycle; ordinary plans
 //! use Instruction + Plan Items without a parallel PlanExecute session.
-//! Existing AgentRun persistence remains the execution/receipt owner while the
-//! migration proceeds; this module does not copy AgentRun status or bodies.
+//! Work execution identity and terminal state are owned here. Capability
+//! adapters may retain their own typed receipts, but they do not own Task or
+//! Run lifecycle state.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -14,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 6;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -24,6 +25,8 @@ pub enum CanonicalTaskStatus {
     Completed,
     Blocked,
     Failed,
+    Cancelled,
+    Interrupted,
     EffectUnknown,
 }
 
@@ -35,6 +38,8 @@ impl CanonicalTaskStatus {
             Self::Completed => "completed",
             Self::Blocked => "blocked",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
             Self::EffectUnknown => "effect_unknown",
         }
     }
@@ -46,6 +51,8 @@ impl CanonicalTaskStatus {
             "completed" => Ok(Self::Completed),
             "blocked" => Ok(Self::Blocked),
             "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "interrupted" => Ok(Self::Interrupted),
             "effect_unknown" => Ok(Self::EffectUnknown),
             _ => anyhow::bail!("canonical_task_status_invalid:{value}"),
         }
@@ -107,9 +114,12 @@ impl CanonicalTaskItemKind {
 #[serde(rename_all = "snake_case")]
 pub enum CanonicalTaskItemStatus {
     Waiting,
+    Running,
     Completed,
     Blocked,
     Failed,
+    Cancelled,
+    Interrupted,
     EffectUnknown,
 }
 
@@ -117,9 +127,12 @@ impl CanonicalTaskItemStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Waiting => "waiting",
+            Self::Running => "running",
             Self::Completed => "completed",
             Self::Blocked => "blocked",
             Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
             Self::EffectUnknown => "effect_unknown",
         }
     }
@@ -127,9 +140,12 @@ impl CanonicalTaskItemStatus {
     fn from_db(value: &str) -> Result<Self> {
         match value {
             "waiting" => Ok(Self::Waiting),
+            "running" => Ok(Self::Running),
             "completed" => Ok(Self::Completed),
             "blocked" => Ok(Self::Blocked),
             "failed" => Ok(Self::Failed),
+            "cancelled" => Ok(Self::Cancelled),
+            "interrupted" => Ok(Self::Interrupted),
             "effect_unknown" => Ok(Self::EffectUnknown),
             _ => anyhow::bail!("canonical_task_item_status_invalid:{value}"),
         }
@@ -233,8 +249,41 @@ pub struct CanonicalTaskRunRecord {
     pub run_id: String,
     pub execution_session_id: String,
     pub ordinal: u64,
+    pub status: CanonicalTaskStatus,
     pub execution_facts_version: u64,
     pub plan_revision: u64,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalTaskItemAttemptRecord {
+    pub attempt_id: String,
+    pub task_id: String,
+    pub run_id: String,
+    pub item_id: String,
+    pub ordinal: u64,
+    pub status: CanonicalTaskItemStatus,
+    pub executor_kind: String,
+    pub provider_profile_id: Option<String>,
+    pub provider_model_id: Option<String>,
+    pub request_digest: String,
+    pub receipt_digest: Option<String>,
+    pub started_at: DateTime<Utc>,
+    pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalFinalResultRecord {
+    pub task_id: String,
+    pub run_id: String,
+    pub item_id: String,
+    pub conversation_item_id: String,
+    pub result_digest: String,
+    pub summary_code: String,
     pub created_at: DateTime<Utc>,
 }
 
@@ -294,7 +343,48 @@ pub struct CanonicalTaskSnapshot {
     pub task: CanonicalTaskRecord,
     pub runs: Vec<CanonicalTaskRunRecord>,
     pub items: Vec<CanonicalTaskItemRecord>,
+    pub attempts: Vec<CanonicalTaskItemAttemptRecord>,
+    pub final_result: Option<CanonicalFinalResultRecord>,
     pub artifacts: Vec<CanonicalArtifactSnapshot>,
+}
+
+#[derive(Clone, Copy)]
+pub struct BeginGeneralTaskRunInput<'a> {
+    pub task_id: &'a str,
+    pub conversation_id: &'a str,
+    pub run_id: &'a str,
+    pub execution_session_id: &'a str,
+    pub instruction_digest: &'a str,
+    pub plan_digest: Option<&'a str>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BegunGeneralTaskRun {
+    pub task_id: String,
+    pub run_id: String,
+    pub instruction_item_id: String,
+    pub plan_item_id: Option<String>,
+    pub ordinal: u64,
+}
+
+pub struct BeginItemAttemptInput<'a> {
+    pub attempt_id: &'a str,
+    pub task_id: &'a str,
+    pub run_id: &'a str,
+    pub item_id: &'a str,
+    pub executor_kind: &'a str,
+    pub provider_profile_id: Option<&'a str>,
+    pub provider_model_id: Option<&'a str>,
+    pub request_digest: &'a str,
+}
+
+pub struct CompleteGeneralTaskInput<'a> {
+    pub task_id: &'a str,
+    pub run_id: &'a str,
+    pub final_item_id: &'a str,
+    pub conversation_item_id: &'a str,
+    pub result_digest: &'a str,
+    pub summary_code: &'a str,
 }
 
 pub struct ReportArtifactDraftInput<'a> {
@@ -428,6 +518,8 @@ impl CanonicalTaskRuntimeStore {
                 "canonical_tasks",
                 "canonical_task_runs",
                 "canonical_task_items",
+                "canonical_task_item_attempts",
+                "canonical_task_final_results",
                 "canonical_report_steering",
                 "canonical_artifacts",
                 "canonical_artifact_versions",
@@ -461,12 +553,12 @@ impl CanonicalTaskRuntimeStore {
              ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS canonical_tasks (
                 id TEXT PRIMARY KEY,
-                conversation_id TEXT NOT NULL UNIQUE,
-                task_kind TEXT NOT NULL CHECK(task_kind IN ('report', 'plan')),
+                conversation_id TEXT NOT NULL,
+                task_kind TEXT NOT NULL CHECK(task_kind IN ('work', 'report', 'plan')),
                 initial_outcome_digest TEXT NOT NULL,
                 status TEXT NOT NULL CHECK(status IN (
                     'running', 'waiting_review', 'completed', 'blocked',
-                    'failed', 'effect_unknown'
+                    'failed', 'cancelled', 'interrupted', 'effect_unknown'
                 )),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -476,10 +568,16 @@ impl CanonicalTaskRuntimeStore {
                 run_id TEXT NOT NULL UNIQUE,
                 execution_session_id TEXT NOT NULL,
                 ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+                status TEXT NOT NULL DEFAULT 'running' CHECK(status IN (
+                    'running', 'waiting_review', 'completed', 'blocked',
+                    'failed', 'cancelled', 'interrupted', 'effect_unknown'
+                )),
                 execution_facts_version INTEGER NOT NULL DEFAULT 5
                     CHECK(execution_facts_version IN (1, 2, 3, 4, 5)),
                 plan_revision INTEGER NOT NULL DEFAULT 1 CHECK(plan_revision > 0),
                 created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
                 PRIMARY KEY(task_id, run_id),
                 FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
              ) WITHOUT ROWID;
@@ -495,7 +593,8 @@ impl CanonicalTaskRuntimeStore {
                     'verification', 'final_result'
                 )),
                 status TEXT NOT NULL CHECK(status IN (
-                    'waiting', 'completed', 'blocked', 'failed', 'effect_unknown'
+                    'waiting', 'running', 'completed', 'blocked', 'failed',
+                    'cancelled', 'interrupted', 'effect_unknown'
                 )),
                 summary_code TEXT NOT NULL,
                 payload_digest TEXT NOT NULL,
@@ -521,6 +620,42 @@ impl CanonicalTaskRuntimeStore {
                 FOREIGN KEY(task_id, run_id)
                     REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
              );
+             CREATE TABLE IF NOT EXISTS canonical_task_item_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                task_id TEXT NOT NULL,
+                run_id TEXT NOT NULL,
+                item_id TEXT NOT NULL,
+                ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+                status TEXT NOT NULL CHECK(status IN (
+                    'running', 'completed', 'blocked', 'failed', 'cancelled',
+                    'interrupted', 'effect_unknown'
+                )),
+                executor_kind TEXT NOT NULL CHECK(executor_kind IN (
+                    'provider', 'tool', 'internal', 'review', 'materializer'
+                )),
+                provider_profile_id TEXT,
+                provider_model_id TEXT,
+                request_digest TEXT NOT NULL,
+                receipt_digest TEXT,
+                started_at TEXT NOT NULL,
+                finished_at TEXT,
+                UNIQUE(item_id, ordinal),
+                FOREIGN KEY(task_id, run_id)
+                    REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT,
+                FOREIGN KEY(item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT
+             );
+             CREATE TABLE IF NOT EXISTS canonical_task_final_results (
+                task_id TEXT PRIMARY KEY,
+                run_id TEXT NOT NULL,
+                item_id TEXT NOT NULL UNIQUE,
+                conversation_item_id TEXT NOT NULL UNIQUE,
+                result_digest TEXT NOT NULL,
+                summary_code TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(task_id, run_id)
+                    REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT,
+                FOREIGN KEY(item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT
+             ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS canonical_artifacts (
                 id TEXT PRIMARY KEY,
                 task_id TEXT NOT NULL,
@@ -554,10 +689,14 @@ impl CanonicalTaskRuntimeStore {
              ) WITHOUT ROWID;
              CREATE INDEX IF NOT EXISTS idx_canonical_task_items_run
                 ON canonical_task_items(run_id, sequence);
+             CREATE INDEX IF NOT EXISTS idx_canonical_tasks_conversation
+                ON canonical_tasks(conversation_id, updated_at DESC, id);
+             CREATE INDEX IF NOT EXISTS idx_canonical_task_attempts_run
+                ON canonical_task_item_attempts(run_id, started_at, attempt_id);
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '6')
+             VALUES ('schema_version', '7')
              ON CONFLICT(key) DO NOTHING;",
         )?;
         if Self::schema_version(&conn)? == 1 {
@@ -574,6 +713,9 @@ impl CanonicalTaskRuntimeStore {
         }
         if Self::schema_version(&conn)? == 5 {
             Self::migrate_v5_to_v6(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 6 {
+            Self::migrate_v6_to_v7(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -969,12 +1111,697 @@ impl CanonicalTaskRuntimeStore {
         Ok(())
     }
 
+    fn migrate_v6_to_v7(conn: &mut Connection) -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys = OFF; PRAGMA legacy_alter_table = ON;")?;
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "DROP TABLE IF EXISTS canonical_task_final_results;
+                 DROP TABLE IF EXISTS canonical_task_item_attempts;
+                 ALTER TABLE canonical_task_items RENAME TO canonical_task_items_v6;
+                 ALTER TABLE canonical_task_runs RENAME TO canonical_task_runs_v6;
+                 ALTER TABLE canonical_tasks RENAME TO canonical_tasks_v6;
+                 CREATE TABLE canonical_tasks (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    task_kind TEXT NOT NULL CHECK(task_kind IN ('work', 'report', 'plan')),
+                    initial_outcome_digest TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'running', 'waiting_review', 'completed', 'blocked',
+                        'failed', 'cancelled', 'interrupted', 'effect_unknown'
+                    )),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO canonical_tasks
+                 SELECT * FROM canonical_tasks_v6;
+                 CREATE TABLE canonical_task_runs (
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL UNIQUE,
+                    execution_session_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+                    status TEXT NOT NULL CHECK(status IN (
+                        'running', 'waiting_review', 'completed', 'blocked',
+                        'failed', 'cancelled', 'interrupted', 'effect_unknown'
+                    )),
+                    execution_facts_version INTEGER NOT NULL DEFAULT 5
+                        CHECK(execution_facts_version IN (1, 2, 3, 4, 5)),
+                    plan_revision INTEGER NOT NULL DEFAULT 1 CHECK(plan_revision > 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    completed_at TEXT,
+                    PRIMARY KEY(task_id, run_id),
+                    FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT
+                 ) WITHOUT ROWID;
+                 INSERT INTO canonical_task_runs (
+                    task_id, run_id, execution_session_id, ordinal, status,
+                    execution_facts_version, plan_revision, created_at, updated_at,
+                    completed_at
+                 ) SELECT run.task_id, run.run_id, run.execution_session_id, run.ordinal,
+                          CASE task.status
+                            WHEN 'completed' THEN 'completed'
+                            WHEN 'failed' THEN 'failed'
+                            WHEN 'blocked' THEN 'blocked'
+                            WHEN 'effect_unknown' THEN 'effect_unknown'
+                            ELSE 'running'
+                          END,
+                          run.execution_facts_version, run.plan_revision, run.created_at,
+                          task.updated_at,
+                          CASE WHEN task.status = 'completed' THEN task.updated_at ELSE NULL END
+                   FROM canonical_task_runs_v6 run
+                   JOIN canonical_tasks_v6 task ON task.id = run.task_id;
+                 CREATE TABLE canonical_task_items (
+                    id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    sequence INTEGER NOT NULL CHECK(sequence > 0),
+                    kind TEXT NOT NULL CHECK(kind IN (
+                        'instruction', 'plan', 'steering', 'tool_call', 'observation',
+                        'provider_generation', 'artifact_draft',
+                        'review_checkpoint', 'artifact_materialized',
+                        'verification', 'final_result'
+                    )),
+                    status TEXT NOT NULL CHECK(status IN (
+                        'waiting', 'running', 'completed', 'blocked', 'failed',
+                        'cancelled', 'interrupted', 'effect_unknown'
+                    )),
+                    summary_code TEXT NOT NULL,
+                    payload_digest TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    UNIQUE(task_id, sequence),
+                    FOREIGN KEY(task_id, run_id)
+                        REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+                 );
+                 INSERT INTO canonical_task_items SELECT * FROM canonical_task_items_v6;
+                 DROP TABLE canonical_task_items_v6;
+                 DROP TABLE canonical_task_runs_v6;
+                 DROP TABLE canonical_tasks_v6;
+                 CREATE TABLE canonical_task_item_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    run_id TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    ordinal INTEGER NOT NULL CHECK(ordinal > 0),
+                    status TEXT NOT NULL CHECK(status IN (
+                        'running', 'completed', 'blocked', 'failed', 'cancelled',
+                        'interrupted', 'effect_unknown'
+                    )),
+                    executor_kind TEXT NOT NULL CHECK(executor_kind IN (
+                        'provider', 'tool', 'internal', 'review', 'materializer'
+                    )),
+                    provider_profile_id TEXT,
+                    provider_model_id TEXT,
+                    request_digest TEXT NOT NULL,
+                    receipt_digest TEXT,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    UNIQUE(item_id, ordinal),
+                    FOREIGN KEY(task_id, run_id)
+                        REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT,
+                    FOREIGN KEY(item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT
+                 );
+                 CREATE TABLE canonical_task_final_results (
+                    task_id TEXT PRIMARY KEY,
+                    run_id TEXT NOT NULL,
+                    item_id TEXT NOT NULL UNIQUE,
+                    conversation_item_id TEXT NOT NULL UNIQUE,
+                    result_digest TEXT NOT NULL,
+                    summary_code TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(task_id, run_id)
+                        REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT,
+                    FOREIGN KEY(item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT
+                 ) WITHOUT ROWID;
+                 CREATE INDEX idx_canonical_tasks_conversation
+                    ON canonical_tasks(conversation_id, updated_at DESC, id);
+                 CREATE INDEX idx_canonical_task_items_run
+                    ON canonical_task_items(run_id, sequence);
+                 CREATE INDEX idx_canonical_task_attempts_run
+                    ON canonical_task_item_attempts(run_id, started_at, attempt_id);",
+            )?;
+            let changed = tx.execute(
+                "UPDATE canonical_task_runtime_metadata SET value = '7'
+                 WHERE key = 'schema_version' AND value = '6'",
+                [],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("canonical_task_runtime_v6_migration_version_conflict");
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        let pragma_restore =
+            conn.execute_batch("PRAGMA legacy_alter_table = OFF; PRAGMA foreign_keys = ON;");
+        migration?;
+        pragma_restore?;
+        let violation = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_row([], |_| Ok(()))
+            .optional()?;
+        if violation.is_some() {
+            anyhow::bail!("canonical_task_runtime_v6_migration_foreign_key_violation");
+        }
+        Ok(())
+    }
+
     fn validate_schema(conn: &Connection) -> Result<()> {
         let version = Self::schema_version(conn)?;
         if version != TASK_RUNTIME_SCHEMA_VERSION {
             anyhow::bail!("canonical_task_runtime_schema_version_unsupported:{version}");
         }
         Ok(())
+    }
+
+    pub fn begin_general_task_run(
+        &self,
+        input: BeginGeneralTaskRunInput<'_>,
+    ) -> Result<BegunGeneralTaskRun> {
+        validate_uuid("task_id", input.task_id)?;
+        validate_uuid("conversation_id", input.conversation_id)?;
+        validate_uuid("run_id", input.run_id)?;
+        validate_nonempty("execution_session_id", input.execution_session_id, 512)?;
+        validate_digest("instruction_digest", input.instruction_digest)?;
+        if let Some(plan_digest) = input.plan_digest {
+            validate_digest("plan_digest", plan_digest)?;
+        }
+        let instruction_item_id = stable_id("item", &["instruction", input.task_id, input.run_id]);
+        let plan_item_id = input
+            .plan_digest
+            .map(|_| stable_id("item", &["plan", input.task_id, input.run_id]));
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let inserted_task = tx.execute(
+            "INSERT INTO canonical_tasks (
+                id, conversation_id, task_kind, initial_outcome_digest,
+                status, created_at, updated_at
+             ) VALUES (?1, ?2, 'work', ?3, 'running', ?4, ?4)
+             ON CONFLICT(id) DO NOTHING",
+            params![
+                input.task_id,
+                input.conversation_id,
+                input.instruction_digest,
+                now
+            ],
+        )?;
+        let task: (String, String, String, String) = tx.query_row(
+            "SELECT conversation_id, task_kind, initial_outcome_digest, status
+             FROM canonical_tasks WHERE id = ?1",
+            [input.task_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        if task.0 != input.conversation_id || task.1 != "work" || task.2 != input.instruction_digest
+        {
+            anyhow::bail!("canonical_general_task_identity_conflict");
+        }
+        let existing_run = tx
+            .query_row(
+                "SELECT task_id, execution_session_id, ordinal
+                 FROM canonical_task_runs WHERE run_id = ?1",
+                [input.run_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let run_existed = existing_run.is_some();
+        if inserted_task == 0
+            && existing_run.is_none()
+            && !matches!(
+                task.3.as_str(),
+                "failed" | "blocked" | "cancelled" | "interrupted"
+            )
+        {
+            anyhow::bail!("canonical_general_task_not_retryable");
+        }
+        let ordinal: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(ordinal), 0) + 1 FROM canonical_task_runs WHERE task_id = ?1",
+            [input.task_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO canonical_task_runs (
+                task_id, run_id, execution_session_id, ordinal, status,
+                execution_facts_version, plan_revision, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, 'running', 5, 1, ?5, ?5)
+             ON CONFLICT(run_id) DO NOTHING",
+            params![
+                input.task_id,
+                input.run_id,
+                input.execution_session_id,
+                ordinal,
+                now
+            ],
+        )?;
+        let run: (String, String, i64) = tx.query_row(
+            "SELECT task_id, execution_session_id, ordinal
+             FROM canonical_task_runs WHERE run_id = ?1",
+            [input.run_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if run.0 != input.task_id || run.1 != input.execution_session_id {
+            anyhow::bail!("canonical_general_run_identity_conflict");
+        }
+        if run_existed {
+            let stored_plan_digest = tx
+                .query_row(
+                    "SELECT payload_digest FROM canonical_task_items
+                     WHERE task_id = ?1 AND run_id = ?2 AND kind = 'plan'",
+                    params![input.task_id, input.run_id],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()?;
+            if stored_plan_digest.as_deref() != input.plan_digest {
+                anyhow::bail!("canonical_general_run_plan_conflict");
+            }
+        }
+        ensure_completed_item(
+            &tx,
+            CompletedItemInput {
+                item_id: &instruction_item_id,
+                task_id: input.task_id,
+                run_id: input.run_id,
+                kind: CanonicalTaskItemKind::Instruction,
+                summary_code: "work_instruction_bound",
+                payload_digest: input.instruction_digest,
+                now: &now,
+            },
+        )?;
+        if let (Some(item_id), Some(plan_digest)) = (&plan_item_id, input.plan_digest) {
+            ensure_completed_item(
+                &tx,
+                CompletedItemInput {
+                    item_id,
+                    task_id: input.task_id,
+                    run_id: input.run_id,
+                    kind: CanonicalTaskItemKind::Plan,
+                    summary_code: "work_plan_bound",
+                    payload_digest: plan_digest,
+                    now: &now,
+                },
+            )?;
+        }
+        if !run_existed {
+            tx.execute(
+                "UPDATE canonical_tasks SET status = 'running', updated_at = ?2 WHERE id = ?1",
+                params![input.task_id, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(BegunGeneralTaskRun {
+            task_id: input.task_id.to_string(),
+            run_id: input.run_id.to_string(),
+            instruction_item_id,
+            plan_item_id,
+            ordinal: u64::try_from(run.2)?,
+        })
+    }
+
+    pub fn begin_item_attempt(
+        &self,
+        input: BeginItemAttemptInput<'_>,
+    ) -> Result<CanonicalTaskItemAttemptRecord> {
+        validate_uuid("attempt_id", input.attempt_id)?;
+        validate_uuid("task_id", input.task_id)?;
+        validate_uuid("run_id", input.run_id)?;
+        validate_nonempty("item_id", input.item_id, 512)?;
+        validate_nonempty("executor_kind", input.executor_kind, 64)?;
+        if !matches!(
+            input.executor_kind,
+            "provider" | "tool" | "internal" | "review" | "materializer"
+        ) {
+            anyhow::bail!("canonical_task_runtime_executor_kind_invalid");
+        }
+        validate_digest("request_digest", input.request_digest)?;
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (item_task, item_run, item_status): (String, String, String) = tx.query_row(
+            "SELECT task_id, run_id, status FROM canonical_task_items WHERE id = ?1",
+            [input.item_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if item_task != input.task_id || item_run != input.run_id {
+            anyhow::bail!("canonical_item_attempt_owner_conflict");
+        }
+        if matches!(
+            item_status.as_str(),
+            "completed" | "cancelled" | "effect_unknown"
+        ) {
+            anyhow::bail!("canonical_item_attempt_terminal_item");
+        }
+        let ordinal: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(ordinal), 0) + 1
+             FROM canonical_task_item_attempts WHERE item_id = ?1",
+            [input.item_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO canonical_task_item_attempts (
+                attempt_id, task_id, run_id, item_id, ordinal, status,
+                executor_kind, provider_profile_id, provider_model_id,
+                request_digest, started_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'running', ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(attempt_id) DO NOTHING",
+            params![
+                input.attempt_id,
+                input.task_id,
+                input.run_id,
+                input.item_id,
+                ordinal,
+                input.executor_kind,
+                input.provider_profile_id,
+                input.provider_model_id,
+                input.request_digest,
+                now
+            ],
+        )?;
+        tx.execute(
+            "UPDATE canonical_task_items SET status = 'running', updated_at = ?2 WHERE id = ?1",
+            params![input.item_id, now],
+        )?;
+        let attempt = load_attempt_in_tx(&tx, input.attempt_id)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_item_attempt_missing_after_begin"))?;
+        if attempt.task_id != input.task_id
+            || attempt.run_id != input.run_id
+            || attempt.item_id != input.item_id
+            || attempt.executor_kind != input.executor_kind
+            || attempt.request_digest != input.request_digest
+        {
+            anyhow::bail!("canonical_item_attempt_identity_conflict");
+        }
+        tx.commit()?;
+        Ok(attempt)
+    }
+
+    pub fn append_general_item(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        item_id: &str,
+        kind: CanonicalTaskItemKind,
+        summary_code: &str,
+        payload_digest: &str,
+    ) -> Result<CanonicalTaskItemRecord> {
+        validate_uuid("task_id", task_id)?;
+        validate_uuid("run_id", run_id)?;
+        validate_nonempty("item_id", item_id, 512)?;
+        validate_nonempty("summary_code", summary_code, 128)?;
+        validate_digest("payload_digest", payload_digest)?;
+        if matches!(
+            kind,
+            CanonicalTaskItemKind::Instruction | CanonicalTaskItemKind::FinalResult
+        ) {
+            anyhow::bail!("canonical_general_item_kind_reserved");
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let run_status: String = tx.query_row(
+            "SELECT status FROM canonical_task_runs WHERE task_id = ?1 AND run_id = ?2",
+            params![task_id, run_id],
+            |row| row.get(0),
+        )?;
+        if run_status != "running" {
+            anyhow::bail!("canonical_general_item_run_not_running");
+        }
+        if let Some(existing) = tx
+            .query_row(
+                "SELECT id, task_id, run_id, sequence, kind, status, summary_code,
+                        payload_digest, created_at, updated_at
+                 FROM canonical_task_items WHERE id = ?1",
+                [item_id],
+                row_to_item,
+            )
+            .optional()?
+        {
+            if existing.task_id != task_id
+                || existing.run_id != run_id
+                || existing.kind != kind
+                || existing.summary_code != summary_code
+                || existing.payload_digest != payload_digest
+            {
+                anyhow::bail!("canonical_general_item_identity_conflict");
+            }
+            tx.commit()?;
+            return Ok(existing);
+        }
+        let sequence: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM canonical_task_items WHERE task_id = ?1",
+            [task_id],
+            |row| row.get(0),
+        )?;
+        tx.execute(
+            "INSERT INTO canonical_task_items (
+                id, task_id, run_id, sequence, kind, status, summary_code,
+                payload_digest, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, 'waiting', ?6, ?7, ?8, ?8)",
+            params![
+                item_id,
+                task_id,
+                run_id,
+                sequence,
+                kind.as_str(),
+                summary_code,
+                payload_digest,
+                now
+            ],
+        )?;
+        let item = tx.query_row(
+            "SELECT id, task_id, run_id, sequence, kind, status, summary_code,
+                    payload_digest, created_at, updated_at
+             FROM canonical_task_items WHERE id = ?1",
+            [item_id],
+            row_to_item,
+        )?;
+        tx.commit()?;
+        Ok(item)
+    }
+
+    pub fn terminalize_item_attempt(
+        &self,
+        attempt_id: &str,
+        status: CanonicalTaskItemStatus,
+        receipt_digest: Option<&str>,
+    ) -> Result<CanonicalTaskItemAttemptRecord> {
+        validate_uuid("attempt_id", attempt_id)?;
+        if !matches!(
+            status,
+            CanonicalTaskItemStatus::Completed
+                | CanonicalTaskItemStatus::Blocked
+                | CanonicalTaskItemStatus::Failed
+                | CanonicalTaskItemStatus::Cancelled
+                | CanonicalTaskItemStatus::Interrupted
+                | CanonicalTaskItemStatus::EffectUnknown
+        ) {
+            anyhow::bail!("canonical_item_attempt_terminal_status_invalid");
+        }
+        if let Some(digest) = receipt_digest {
+            validate_digest("receipt_digest", digest)?;
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let attempt = load_attempt_in_tx(&tx, attempt_id)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_item_attempt_missing"))?;
+        if attempt.status != CanonicalTaskItemStatus::Running {
+            if attempt.status == status && attempt.receipt_digest.as_deref() == receipt_digest {
+                tx.commit()?;
+                return Ok(attempt);
+            }
+            anyhow::bail!("canonical_item_attempt_terminal_conflict");
+        }
+        tx.execute(
+            "UPDATE canonical_task_item_attempts
+             SET status = ?2, receipt_digest = ?3, finished_at = ?4
+             WHERE attempt_id = ?1 AND status = 'running'",
+            params![attempt_id, status.as_str(), receipt_digest, now],
+        )?;
+        tx.execute(
+            "UPDATE canonical_task_items SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![attempt.item_id, status.as_str(), now],
+        )?;
+        let result = load_attempt_in_tx(&tx, attempt_id)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_item_attempt_missing_after_terminal"))?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub fn complete_general_task(
+        &self,
+        input: CompleteGeneralTaskInput<'_>,
+    ) -> Result<CanonicalFinalResultRecord> {
+        validate_uuid("task_id", input.task_id)?;
+        validate_uuid("run_id", input.run_id)?;
+        validate_nonempty("final_item_id", input.final_item_id, 512)?;
+        validate_nonempty("conversation_item_id", input.conversation_item_id, 512)?;
+        validate_digest("result_digest", input.result_digest)?;
+        validate_nonempty("summary_code", input.summary_code, 128)?;
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let run_status: String = tx.query_row(
+            "SELECT status FROM canonical_task_runs WHERE task_id = ?1 AND run_id = ?2",
+            params![input.task_id, input.run_id],
+            |row| row.get(0),
+        )?;
+        if run_status != "running" {
+            if let Some(existing) = load_final_result_in_tx(&tx, input.task_id)? {
+                if existing.run_id == input.run_id
+                    && existing.item_id == input.final_item_id
+                    && existing.conversation_item_id == input.conversation_item_id
+                    && existing.result_digest == input.result_digest
+                {
+                    tx.commit()?;
+                    return Ok(existing);
+                }
+            }
+            anyhow::bail!("canonical_general_task_run_not_running");
+        }
+        ensure_completed_item(
+            &tx,
+            CompletedItemInput {
+                item_id: input.final_item_id,
+                task_id: input.task_id,
+                run_id: input.run_id,
+                kind: CanonicalTaskItemKind::FinalResult,
+                summary_code: input.summary_code,
+                payload_digest: input.result_digest,
+                now: &now,
+            },
+        )?;
+        tx.execute(
+            "INSERT INTO canonical_task_final_results (
+                task_id, run_id, item_id, conversation_item_id, result_digest,
+                summary_code, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                input.task_id,
+                input.run_id,
+                input.final_item_id,
+                input.conversation_item_id,
+                input.result_digest,
+                input.summary_code,
+                now
+            ],
+        )?;
+        tx.execute(
+            "UPDATE canonical_task_runs SET status = 'completed', updated_at = ?3,
+                    completed_at = ?3 WHERE task_id = ?1 AND run_id = ?2",
+            params![input.task_id, input.run_id, now],
+        )?;
+        tx.execute(
+            "UPDATE canonical_tasks SET status = 'completed', updated_at = ?2 WHERE id = ?1",
+            params![input.task_id, now],
+        )?;
+        let result = load_final_result_in_tx(&tx, input.task_id)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_final_result_missing_after_commit"))?;
+        tx.commit()?;
+        Ok(result)
+    }
+
+    pub fn terminalize_general_run(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        status: CanonicalTaskStatus,
+    ) -> Result<CanonicalTaskSnapshot> {
+        validate_uuid("task_id", task_id)?;
+        validate_uuid("run_id", run_id)?;
+        if !matches!(
+            status,
+            CanonicalTaskStatus::Blocked
+                | CanonicalTaskStatus::Failed
+                | CanonicalTaskStatus::Cancelled
+                | CanonicalTaskStatus::Interrupted
+                | CanonicalTaskStatus::EffectUnknown
+        ) {
+            anyhow::bail!("canonical_general_run_terminal_status_invalid");
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE canonical_task_runs SET status = ?3, updated_at = ?4,
+                    completed_at = ?4 WHERE task_id = ?1 AND run_id = ?2
+                      AND status = 'running'",
+            params![task_id, run_id, status.as_str(), now],
+        )?;
+        if changed == 0 {
+            let existing: String = tx.query_row(
+                "SELECT status FROM canonical_task_runs WHERE task_id = ?1 AND run_id = ?2",
+                params![task_id, run_id],
+                |row| row.get(0),
+            )?;
+            if existing != status.as_str() {
+                anyhow::bail!("canonical_general_run_terminal_conflict");
+            }
+        }
+        tx.execute(
+            "UPDATE canonical_task_items SET status = ?3, updated_at = ?4
+             WHERE task_id = ?1 AND run_id = ?2 AND status IN ('waiting', 'running')",
+            params![task_id, run_id, status.as_str(), now],
+        )?;
+        tx.execute(
+            "UPDATE canonical_task_item_attempts SET status = ?3, finished_at = ?4
+             WHERE task_id = ?1 AND run_id = ?2 AND status = 'running'",
+            params![task_id, run_id, status.as_str(), now],
+        )?;
+        tx.execute(
+            "UPDATE canonical_tasks SET status = ?2, updated_at = ?3 WHERE id = ?1",
+            params![task_id, status.as_str(), now],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.load_task_snapshot(task_id)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_general_task_missing_after_terminal"))
+    }
+
+    pub fn recover_interrupted_general_runs(&self) -> Result<u64> {
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut statement = tx.prepare(
+            "SELECT run.task_id, run.run_id FROM canonical_task_runs run
+             JOIN canonical_tasks task ON task.id = run.task_id
+             WHERE run.status = 'running' AND run.execution_facts_version = 5
+               AND task.task_kind = 'work'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let running = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        for (task_id, run_id) in &running {
+            tx.execute(
+                "UPDATE canonical_task_runs SET status = 'interrupted', updated_at = ?3,
+                        completed_at = ?3 WHERE task_id = ?1 AND run_id = ?2",
+                params![task_id, run_id, now],
+            )?;
+            tx.execute(
+                "UPDATE canonical_task_items SET status = 'interrupted', updated_at = ?3
+                 WHERE task_id = ?1 AND run_id = ?2 AND status IN ('waiting', 'running')",
+                params![task_id, run_id, now],
+            )?;
+            tx.execute(
+                "UPDATE canonical_task_item_attempts
+                 SET status = 'interrupted', finished_at = ?3
+                 WHERE task_id = ?1 AND run_id = ?2 AND status = 'running'",
+                params![task_id, run_id, now],
+            )?;
+            tx.execute(
+                "UPDATE canonical_tasks SET status = 'interrupted', updated_at = ?2
+                 WHERE id = ?1 AND status = 'running'",
+                params![task_id, now],
+            )?;
+        }
+        tx.commit()?;
+        Ok(u64::try_from(running.len())?)
     }
 
     pub fn begin_report_run(&self, input: BeginReportRunInput<'_>) -> Result<BegunReportRun> {
@@ -994,13 +1821,13 @@ impl CanonicalTaskRuntimeStore {
                 id, conversation_id, task_kind, initial_outcome_digest,
                 status, created_at, updated_at
              ) VALUES (?1, ?2, 'report', ?3, 'running', ?4, ?4)
-             ON CONFLICT(conversation_id) DO NOTHING",
+             ON CONFLICT(id) DO NOTHING",
             params![task_id, input.conversation_id, input.outcome_digest, now],
         )?;
         let stored_task: (String, String, String) = tx.query_row(
             "SELECT id, initial_outcome_digest, status FROM canonical_tasks
-             WHERE conversation_id = ?1",
-            [input.conversation_id],
+             WHERE id = ?1",
+            [&task_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         if stored_task.0 != task_id {
@@ -1039,9 +1866,9 @@ impl CanonicalTaskRuntimeStore {
                 )?;
                 tx.execute(
                     "INSERT INTO canonical_task_runs (
-                    task_id, run_id, execution_session_id, ordinal,
-                    execution_facts_version, plan_revision, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, 5, 1, ?5)",
+                    task_id, run_id, execution_session_id, ordinal, status,
+                    execution_facts_version, plan_revision, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'running', 5, 1, ?5, ?5)",
                     params![
                         task_id,
                         input.run_id,
@@ -1105,7 +1932,7 @@ impl CanonicalTaskRuntimeStore {
                 id, conversation_id, task_kind, initial_outcome_digest,
                 status, created_at, updated_at
              ) VALUES (?1, ?2, 'plan', ?3, 'running', ?4, ?4)
-             ON CONFLICT(conversation_id) DO NOTHING",
+             ON CONFLICT(id) DO NOTHING",
             params![
                 task_id,
                 input.conversation_id,
@@ -1115,8 +1942,8 @@ impl CanonicalTaskRuntimeStore {
         )?;
         let stored: (String, String, String) = tx.query_row(
             "SELECT id, task_kind, initial_outcome_digest FROM canonical_tasks
-             WHERE conversation_id = ?1",
-            [input.conversation_id],
+             WHERE id = ?1",
+            [&task_id],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         if stored.0 != task_id || stored.1 != "plan" || stored.2 != input.instruction_digest {
@@ -1124,9 +1951,9 @@ impl CanonicalTaskRuntimeStore {
         }
         tx.execute(
             "INSERT INTO canonical_task_runs (
-                task_id, run_id, execution_session_id, ordinal,
-                execution_facts_version, plan_revision, created_at
-             ) VALUES (?1, ?2, ?3, 1, 5, 1, ?4)
+                task_id, run_id, execution_session_id, ordinal, status,
+                execution_facts_version, plan_revision, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, 1, 'running', 5, 1, ?4, ?4)
              ON CONFLICT(run_id) DO NOTHING",
             params![task_id, input.run_id, input.execution_session_id, now],
         )?;
@@ -1395,6 +2222,24 @@ impl CanonicalTaskRuntimeStore {
         .map_err(Into::into)
     }
 
+    pub fn resolve_general_run_by_execution_session(
+        &self,
+        execution_session_id: &str,
+    ) -> Result<Option<(String, String)>> {
+        validate_uuid("execution_session_id", execution_session_id)?;
+        let conn = self.lock_conn()?;
+        conn.query_row(
+            "SELECT run.task_id, run.run_id
+             FROM canonical_task_runs run
+             JOIN canonical_tasks task ON task.id = run.task_id
+             WHERE run.execution_session_id = ?1 AND task.task_kind = 'work'",
+            [execution_session_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn resolve_report_run_target(
         &self,
         execution_session_id: &str,
@@ -1572,7 +2417,7 @@ impl CanonicalTaskRuntimeStore {
                 id, conversation_id, task_kind, initial_outcome_digest,
                 status, created_at, updated_at
              ) VALUES (?1, ?2, 'report', ?3, 'running', ?4, ?4)
-             ON CONFLICT(conversation_id) DO UPDATE SET updated_at = excluded.updated_at",
+             ON CONFLICT(id) DO UPDATE SET updated_at = excluded.updated_at",
             params![
                 task_id,
                 input.conversation_id,
@@ -1581,8 +2426,8 @@ impl CanonicalTaskRuntimeStore {
             ],
         )?;
         let stored_task_id: String = tx.query_row(
-            "SELECT id FROM canonical_tasks WHERE conversation_id = ?1",
-            [input.conversation_id],
+            "SELECT id FROM canonical_tasks WHERE id = ?1",
+            [&task_id],
             |row| row.get(0),
         )?;
         if stored_task_id != task_id {
@@ -1624,9 +2469,9 @@ impl CanonicalTaskRuntimeStore {
             )?;
             tx.execute(
                 "INSERT INTO canonical_task_runs (
-                    task_id, run_id, execution_session_id, ordinal,
-                    execution_facts_version, plan_revision, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, 5, 1, ?5)",
+                    task_id, run_id, execution_session_id, ordinal, status,
+                    execution_facts_version, plan_revision, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'running', 5, 1, ?5, ?5)",
                 params![
                     task_id,
                     input.run_id,
@@ -2297,6 +3142,23 @@ impl CanonicalTaskRuntimeStore {
         .map_err(Into::into)
     }
 
+    pub fn load_task_snapshot(&self, task_id: &str) -> Result<Option<CanonicalTaskSnapshot>> {
+        let conn = self.lock_conn()?;
+        let task = conn
+            .query_row(
+                "SELECT id, conversation_id, task_kind, initial_outcome_digest,
+                        status, created_at, updated_at
+                 FROM canonical_tasks WHERE id = ?1",
+                [task_id],
+                row_to_task,
+            )
+            .optional()?;
+        let Some(task) = task else {
+            return Ok(None);
+        };
+        Ok(Some(load_snapshot_for_task(&conn, task)?))
+    }
+
     pub fn load_artifact(&self, artifact_id: &str) -> Result<Option<CanonicalArtifactRecord>> {
         let conn = self.lock_conn()?;
         conn.query_row(
@@ -2378,7 +3240,8 @@ impl CanonicalTaskRuntimeStore {
             let runs = {
                 let mut statement = tx.prepare(
                     "SELECT task_id, run_id, execution_session_id, ordinal,
-                            execution_facts_version, plan_revision, created_at
+                            status, execution_facts_version, plan_revision, created_at,
+                            updated_at, completed_at
                      FROM canonical_task_runs WHERE task_id = ?1
                      ORDER BY ordinal ASC, run_id ASC",
                 )?;
@@ -2395,6 +3258,18 @@ impl CanonicalTaskRuntimeStore {
                 let rows = statement.query_map([&task.id], row_to_item)?;
                 rows.collect::<std::result::Result<Vec<_>, _>>()?
             };
+            let attempts = {
+                let mut statement = tx.prepare(
+                    "SELECT attempt_id, task_id, run_id, item_id, ordinal, status,
+                            executor_kind, provider_profile_id, provider_model_id,
+                            request_digest, receipt_digest, started_at, finished_at
+                     FROM canonical_task_item_attempts WHERE task_id = ?1
+                     ORDER BY started_at ASC, attempt_id ASC",
+                )?;
+                let rows = statement.query_map([&task.id], row_to_item_attempt)?;
+                rows.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+            let final_result = load_final_result_in_tx(&tx, &task.id)?;
             let artifacts = {
                 let mut statement = tx.prepare(
                     "SELECT artifact.id, artifact.task_id, artifact.source_item_id,
@@ -2420,6 +3295,8 @@ impl CanonicalTaskRuntimeStore {
                 task,
                 runs,
                 items,
+                attempts,
+                final_result,
                 artifacts,
             });
         }
@@ -2535,6 +3412,113 @@ fn load_steering_in_tx(
     )
     .optional()
     .map_err(Into::into)
+}
+
+fn load_attempt_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    attempt_id: &str,
+) -> Result<Option<CanonicalTaskItemAttemptRecord>> {
+    tx.query_row(
+        "SELECT attempt_id, task_id, run_id, item_id, ordinal, status,
+                executor_kind, provider_profile_id, provider_model_id,
+                request_digest, receipt_digest, started_at, finished_at
+         FROM canonical_task_item_attempts WHERE attempt_id = ?1",
+        [attempt_id],
+        row_to_item_attempt,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn load_final_result_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    task_id: &str,
+) -> Result<Option<CanonicalFinalResultRecord>> {
+    tx.query_row(
+        "SELECT task_id, run_id, item_id, conversation_item_id, result_digest,
+                summary_code, created_at
+         FROM canonical_task_final_results WHERE task_id = ?1",
+        [task_id],
+        row_to_final_result,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn load_snapshot_for_task(
+    conn: &Connection,
+    task: CanonicalTaskRecord,
+) -> Result<CanonicalTaskSnapshot> {
+    let runs = {
+        let mut statement = conn.prepare(
+            "SELECT task_id, run_id, execution_session_id, ordinal,
+                    status, execution_facts_version, plan_revision, created_at,
+                    updated_at, completed_at
+             FROM canonical_task_runs WHERE task_id = ?1
+             ORDER BY ordinal ASC, run_id ASC",
+        )?;
+        let rows = statement.query_map([&task.id], row_to_task_run)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let items = {
+        let mut statement = conn.prepare(
+            "SELECT id, task_id, run_id, sequence, kind, status, summary_code,
+                    payload_digest, created_at, updated_at
+             FROM canonical_task_items WHERE task_id = ?1
+             ORDER BY sequence ASC, id ASC",
+        )?;
+        let rows = statement.query_map([&task.id], row_to_item)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let attempts = {
+        let mut statement = conn.prepare(
+            "SELECT attempt_id, task_id, run_id, item_id, ordinal, status,
+                    executor_kind, provider_profile_id, provider_model_id,
+                    request_digest, receipt_digest, started_at, finished_at
+             FROM canonical_task_item_attempts WHERE task_id = ?1
+             ORDER BY started_at ASC, attempt_id ASC",
+        )?;
+        let rows = statement.query_map([&task.id], row_to_item_attempt)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    let final_result = conn
+        .query_row(
+            "SELECT task_id, run_id, item_id, conversation_item_id, result_digest,
+                    summary_code, created_at
+             FROM canonical_task_final_results WHERE task_id = ?1",
+            [&task.id],
+            row_to_final_result,
+        )
+        .optional()?;
+    let artifacts = {
+        let mut statement = conn.prepare(
+            "SELECT artifact.id, artifact.task_id, artifact.source_item_id,
+                    artifact.current_version, artifact.status, artifact.media_type,
+                    artifact.target_reference_digest, artifact.content_digest,
+                    artifact.proposal_id, artifact.materialized_reference,
+                    artifact.created_at, artifact.updated_at,
+                    version.artifact_id, version.version, version.source_item_id,
+                    version.content_digest, version.materialized_reference,
+                    version.observed_content_digest, version.created_at,
+                    version.materialized_at
+             FROM canonical_artifacts artifact
+             JOIN canonical_artifact_versions version
+               ON version.artifact_id = artifact.id
+              AND version.version = artifact.current_version
+             WHERE artifact.task_id = ?1
+             ORDER BY artifact.created_at ASC, artifact.id ASC",
+        )?;
+        let rows = statement.query_map([&task.id], row_to_artifact_snapshot)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    Ok(CanonicalTaskSnapshot {
+        task,
+        runs,
+        items,
+        attempts,
+        final_result,
+        artifacts,
+    })
 }
 
 fn row_to_steering(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalReportSteeringRecord> {
@@ -2747,6 +3731,15 @@ fn validate_nonempty(field: &str, value: &str, max_bytes: usize) -> Result<()> {
     Ok(())
 }
 
+fn validate_uuid(field: &str, value: &str) -> Result<()> {
+    let parsed = uuid::Uuid::parse_str(value)
+        .with_context(|| format!("canonical_task_runtime_{field}_invalid"))?;
+    if parsed.get_version_num() != 4 || parsed.is_nil() || parsed.to_string() != value {
+        anyhow::bail!("canonical_task_runtime_{field}_invalid");
+    }
+    Ok(())
+}
+
 fn validate_digest(field: &str, value: &str) -> Result<()> {
     validate_nonempty(field, value, 256)?;
     if !value.starts_with("sha256:") || value.len() != "sha256:".len() + 64 {
@@ -2897,20 +3890,90 @@ fn row_to_task_run(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalTaskRun
     let ordinal = u64::try_from(row.get::<_, i64>(3)?).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Integer, error.into())
     })?;
-    let execution_facts_version = u64::try_from(row.get::<_, i64>(4)?).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Integer, error.into())
+    let status = CanonicalTaskStatus::from_db(&row.get::<_, String>(4)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, error.into())
     })?;
-    let plan_revision = u64::try_from(row.get::<_, i64>(5)?).map_err(|error| {
+    let execution_facts_version = u64::try_from(row.get::<_, i64>(5)?).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Integer, error.into())
+    })?;
+    let plan_revision = u64::try_from(row.get::<_, i64>(6)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Integer, error.into())
     })?;
     Ok(CanonicalTaskRunRecord {
         task_id: row.get(0)?,
         run_id: row.get(1)?,
         execution_session_id: row.get(2)?,
         ordinal,
+        status,
         execution_facts_version,
         plan_revision,
-        created_at: parse_timestamp(row.get(6)?, "task_run_created_at").map_err(|error| {
+        created_at: parse_timestamp(row.get(7)?, "task_run_created_at").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, error.into())
+        })?,
+        updated_at: parse_timestamp(row.get(8)?, "task_run_updated_at").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(8, rusqlite::types::Type::Text, error.into())
+        })?,
+        completed_at: row
+            .get::<_, Option<String>>(9)?
+            .map(|value| parse_timestamp(value, "task_run_completed_at"))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    9,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?,
+    })
+}
+
+fn row_to_item_attempt(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CanonicalTaskItemAttemptRecord> {
+    let ordinal = u64::try_from(row.get::<_, i64>(4)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Integer, error.into())
+    })?;
+    let status = CanonicalTaskItemStatus::from_db(&row.get::<_, String>(5)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, error.into())
+    })?;
+    Ok(CanonicalTaskItemAttemptRecord {
+        attempt_id: row.get(0)?,
+        task_id: row.get(1)?,
+        run_id: row.get(2)?,
+        item_id: row.get(3)?,
+        ordinal,
+        status,
+        executor_kind: row.get(6)?,
+        provider_profile_id: row.get(7)?,
+        provider_model_id: row.get(8)?,
+        request_digest: row.get(9)?,
+        receipt_digest: row.get(10)?,
+        started_at: parse_timestamp(row.get(11)?, "item_attempt_started_at").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, error.into())
+        })?,
+        finished_at: row
+            .get::<_, Option<String>>(12)?
+            .map(|value| parse_timestamp(value, "item_attempt_finished_at"))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    12,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?,
+    })
+}
+
+fn row_to_final_result(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalFinalResultRecord> {
+    Ok(CanonicalFinalResultRecord {
+        task_id: row.get(0)?,
+        run_id: row.get(1)?,
+        item_id: row.get(2)?,
+        conversation_item_id: row.get(3)?,
+        result_digest: row.get(4)?,
+        summary_code: row.get(5)?,
+        created_at: parse_timestamp(row.get(6)?, "final_result_created_at").map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, error.into())
         })?,
     })
@@ -4434,5 +5497,244 @@ mod tests {
                 && artifact.artifact.id == artifact.current_version.artifact_id
                 && artifact.artifact.content_digest == artifact.current_version.content_digest
         }));
+    }
+
+    #[test]
+    fn general_tasks_are_distinct_inside_one_conversation_and_runs_are_canonical() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let first_task = uuid::Uuid::new_v4().to_string();
+        let second_task = uuid::Uuid::new_v4().to_string();
+        let first_run = uuid::Uuid::new_v4().to_string();
+        let second_run = uuid::Uuid::new_v4().to_string();
+        let instruction = digest_of("prepare a bounded result");
+        let first = store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &first_task,
+                conversation_id: &conversation_id,
+                run_id: &first_run,
+                execution_session_id: &first_run,
+                instruction_digest: &instruction,
+                plan_digest: None,
+            })
+            .unwrap();
+        let second = store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &second_task,
+                conversation_id: &conversation_id,
+                run_id: &second_run,
+                execution_session_id: &second_run,
+                instruction_digest: &digest_of("prepare another bounded result"),
+                plan_digest: Some(&digest_of("one step")),
+            })
+            .unwrap();
+        assert_ne!(first.task_id, second.task_id);
+        let snapshots = store.list_task_snapshots(100).unwrap();
+        assert_eq!(snapshots.len(), 2);
+        assert!(snapshots
+            .iter()
+            .all(|snapshot| snapshot.task.conversation_id == conversation_id));
+        assert!(snapshots
+            .iter()
+            .all(|snapshot| snapshot.task.task_kind == "work"));
+    }
+
+    #[test]
+    fn general_item_attempt_and_final_result_have_one_terminal_owner() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: &run_id,
+                instruction_digest: &digest_of("answer with evidence"),
+                plan_digest: None,
+            })
+            .unwrap();
+        let provider_item_id = stable_id("item", &["provider_generation", &task_id, &run_id]);
+        store
+            .append_general_item(
+                &task_id,
+                &run_id,
+                &provider_item_id,
+                CanonicalTaskItemKind::ProviderGeneration,
+                "work_provider_generation",
+                &digest_of("provider request item"),
+            )
+            .unwrap();
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let request_digest = digest_of("provider request");
+        let attempt = store
+            .begin_item_attempt(BeginItemAttemptInput {
+                attempt_id: &attempt_id,
+                task_id: &task_id,
+                run_id: &run_id,
+                item_id: &provider_item_id,
+                executor_kind: "provider",
+                provider_profile_id: None,
+                provider_model_id: None,
+                request_digest: &request_digest,
+            })
+            .unwrap();
+        assert_eq!(attempt.status, CanonicalTaskItemStatus::Running);
+        store
+            .terminalize_item_attempt(
+                &attempt_id,
+                CanonicalTaskItemStatus::Completed,
+                Some(&digest_of("internal receipt")),
+            )
+            .unwrap();
+        let final_item_id = stable_id("item", &["final_result", &task_id, &run_id]);
+        let result = store
+            .complete_general_task(CompleteGeneralTaskInput {
+                task_id: &task_id,
+                run_id: &run_id,
+                final_item_id: &final_item_id,
+                conversation_item_id: "conversation-item:assistant",
+                result_digest: &digest_of("final answer"),
+                summary_code: "work_completed",
+            })
+            .unwrap();
+        let snapshot = store.load_task_snapshot(&task_id).unwrap().unwrap();
+        assert_eq!(snapshot.task.status, CanonicalTaskStatus::Completed);
+        assert_eq!(snapshot.runs[0].status, CanonicalTaskStatus::Completed);
+        assert_eq!(snapshot.final_result, Some(result));
+        assert!(store
+            .terminalize_general_run(&task_id, &run_id, CanonicalTaskStatus::Failed)
+            .is_err());
+    }
+
+    #[test]
+    fn recovery_interrupts_open_general_run_and_retry_adds_a_new_run() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let first_run = uuid::Uuid::new_v4().to_string();
+        let instruction_digest = digest_of("continue after restart");
+        store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &first_run,
+                execution_session_id: &first_run,
+                instruction_digest: &instruction_digest,
+                plan_digest: None,
+            })
+            .unwrap();
+        assert_eq!(store.recover_interrupted_general_runs().unwrap(), 1);
+        let interrupted = store.load_task_snapshot(&task_id).unwrap().unwrap();
+        assert_eq!(interrupted.task.status, CanonicalTaskStatus::Interrupted);
+        assert_eq!(interrupted.runs[0].status, CanonicalTaskStatus::Interrupted);
+        let retry_run = uuid::Uuid::new_v4().to_string();
+        let retry = store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &retry_run,
+                execution_session_id: &retry_run,
+                instruction_digest: &instruction_digest,
+                plan_digest: None,
+            })
+            .unwrap();
+        assert_eq!(retry.ordinal, 2);
+        let current = store.load_task_snapshot(&task_id).unwrap().unwrap();
+        assert_eq!(current.task.status, CanonicalTaskStatus::Running);
+        assert_eq!(current.runs.len(), 2);
+    }
+
+    #[test]
+    fn general_task_allows_exact_replay_but_rejects_a_parallel_run() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let instruction_digest = digest_of("one active outcome");
+        let input = BeginGeneralTaskRunInput {
+            task_id: &task_id,
+            conversation_id: &conversation_id,
+            run_id: &run_id,
+            execution_session_id: &run_id,
+            instruction_digest: &instruction_digest,
+            plan_digest: None,
+        };
+        let first = store.begin_general_task_run(input.clone()).unwrap();
+        let replay = store.begin_general_task_run(input).unwrap();
+        assert_eq!(replay.run_id, first.run_id);
+
+        let parallel_run = uuid::Uuid::new_v4().to_string();
+        let error = store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &parallel_run,
+                execution_session_id: &parallel_run,
+                instruction_digest: &instruction_digest,
+                plan_digest: None,
+            })
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("canonical_general_task_not_retryable"));
+        assert_eq!(
+            store
+                .load_task_snapshot(&task_id)
+                .unwrap()
+                .unwrap()
+                .runs
+                .len(),
+            1
+        );
+
+        let plan_drift = store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: &run_id,
+                instruction_digest: &instruction_digest,
+                plan_digest: Some(&digest_of("changed plan presence")),
+            })
+            .unwrap_err();
+        assert!(plan_drift
+            .to_string()
+            .contains("canonical_general_run_plan_conflict"));
+    }
+
+    #[test]
+    fn cancelled_general_task_can_retry_with_a_new_run() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let instruction_digest = digest_of("retry cancelled outcome");
+        store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: &run_id,
+                instruction_digest: &instruction_digest,
+                plan_digest: None,
+            })
+            .unwrap();
+        store
+            .terminalize_general_run(&task_id, &run_id, CanonicalTaskStatus::Cancelled)
+            .unwrap();
+        let retry_run = uuid::Uuid::new_v4().to_string();
+        let retried = store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &retry_run,
+                execution_session_id: &retry_run,
+                instruction_digest: &instruction_digest,
+                plan_digest: None,
+            })
+            .unwrap();
+        assert_eq!(retried.ordinal, 2);
     }
 }

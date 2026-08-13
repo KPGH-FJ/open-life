@@ -669,18 +669,8 @@ export function workbenchJourneyFixtureDataSource(
         tool_calls: [],
       } as Awaited<ReturnType<WorkspaceConversationDataSource["streamTurn"]>>;
     },
-    async cancelTask() {
-      return {
-        session: null,
-        actions: [],
-        transcript: [],
-        pendingApprovalCount: 0,
-        activeToolCount: 0,
-        canResume: false,
-        canCancel: false,
-        canRetry: false,
-        cancellationPending: true,
-      };
+    async cancelChatTurn() {
+      return { status: "cancelled" };
     },
     async dispatchReviewAction(reviewAction) {
       if (readStatus(id) !== "ready") {

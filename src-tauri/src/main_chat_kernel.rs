@@ -6660,6 +6660,38 @@ where
         self.run_turn(input, event_sink).await
     }
 
+    /// R2 provider-only Work path. The general Task owner is outside the
+    /// kernel; this method reuses provider/context policy without allowing a
+    /// second task lifecycle or any tool/effect execution. R3 expands the
+    /// typed Item executor for governed reads.
+    pub(crate) async fn run_canonical_work_provider_only<S>(
+        &self,
+        input: MainChatTurnInput,
+        event_sink: &mut S,
+    ) -> MainChatTurnResult
+    where
+        S: MainChatEventSink + ?Sized,
+    {
+        if matches!(
+            input.policy_decision.route_kind,
+            openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ReadOnlyTool
+                | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::TransientStateCommand
+                | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ReversibleMemoryCommit
+                | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ProposalOnlyWrite
+                | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::ConfirmationRequest
+        ) {
+            return self.blocked("work_capability_requires_r3_or_r4", event_sink);
+        }
+        if matches!(
+            input.policy_decision.route_kind,
+            openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::AskClarification
+                | openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::GovernedBlocker
+        ) {
+            return self.blocked("work_request_blocked_by_policy", event_sink);
+        }
+        self.run_turn(input, event_sink).await
+    }
+
     fn blocked<S>(&self, code: &'static str, event_sink: &mut S) -> MainChatTurnResult
     where
         S: MainChatEventSink + ?Sized,

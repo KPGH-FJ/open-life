@@ -3252,20 +3252,15 @@ async fn main_chat_task_continuity_list_detail_and_refresh_are_evidence_backed()
     let tasks_view = crate::read_models::tasks::get_tasks_view_model_with_state(&state)
         .await
         .expect("build backend TasksViewModel");
-    let task_item = tasks_view
-        .data
-        .as_ref()
-        .expect("TasksViewModel data")
-        .items
-        .iter()
-        .find(|item| item.task_session_id.as_deref() == Some(blocked.id.as_str()))
-        .expect("projected task item");
     assert!(
-        task_item
-            .allowed_controls
+        tasks_view
+            .data
+            .as_ref()
+            .expect("TasksViewModel data")
+            .items
             .iter()
-            .all(|control| !control.id.ends_with(":retry")),
-        "TasksViewModel must not invent a retry control without a durable execution envelope"
+            .all(|item| item.task_session_id.as_deref() != Some(blocked.id.as_str())),
+        "canonical TasksViewModel must not project retired TaskSession state"
     );
 
     let refreshed = refresh_main_chat_agent_task_context(

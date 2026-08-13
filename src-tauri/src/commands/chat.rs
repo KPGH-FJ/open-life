@@ -147,7 +147,11 @@ pub(crate) async fn get_conversation_view_model_with_state(
         provider_profiles,
         selected_provider_profile_id,
         provider_error_code,
-        work_status: "reconstructing".into(),
+        work_status: if state.canonical_task_runtime_store.is_some() {
+            "ready".into()
+        } else {
+            "reconstructing".into()
+        },
     })
 }
 

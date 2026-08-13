@@ -127,6 +127,8 @@ fn shipped_main_chat_debug_contract_redacts_message_reasoning_and_tool_bodies() 
     let args = crate::StartStreamMessageArgs {
         operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003aa".into(),
         session_id: "debug-session".into(),
+        task_id: Some("a4c82caa-3781-43ca-a839-13b13fc0c7d1".into()),
+        run_id: Some("eb6a47fa-c334-41d4-9007-371a3cf06263".into()),
         messages: vec![openlife_core::llm::ChatMessage {
             role: "user".into(),
             content: SECRET.into(),
@@ -382,13 +384,13 @@ fn main_chat_invoke_request(
         let object = body
             .as_object_mut()
             .expect("Main Chat command fixture body must be an object");
-        // Historical command-surface fixtures exercise the pre-R2 Work
-        // consumer. Product IPC defaults to Chat, but legacy tests must state
-        // their mode explicitly so they cannot accidentally receive credit
-        // for the new canonical Chat path.
+        // Historical command-surface fixtures exercise capabilities that are
+        // migrated in R3/R4. Their executor is test-only: they cannot receive
+        // product credit for canonical Chat or Work and cannot become a
+        // shipped compatibility fallback.
         object
             .entry("mode")
-            .or_insert_with(|| serde_json::Value::String("work".into()));
+            .or_insert_with(|| serde_json::Value::String("legacy_test".into()));
         object.insert(
             "operationId".into(),
             serde_json::Value::String(supplied_operation.clone()),
@@ -403,7 +405,7 @@ fn main_chat_invoke_request(
                 .and_then(serde_json::Value::as_object_mut)
             {
                 args.entry("mode")
-                    .or_insert_with(|| serde_json::Value::String("work".into()));
+                    .or_insert_with(|| serde_json::Value::String("legacy_test".into()));
                 args.insert(
                     "operationId".into(),
                     serde_json::Value::String(supplied_operation.clone()),
@@ -6576,6 +6578,9 @@ async fn s3_attachment_only_report_uses_document_tool_before_reviewed_materializ
     );
     let proposals = list_command_surface_proposals_for_task(&state, &operation_id).await;
     assert_eq!(proposals.len(), 1);
+    let canonical_task_id = proposals[0].after["canonicalTaskId"]
+        .as_str()
+        .expect("S3 attachment proposal canonical Task id");
     let tasks_view = crate::read_models::tasks::get_tasks_view_model_with_state(&state)
         .await
         .expect("S3 canonical report Tasks read model")
@@ -6584,7 +6589,7 @@ async fn s3_attachment_only_report_uses_document_tool_before_reviewed_materializ
     let task = tasks_view
         .items
         .iter()
-        .find(|task| task.task_session_id.as_deref() == Some(operation_id.as_str()))
+        .find(|task| task.canonical_task_id == canonical_task_id)
         .expect("S3 attachment report task projection");
     assert_eq!(
         task.items.iter().map(|item| item.kind).collect::<Vec<_>>(),

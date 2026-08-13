@@ -78,6 +78,25 @@ pub(crate) async fn cancel_canonical_chat(
     } else {
         existing
     };
+    if let Some(task_store) = state.canonical_task_runtime_store.as_ref() {
+        let target = {
+            let store = task_store.lock().await;
+            store
+                .resolve_general_run_by_execution_session(turn_id)
+                .map_err(|error| error.to_string())?
+        };
+        if let Some((task_id, run_id)) = target {
+            task_store
+                .lock()
+                .await
+                .terminalize_general_run(
+                    &task_id,
+                    &run_id,
+                    openlife_core::task_runtime::CanonicalTaskStatus::Cancelled,
+                )
+                .map_err(|error| format!("cancel canonical Work Task failed: {error}"))?;
+        }
+    }
     Ok(CancelCanonicalChatResult {
         conversation_id: conversation_id.to_string(),
         turn_id: turn_id.to_string(),
@@ -86,12 +105,12 @@ pub(crate) async fn cancel_canonical_chat(
     })
 }
 
-struct CanonicalChatEventSink<'a> {
-    buffered: BufferedMainChatEventSink,
-    conversation_id: &'a str,
-    turn_id: &'a str,
-    emit: &'a mut (dyn FnMut(&str, Value) + Send),
-    cancellation_registry: crate::main_chat_cancellation::MainChatCancellationRegistry,
+pub(crate) struct CanonicalChatEventSink<'a> {
+    pub(crate) buffered: BufferedMainChatEventSink,
+    pub(crate) conversation_id: &'a str,
+    pub(crate) turn_id: &'a str,
+    pub(crate) emit: &'a mut (dyn FnMut(&str, Value) + Send),
+    pub(crate) cancellation_registry: crate::main_chat_cancellation::MainChatCancellationRegistry,
 }
 
 impl MainChatEventSink for CanonicalChatEventSink<'_> {
@@ -392,7 +411,7 @@ pub(crate) async fn run_canonical_chat(
     ))
 }
 
-fn verify_provider_binding(
+pub(crate) fn verify_provider_binding(
     events: &[MainChatKernelEvent],
     binding: &ProviderBinding,
 ) -> Result<(), String> {
@@ -438,7 +457,7 @@ fn validate_uuid_field(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn provider_state(events: &[MainChatKernelEvent]) -> ProviderInvocationState {
+pub(crate) fn provider_state(events: &[MainChatKernelEvent]) -> ProviderInvocationState {
     events
         .iter()
         .rev()

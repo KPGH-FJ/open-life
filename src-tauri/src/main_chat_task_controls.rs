@@ -1,4 +1,5 @@
 use std::sync::Arc;
+#[cfg(test)]
 use tauri::State;
 
 use crate::main_chat_replay_contract::DurableMainChatReplayExecutionEnvelope;
@@ -263,6 +264,7 @@ impl ProductTaskProposal {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub struct MainChatAgentTaskFilter {
     #[serde(default)]
     pub statuses: Vec<openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus>,
@@ -276,6 +278,7 @@ pub struct MainChatAgentTaskFilter {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+#[cfg(test)]
 pub struct TaskSummary {
     pub task_session_id: String,
     pub conversation_id: String,
@@ -468,11 +471,13 @@ pub struct ProductRunEvidenceView {
     pub redaction_state: String,
 }
 
+#[cfg(test)]
 fn default_true() -> bool {
     true
 }
 
 #[tauri::command]
+#[cfg(test)]
 pub(crate) async fn get_main_chat_agent_task_state(
     task_session_id: String,
     state: State<'_, Arc<AppState>>,
@@ -481,6 +486,7 @@ pub(crate) async fn get_main_chat_agent_task_state(
 }
 
 #[tauri::command]
+#[cfg(test)]
 pub(crate) async fn list_main_chat_agent_tasks(
     filter: Option<MainChatAgentTaskFilter>,
     limit: Option<usize>,
@@ -491,6 +497,7 @@ pub(crate) async fn list_main_chat_agent_tasks(
 }
 
 #[tauri::command]
+#[cfg(test)]
 pub(crate) async fn get_main_chat_agent_task_detail(
     task_session_id: String,
     state: State<'_, Arc<AppState>>,
@@ -499,6 +506,7 @@ pub(crate) async fn get_main_chat_agent_task_detail(
 }
 
 #[tauri::command]
+#[cfg(test)]
 pub(crate) async fn refresh_main_chat_agent_task_context(
     task_session_id: String,
     state: State<'_, Arc<AppState>>,
@@ -518,6 +526,7 @@ pub(crate) async fn refresh_main_chat_agent_task_context(
     get_main_chat_agent_task_detail_with_state(&task_session_id, &state).await
 }
 
+#[cfg(test)]
 pub(crate) async fn list_main_chat_agent_tasks_with_state(
     filter: Option<MainChatAgentTaskFilter>,
     limit: Option<usize>,
@@ -1847,6 +1856,7 @@ async fn continuity_diagnostics_for_task(
     Ok(diagnostics)
 }
 
+#[cfg(test)]
 fn task_summary_from_detail(detail: &TaskDetail) -> TaskSummary {
     let resume_safety_digest = digest_label(&serde_json::json!({
         "taskSessionId": detail.task_session.id,
@@ -1893,6 +1903,7 @@ fn task_summary_from_detail(detail: &TaskDetail) -> TaskSummary {
     }
 }
 
+#[cfg(test)]
 fn stale_state_for_detail(detail: &TaskDetail) -> String {
     if detail.continuity_diagnostics.terminal_no_resume {
         "terminal".into()
@@ -2116,6 +2127,7 @@ fn main_chat_task_status_is_terminal(
     )
 }
 
+#[cfg(test)]
 fn run_evidence_lifecycle_is_terminal(lifecycle_state: &str) -> bool {
     matches!(
         lifecycle_state,
@@ -2267,6 +2279,7 @@ fn final_delivery_status_from_task(
     }
 }
 
+#[cfg(test)]
 fn last_observation_preview(evidence_view: &ProductRunEvidenceView) -> String {
     evidence_view
         .event_timeline
@@ -2850,6 +2863,7 @@ fn digest_label(value: &serde_json::Value) -> String {
 }
 
 #[tauri::command]
+#[cfg(test)]
 pub(crate) async fn resume_main_chat_agent_task(
     task_session_id: String,
     state: State<'_, Arc<AppState>>,
@@ -3687,6 +3701,7 @@ fn collect_main_chat_proposal_ids(value: &serde_json::Value, ids: &mut Vec<Strin
 /// existing ReviewWorkflow terminal-successor path so the Proposal, task, run,
 /// and queued effects converge together instead of attempting a forbidden
 /// post-seal lifecycle write.
+#[cfg(test)]
 async fn sealed_blocking_review_proposals_for_task(
     state: &Arc<AppState>,
     task_session_id: &str,
@@ -3776,6 +3791,7 @@ async fn sealed_blocking_review_proposals_for_task(
 }
 
 #[tauri::command]
+#[cfg(test)]
 pub(crate) async fn cancel_main_chat_agent_task(
     task_session_id: String,
     state: State<'_, Arc<AppState>>,
@@ -3783,6 +3799,7 @@ pub(crate) async fn cancel_main_chat_agent_task(
     cancel_main_chat_agent_task_with_state(&task_session_id, state.inner()).await
 }
 
+#[cfg(test)]
 pub(crate) async fn cancel_main_chat_agent_task_with_state(
     task_session_id: &str,
     state: &Arc<AppState>,
@@ -4062,6 +4079,7 @@ async fn mark_cancellation_projection_delivery(
 }
 
 #[tauri::command]
+#[cfg(test)]
 pub(crate) async fn retry_main_chat_agent_action(
     task_session_id: String,
     action_id: String,

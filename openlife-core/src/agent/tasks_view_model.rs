@@ -1027,7 +1027,7 @@ fn controls_for_task(
         for control in &mut controls {
             if matches!(
                 control.kind,
-                TaskControlKind::Resume | TaskControlKind::Cancel | TaskControlKind::Retry
+                TaskControlKind::Resume | TaskControlKind::Cancel
             ) {
                 control.enabled = false;
                 control.disabled_reason =
@@ -1472,6 +1472,36 @@ mod tests {
             .expect("cancel control");
         assert_eq!(cancel.effect, TaskControlEffect::TaskCancelRequest);
         assert!(cancel.requires_confirmation);
+    }
+
+    #[test]
+    fn terminal_failed_or_cancelled_task_may_offer_backend_bound_retry_only() {
+        for status in [TaskLifecycleStatus::Failed, TaskLifecycleStatus::Cancelled] {
+            let model = build_tasks_view_model(TasksViewModelBuildInput {
+                task_inputs: vec![TaskViewModelTaskInput {
+                    task_session_id: format!("task-{status:?}"),
+                    title: "Retryable terminal task".into(),
+                    canonical_lifecycle_status: Some(status),
+                    allowed_control_ids: vec!["retry".into(), "cancel".into()],
+                    retry_action_id: Some("prior-run".into()),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            });
+            let retry = model.items[0]
+                .allowed_controls
+                .iter()
+                .find(|control| control.kind == TaskControlKind::Retry)
+                .expect("retry control");
+            assert!(retry.enabled);
+            assert_eq!(retry.target_action_id.as_deref(), Some("prior-run"));
+            let cancel = model.items[0]
+                .allowed_controls
+                .iter()
+                .find(|control| control.kind == TaskControlKind::Cancel)
+                .expect("cancel control");
+            assert!(!cancel.enabled);
+        }
     }
 
     #[test]

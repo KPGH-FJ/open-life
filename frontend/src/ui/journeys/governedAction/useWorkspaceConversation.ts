@@ -900,6 +900,8 @@ export function useWorkspaceConversation(
       const operationId = ++operationRef.current;
       const turnOperationId =
         pendingResources.length > 0 ? pendingResourceTurnOperationId : crypto.randomUUID();
+      const workTaskId = mode === "work" ? crypto.randomUUID() : undefined;
+      const workRunId = mode === "work" ? crypto.randomUUID() : undefined;
       if (!turnOperationId) {
         announce("文件已经显示为待发送，但缺少精确回合标识；当前不会发送。");
         return;
@@ -946,6 +948,8 @@ export function useWorkspaceConversation(
             operationId: turnOperationId,
             selectedSkillId: selectedSkillId ?? undefined,
             mode,
+            taskId: workTaskId,
+            runId: workRunId,
           },
           {
             onStart: (payload: StreamMessageStartPayload) => {
@@ -1083,12 +1087,10 @@ export function useWorkspaceConversation(
     setTurnState({ phase: "cancelling", sessionId, turnId, taskSessionId });
     announce("正在请求取消；只有后端终态返回后才会显示已取消。");
     try {
-      if (!taskSessionId && dataSource.cancelChatTurn) {
+      if (dataSource.cancelChatTurn) {
         await dataSource.cancelChatTurn(sessionId, turnId);
-      } else if (taskSessionId) {
-        await dataSource.cancelTask(taskSessionId);
       } else {
-        throw new Error("canonical_chat_cancel_unavailable");
+        throw new Error("canonical_turn_cancel_unavailable");
       }
     } catch (error) {
       if (cancelRequestId !== cancelRequestRef.current) return;

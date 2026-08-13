@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { MainChatAgentTaskState, StreamMessageDonePayload } from "@/tauri";
+import type { StreamMessageDonePayload } from "@/tauri";
 import type { ChatMessage } from "@/types";
 import type { WorkspaceConversationDataSource } from "./workspaceConversationDataSource";
 import { useWorkspaceConversation } from "./useWorkspaceConversation";
@@ -70,7 +70,7 @@ function source(overrides: Partial<WorkspaceConversationDataSource> = {}) {
       })
     ),
     streamTurn: vi.fn().mockResolvedValue(turnResult("completed")),
-    cancelTask: vi.fn().mockResolvedValue({} as MainChatAgentTaskState),
+    cancelChatTurn: vi.fn().mockResolvedValue({ status: "cancelled" }),
     ...overrides,
   };
   return dataSource;
@@ -333,6 +333,8 @@ describe("workspace conversation journey", () => {
         operationId: exactTurnOperationId,
         mode: "work",
         selectedSkillId: undefined,
+        taskId: expect.any(String),
+        runId: expect.any(String),
       },
       expect.any(Object)
     );
@@ -884,8 +886,8 @@ describe("workspace conversation journey", () => {
         });
       }
     );
-    const cancelTask = vi.fn().mockResolvedValue({} as MainChatAgentTaskState);
-    const dataSource = source({ streamTurn, cancelTask });
+    const cancelChatTurn = vi.fn().mockResolvedValue({ status: "cancelled" });
+    const dataSource = source({ streamTurn, cancelChatTurn });
     const { result } = renderHook(() =>
       useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
     );
@@ -896,7 +898,7 @@ describe("workspace conversation journey", () => {
 
     await act(async () => result.current.cancel());
 
-    expect(cancelTask).toHaveBeenCalledWith("task-2");
+    expect(cancelChatTurn).toHaveBeenCalledWith("conversation-1", expect.any(String));
     expect(result.current.turnState.phase).toBe("cancelling");
 
     await act(async () => finishTurn(turnResult("cancelled")));
@@ -928,8 +930,7 @@ describe("workspace conversation journey", () => {
       }
     );
     const cancelChatTurn = vi.fn().mockResolvedValue({ status: "cancelled" });
-    const cancelTask = vi.fn().mockResolvedValue({} as MainChatAgentTaskState);
-    const dataSource = source({ streamTurn, cancelChatTurn, cancelTask });
+    const dataSource = source({ streamTurn, cancelChatTurn });
     const { result } = renderHook(() =>
       useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
     );
@@ -943,7 +944,6 @@ describe("workspace conversation journey", () => {
     await act(async () => result.current.cancel());
 
     expect(cancelChatTurn).toHaveBeenCalledWith("conversation-1", turnId);
-    expect(cancelTask).not.toHaveBeenCalled();
     expect(result.current.turnState.phase).toBe("cancelling");
     await act(async () =>
       finishTurn({
@@ -980,14 +980,14 @@ describe("workspace conversation journey", () => {
         });
       }
     );
-    const cancelTask = vi.fn(
+    const cancelChatTurn = vi.fn(
       () =>
-        new Promise<MainChatAgentTaskState>((_resolve, reject) => {
+        new Promise<unknown>((_resolve, reject) => {
           rejectCancel = reject;
         })
     );
     const announce = vi.fn();
-    const dataSource = source({ streamTurn, cancelTask });
+    const dataSource = source({ streamTurn, cancelChatTurn });
     const { result } = renderHook(() =>
       useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
     );

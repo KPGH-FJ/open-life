@@ -5,10 +5,11 @@
 Source-backed description of the current runtime. It is not a product-readiness
 claim.
 
-The current ordinary Main Chat entrypoints are implemented through
-`send_message_with_state` and `start_stream_message_with_state`, which delegate
-to `OpenLifeTurnRuntime`. Local command-surface and runtime evals are evidence
-inputs, but they do not count as external live provider completion.
+Release Main Chat has two explicit modes. Chat delegates to
+`CanonicalChatRuntime`; Work delegates to `CanonicalWorkRuntime`. Both use the
+same Conversation owner, while only Work creates canonical Task/Run state.
+Local command-surface and runtime evals are evidence inputs, not external-live
+provider completion.
 
 ## Authority
 
@@ -17,12 +18,14 @@ current source. Superseded execution plans remain in Git history.
 
 ## Last verified
 
-2026-08-13 during S7 old-path retirement and release-baseline closure.
+2026-08-13 during R2 general Work runtime reconstruction.
 
 ## Source map
 
 - `src-tauri/src/main_chat_send.rs`
 - `src-tauri/src/main_chat_streaming.rs`
+- `src-tauri/src/canonical_chat_runtime.rs`
+- `src-tauri/src/canonical_work_runtime.rs`
 - `src-tauri/src/main_chat_steering.rs`
 - `src-tauri/src/main_chat_turn_runtime.rs`
 - `src-tauri/src/main_chat_kernel.rs`
@@ -48,18 +51,19 @@ provider behavior remains unproven until an explicitly authorized live run.
 
 ## Current Entry Flow
 
-Ordinary buffered chat enters `src-tauri/src/main_chat_send.rs`. Ordinary
-streaming chat enters `src-tauri/src/main_chat_streaming.rs`. Both wrappers
-construct `OpenLifeTurnRuntime` and pass `OpenLifeTurnInput` containing the
-session id, chat messages, optional selected skill id, and delivery mode.
+Buffered and streaming transports preserve the same canonical owner for each
+mode. Chat receives caller-owned Conversation and Turn IDs. Work additionally
+requires caller-owned Task and Run IDs. `CanonicalWorkRuntime` begins the
+Conversation Turn and Task Run before provider execution, records a typed
+ProviderGeneration Item and ItemAttempt, commits the assistant Item, and then
+binds one FinalResult to that exact assistant Item. Exact replay does not call
+the provider again; retry creates another Run and Turn for the same Task.
 
-`src-tauri/src/main_chat_turn_runtime.rs` owns the current runtime boundary. It
-starts or resumes an Agent task session through `start_main_chat_agent_turn`,
-decides a route, invokes the Main Chat kernel, records route evidence, and
-finalizes the task state. Its canonical delivery view separates answer text,
-completed actions, observations, proposals, blockers, and pending user actions.
+`src-tauri/src/main_chat_turn_runtime.rs` is retained for capability migration
+tests and pre-R3/R4 internal consumers. It is not reachable as a release Chat or
+Work fallback.
 
-For canonical report Tasks, `src-tauri/src/read_models/tasks.rs` is the product
+For canonical Work and report Tasks, `src-tauri/src/read_models/tasks.rs` is the product
 presentation boundary. It joins the canonical ArtifactVersion to an exact
 proposal while waiting for Review, or to a digest-matching regular file after
 materialization. It exposes bounded change, preview, and verification fields to
@@ -183,14 +187,12 @@ ownership.
 metadata-safe transcript entries, queues governed actions, classifies execution
 policy, and finalizes failures with `directWritesExecuted=false`.
 
-`src-tauri/src/main_chat_task_controls.rs` exposes task-state, list/detail,
-refresh, resume, cancel, and retry controls. Resume and retry are evidence
-aware: they inspect continuity diagnostics, pending permissions, replay safety,
-tool availability, provider availability, and action metadata before replay.
-Review actions related to a task can use the typed approve-and-continue bridge:
-proposal acceptance/materialization is proven first, then the backend reloads
-task state and invokes the existing replay owner only when `can_resume` is
-true. The UI never treats an approval response as continuation proof.
+Release Work cancel and retry are owned by `canonical_work_runtime.rs` and
+operate on canonical Task/Run/Turn identity. The former TaskSession list,
+detail, refresh, resume, cancel, and action-retry IPCs are removed from the
+release handler and frontend. `main_chat_task_controls.rs` remains only for
+pre-R4 Review continuation/materialization consumers and tests until those
+capabilities move to canonical Item checkpoints.
 
 ## Test And Eval Surfaces
 

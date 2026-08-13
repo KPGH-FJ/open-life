@@ -2354,7 +2354,26 @@ fn bootstrap_with_secret_store(
         canonical_task_runtime_store,
         "CanonicalTaskRuntimeStore",
         &startup_warnings,
-    );
+    )
+    .and_then(|store| match store.recover_interrupted_general_runs() {
+        Ok(interrupted) => {
+            if interrupted > 0 {
+                log::info!("[startup] marked {interrupted} incomplete Work runs interrupted");
+            }
+            Some(store)
+        }
+        Err(error) => {
+            persistence.register_unavailable(
+                "CanonicalTaskRuntimeStore",
+                "incomplete_work_recovery_failed",
+                &error.to_string(),
+            );
+            startup_warnings.borrow_mut().push(format!(
+                "Canonical Work recovery failed; Work is unavailable: {error}"
+            ));
+            None
+        }
+    });
 
     let evidence_db_path = data_dir.join("evidence.db");
     let evidence_store = init_store(

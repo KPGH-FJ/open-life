@@ -357,6 +357,8 @@ export interface MainChatMessageOptions {
   operationId: string;
   selectedSkillId?: string;
   mode?: "chat" | "work";
+  taskId?: string;
+  runId?: string;
 }
 
 export async function sendMessage(
@@ -370,6 +372,10 @@ export async function sendMessage(
     ...sessionArgs(sessionId),
     messages,
     mode: options.mode ?? "chat",
+    taskId: options.taskId,
+    task_id: options.taskId,
+    runId: options.runId,
+    run_id: options.runId,
     ...selectedSkillArgs(options.selectedSkillId),
   });
   return result.reply;
@@ -1358,6 +1364,10 @@ export async function sendMessageV2(
     ...sessionArgs(sessionId),
     messages,
     mode: options.mode ?? "chat",
+    taskId: options.taskId,
+    task_id: options.taskId,
+    runId: options.runId,
+    run_id: options.runId,
     ...selectedSkillArgs(options.selectedSkillId),
   });
 }
@@ -1381,72 +1391,40 @@ export async function cancelChatTurn(
   });
 }
 
-export async function getMainChatAgentTaskState(
-  taskSessionId: string
-): Promise<MainChatAgentTaskState> {
-  return safeInvoke<MainChatAgentTaskState>("get_main_chat_agent_task_state", {
-    taskSessionId,
-    task_session_id: taskSessionId,
-  });
+export interface CanonicalWorkControlResult {
+  taskId: string;
+  runId: string;
+  turnId: string;
+  status:
+    | "running"
+    | "waiting_review"
+    | "completed"
+    | "blocked"
+    | "failed"
+    | "cancelled"
+    | "interrupted"
+    | "effect_unknown";
 }
 
-export async function listMainChatAgentTasks(
-  filter?: MainChatAgentTaskFilter,
-  limit = 50,
-  offset = 0
-): Promise<MainChatTaskSummary[]> {
-  return safeInvoke<MainChatTaskSummary[]>("list_main_chat_agent_tasks", {
-    filter: filter ?? null,
-    limit,
-    offset,
-  });
+export async function cancelWorkTask(taskId: string): Promise<CanonicalWorkControlResult> {
+  return safeInvoke<CanonicalWorkControlResult>("cancel_work_task", { taskId, task_id: taskId });
 }
 
-export async function getMainChatAgentTaskDetail(
-  taskSessionId: string
-): Promise<MainChatTaskDetail> {
-  return safeInvoke<MainChatTaskDetail>("get_main_chat_agent_task_detail", {
-    taskSessionId,
-    task_session_id: taskSessionId,
-  });
-}
-
-export async function refreshMainChatAgentTaskContext(
-  taskSessionId: string
-): Promise<MainChatTaskDetail> {
-  return safeInvoke<MainChatTaskDetail>("refresh_main_chat_agent_task_context", {
-    taskSessionId,
-    task_session_id: taskSessionId,
-  });
-}
-
-export async function resumeMainChatAgentTask(
-  taskSessionId: string
-): Promise<MainChatAgentTaskState> {
-  return safeInvoke<MainChatAgentTaskState>("resume_main_chat_agent_task", {
-    taskSessionId,
-    task_session_id: taskSessionId,
-  });
-}
-
-export async function cancelMainChatAgentTask(
-  taskSessionId: string
-): Promise<MainChatAgentTaskState> {
-  return safeInvoke<MainChatAgentTaskState>("cancel_main_chat_agent_task", {
-    taskSessionId,
-    task_session_id: taskSessionId,
-  });
-}
-
-export async function retryMainChatAgentAction(
-  taskSessionId: string,
-  actionId: string
-): Promise<MainChatAgentTaskState> {
-  return safeInvoke<MainChatAgentTaskState>("retry_main_chat_agent_action", {
-    taskSessionId,
-    task_session_id: taskSessionId,
-    actionId,
-    action_id: actionId,
+export async function retryWorkTask(
+  taskId: string,
+  priorRunId: string
+): Promise<SendMessageResult> {
+  const newRunId = crypto.randomUUID();
+  const newTurnId = crypto.randomUUID();
+  return safeInvoke<SendMessageResult>("retry_work_task", {
+    taskId,
+    task_id: taskId,
+    priorRunId,
+    prior_run_id: priorRunId,
+    newRunId,
+    new_run_id: newRunId,
+    newTurnId,
+    new_turn_id: newTurnId,
   });
 }
 
@@ -1515,6 +1493,10 @@ export async function startStreamMessage(
     ...sessionArgs(sessionId),
     messages,
     mode: options.mode ?? "chat",
+    taskId: options.taskId,
+    task_id: options.taskId,
+    runId: options.runId,
+    run_id: options.runId,
     ...selectedSkillArgs(options.selectedSkillId),
   };
   return safeInvoke<StreamMessageDonePayload>("start_stream_message", {

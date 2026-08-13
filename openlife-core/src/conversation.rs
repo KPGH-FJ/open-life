@@ -580,6 +580,17 @@ impl ConversationStore {
         Ok(TurnSnapshot { turn, items })
     }
 
+    /// Work uses the same canonical Conversation/Turn/Item transcript as Chat.
+    /// The distinct method name keeps product intent explicit while preserving
+    /// one atomic assistant Item + Turn completion owner.
+    pub fn complete_work_turn(
+        &self,
+        turn_id: &str,
+        assistant_message: &str,
+    ) -> Result<TurnSnapshot> {
+        self.complete_chat_turn(turn_id, assistant_message)
+    }
+
     pub fn fail_chat_turn(&self, turn_id: &str, error_code: &str) -> Result<TurnRecord> {
         validate_label("turn_error_code", error_code, 256)?;
         self.terminalize_without_assistant(turn_id, TurnStatus::Failed, Some(error_code))

@@ -1,7 +1,6 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   cancelChatTurn,
-  cancelMainChatAgentTask,
   createChatSession,
   deactivateMarkdownMemoryFileProposal,
   deleteChatSession,
@@ -23,7 +22,6 @@ import {
   type ChatLifeModelInfluenceSnapshot,
   type ResourceDetachReceipt,
   type ResourceImportSelectionResult,
-  type MainChatAgentTaskState,
   type MainChatMessageOptions,
   type MainChatSelectedSkill,
   type MainChatSkillSummary,
@@ -69,7 +67,6 @@ export interface WorkspaceConversationDataSource {
     events: WorkspaceStreamEvents
   ): Promise<StreamMessageDonePayload>;
   cancelChatTurn?(conversationId: string, turnId: string): Promise<unknown>;
-  cancelTask(taskSessionId: string): Promise<MainChatAgentTaskState>;
   steerTask?(request: {
     steeringId: string;
     taskSessionId: string;
@@ -141,7 +138,6 @@ export const tauriWorkspaceConversationDataSource: WorkspaceConversationDataSour
   detachResource: detachResourceFromTurn,
   streamTurn,
   cancelChatTurn,
-  cancelTask: cancelMainChatAgentTask,
   steerTask: submitMainChatTaskSteering,
   listSkills: listMainChatSkills,
   selectSkill: selectMainChatSkill,

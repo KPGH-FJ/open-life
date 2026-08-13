@@ -10,6 +10,7 @@ pub mod a2a_sidecar;
 pub(crate) mod artifact_materializer;
 pub mod bootstrap;
 mod canonical_chat_runtime;
+mod canonical_work_runtime;
 pub mod commands;
 mod credential_bootstrap;
 pub(crate) mod danger_action_confirmation;
@@ -187,11 +188,6 @@ use life_state_projection::get_life_state_projection;
 use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
 use main_chat_memory_proposals::draft_edit_memory_proposal;
 use main_chat_steering::submit_main_chat_task_steering;
-use main_chat_task_controls::{
-    cancel_main_chat_agent_task, get_main_chat_agent_task_detail, get_main_chat_agent_task_state,
-    list_main_chat_agent_tasks, refresh_main_chat_agent_task_context, resume_main_chat_agent_task,
-    retry_main_chat_agent_action,
-};
 use markdown_memory::{
     deactivate_markdown_memory_file_proposal, draft_markdown_memory_file_proposal,
     get_markdown_memory_view_model,
@@ -394,12 +390,18 @@ pub struct SystemDiagnostics {
 }
 
 #[tauri::command]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "owner=canonical-chat-work-ipc; expires=R7; Tauri command keeps explicit wire fields while internal runtime uses typed inputs"
+)]
 async fn send_message(
     operation_id: String,
     session_id: String,
     messages: Vec<ChatMessage>,
     selected_skill_id: Option<String>,
     mode: Option<String>,
+    task_id: Option<String>,
+    run_id: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<SendMessageResult, String> {
     let selected_skill_id = selected_skill_id.as_deref().map(str::to_owned);
@@ -415,6 +417,19 @@ async fn send_message(
             .await
         }
         "work" => {
+            main_chat_send::send_canonical_work_with_state(
+                operation_id,
+                task_id.ok_or_else(|| "canonical_work_task_id_missing".to_string())?,
+                run_id.ok_or_else(|| "canonical_work_run_id_missing".to_string())?,
+                session_id,
+                messages,
+                selected_skill_id,
+                state.inner(),
+            )
+            .await
+        }
+        #[cfg(test)]
+        "legacy_test" => {
             main_chat_send::send_message_with_operation_state(
                 operation_id,
                 session_id,
@@ -437,6 +452,10 @@ struct StartStreamMessageArgs {
     selected_skill_id: Option<String>,
     #[serde(default)]
     mode: Option<String>,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    run_id: Option<String>,
 }
 
 impl std::fmt::Debug for StartStreamMessageArgs {
@@ -452,6 +471,8 @@ impl std::fmt::Debug for StartStreamMessageArgs {
                 &self.selected_skill_id.is_some(),
             )
             .field("mode", &self.mode)
+            .field("task_id_present", &self.task_id.is_some())
+            .field("run_id_present", &self.run_id.is_some())
             .finish()
     }
 }
@@ -468,6 +489,8 @@ async fn start_stream_message<R: tauri::Runtime>(
         messages,
         selected_skill_id,
         mode,
+        task_id,
+        run_id,
     } = args;
 
     let selected_skill_id = selected_skill_id.as_deref().map(str::to_owned);
@@ -488,6 +511,23 @@ async fn start_stream_message<R: tauri::Runtime>(
             .await
         }
         "work" => {
+            main_chat_streaming::start_canonical_work_stream_with_state(
+                canonical_work_runtime::CanonicalWorkInput {
+                    turn_id: operation_id,
+                    task_id: task_id.ok_or_else(|| "canonical_work_task_id_missing".to_string())?,
+                    run_id: run_id.ok_or_else(|| "canonical_work_run_id_missing".to_string())?,
+                    conversation_id: session_id,
+                    messages,
+                    selected_skill_id,
+                    stream: true,
+                },
+                state.inner(),
+                emit,
+            )
+            .await
+        }
+        #[cfg(test)]
+        "legacy_test" => {
             main_chat_streaming::start_stream_message_with_operation_state(
                 operation_id,
                 session_id,
@@ -509,6 +549,33 @@ async fn cancel_chat_turn(
     state: State<'_, Arc<AppState>>,
 ) -> Result<canonical_chat_runtime::CancelCanonicalChatResult, String> {
     canonical_chat_runtime::cancel_canonical_chat(&conversation_id, &turn_id, state.inner()).await
+}
+
+#[tauri::command]
+async fn cancel_work_task(
+    task_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<canonical_work_runtime::CanonicalWorkControlResult, String> {
+    canonical_work_runtime::cancel_canonical_work_task(&task_id, state.inner()).await
+}
+
+#[tauri::command]
+async fn retry_work_task(
+    task_id: String,
+    prior_run_id: String,
+    new_run_id: String,
+    new_turn_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<SendMessageResult, String> {
+    canonical_work_runtime::retry_canonical_work_task(
+        task_id,
+        prior_run_id,
+        new_run_id,
+        new_turn_id,
+        state.inner(),
+    )
+    .await
+    .map(|output| output.result)
 }
 
 #[tauri::command]
@@ -1026,19 +1093,14 @@ pub fn run() {
             send_message,
             start_stream_message,
             cancel_chat_turn,
+            cancel_work_task,
+            retry_work_task,
             pick_and_import_resources,
             cancel_resource_import,
             get_resource_import_status,
             detach_resource_from_turn,
             list_main_chat_agent_events,
             get_main_chat_agent_state_snapshot,
-            list_main_chat_agent_tasks,
-            get_main_chat_agent_task_detail,
-            refresh_main_chat_agent_task_context,
-            get_main_chat_agent_task_state,
-            resume_main_chat_agent_task,
-            cancel_main_chat_agent_task,
-            retry_main_chat_agent_action,
             submit_main_chat_task_steering,
             get_conversation_view_model,
             #[cfg(feature = "dev-extensions")]

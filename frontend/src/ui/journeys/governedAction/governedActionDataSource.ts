@@ -1,16 +1,14 @@
 import {
   acceptProposal,
   acceptProposalAndContinue,
-  cancelMainChatAgentTask,
+  cancelWorkTask,
   editLifeModelLearningProposal,
   getReviewCenterViewModel,
   getTasksViewModel,
   getWorkspaceViewModel,
   postponeProposal,
-  refreshMainChatAgentTaskContext,
   rejectProposal,
-  resumeMainChatAgentTask,
-  retryMainChatAgentAction,
+  retryWorkTask,
   type ReviewAction,
   type ReviewCenterViewModel,
   type TaskControl,
@@ -155,25 +153,19 @@ async function dispatchReviewAction(action: ReviewAction): Promise<void> {
   }
 }
 
-async function resumeTask(control: TaskControl): Promise<void> {
-  await resumeMainChatAgentTask(control.targetTaskId);
-}
-
 async function dispatchTaskControl(control: TaskControl): Promise<void> {
   switch (control.kind) {
     case "resume":
-      await resumeMainChatAgentTask(control.targetTaskId);
-      return;
+      throw new Error("canonical_task_resume_requires_retry_or_review_checkpoint");
     case "cancel":
-      await cancelMainChatAgentTask(control.targetTaskId);
+      await cancelWorkTask(control.targetTaskId);
       return;
     case "retry":
       if (!control.targetActionId) throw new Error("task_retry_target_action_missing");
-      await retryMainChatAgentAction(control.targetTaskId, control.targetActionId);
+      await retryWorkTask(control.targetTaskId, control.targetActionId);
       return;
     case "refresh_context":
-      await refreshMainChatAgentTaskContext(control.targetTaskId);
-      return;
+      throw new Error("canonical_task_refresh_context_unavailable");
     case "open_trace":
     case "open_run":
     case "open_review_item":
@@ -203,6 +195,8 @@ export const tauriGovernedActionDataSource: GovernedActionDataSource = {
       throw new Error("lifemodel_learning_edit_receipt_unverified");
     }
   },
-  resumeTask,
+  resumeTask: async control => {
+    throw new Error(`canonical_task_resume_unavailable:${control.targetTaskId}`);
+  },
   dispatchTaskControl,
 };

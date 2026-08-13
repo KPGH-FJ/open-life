@@ -18,43 +18,47 @@ React Workbench
   -> SQLite, local files, Keychain, providers, and governed external tools
 ```
 
-Chat send and stream have separate transport entrypoints and converge on the
-R1 `CanonicalChatRuntime`:
+Chat and Work have separate transport entrypoints and converge on canonical
+Conversation and Task owners:
 
 ```text
 frontend Conversation ViewModel + Chat composer
   -> main_chat_send.rs | main_chat_streaming.rs
-  -> canonical_chat_runtime.rs
+  -> canonical_chat_runtime.rs | canonical_work_runtime.rs
   -> main_chat_kernel.rs
   -> openlife-core/src/agent/main_chat_agent_v1.rs
   -> ConversationStore (Conversation -> Turn -> Item)
+  -> CanonicalTaskRuntimeStore (Task -> Run -> Item -> ItemAttempt -> FinalResult)
 ```
 
-The explicit compatibility `mode=work` branch still enters
-`OpenLifeTurnRuntime` while R2 migrates it. It is not a fallback from Chat and
-is not exposed as an available product mode in R1. The production Workbench
-reads Chat history, terminal state, exact provider/model binding, and Work
-availability through one backend `ConversationViewModel`; it no longer joins
-Tasks, Review, AgentRun, or durable Main Chat events to decide whether Chat is
-usable.
+`mode=chat` enters `CanonicalChatRuntime`. `mode=work` requires caller-owned
+Task, Run, Turn, and Conversation UUIDs and enters `CanonicalWorkRuntime`.
+Neither release branch can fall back to `OpenLifeTurnRuntime`. Historical
+capability fixtures use a `cfg(test)`-only route and provide no product credit.
+The Workbench reads conversation history from `ConversationViewModel` and Work
+lifecycle state from backend canonical Task snapshots.
 
 Other product commands, including Review acceptance, Settings persistence, and
 direct Memory controls, use their command-specific gateways rather than passing
 through `OpenLifeTurnRuntime`.
 
-Canonical Chat now owns exact UUID idempotency, atomic user/assistant Items,
+Canonical Chat owns exact UUID idempotency, atomic user/assistant Items,
 terminal transitions, cancellation, failed-provider state, restart
-interruption, and the immutable provider profile/model/configuration generation
-for each Turn. It never creates TaskSession, AgentRun, ActionQueue, durable Main
-Chat Event, Proposal, or Task. The retained Work runtime still splits its
-non-migrated lifecycle responsibility among those owners. The independent
-PlanExecute product owner, store, IPC, and frontend contracts are retired:
-ordinary planning currently writes an Instruction and Plan Item into
-`CanonicalTaskRuntimeStore`. These Work constraints are migration input for R2,
-not the target product contract.
+interruption, and immutable provider profile/model/configuration generation for
+each Turn. It never creates a Task. Canonical Work begins the Conversation Turn
+and Work Task before provider execution, records the provider Item and exact
+ItemAttempt, and completes with one FinalResult bound to the exact assistant
+Item. Cancellation, interruption, failure, retry, and replay terminalize the
+same Task/Run owner; retry creates a new Run and Turn for the same Task.
 
-The first S2 vertical slice adds `CanonicalTaskRuntimeStore` on the
-provider-generated report path. It owns stable report Task identity, Run
+One Conversation may retain multiple Tasks. Planning is a typed Item inside a
+Run, not a PlanExecute session or strategy-owned lifecycle. Release Work does
+not create or read TaskSession, AgentRun, ActionQueue, or durable Main Chat
+Event lifecycle state. Those stores remain only as capability-materialization
+migration consumers for R3/R4 and are not Task truth.
+
+The historical S2-S5 report implementation remains reusable capability and
+Artifact evidence. It owns stable report Task identity, Run
 membership, typed instruction/plan/tool/observation/provider-generation/
 artifact/review/materialization/verification/final-result Items, and independent
 ArtifactVersion metadata in `task_runtime.db`. A report Task and Run begin
@@ -68,7 +72,8 @@ ArtifactVersion has an exact expected/observed digest match and the store writes
 the completing Run's canonical FinalResult. This is current product code for
 that path, not a claim that every Main Chat route has migrated.
 
-S3 extends that same report Run rather than adding another execution owner.
+That retained implementation extends the same report Run rather than adding
+another execution owner.
 Policy can authorize the bounded production `document.read` capability for
 resources already imported and bound to the current message/task operation.
 The kernel executes `document.read` before `web.search`/`web.fetch` when both
@@ -87,7 +92,7 @@ digest. Restart replay reselects the exact task-bound ResourceStore content and
 must reproduce that digest before provider synthesis; it does not redispatch the
 ToolGateway read or persist a document-body preview.
 
-S4 extends the same report Run with typed Steering Items and a monotonic plan
+It also contains typed Steering Items and a monotonic plan
 revision. Workspace submits authenticated steering while work is active.
 Conversation remains the only body owner; `CanonicalTaskRuntimeStore` keeps the
 exact message reference and digests. One pending in-scope Steering Item is
@@ -104,16 +109,13 @@ task truth and resumes only when the existing control owner says the same task
 is resumable. Approval, effect confirmation, and continuation remain separate
 facts even though the product presents one action.
 
-The existing backend-owned `TasksViewModel` and `WorkspaceViewModel` now read a
-consistent canonical report snapshot and project its Run memberships, typed
-Items, Artifact versions, Review wait, rejection, verified delivery, and
-effect-unknown states. Exact Run membership overlays the migrated report onto
-its compatibility execution session instead of showing two tasks. Canonical
-report lifecycle wins when compatibility TaskSession state disagrees; the
-compatibility session remains only the current control target until that control
-path is migrated.
+The backend-owned `TasksViewModel` and `WorkspaceViewModel` now read canonical
+Task snapshots directly. They project Work and report Run membership, typed
+Items, attempts, FinalResult, Artifact versions, Review wait, rejection,
+verified delivery, and effect-unknown states. They do not overlay TaskSession
+or AgentRun state. Current Work controls use canonical cancel and retry IPCs.
 
-S5 adds backend-owned Result, Change, Preview, and Verification projections to
+The retained Artifact path adds backend-owned Result, Change, Preview, and Verification projections to
 each report ArtifactVersion. A pending preview is admitted only from the exact
 proposal whose Artifact id, version, target digest, content digest, and body
 digest all match. A materialized preview is reread only from a regular file
@@ -141,7 +143,7 @@ Conversation and Task are not aliases, and the target schema must allow a
 Conversation to retain multiple historical Tasks without allowing multiple
 unrelated active outcomes to blur the user experience.
 
-### R0 retained assets and migration consumers
+### Retained assets and migration consumers
 
 The reconstruction keeps proven provider adapters and receipts, ToolGateway
 contracts, production document/Web/Skill/MCP reads, ReviewWorkflow,
@@ -149,13 +151,16 @@ materializers, effect certainty, cancellation fences, outbox recovery, backend
 ViewModels, and the report Artifact/Changes/Preview/Verification implementation.
 Memory and LifeModel remain retained stores behind future narrow typed ports.
 
-The following are current Work migration consumers, not accepted target owners:
+The following remain capability migration consumers, not Work lifecycle owners:
 
 - `AgentTaskSessionStore`, `AgentRunStore`, `ActionQueueStore`, and
-  `MainChatAgentEventStore` still divide the compatibility Work lifecycle and
-  controls, but no longer own canonical Chat;
-- `CanonicalTaskRuntimeStore` still covers report/plan rather than all Tasks;
-- `PlanExecute` remains a selected execution strategy in runtime state; and
+  `MainChatAgentEventStore` are still used by pre-R3/R4 capability,
+  materialization, evaluation, or scheduling paths, but no longer own release
+  Chat or Work lifecycle;
+- retained report execution still needs migration into the general Work
+  coordinator in R3/R4;
+- PlanExecute session/store/IPC ownership is retired; remaining PlanExecute
+  names are drafting algorithms or test fixtures; and
 - Today, Tasks, and Review remain top-level frontend surfaces during migration.
 
 R1-R7 migrate these consumers vertically and delete each old writer, read
@@ -260,15 +265,12 @@ refreshed product read model where one exists.
 - Backend ViewModels are rebuildable projections and the only product-facing
   composition surface when a ViewModel exists.
 
-During the current production baseline, `AgentRunStore` remains the execution
-and receipt owner while `CanonicalTaskRuntimeStore` owns stable report Task,
-Run membership, typed execution-fact Item, and Artifact metadata. It
-deliberately does not copy AgentRun status, provider payloads, or TaskSession
-bodies. Compatibility owners are retired only after each migrated path has a
-replacement read model and recovery proof. The S2 report slice is reusable
-migration evidence, not the migration strategy: ADR 0018 requires ordinary Chat
-and every Work capability to migrate vertically and deletes legacy execution
-data rather than keeping a runtime fallback.
+For release Work, `CanonicalTaskRuntimeStore` is the Task, Run, Item,
+ItemAttempt, terminal-state, recovery, and FinalResult owner. Provider and tool
+adapters retain bounded receipts, but cannot declare Task completion. The
+historical report slice remains reusable migration evidence for R3/R4, not a
+fallback: each capability must move into the general coordinator before its
+legacy execution consumer is deleted.
 
 ## Personal intelligence boundary
 

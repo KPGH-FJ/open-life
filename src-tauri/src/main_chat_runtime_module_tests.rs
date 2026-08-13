@@ -278,6 +278,50 @@ fn standalone_plan_execute_owner_stays_retired() {
 }
 
 #[test]
+fn canonical_work_release_surface_has_no_legacy_task_control_or_runtime_fallback() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let lib = std::fs::read_to_string(root.join("src/lib.rs")).expect("read lib.rs");
+    for retired_command in [
+        "list_main_chat_agent_tasks,",
+        "get_main_chat_agent_task_detail,",
+        "refresh_main_chat_agent_task_context,",
+        "get_main_chat_agent_task_state,",
+        "resume_main_chat_agent_task,",
+        "cancel_main_chat_agent_task,",
+        "retry_main_chat_agent_action,",
+    ] {
+        assert!(
+            !lib.contains(retired_command),
+            "release handler must not expose retired TaskSession command {retired_command}"
+        );
+    }
+    let frontend = std::fs::read_to_string(root.join("../frontend/src/tauri.ts"))
+        .expect("read frontend Tauri bridge");
+    for retired_command in [
+        "list_main_chat_agent_tasks",
+        "get_main_chat_agent_task_detail",
+        "refresh_main_chat_agent_task_context",
+        "get_main_chat_agent_task_state",
+        "resume_main_chat_agent_task",
+        "cancel_main_chat_agent_task",
+        "retry_main_chat_agent_action",
+    ] {
+        assert!(
+            !frontend.contains(retired_command),
+            "frontend must not invoke retired TaskSession command {retired_command}"
+        );
+    }
+    for relative in ["src/main_chat_send.rs", "src/main_chat_streaming.rs"] {
+        let source = std::fs::read_to_string(root.join(relative)).expect("read Work entrypoint");
+        let canonical = source.split("canonical_work").skip(1).collect::<String>();
+        assert!(
+            !canonical.contains("OpenLifeTurnRuntime::new"),
+            "canonical Work entrypoint in {relative} must not invoke the compatibility runtime"
+        );
+    }
+}
+
+#[test]
 fn retired_plan_events_have_no_production_writer() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     let event_stream = root.join("src/main_chat_event_stream.rs");
@@ -1101,7 +1145,7 @@ fn main_chat_command_surface_send_eval_runner_uses_case_assertions() {
 }
 
 #[test]
-fn main_chat_send_command_has_non_tauri_state_executor() {
+fn main_chat_send_command_uses_canonical_runtime_executors() {
     let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
     let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
     let send_body = extract_rust_function_body(&source, "async fn send_message(");
@@ -1118,10 +1162,8 @@ fn main_chat_send_command_has_non_tauri_state_executor() {
         "Main Chat send state executor module file must exist outside lib.rs"
     );
     let module_source = std::fs::read_to_string(&module_path).expect("read main_chat_send.rs");
-    assert!(
-        module_source.contains("pub(crate) fn send_message_with_operation_state("),
-        "send module must expose the boxed Arc<AppState> executor that final gates can call without tauri::State or mock IPC"
-    );
+    assert!(module_source.contains("pub(crate) fn send_canonical_chat_with_state("));
+    assert!(module_source.contains("pub(crate) fn send_canonical_work_with_state("));
     assert!(
         module_source.contains("Pin<Box<dyn Future<Output = Result<SendMessageResult, String>>")
             && module_source.contains("Box::pin(async move"),
@@ -1131,16 +1173,12 @@ fn main_chat_send_command_has_non_tauri_state_executor() {
         !source.contains("\npub(crate) fn send_message_with_operation_state("),
         "send state executor should not remain concentrated in lib.rs"
     );
-    assert!(
-        compact_send_body.contains(
-            "main_chat_send::send_message_with_operation_state(operation_id,session_id,messages,selected_skill_id,state.inner(),).await"
-        ),
-        "the Tauri command wrapper must call the operation-aware reusable send executor"
-    );
+    assert!(compact_send_body.contains("main_chat_send::send_canonical_chat_with_state("));
+    assert!(compact_send_body.contains("main_chat_send::send_canonical_work_with_state("));
 }
 
 #[test]
-fn main_chat_stream_command_has_non_tauri_state_executor() {
+fn main_chat_stream_command_uses_canonical_runtime_executors() {
     let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
     let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
     let stream_body =
@@ -1157,10 +1195,8 @@ fn main_chat_stream_command_has_non_tauri_state_executor() {
         "Main Chat stream state executor module file must exist outside lib.rs"
     );
     let module_source = std::fs::read_to_string(&module_path).expect("read main_chat_streaming.rs");
-    assert!(
-        module_source.contains("pub(crate) fn start_stream_message_with_operation_state<'a>("),
-        "streaming module must expose the boxed Arc<AppState> executor that final gates can call without tauri::State or mock IPC"
-    );
+    assert!(module_source.contains("pub(crate) fn start_canonical_chat_stream_with_state<'a>("));
+    assert!(module_source.contains("pub(crate) fn start_canonical_work_stream_with_state<'a>("));
     assert!(
         module_source.contains(
             "Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>>"
@@ -1186,10 +1222,8 @@ fn main_chat_stream_command_has_non_tauri_state_executor() {
         !source.contains("\npub(crate) fn start_stream_message_with_operation_state"),
         "stream state executor should not remain concentrated in lib.rs"
     );
-    assert!(
-        stream_body.contains("main_chat_streaming::start_stream_message_with_operation_state("),
-        "the Tauri stream command wrapper must call the operation-aware reusable stream executor"
-    );
+    assert!(stream_body.contains("main_chat_streaming::start_canonical_chat_stream_with_state("));
+    assert!(stream_body.contains("main_chat_streaming::start_canonical_work_stream_with_state("));
 }
 
 #[test]

@@ -88,6 +88,18 @@ pub(crate) fn start_stream_message_with_operation_state<'a>(
     })
 }
 
+pub(crate) fn start_canonical_work_stream_with_state<'a>(
+    input: crate::canonical_work_runtime::CanonicalWorkInput,
+    state: &'a Arc<AppState>,
+    mut emit_stream_event: impl FnMut(&str, serde_json::Value) + Send + 'a,
+) -> Pin<Box<dyn Future<Output = Result<serde_json::Value, String>> + Send + 'a>> {
+    Box::pin(async move {
+        crate::canonical_work_runtime::run_canonical_work(input, state, &mut emit_stream_event)
+            .await
+            .map(|output| output.done_payload)
+    })
+}
+
 /// Explicit test-only compatibility for historical fixtures. Shipped IPC and
 /// new D050 tests must provide the stable logical-turn UUIDv4 themselves.
 #[cfg(test)]
