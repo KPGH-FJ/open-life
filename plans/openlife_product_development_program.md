@@ -507,7 +507,60 @@ evidence only; exact-native and external-live evidence remain R8.
 
 ## Current stage: R8 - golden evidence and clean release baseline
 
-R8 will run the final golden behavior matrix, measure performance and provider
-cost boundaries, verify profile migration and exact native identity, execute
-only the external-live checks required by the accepted product contract, and
-remove remaining replaced backend/IPC paths before the clean release baseline.
+### Outcome
+
+Close the reconstruction with one reviewable release baseline whose product
+behavior, migration, performance, native identity, and required live effects
+are independently evidenced. Delete replaced release surfaces instead of
+keeping a second diagnostic or compatibility product API.
+
+### In scope
+
+1. Remove frontend and release IPC access to replaced AgentRun, MainChatEvent,
+   legacy state/hot-cache, router-status, and SystemDiagnostics surfaces while
+   retaining only proven internal consumers until their owner migration lands.
+2. Ship one metadata-safe ProductDiagnostics ViewModel based on canonical
+   Conversation/Task stores, product persistence health, exact build identity,
+   typed credential bootstrap, and explicit blocker codes.
+3. Run the final Chat/Work behavior matrix: direct Chat, document/Web Work,
+   steering, approval, cancellation/retry, artifact/undo, restart recovery,
+   bounded concurrency, background completion, and independent
+   Memory/LifeModel influence.
+4. Measure startup/read-model latency, time-to-first-visible-output, task
+   terminalization, bounded context/tool budgets, and provider request counts.
+5. Verify a retained R0/R7 profile and a fresh profile against the current
+   schema without importing retired execution owners.
+6. Build the exact signed native bundle and run the native golden paths;
+   execute external-live provider/Web evidence only where controlled and
+   native-local evidence cannot prove the accepted contract.
+7. Run full absence guards and repository gates, then document the exact
+   evidence boundary and remaining non-product internal compatibility debt.
+
+### Acceptance
+
+- The shipped handler and frontend contain no replaced public IPC named above;
+  static guards fail if they return.
+- Product Diagnostics never derives health from AgentRun, old event streams,
+  logs, or frontend defaults; unavailable canonical counts remain unknown.
+- Every matrix row has a typed terminal result and evidence level. A process
+  launch, fixture, browser shell, or command return is not upgraded to native
+  or external-live proof.
+- Performance and provider-cost limits are executable checks with explicit
+  thresholds, not prose observations.
+- The exact signed bundle passes strict identity/resource-seal checks, fresh
+  start, restart, settings diagnostics, Chat, Work, Results, and needs-attention
+  paths on isolated data.
+- The branch ends clean, with no generated bundle, credential, private profile,
+  or unrelated user file in the commit.
+
+### Current progress
+
+- Replaced release IPC and frontend wrappers for AgentRun history/deletion,
+  provider transmission history, MainChat event/state replay, legacy state
+  history/alerts/daily goals/hot cache, standalone build/router diagnostics,
+  Ollama probes, and scheduler mutation have been removed with absence guards.
+- Settings now includes a real Product Diagnostics category backed by a narrow
+  canonical ViewModel; the old SystemDiagnostics implementation remains an
+  internal LifeStateProjection dependency only and is not a product API.
+- Exact-native, external-live, performance, migration, and final full-gate
+  evidence remain open and are not claimed by this progress record.

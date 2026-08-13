@@ -8,7 +8,7 @@ import type {
 import type { SettingsOrchestrationState } from "@/contracts/settingsOrchestrationContract";
 import type { FoundationStatus } from "@/ui/foundation";
 
-export type SettingsPrivacySurfaceId = "model-provider" | "privacy-network";
+export type SettingsPrivacySurfaceId = "model-provider" | "privacy-network" | "diagnostics";
 
 export const settingsBoundaryLabels = {
   routeType: {

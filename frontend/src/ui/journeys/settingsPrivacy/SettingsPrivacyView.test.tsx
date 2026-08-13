@@ -14,7 +14,7 @@ function SafeModeSettings({
   surface = "model-provider",
 }: {
   source: SettingsPrivacyDataSource;
-  surface?: "model-provider" | "privacy-network";
+  surface?: "model-provider" | "privacy-network" | "diagnostics";
 }) {
   const controller = useSettingsPrivacyJourney(source, vi.fn());
   useEffect(() => {
@@ -95,6 +95,63 @@ function credentialSettingsSource(
 }
 
 describe("SettingsPrivacyView", () => {
+  it("renders only canonical product diagnostics and reports blockers explicitly", async () => {
+    const source = credentialSettingsSource(null);
+    const snapshot = await source.loadSettingsPrivacy();
+    source.loadSettingsPrivacy = vi.fn().mockResolvedValue({
+      ...snapshot,
+      productDiagnostics: {
+        generatedAt: "2026-08-14T00:00:00Z",
+        status: "degraded",
+        appVersion: "0.1.0",
+        runtimeBuild: {
+          profile: "qa",
+          gitSha: "abc123",
+          buildTime: "2026-08-14T00:00:00Z",
+          currentExe: "/Applications/OpenLife.app/Contents/MacOS/openlife-tauri",
+          binaryKind: "release_bundle",
+          frontendMode: "bundled_dist",
+          devUrl: "",
+          frontendDist: "frontend/dist",
+          dataDir: "/tmp/openlife",
+          a2aPort: 0,
+          a2aStatus: "disabled_by_build",
+          devExtensionsEnabled: false,
+          authenticatedDevA2aEnabled: false,
+          unauthenticatedDevA2aEnabled: false,
+          arbitraryMcpRegistrationEnabled: false,
+          bundleIdentifier: "ai.openlife.desktop",
+          productName: "OpenLife",
+        },
+        persistenceMode: "read_only_degraded",
+        canonicalWritesAllowed: false,
+        providerDispatchAllowed: false,
+        toolDispatchAllowed: false,
+        stores: [
+          { store: "ConversationStore", status: "read_write_canonical" },
+          {
+            store: "CanonicalTaskRuntimeStore",
+            status: "read_only_canonical",
+            reasonCode: "runtime_io_failure",
+          },
+        ],
+        counts: { projectCount: 1, conversationCount: 2, taskCount: 3, activeTaskCount: 1 },
+        credentialBootstrap: { version: "v1", digest: "digest", purposes: [] },
+        blockerCodes: ["store:CanonicalTaskRuntimeStore:runtime_io_failure"],
+      },
+    });
+
+    render(<SafeModeSettings source={source} surface="diagnostics" />);
+
+    expect(await screen.findByRole("heading", { name: "产品诊断" })).toBeInTheDocument();
+    expect(screen.getByText("部分能力降级")).toBeInTheDocument();
+    expect(screen.getByText("ai.openlife.desktop")).toBeInTheDocument();
+    expect(
+      screen.getByText("store:CanonicalTaskRuntimeStore:runtime_io_failure")
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/AgentRun/)).not.toBeInTheDocument();
+  });
+
   it("shows explicit Search Provider controls and fail-closed artifact output state", async () => {
     const source = credentialSettingsSource(null);
     source.loadSettingsPrivacy = vi.fn().mockResolvedValue({

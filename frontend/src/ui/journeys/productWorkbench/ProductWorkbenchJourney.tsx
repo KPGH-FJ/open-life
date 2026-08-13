@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Bot, ListTodo, Monitor, Network, ShieldCheck, UserRound } from "lucide-react";
+import { Activity, Bot, ListTodo, Monitor, Network, ShieldCheck, UserRound } from "lucide-react";
 import type {
   EvidenceRef,
   ProviderPrivacyBoundarySummary,
@@ -98,6 +98,13 @@ const settingsNavigation: readonly WorkbenchNavigationItem[] = [
     searchTerms: ["外部传输", "网络策略", "本地限定", "风险"],
     icon: Network,
   },
+  {
+    id: "diagnostics",
+    label: "产品诊断",
+    meta: "构建、存储与任务健康",
+    searchTerms: ["版本", "构建", "存储", "canonical", "诊断", "任务统计"],
+    icon: Activity,
+  },
 ];
 
 const unavailableCopy: Record<PublicProductSurfaceId, { title: string; reason: string }> = {
@@ -120,10 +127,15 @@ const settingsCopy: Record<string, { title: string; reason: string }> = {
     title: "隐私与网络暂不可用",
     reason: "需要后端提供当前传输边界；未知状态不会显示为本地或私密。",
   },
+  diagnostics: {
+    title: "产品诊断暂不可用",
+    reason:
+      "需要后端提供 canonical 产品诊断；页面不会从旧 AgentRun、日志或兼容 store 推断健康状态。",
+  },
 };
 
 function isSettingsPrivacySurface(id: string): id is SettingsPrivacySurfaceId {
-  return id === "model-provider" || id === "privacy-network";
+  return id === "model-provider" || id === "privacy-network" || id === "diagnostics";
 }
 
 function loadingBoundaryEnvelope(): ViewModelEnvelope<ProviderPrivacyBoundarySummary> {

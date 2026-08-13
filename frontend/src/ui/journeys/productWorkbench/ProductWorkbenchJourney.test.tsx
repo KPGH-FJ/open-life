@@ -66,9 +66,10 @@ describe("OpenLife product shell", () => {
     );
 
     await user.click(await screen.findByRole("button", { name: "设置" }));
-    expect(screen.getByText("共 2 个设置分类")).toBeInTheDocument();
+    expect(screen.getByText("共 3 个设置分类")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^模型与供应商/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: /^隐私与网络/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^产品诊断/ })).toBeInTheDocument();
     expect(screen.queryByText("通知")).not.toBeInTheDocument();
     expect(screen.queryByText("账户")).not.toBeInTheDocument();
   });

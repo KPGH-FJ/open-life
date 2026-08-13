@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { LifeModel, ChatMessage, StateHistoryEntry, StateAlert } from "./types";
+import type { LifeModel, ChatMessage } from "./types";
 
 function isTauriEnv(): boolean {
   return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
@@ -1462,29 +1462,6 @@ export async function submitMainChatTaskSteering(request: {
   return safeInvoke<SubmitMainChatSteeringResponse>("submit_main_chat_task_steering", request);
 }
 
-export async function listMainChatAgentEvents(
-  taskSessionId: string,
-  afterSequence: number = 0,
-  limit: number = 100
-): Promise<MainChatAgentDurableEvent[]> {
-  return safeInvoke<MainChatAgentDurableEvent[]>("list_main_chat_agent_events", {
-    taskSessionId,
-    task_session_id: taskSessionId,
-    afterSequence,
-    after_sequence: afterSequence,
-    limit,
-  });
-}
-
-export async function getMainChatAgentStateSnapshot(
-  taskSessionId: string
-): Promise<MainChatAgentStateSnapshot> {
-  return safeInvoke<MainChatAgentStateSnapshot>("get_main_chat_agent_state_snapshot", {
-    taskSessionId,
-    task_session_id: taskSessionId,
-  });
-}
-
 export async function startStreamMessage(
   sessionId: string,
   messages: ChatMessage[],
@@ -1551,42 +1528,6 @@ export async function detachResourceFromTurn(
 
 // Note: Hermes dispatch command has been removed. Use AgentRuntime instead.
 
-export async function checkOllamaStatus(): Promise<boolean> {
-  return safeInvoke<boolean>("check_ollama_status");
-}
-
-export interface PolicyRouterStatus {
-  activeAuthority: string;
-  authorityChain: string[];
-  routeOutputs: string[];
-  appStateOldRoutersPresent: boolean;
-  diagnosticsSurface: string;
-}
-
-export async function getPolicyRouterStatus(): Promise<PolicyRouterStatus> {
-  return safeInvoke<PolicyRouterStatus>("get_policy_router_status");
-}
-
-export async function getModelRouterStatus(): Promise<ModelRouterStatus> {
-  return safeInvoke<ModelRouterStatus>("get_model_router_status");
-}
-
-export interface DataFileStatus {
-  messages_db_exists: boolean;
-  messages_db_size_mb: number;
-  vectors_db_exists: boolean;
-  vectors_db_size_mb: number;
-  mcp_audit_db_exists: boolean;
-  mcp_audit_db_size_mb: number;
-  config_yaml_exists: boolean;
-  life_model_yaml_exists: boolean;
-}
-
-export interface OllamaModelInfo {
-  name: string;
-  size_mb: number;
-}
-
 export interface RuntimeBuildInfo {
   profile: "dev" | "qa" | "release" | string;
   gitSha: string;
@@ -1605,6 +1546,42 @@ export interface RuntimeBuildInfo {
   arbitraryMcpRegistrationEnabled: boolean;
   bundleIdentifier: string;
   productName: string;
+}
+
+export interface ProductStoreDiagnostic {
+  store: string;
+  status: string;
+  reasonCode?: string | null;
+}
+
+export interface ProductContentCounts {
+  projectCount?: number | null;
+  conversationCount?: number | null;
+  taskCount?: number | null;
+  activeTaskCount?: number | null;
+  waitingTaskCount?: number | null;
+  completedTaskCount?: number | null;
+  failedTaskCount?: number | null;
+  unresolvedAttentionCount?: number | null;
+}
+
+export interface ProductDiagnosticsViewModel {
+  generatedAt: string;
+  status: "ready" | "degraded" | "blocked" | string;
+  appVersion: string;
+  runtimeBuild: RuntimeBuildInfo;
+  persistenceMode: string;
+  canonicalWritesAllowed: boolean;
+  providerDispatchAllowed: boolean;
+  toolDispatchAllowed: boolean;
+  stores: ProductStoreDiagnostic[];
+  counts: ProductContentCounts;
+  credentialBootstrap: CredentialBootstrapSnapshot;
+  blockerCodes: string[];
+}
+
+export async function getProductDiagnosticsViewModel(): Promise<ProductDiagnosticsViewModel> {
+  return safeInvoke<ProductDiagnosticsViewModel>("get_product_diagnostics_view_model");
 }
 
 export interface RouteIdentity {
@@ -1769,58 +1746,6 @@ export interface PersistenceHealthSnapshot {
     errorDigest?: string | null;
   }>;
   globalReasonCodes: string[];
-}
-
-export interface SystemDiagnostics {
-  persistence_health?: PersistenceHealthSnapshot;
-  policy_router: PolicyRouterStatus;
-  mcp_server_count: number;
-  mcp_tool_count: number;
-  mcp_recent_audit_count: number;
-  mcp_recent_pii_count: number;
-  memory_chunk_count: number;
-  vector_corrupt_embedding_count?: number;
-  vector_unknown_profile_count?: number;
-  vector_profile_dimension_mismatch_count?: number;
-  ollama_service_online?: boolean;
-  ollama_online: boolean;
-  local_model: string;
-  resolved_local_model?: string | null;
-  prefer_local_model: boolean;
-  cloud_api_configured: boolean;
-  cloud_provider?: string;
-  cloud_api_validated?: boolean;
-  cloud_api_last_error?: string | null;
-  cloud_api_validation_status?: CloudApiValidationStatus;
-  cloud_api_validated_at?: string | null;
-  cloud_api_failed_at?: string | null;
-  cloud_api_validation_source?: string | null;
-  chat_ready: boolean;
-  readiness_issues: string[];
-  data_dir: string;
-  active_data_dir?: string;
-  database_status?: string;
-  startup_warnings?: string[];
-  life_model_ready: boolean;
-  app_version: string;
-  model_empty: boolean;
-  chat_session_count: number;
-  usage_ready?: boolean;
-  usage_readiness_issues?: string[];
-  data_files: DataFileStatus;
-  ollama_models: OllamaModelInfo[];
-  config_source: string;
-  agent_run_count: number;
-  agent_run_store_status: string;
-  pending_proposal_count: number;
-  high_risk_pending_proposal_count: number;
-  proposal_store_status: string;
-  runtime_build_info?: RuntimeBuildInfo;
-  runtime_route_evidence?: RuntimeRouteEvidence | null;
-}
-
-export async function getSystemDiagnostics(): Promise<SystemDiagnostics> {
-  return safeInvoke<SystemDiagnostics>("get_system_diagnostics");
 }
 
 export interface LifePendingProjection {
@@ -3002,19 +2927,6 @@ export type MemoryViewModel = {
   contractLimitations: string[];
 };
 
-export async function getRuntimeBuildInfo(): Promise<RuntimeBuildInfo> {
-  return safeInvoke<RuntimeBuildInfo>("get_runtime_build_info");
-}
-
-export async function setSchedulerConfig(localModel: string, preferLocal: boolean): Promise<void> {
-  return safeInvoke("set_scheduler_config", {
-    localModel,
-    local_model: localModel,
-    preferLocal,
-    prefer_local: preferLocal,
-  });
-}
-
 export async function executeToolCall(
   name: string,
   arguments_: Record<string, any>
@@ -3733,35 +3645,6 @@ export async function deleteChatSession(sessionId: string): Promise<void> {
   return safeInvoke("delete_chat_session", sessionArgs(sessionId));
 }
 
-export async function getStateHistory(
-  dimensionName: string,
-  limit: number
-): Promise<StateHistoryEntry[]> {
-  return safeInvoke<StateHistoryEntry[]>("get_state_history", {
-    dimensionName,
-    dimension_name: dimensionName,
-    limit,
-  });
-}
-
-export async function getStateAlerts(): Promise<StateAlert[]> {
-  return safeInvoke<StateAlert[]>("get_state_alerts");
-}
-
-// ── Milestone D: Hot Memory Cache ──
-export interface HotMemoryCache {
-  identity_summary: string;
-  top_values: string[];
-  current_goals: string[];
-  recent_state: string;
-  last_refreshed: string;
-  life_model_version: string;
-}
-
-export async function getHotCache(): Promise<HotMemoryCache> {
-  return safeInvoke<HotMemoryCache>("get_hot_cache");
-}
-
 // ── Canonical Memory retrieval / access-tier telemetry ──
 export interface CanonicalMemoryOwner {
   ownerKind: string;
@@ -3958,13 +3841,6 @@ export interface ProviderStatus {
   lastChecked?: string;
 }
 
-export interface ModelRouterStatus {
-  enabled: boolean;
-  providers: ProviderStatus[];
-  lastCheckAt?: string;
-  message?: string;
-}
-
 export interface ProductAgentAction {
   id: string;
   actionType: string;
@@ -4087,84 +3963,6 @@ export interface ProductAgentRun {
   deleteReason?: string;
   startedAt: string;
   finishedAt?: string;
-}
-
-/**
- * Frontend-only compatibility view. Product AgentRun IPC commands return the
- * exact ProductAgentRun contract; the adapter below does not synthesize any
- * removed body, trace, route, or tool fields.
- */
-export interface AgentRunView extends Omit<
-  ProductAgentRun,
-  "contextSummary" | "modelRoute" | "actions" | "observations"
-> {
-  userInput?: string;
-  inputRef?: string;
-  inputDigest?: string;
-  contextSummary?: ContextSummary;
-  modelRoute?: ModelRouteTrace;
-  actions: AgentAction[];
-  observations: AgentObservation[];
-  reasoningTrace?: ReasoningTrace;
-  reasoningTraceDigest?: string;
-}
-
-/** @deprecated Prefer ProductAgentRun at IPC boundaries or AgentRunView in UI code. */
-export type AgentRun = AgentRunView;
-
-export function productAgentRunToView(run: ProductAgentRun): AgentRunView {
-  return run;
-}
-
-export async function getAgentRun(runId: string): Promise<AgentRunView | null> {
-  const run = await safeInvoke<ProductAgentRun | null>("get_agent_run", { runId });
-  return run ? productAgentRunToView(run) : null;
-}
-
-export async function listAgentRuns(
-  limit: number = 50,
-  offset: number = 0
-): Promise<AgentRunView[]> {
-  const runs = await safeInvoke<ProductAgentRun[]>("list_agent_runs", { limit, offset });
-  return runs.map(productAgentRunToView);
-}
-
-export async function listProviderTransmissionHistory(
-  limit: number = 20
-): Promise<ProviderTransmissionHistoryItem[]> {
-  return safeInvoke<ProviderTransmissionHistoryItem[]>("list_provider_transmission_history", {
-    limit,
-  });
-}
-
-export async function listRuns(limit: number = 50, offset: number = 0): Promise<AgentRunView[]> {
-  return listAgentRuns(limit, offset);
-}
-
-export async function listAgentRunsForSession(
-  sessionId: string,
-  limit: number = 50
-): Promise<AgentRunView[]> {
-  const runs = await safeInvoke<ProductAgentRun[]>("list_agent_runs_for_session", {
-    sessionId,
-    limit,
-  });
-  return runs.map(productAgentRunToView);
-}
-
-export async function deleteAgentRun(
-  runId: string,
-  reason?: string,
-  confirmationEvidence?: DangerActionConfirmationEvidence
-): Promise<void> {
-  return safeInvoke("delete_agent_run", {
-    runId,
-    run_id: runId,
-    reason,
-    ...(confirmationEvidence
-      ? { confirmationEvidence, confirmation_evidence: confirmationEvidence }
-      : {}),
-  });
 }
 
 export type ToolPermissionPolicy =

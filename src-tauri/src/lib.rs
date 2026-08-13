@@ -128,10 +128,8 @@ use commands::a2a::{
     a2a_bridge_local, a2a_discover_agent, a2a_handle_task, a2a_local_agent_card,
     a2a_restart_sidecar, a2a_send_task, a2a_stop_sidecar,
 };
-use commands::agent::{
-    delete_agent_run, get_agent_run, list_agent_runs, list_agent_runs_for_session,
-    list_provider_transmission_history,
-};
+#[cfg(test)]
+use commands::agent::get_agent_run;
 use commands::agent_runtime::{
     clear_main_chat_skill, get_main_chat_skill_detail, list_main_chat_skills,
     list_main_chat_tool_candidates, select_main_chat_skill,
@@ -140,10 +138,6 @@ use commands::agent_runtime::{
 use commands::chat::{
     assign_conversation_project, create_chat_session, create_project, delete_chat_session,
     get_conversation_view_model, rename_chat_session,
-};
-use commands::diagnostics::{
-    check_ollama_status, get_policy_router_status, get_runtime_build_info, get_system_diagnostics,
-    set_scheduler_config,
 };
 #[cfg(feature = "dev-extensions")]
 use commands::execution::{disable_plugin, enable_plugin, list_plugins, reload_plugins};
@@ -168,7 +162,7 @@ use commands::mcp::{
 use commands::memory::{
     archive_low_access_memories, count_memory_chunks, create_knowledge_note,
     draft_memory_archive_proposal, draft_memory_correction_proposal,
-    draft_memory_stop_recall_proposal, get_hot_cache, get_memory_tier_stats, list_archived_chunks,
+    draft_memory_stop_recall_proposal, get_memory_tier_stats, list_archived_chunks,
     privacy_erase_memory_asset, rebuild_memory_index, restore_archived_chunks,
     run_memory_tier_maintenance, search_memory,
 };
@@ -177,7 +171,6 @@ use commands::proposal::{
     get_pending_proposals, list_memory_assets, list_proposals, postpone_proposal, reject_proposal,
     request_artifact_undo, rollback_memory_asset,
 };
-use commands::router::get_model_router_status;
 use commands::settings::{
     abandon_governed_data_import_recovery, export_all_data, get_config,
     get_danger_action_preflight, get_governed_data_import_status, get_last_model_error,
@@ -186,15 +179,14 @@ use commands::settings::{
 };
 #[cfg(feature = "dev-extensions")]
 use commands::settings::{cleanup_mcp_audit_logs, export_mcp_audit_logs, rotate_mcp_audit_key};
-use commands::state::{get_daily_goals, get_state_alerts, get_state_history};
 use life_state_projection::get_life_state_projection;
-use main_chat_event_stream::{get_main_chat_agent_state_snapshot, list_main_chat_agent_events};
 use main_chat_memory_proposals::draft_edit_memory_proposal;
 use main_chat_steering::submit_main_chat_task_steering;
 use markdown_memory::{
     deactivate_markdown_memory_file_proposal, draft_markdown_memory_file_proposal,
     get_markdown_memory_view_model,
 };
+use read_models::diagnostics::get_product_diagnostics_view_model;
 use read_models::life_model::get_life_model_view_model;
 use read_models::memory::get_memory_view_model;
 use read_models::provider_privacy::get_provider_privacy_boundary_summary;
@@ -1061,16 +1053,12 @@ pub fn run() {
             get_provider_privacy_boundary_summary,
             get_tasks_view_model,
             get_workspace_view_model,
+            get_product_diagnostics_view_model,
             get_config,
             save_config,
             select_artifact_output_directory,
             select_markdown_memory_root,
             recover_required_credential_access,
-            get_agent_run,
-            list_agent_runs,
-            list_provider_transmission_history,
-            list_agent_runs_for_session,
-            delete_agent_run,
             list_main_chat_skills,
             get_main_chat_skill_detail,
             select_main_chat_skill,
@@ -1102,8 +1090,6 @@ pub fn run() {
             cancel_resource_import,
             get_resource_import_status,
             detach_resource_from_turn,
-            list_main_chat_agent_events,
-            get_main_chat_agent_state_snapshot,
             submit_main_chat_task_steering,
             get_conversation_view_model,
             #[cfg(feature = "dev-extensions")]
@@ -1125,12 +1111,6 @@ pub fn run() {
             list_mcp_audit_logs,
             #[cfg(feature = "dev-extensions")]
             clear_mcp_audit_logs,
-            get_system_diagnostics,
-            get_runtime_build_info,
-            check_ollama_status,
-            get_policy_router_status,
-            get_model_router_status,
-            set_scheduler_config,
             run_memory_tier_maintenance,
             count_memory_chunks,
             create_knowledge_note,
@@ -1161,10 +1141,6 @@ pub fn run() {
             assign_conversation_project,
             rename_chat_session,
             delete_chat_session,
-            get_state_history,
-            get_state_alerts,
-            get_daily_goals,
-            get_hot_cache,
             archive_low_access_memories,
             restore_archived_chunks,
             list_archived_chunks,

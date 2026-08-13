@@ -53,6 +53,10 @@ export function SettingsPrivacyView({
     );
   }
 
+  if (surface === "diagnostics") {
+    return <ProductDiagnosticsPanel controller={controller} />;
+  }
+
   if (!draft) {
     const safeModeActive = controller.snapshot?.safeMode?.active === true;
     return (
@@ -520,6 +524,180 @@ export function SettingsPrivacyView({
           </div>
         </dl>
       </FoundationDialog>
+    </div>
+  );
+}
+
+function displayCount(value: number | null | undefined): string {
+  return value == null ? "未知" : String(value);
+}
+
+function ProductDiagnosticsPanel({ controller }: { controller: SettingsPrivacyJourneyController }) {
+  const diagnostics = controller.snapshot?.productDiagnostics ?? null;
+  if (!diagnostics) {
+    return (
+      <div
+        className="ol-settings-page ol-settings-page--centered"
+        data-settings-surface="diagnostics"
+      >
+        <FoundationNotice title="产品诊断不可用" tone="error">
+          <p>后端没有返回 canonical 产品诊断；页面不会从旧 AgentRun 或日志统计推断健康状态。</p>
+        </FoundationNotice>
+        <FoundationActionButton
+          label="重新读取"
+          icon={<RefreshCw size={18} strokeWidth={1.75} aria-hidden="true" />}
+          loading={controller.loading}
+          loadingLabel="正在读取"
+          onClick={() => void controller.load(true)}
+        />
+      </div>
+    );
+  }
+  const statusLabel =
+    diagnostics.status === "ready"
+      ? "产品链路正常"
+      : diagnostics.status === "degraded"
+        ? "部分能力降级"
+        : "产品链路受阻";
+  const statusTone =
+    diagnostics.status === "ready"
+      ? "neutral"
+      : diagnostics.status === "degraded"
+        ? "waiting"
+        : "error";
+  return (
+    <div className="ol-settings-page" data-settings-surface="diagnostics">
+      <section className="ol-settings-boundary" aria-labelledby="ol-product-diagnostics-title">
+        <div className="ol-settings-section-heading">
+          <span>Canonical 后端事实</span>
+          <h2 id="ol-product-diagnostics-title">产品诊断</h2>
+        </div>
+        <div className="ol-settings-boundary__summary">
+          <FoundationStatusLabel label={statusLabel} status={statusTone} />
+          <p>生成于 {diagnostics.generatedAt}；不包含凭据、消息正文或旧运行轨迹。</p>
+        </div>
+      </section>
+
+      <section className="ol-settings-section" aria-labelledby="ol-diagnostics-runtime-title">
+        <div className="ol-settings-section-heading">
+          <span>当前精确构建</span>
+          <h2 id="ol-diagnostics-runtime-title">运行环境</h2>
+        </div>
+        <dl className="ol-settings-fact-list">
+          <div>
+            <dt>版本</dt>
+            <dd>{diagnostics.appVersion}</dd>
+          </div>
+          <div>
+            <dt>构建</dt>
+            <dd>{diagnostics.runtimeBuild.gitSha}</dd>
+          </div>
+          <div>
+            <dt>二进制</dt>
+            <dd>{diagnostics.runtimeBuild.binaryKind}</dd>
+          </div>
+          <div>
+            <dt>Bundle ID</dt>
+            <dd>{diagnostics.runtimeBuild.bundleIdentifier}</dd>
+          </div>
+          <div>
+            <dt>持久化</dt>
+            <dd>{diagnostics.persistenceMode}</dd>
+          </div>
+          <div>
+            <dt>Canonical 写入</dt>
+            <dd>{diagnostics.canonicalWritesAllowed ? "允许" : "关闭"}</dd>
+          </div>
+          <div>
+            <dt>模型派发</dt>
+            <dd>{diagnostics.providerDispatchAllowed ? "允许" : "关闭"}</dd>
+          </div>
+          <div>
+            <dt>工具派发</dt>
+            <dd>{diagnostics.toolDispatchAllowed ? "允许" : "关闭"}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="ol-settings-section" aria-labelledby="ol-diagnostics-content-title">
+        <div className="ol-settings-section-heading">
+          <span>只统计 canonical 产品对象</span>
+          <h2 id="ol-diagnostics-content-title">内容与工作</h2>
+        </div>
+        <dl className="ol-settings-fact-list">
+          <div>
+            <dt>Projects</dt>
+            <dd>{displayCount(diagnostics.counts.projectCount)}</dd>
+          </div>
+          <div>
+            <dt>Conversations</dt>
+            <dd>{displayCount(diagnostics.counts.conversationCount)}</dd>
+          </div>
+          <div>
+            <dt>Tasks</dt>
+            <dd>{displayCount(diagnostics.counts.taskCount)}</dd>
+          </div>
+          <div>
+            <dt>执行中</dt>
+            <dd>{displayCount(diagnostics.counts.activeTaskCount)}</dd>
+          </div>
+          <div>
+            <dt>需处理</dt>
+            <dd>{displayCount(diagnostics.counts.waitingTaskCount)}</dd>
+          </div>
+          <div>
+            <dt>已完成</dt>
+            <dd>{displayCount(diagnostics.counts.completedTaskCount)}</dd>
+          </div>
+          <div>
+            <dt>失败或取消</dt>
+            <dd>{displayCount(diagnostics.counts.failedTaskCount)}</dd>
+          </div>
+          <div>
+            <dt>未解决提醒</dt>
+            <dd>{displayCount(diagnostics.counts.unresolvedAttentionCount)}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="ol-settings-section" aria-labelledby="ol-diagnostics-store-title">
+        <div className="ol-settings-section-heading">
+          <span>单一 owner 健康状态</span>
+          <h2 id="ol-diagnostics-store-title">产品存储</h2>
+        </div>
+        <dl className="ol-settings-fact-list">
+          {diagnostics.stores.map(store => (
+            <div key={store.store}>
+              <dt>{store.store}</dt>
+              <dd>
+                {store.status}
+                {store.reasonCode ? ` · ${store.reasonCode}` : ""}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      {diagnostics.blockerCodes.length > 0 && (
+        <FoundationNotice
+          title="当前阻断代码"
+          tone={diagnostics.status === "blocked" ? "error" : undefined}
+        >
+          <ul className="ol-settings-diagnostic-list">
+            {diagnostics.blockerCodes.map(code => (
+              <li key={code}>{code}</li>
+            ))}
+          </ul>
+        </FoundationNotice>
+      )}
+
+      <FoundationActionButton
+        label="重新读取诊断"
+        icon={<RefreshCw size={18} strokeWidth={1.75} aria-hidden="true" />}
+        loading={controller.loading}
+        loadingLabel="正在读取"
+        onClick={() => void controller.load(true)}
+      />
     </div>
   );
 }

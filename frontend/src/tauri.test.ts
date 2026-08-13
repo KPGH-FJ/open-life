@@ -4,9 +4,6 @@ import {
   acceptProposal,
   draftEditMemoryProposal,
   editProposal,
-  getStateHistory,
-  listMainChatAgentEvents,
-  getMainChatAgentStateSnapshot,
   restoreArchivedMemory,
   startStreamMessage,
   importAllData,
@@ -303,17 +300,7 @@ describe("tauri command argument aliases", () => {
   });
 
   it("adds camelCase aliases for snake_case command arguments", async () => {
-    await getStateHistory("专注度", 7);
     await restoreArchivedMemory({ ownerKind: "knowledge_note", ownerId: "note-1" });
-
-    expect(invoke).toHaveBeenCalledWith(
-      "get_state_history",
-      expect.objectContaining({
-        dimensionName: "专注度",
-        dimension_name: "专注度",
-        limit: 7,
-      })
-    );
     expect(invoke).toHaveBeenCalledWith(
       "restore_archived_chunks",
       expect.objectContaining({
@@ -417,33 +404,6 @@ describe("tauri command argument aliases", () => {
           selectedSkillId: "summarize",
           selected_skill_id: "summarize",
         }),
-      })
-    );
-  });
-
-  it("adds aliases for durable Main Chat event replay commands", async () => {
-    vi.mocked(invoke)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce({ task: { taskId: "mainchat-task-1" } });
-
-    await listMainChatAgentEvents("mainchat-task-1", 7, 50);
-    await getMainChatAgentStateSnapshot("mainchat-task-1");
-
-    expect(invoke).toHaveBeenCalledWith(
-      "list_main_chat_agent_events",
-      expect.objectContaining({
-        taskSessionId: "mainchat-task-1",
-        task_session_id: "mainchat-task-1",
-        afterSequence: 7,
-        after_sequence: 7,
-        limit: 50,
-      })
-    );
-    expect(invoke).toHaveBeenCalledWith(
-      "get_main_chat_agent_state_snapshot",
-      expect.objectContaining({
-        taskSessionId: "mainchat-task-1",
-        task_session_id: "mainchat-task-1",
       })
     );
   });

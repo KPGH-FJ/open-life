@@ -2899,6 +2899,55 @@ export const mockInvoke = vi.fn(<T>(cmd: string, args?: Record<string, any>): Pr
         ],
         config_source: "env+default",
       } as T);
+    case "get_product_diagnostics_view_model":
+      return Promise.resolve({
+        generatedAt: new Date().toISOString(),
+        status: "ready",
+        appVersion: "0.1.0",
+        runtimeBuild: {
+          profile: "qa",
+          gitSha: "mock-build",
+          buildTime: "2026-08-14T00:00:00Z",
+          currentExe: "/Applications/OpenLife.app/Contents/MacOS/openlife-tauri",
+          binaryKind: "release_bundle",
+          frontendMode: "bundled_dist",
+          devUrl: "",
+          frontendDist: "frontend/dist",
+          dataDir: "/tmp/openlife-mock",
+          a2aPort: 0,
+          a2aStatus: "disabled_by_build",
+          devExtensionsEnabled: false,
+          authenticatedDevA2aEnabled: false,
+          unauthenticatedDevA2aEnabled: false,
+          arbitraryMcpRegistrationEnabled: false,
+          bundleIdentifier: "ai.openlife.desktop",
+          productName: "OpenLife",
+        },
+        persistenceMode: "read_write",
+        canonicalWritesAllowed: true,
+        providerDispatchAllowed: true,
+        toolDispatchAllowed: true,
+        stores: [
+          { store: "ConversationStore", status: "read_write_canonical", reasonCode: null },
+          {
+            store: "CanonicalTaskRuntimeStore",
+            status: "read_write_canonical",
+            reasonCode: null,
+          },
+        ],
+        counts: {
+          projectCount: 1,
+          conversationCount: 1,
+          taskCount: 0,
+          activeTaskCount: 0,
+          waitingTaskCount: 0,
+          completedTaskCount: 0,
+          failedTaskCount: 0,
+          unresolvedAttentionCount: 0,
+        },
+        credentialBootstrap: { version: "v1", digest: "mock", purposes: [] },
+        blockerCodes: [],
+      } as T);
     case "get_life_state_projection":
       return Promise.resolve({
         version: "life_state_projection_v1",
