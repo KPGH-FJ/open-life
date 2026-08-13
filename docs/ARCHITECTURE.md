@@ -34,10 +34,13 @@ through `OpenLifeTurnRuntime`.
 
 The current runtime already owns admission, durable user-message recording,
 bounded context, provider execution, cancellation, recovery, and terminal
-settlement. Its current persistence still splits lifecycle responsibility among
-task sessions, Agent runs, action queues, event streams, and a separate
-PlanExecute session. A current Main Chat operation is also effectively one task
-slice. These are migration constraints, not the target product contract.
+settlement. Its current persistence still splits some non-migrated lifecycle
+responsibility among task sessions, Agent runs, action queues, and event
+streams. The independent PlanExecute product owner, store, IPC, and frontend
+contracts are retired: ordinary planning now writes an Instruction and Plan
+Item into `CanonicalTaskRuntimeStore`. A current Main Chat operation is still
+effectively one task slice outside complete migrated paths. These are migration
+constraints, not the target product contract.
 
 The first S2 vertical slice adds `CanonicalTaskRuntimeStore` on the
 provider-generated report path. It owns stable report Task identity, Run
@@ -52,8 +55,7 @@ Proposal; Review is a checkpoint relation, and confirmed materialization updates
 the same ArtifactVersion. The Task becomes delivered only after each current
 ArtifactVersion has an exact expected/observed digest match and the store writes
 the completing Run's canonical FinalResult. This is current product code for
-that path, not yet a
-claim that every Main Chat route has migrated.
+that path, not a claim that every Main Chat route has migrated.
 
 S3 extends that same report Run rather than adding another execution owner.
 Policy can authorize the bounded production `document.read` capability for

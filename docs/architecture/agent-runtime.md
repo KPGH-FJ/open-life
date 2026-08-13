@@ -17,7 +17,7 @@ current source. Superseded execution plans remain in Git history.
 
 ## Last verified
 
-2026-08-13 during S5 report Results, Changes, Preview, and Verification closure.
+2026-08-13 during S7 old-path retirement and release-baseline closure.
 
 ## Source map
 
@@ -25,7 +25,6 @@ current source. Superseded execution plans remain in Git history.
 - `src-tauri/src/main_chat_streaming.rs`
 - `src-tauri/src/main_chat_steering.rs`
 - `src-tauri/src/main_chat_turn_runtime.rs`
-- `src-tauri/src/main_chat_turn_pipeline.rs`
 - `src-tauri/src/main_chat_kernel.rs`
 - `src-tauri/src/main_chat_context_loader.rs`
 - `src-tauri/src/main_chat_policy_runtime.rs`
@@ -67,8 +66,8 @@ materialization. It exposes bounded change, preview, and verification fields to
 `TasksViewModel`. A stored completion label alone cannot preserve delivery when
 the current file is missing or its bytes drift.
 
-`src-tauri/src/main_chat_turn_pipeline.rs` is a compatibility wrapper around
-`OpenLifeTurnRuntime`. It does not make the older route family authoritative.
+The former `main_chat_turn_pipeline.rs` compatibility wrapper is deleted.
+Buffered and streaming transports call `OpenLifeTurnRuntime` directly.
 
 ## Kernel Responsibilities
 
@@ -102,9 +101,11 @@ compiled by the owning product adapter before the generic runtime boundary.
 
 Main Chat personalization has one product path: bounded Agent Memory plus the
 canonical LifeModel v2 runtime context. The kernel no longer compiles an
-accepted-guidance/HS context in parallel. PlanExecute receives the same
-canonical v2 planning hints; its product entrypoint does not enable legacy
-runtime-guidance consumption.
+accepted-guidance/HS context in parallel. Ordinary planning uses the same
+canonical v2 planning hints to draft a bounded Plan Item. Planning has no
+standalone release IPC, session store, or product lifecycle; the remaining
+PlanExecute-named core code is an internal drafting/evaluation algorithm, and
+its former session rules are test-only regression fixtures.
 
 Historical AgentRun rows can still expose minimized HS selection-audit and
 behavior-check metadata through the product read model. Those DTOs are

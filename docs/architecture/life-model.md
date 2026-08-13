@@ -141,7 +141,7 @@ Those caller-shaped proposals were subsequently submitted to ReviewWorkflow,
 but ReviewWorkflow had no observation-bound policy proof to validate. The
 engine, its product consumers, and its public exports were therefore deleted
 together. Main Chat proposals must now carry current PolicyRouter admission
-into ReviewWorkflow. ToolPermission, PlanExecute, learning candidates, and
+into ReviewWorkflow. ToolPermission, canonical Plan Items, learning candidates, and
 other proposal producers remain separate domains and must carry their own
 policy and source evidence.
 

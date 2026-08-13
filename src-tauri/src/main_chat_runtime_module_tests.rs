@@ -278,6 +278,49 @@ fn standalone_plan_execute_owner_stays_retired() {
 }
 
 #[test]
+fn retired_plan_events_have_no_production_writer() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let event_stream = root.join("src/main_chat_event_stream.rs");
+    let mut stack = vec![root.join("src")];
+    while let Some(path) = stack.pop() {
+        for entry in std::fs::read_dir(&path).expect("read source directory") {
+            let entry = entry.expect("read source entry");
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if path.extension().and_then(|value| value.to_str()) != Some("rs")
+                || path == event_stream
+                || path
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|name| name.ends_with("_tests.rs"))
+            {
+                continue;
+            }
+            let source = std::fs::read_to_string(&path).expect("read Rust source");
+            for retired in [
+                "plan.created",
+                "plan.updated",
+                "plan.confirmed",
+                "plan.reviewed",
+                "step.created",
+                "step.updated",
+                "step.cancelled",
+                "step.skipped",
+            ] {
+                assert!(
+                    !source.contains(&format!("event_type: \"{retired}\"")),
+                    "{} must not write retired event {retired}",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn ordinary_chat_entrypoints_delegate_to_openlife_turn_runtime_only() {
     let send_module_path = format!("{}/src/main_chat_send.rs", env!("CARGO_MANIFEST_DIR"));
     let send_source = std::fs::read_to_string(send_module_path).expect("read main_chat_send.rs");
