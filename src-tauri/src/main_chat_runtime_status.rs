@@ -3,7 +3,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use tauri::State;
 
-use crate::main_chat_turn_pipeline::{MainChatTurnRouteDecision, MainChatTurnStreamMode};
+use crate::main_chat_turn_runtime::{MainChatTurnRouteDecision, MainChatTurnStreamMode};
 use crate::state::{MainChatFinalGateReadinessSnapshot, MainChatTurnRouteEvidenceSnapshot};
 use crate::AppState;
 

@@ -58,8 +58,6 @@ pub(crate) mod main_chat_steering;
 pub(crate) mod main_chat_streaming;
 pub(crate) mod main_chat_task_controls;
 #[allow(dead_code)]
-pub(crate) mod main_chat_turn_pipeline;
-#[allow(dead_code)]
 pub mod main_chat_turn_runtime;
 pub(crate) mod markdown_memory;
 #[allow(dead_code)]

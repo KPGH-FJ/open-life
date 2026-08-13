@@ -200,10 +200,6 @@ fn main_chat_retired_runtime_modules_are_not_registered_or_present() {
     }
 }
 
-fn retired_delivery_marker(prefix: &str) -> String {
-    [prefix, "_fallback_delivery"].join("")
-}
-
 #[test]
 fn main_chat_retired_fallback_delivery_is_absent_from_product_modules() {
     let legacy_module_path =
@@ -220,31 +216,16 @@ fn main_chat_retired_fallback_delivery_is_absent_from_product_modules() {
         "lib.rs must not register a retired ordinary fallback module"
     );
 
-    let pipeline_path = format!(
-        "{}/src/main_chat_turn_pipeline.rs",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let pipeline_source = std::fs::read_to_string(pipeline_path).expect("read pipeline");
-    for forbidden in [
-        ["Legacy", "CompatFallback"].join(""),
-        ["legacy_compat", "_fallback"].join(""),
-        retired_delivery_marker("run_retired_buffered"),
-        retired_delivery_marker("run_retired_streaming"),
-    ] {
-        assert!(
-            !pipeline_source.contains(&forbidden),
-            "ordinary turn pipeline must not contain {forbidden}"
-        );
-    }
-    let legacy_true_assignment = ["legacy_fallback_used = ", "true"].join("");
     assert!(
-        !pipeline_source.contains(&legacy_true_assignment),
-        "ordinary turn pipeline must not record blocked retired fallback as used"
+        !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_turn_pipeline.rs")
+            .exists(),
+        "retired compatibility pipeline must stay deleted"
     );
 }
 
 #[test]
-fn ordinary_chat_entrypoints_and_pipeline_delegate_to_openlife_turn_runtime_only() {
+fn ordinary_chat_entrypoints_delegate_to_openlife_turn_runtime_only() {
     let send_module_path = format!("{}/src/main_chat_send.rs", env!("CARGO_MANIFEST_DIR"));
     let send_source = std::fs::read_to_string(send_module_path).expect("read main_chat_send.rs");
     let send_body = extract_rust_function_body(
@@ -284,27 +265,6 @@ fn ordinary_chat_entrypoints_and_pipeline_delegate_to_openlife_turn_runtime_only
         !stream_body.contains(&["run_main_chat_tool_loop_", "adapter("].concat()),
         "start_stream_message must not dispatch to the retired ToolLoop adapter"
     );
-
-    let pipeline_module_path = format!(
-        "{}/src/main_chat_turn_pipeline.rs",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let pipeline_source =
-        std::fs::read_to_string(pipeline_module_path).expect("read main_chat_turn_pipeline.rs");
-    assert!(
-        pipeline_source.contains("OpenLifeTurnRuntime::new("),
-        "pipeline compatibility wrapper must delegate to OpenLifeTurnRuntime"
-    );
-    for forbidden in [
-        ["try_run_main_chat_agent_", "strategy("].join(""),
-        ["run_main_chat_tool_loop_", "adapter("].join(""),
-        ["handle_agent_loop_", "fallback("].join(""),
-    ] {
-        assert!(
-            !pipeline_source.contains(&forbidden),
-            "pipeline compatibility wrapper must not call retired runtime helper {forbidden}"
-        );
-    }
 }
 
 #[test]

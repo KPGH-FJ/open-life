@@ -1,5 +1,5 @@
 use crate::main_chat_acceptance_test_support::run_main_chat_command_surface_eval_gate;
-use crate::main_chat_turn_pipeline::{
+use crate::main_chat_turn_runtime::{
     MainChatExecutionPath, MainChatTurnRouteDecision, MainChatTurnStreamMode,
 };
 
@@ -1772,29 +1772,11 @@ fn ordinary_send_stream_have_no_legacy_fallback_delivery_source() {
         "ordinary Main Chat must not keep a production legacy fallback delivery module"
     );
 
-    let pipeline_source = std::fs::read_to_string(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_turn_pipeline.rs"),
-    )
-    .expect("read turn pipeline source");
-    fn joined_forbidden(left: &str, right: &str) -> String {
-        [left, right].join("")
-    }
-    let forbidden_markers = [
-        joined_forbidden("Legacy", "CompatFallback"),
-        joined_forbidden("legacy_compat", "_fallback"),
-        joined_forbidden("run_retired_buffered", "_fallback_delivery"),
-        joined_forbidden("run_retired_streaming", "_fallback_delivery"),
-    ];
-    for forbidden in forbidden_markers {
-        assert!(
-            !pipeline_source.contains(&forbidden),
-            "ordinary Main Chat pipeline must not contain {forbidden}"
-        );
-    }
-    let legacy_true_assignment = ["legacy_fallback_used = ", "true"].join("");
     assert!(
-        !pipeline_source.contains(&legacy_true_assignment),
-        "ordinary Main Chat pipeline must not assign legacy fallback usage to true"
+        !std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/main_chat_turn_pipeline.rs")
+            .exists(),
+        "retired Main Chat compatibility pipeline must stay deleted"
     );
     let runtime_source = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_turn_runtime.rs"),
