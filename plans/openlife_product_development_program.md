@@ -1,6 +1,6 @@
 # OpenLife Reconstruction Plan
 
-Status: active
+Status: complete
 
 ## Objective
 
@@ -505,7 +505,7 @@ Frontend format, typecheck, 245 behavior tests, production build and absence
 guard, and 11 browser-shell E2E scenarios pass. R7 claims controlled browser
 evidence only; exact-native and external-live evidence remain R8.
 
-## Current stage: R8 - golden evidence and clean release baseline
+## Current stage: R8 - complete
 
 ### Outcome
 
@@ -567,10 +567,10 @@ keeping a second diagnostic or compatibility product API.
   surfaces, and a 750 ms controlled diagnostics budget for 200 Conversations
   and Tasks.
 - The exact signed release bundle passes bundle-id, signing-authority, and
-  strict resource-seal verification. Its isolated native profile exposes one
-  unresolved evidence blocker: the current self-signed executable cannot read
-  the existing AgentRun receipt Keychain ACL noninteractively, so protected
-  TaskRuntime stores remain unavailable until explicit ACL recovery.
+  strict resource-seal verification. Settings exposes an explicit native
+  credential-access recovery flow; after the user approved the current binary,
+  a complete restart reopened the protected stores without rotating, replacing,
+  or exposing their keys.
 - Canonical external-live Work passes with a real provider and real Web read:
   document + Web evidence enter one Task, wait for Review, materialize once,
   and do not grow retired TaskSession/AgentRun owners. This trial also found
@@ -584,11 +584,26 @@ keeping a second diagnostic or compatibility product API.
   production absence guards, and the executable R8 golden matrix. The retired
   broad live-provider suite entry and stale public-handler expectations were
   deleted rather than retained as acceptance machinery.
-- The exact bundle was rebuilt from this final source with bundle id
+- The final product binary was rebuilt from `81f92ad` with bundle id
   `ai.openlife.desktop`, the named local signing authority, and a verified
-  strict resource seal. A fresh isolated launch still cannot open the existing
-  protected execution credentials: ordinary stores initialize, but canonical
-  TaskRuntime and protected receipt/event stores remain absent. Native UI
-  golden-path credit is therefore not claimed. The explicit Settings
-  credential-access recovery and clean restart must succeed before Settings,
-  Chat, Work, Results, and needs-attention can close R8.
+  strict resource seal. In the isolated retained profile, Product Diagnostics
+  reported that persistence, canonical writes, model dispatch, and tool
+  dispatch were available after restart; the retained Conversation and two
+  canonical Work Tasks remained readable.
+- Exact-native UI evidence covers Settings diagnostics, retained Chat history,
+  a completed Work with Instruction, Plan, ProviderGeneration, and FinalResult
+  Items, and a blocked Work shown in both Results and needs-attention. The
+  blocked Task remains visible when Review has no items, and its evidence uses
+  canonical Task, ItemAttempt, and Work Run labels rather than presenting the
+  compatibility AgentRun as product truth.
+- The production Work tool list and source absence guards exclude the retired
+  `agent_run.lookup` surface. Internal AgentRun consumers that still provide
+  receipt or compatibility support remain non-product implementation debt and
+  are not exposed as a second Work lifecycle.
+- The final rebuild did not issue another external-live request. External-live
+  provider and Web evidence remains the independently recorded trial above;
+  the final closure adds exact-native local evidence and does not upgrade
+  controlled or historical runs beyond their stated level.
+- R8 is complete. The branch is the clean reconstruction baseline; subsequent
+  work must start from a new bounded product objective rather than reopening
+  retired routes, compatibility fallbacks, or a parallel execution owner.
