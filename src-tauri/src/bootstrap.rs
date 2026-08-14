@@ -3898,7 +3898,7 @@ mod tests {
             .await
             .unwrap();
         let workspace =
-            crate::read_models::tasks::get_workspace_view_model_with_state(&result.state)
+            crate::read_models::tasks::get_workspace_view_model_with_state(&result.state, None)
                 .await
                 .unwrap();
         let boundary =

@@ -56,6 +56,7 @@ function taskSearchText(item: TaskViewModelItem): string {
     item.pendingReviewItemRefs.map(ref => ref.label).join(" "),
     item.latestResultPreview?.label ?? "",
     item.latestResultPreview?.preview ?? "",
+    item.workPlan?.steps.map(step => step.kind).join(" ") ?? "",
     item.artifacts.map(artifact => artifact.materializedReference ?? artifact.mediaType).join(" "),
   ]
     .join(" ")
@@ -64,15 +65,33 @@ function taskSearchText(item: TaskViewModelItem): string {
 
 function statusDetail(item: TaskViewModelItem): string {
   if (item.needsAttention && item.attentionReasonCodes?.[0]) {
-    return `需要处理：${item.attentionReasonCodes[0]}`;
+    return `需要处理：${reasonLabel(item.attentionReasonCodes[0])}`;
   }
   if (item.lifecycleStatus === "waiting_review") return "报告产物正在等待你的审核，任务尚未完成。";
   if (item.pendingReviewItemRefs.length > 0) return "有事项等待决定，任务尚未完成。";
-  if (item.pendingBlockers.length > 0) return item.pendingBlockers[0];
+  if (item.pendingBlockers.length > 0) return reasonLabel(item.pendingBlockers[0]);
   if (item.latestResultPreview?.preview) return item.latestResultPreview.preview;
   if (item.lifecycleStatus === "running") return "任务仍在执行。";
   if (item.lifecycleStatus === "remote_unknown") return "远端执行结果未知，不能标记为完成。";
   return "查看依据可核对当前生命周期与交付状态。";
+}
+
+function reasonLabel(reason: string): string {
+  const labels: Record<string, string> = {
+    read_tool_blocked: "所需资料当前不可访问",
+    artifact_effect_unknown: "结果写入状态需要人工核对",
+    artifact_delivery_failed: "结果交付失败",
+    artifact_waiting_materialization: "结果尚未写入目标位置",
+    artifact_content_digest_drift: "目标内容与已核验版本不一致",
+    artifact_materialized_reference_missing: "结果位置缺少确认依据",
+    artifact_preview_source_unavailable: "结果预览来源不可用",
+    artifact_undo_pending_or_failed: "撤销仍在等待决定或执行失败",
+    artifact_undo_unavailable_without_original_bytes: "缺少可恢复的原始内容",
+    artifact_undo_requires_verified_materialization: "结果核验后才能撤销",
+    artifact_undo_unavailable: "当前结果不可撤销",
+  };
+  if (labels[reason]) return labels[reason];
+  return /^[a-z0-9_.:-]+$/i.test(reason) ? "后端要求核对这项状态" : reason;
 }
 
 function artifactTypeLabel(mediaType: string): string {
@@ -142,6 +161,29 @@ function taskItemStatusTone(
   return "waiting";
 }
 
+function workPlanStepLabel(
+  kind: NonNullable<TaskViewModelItem["workPlan"]>["steps"][number]["kind"]
+): string {
+  const labels: Record<typeof kind, string> = {
+    analyze: "分析任务",
+    read_imported_document: "读取导入文档",
+    read_workspace_file: "读取工作区文件",
+    web_search: "搜索 Web",
+    web_fetch: "读取网页",
+    use_selected_skill: "应用所选 Skill",
+    read_mcp: "读取已连接工具",
+    draft_artifact: "起草结果",
+    verify: "核验结果",
+    deliver_result: "交付结果",
+  };
+  return labels[kind];
+}
+
+function completionContractLabel(plan: NonNullable<TaskViewModelItem["workPlan"]>): string {
+  const result = plan.completion.resultKind === "artifact" ? "交付可审阅产物" : "交付最终回答";
+  return plan.completion.requiresVerification ? `${result}，并完成结果核验` : result;
+}
+
 function taskItemSummary(summaryCode: string): string {
   const [, tool] = summaryCode.split(":", 2);
   const toolLabel =
@@ -161,7 +203,7 @@ function taskItemSummary(summaryCode: string): string {
   if (summaryCode === "work_provider_generation") return "模型正在生成结果";
   if (summaryCode === "work_provider_generation_completed") return "模型结果已经生成";
   if (summaryCode === "work_completed") return "任务结果已经交付";
-  return summaryCode.split("_").join(" ");
+  return "执行记录已更新";
 }
 
 function actionAttributes(action: ProductAction) {
@@ -252,6 +294,8 @@ export function WorkbenchResultsView({
   onCancelTaskControlConfirmation,
   onRequestArtifactUndo,
   fixedFilter,
+  scopedItems,
+  embedded = false,
 }: {
   envelope: ViewModelEnvelope<TasksViewModel>;
   refreshing: boolean;
@@ -266,11 +310,13 @@ export function WorkbenchResultsView({
   onCancelTaskControlConfirmation: () => void;
   onRequestArtifactUndo: (artifactId: string) => Promise<void>;
   fixedFilter?: TaskFilter;
+  scopedItems?: readonly TaskViewModelItem[];
+  embedded?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [undoingArtifactId, setUndoingArtifactId] = useState<string | null>(null);
-  const items = envelope.data?.items ?? [];
+  const items = scopedItems ? [...scopedItems] : (envelope.data?.items ?? []);
   const listAvailable = envelope.data !== null && !["error", "loading"].includes(envelope.status);
   const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
   const activeFilter = fixedFilter ?? filter;
@@ -314,12 +360,19 @@ export function WorkbenchResultsView({
   }
 
   return (
-    <article className="ol-workbench-result-page" data-testid="tasks-product-view">
+    <article
+      className={`ol-workbench-result-page${embedded ? " ol-workbench-result-page--embedded" : ""}`}
+      data-testid="tasks-product-view"
+    >
       <header className="ol-workbench-result-page-heading ol-workbench-result-page-heading--with-actions">
         <div>
-          <span>哪些任务需要我或可以继续</span>
-          <h2>{taskPrimaryQuestion(envelope)}</h2>
-          <p>生命周期、阻塞、结果和可用动作都只来自后端任务读模型。</p>
+          <span>{embedded ? "当前 Conversation" : "哪些任务需要我或可以继续"}</span>
+          <h2>{embedded ? "Work 进度与结果" : taskPrimaryQuestion(envelope)}</h2>
+          <p>
+            {embedded
+              ? "计划、进度、决定、结果与验证都来自当前 Conversation 的后端 canonical 投影。"
+              : "生命周期、阻塞、结果和可用动作都只来自后端任务读模型。"}
+          </p>
         </div>
         {!fixedFilter && (
           <FoundationActionButton
@@ -435,6 +488,52 @@ export function WorkbenchResultsView({
       )}
 
       {listAvailable && (
+        <section className="ol-workbench-result-section" aria-labelledby="tasks-plan-title">
+          <div className="ol-workbench-result-section-heading">
+            <div>
+              <span>任务合同</span>
+              <h3 id="tasks-plan-title">{selectedTask ? "计划与完成标准" : "选择任务查看计划"}</h3>
+            </div>
+          </div>
+          {selectedTask?.workPlan ? (
+            <div className="ol-work-contract" data-testid="canonical-work-contract">
+              <div className="ol-work-contract__completion">
+                <span>完成标准</span>
+                <strong>{completionContractLabel(selectedTask.workPlan)}</strong>
+                <small>计划版本 {selectedTask.workPlan.revision}</small>
+              </div>
+              <ol className="ol-work-contract__steps">
+                {selectedTask.workPlan.steps.map((step, index) => (
+                  <li key={step.id}>
+                    <span>{index + 1}</span>
+                    <div>
+                      <strong>{workPlanStepLabel(step.kind)}</strong>
+                      <small>{step.required ? "完成所必需" : "按需执行"}</small>
+                    </div>
+                  </li>
+                ))}
+              </ol>
+              <details className="ol-work-contract__budget">
+                <summary>查看本轮执行边界</summary>
+                <p>
+                  最多 {selectedTask.workPlan.budgetPolicy.maxTotalItems} 个执行项、
+                  {selectedTask.workPlan.budgetPolicy.maxToolAttempts} 次工具尝试和
+                  {selectedTask.workPlan.budgetPolicy.maxProviderAttempts}{" "}
+                  次模型尝试；达到边界后任务会停止并如实报告。
+                </p>
+              </details>
+            </div>
+          ) : (
+            <p className="ol-workbench-result-empty-list">
+              {selectedTask
+                ? "该任务没有后端确认的结构化计划；不会从消息或执行记录推断完成标准。"
+                : "选择任务后显示后端记录的计划与完成标准。"}
+            </p>
+          )}
+        </section>
+      )}
+
+      {listAvailable && (
         <section className="ol-workbench-result-section" aria-labelledby="tasks-progress-title">
           <div className="ol-workbench-result-section-heading">
             <div>
@@ -520,7 +619,7 @@ export function WorkbenchResultsView({
                     {artifact.preview.content ? (
                       <pre>{artifact.preview.content}</pre>
                     ) : (
-                      <p>预览不可用：{artifact.preview.reasonCode ?? "来源未确认"}</p>
+                      <p>预览不可用：{reasonLabel(artifact.preview.reasonCode ?? "来源未确认")}</p>
                     )}
                     {artifact.preview.status === "truncated" && <small>预览已由后端截断。</small>}
                   </section>
@@ -551,7 +650,7 @@ export function WorkbenchResultsView({
                       </div>
                     </dl>
                     {artifact.verification.reasonCode && (
-                      <small>{artifact.verification.reasonCode}</small>
+                      <small>{reasonLabel(artifact.verification.reasonCode)}</small>
                     )}
                   </section>
                   <section className="ol-task-result-card__section" aria-label="Undo">
@@ -576,7 +675,9 @@ export function WorkbenchResultsView({
                           : "撤销正在等待审核或 reconciliation。"}
                       </p>
                     ) : (
-                      <p>不可撤销：{artifact.undo.reasonCode ?? "缺少可验证恢复依据"}</p>
+                      <p>
+                        不可撤销：{reasonLabel(artifact.undo.reasonCode ?? "缺少可验证恢复依据")}
+                      </p>
                     )}
                   </section>
                   <small className="ol-task-result-card__id">{artifact.artifactId}</small>
@@ -641,12 +742,7 @@ export function WorkbenchResultsView({
                     data-action-completion-proof-after-dispatch={String(
                       Boolean(control.completionProofAfterDispatch)
                     )}
-                    onClick={() =>
-                      onRequestTaskControl(
-                        control,
-                        selectedTask.taskSessionId ?? selectedTask.canonicalTaskId
-                      )
-                    }
+                    onClick={() => onRequestTaskControl(control, selectedTask.canonicalTaskId)}
                   />
                 );
               })}

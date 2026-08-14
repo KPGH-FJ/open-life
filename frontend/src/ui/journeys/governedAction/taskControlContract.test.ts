@@ -20,7 +20,6 @@ function control(overrides: Partial<TaskControl> = {}): TaskControl {
 function task(overrides: Partial<TaskViewModelItem> = {}): TaskViewModelItem {
   return {
     canonicalTaskId: "task-1",
-    taskSessionId: "task-1",
     relatedRunIds: [],
     title: "整理访谈",
     strategy: "react",
@@ -88,32 +87,6 @@ describe("task control dispatch contract", () => {
     expect(resolved).toMatchObject({
       phase: "resolved",
       refreshedTask: { canonicalTaskId: "task-1", lifecycleStatus: "running" },
-    });
-  });
-
-  it("keeps controls bound to the compatibility execution session after canonical projection", () => {
-    const retry = control({ targetTaskId: "execution-session-1" });
-    const dispatching = taskControlDispatchReducer(initialTaskControlDispatchState, {
-      type: "request",
-      control: retry,
-      expectedTaskId: "execution-session-1",
-    });
-    const refreshing = taskControlDispatchReducer(dispatching, { type: "dispatch_succeeded" });
-    const resolved = taskControlDispatchReducer(refreshing, {
-      type: "refresh_succeeded",
-      task: task({
-        canonicalTaskId: "canonical-report-task-1",
-        taskSessionId: "execution-session-1",
-        lifecycleStatus: "running",
-      }),
-    });
-
-    expect(resolved).toMatchObject({
-      phase: "resolved",
-      refreshedTask: {
-        canonicalTaskId: "canonical-report-task-1",
-        taskSessionId: "execution-session-1",
-      },
     });
   });
 

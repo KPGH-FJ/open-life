@@ -8,6 +8,7 @@ use crate::agent::types::{AgentRun, AgentRunStatus};
 use crate::task_runtime::{
     CanonicalArtifactStatus, CanonicalTaskItemKind, CanonicalTaskItemStatus,
 };
+use crate::work_orchestration::{WorkCompletionContract, WorkPlanStepKind, WorkRunBudgetPolicy};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -234,6 +235,25 @@ pub struct TaskItemViewModel {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskWorkPlanStepViewModel {
+    pub id: String,
+    pub kind: WorkPlanStepKind,
+    pub required: bool,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskWorkPlanViewModel {
+    pub revision: u64,
+    pub steps: Vec<TaskWorkPlanStepViewModel>,
+    pub completion: WorkCompletionContract,
+    pub budget_policy: WorkRunBudgetPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskArtifactViewModel {
     pub artifact_id: String,
     pub version: u64,
@@ -343,6 +363,8 @@ pub struct TaskViewModelItem {
     pub final_delivery_evidence_present: bool,
     #[serde(default)]
     pub items: Vec<TaskItemViewModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_plan: Option<TaskWorkPlanViewModel>,
     #[serde(default)]
     pub artifacts: Vec<TaskArtifactViewModel>,
     #[serde(default)]
@@ -548,6 +570,10 @@ impl WorkspaceActivityItem {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceViewModel {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_conversation_id: Option<String>,
+    #[serde(default)]
+    pub tasks: Vec<TaskViewModelItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub active_task: Option<TaskViewModelItem>,
     #[serde(default)]
     pub recent_task_refs: Vec<BackendEntityRef>,
@@ -578,6 +604,7 @@ pub struct TaskViewModelTaskInput {
     pub canonical_terminal_delivery_status: Option<TaskTerminalDeliveryStatus>,
     pub canonical_final_delivery_evidence_present: Option<bool>,
     pub canonical_items: Vec<TaskItemViewModel>,
+    pub work_plan: Option<TaskWorkPlanViewModel>,
     pub canonical_artifacts: Vec<TaskArtifactViewModel>,
     pub pending_blockers: Vec<String>,
     pub needs_attention: bool,
@@ -608,6 +635,7 @@ pub struct TasksViewModelBuildInput {
 #[derive(Debug, Clone)]
 pub struct WorkspaceViewModelBuildInput {
     pub tasks: TasksViewModel,
+    pub selected_conversation_id: Option<String>,
     pub review_items: Vec<ReviewItem>,
     pub active_task_activity: Vec<WorkspaceActivityItem>,
     pub provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary,
@@ -647,19 +675,24 @@ pub fn build_tasks_view_model(input: TasksViewModelBuildInput) -> TasksViewModel
 }
 
 pub fn build_workspace_view_model(input: WorkspaceViewModelBuildInput) -> WorkspaceViewModel {
-    let active_task = input
+    let selected_conversation_id = input.selected_conversation_id;
+    let tasks = input
         .tasks
         .items
+        .into_iter()
+        .filter(|task| {
+            selected_conversation_id
+                .as_deref()
+                .is_none_or(|conversation_id| {
+                    task.conversation_id.as_deref() == Some(conversation_id)
+                })
+        })
+        .collect::<Vec<_>>();
+    let active_task = tasks
         .iter()
         .find(|item| item.lifecycle_status.is_active())
         .cloned();
-    let recent_task_refs = input
-        .tasks
-        .items
-        .iter()
-        .take(6)
-        .map(task_ref)
-        .collect::<Vec<_>>();
+    let recent_task_refs = tasks.iter().take(6).map(task_ref).collect::<Vec<_>>();
     let active_review_ids = active_task
         .as_ref()
         .map(|task| {
@@ -702,6 +735,8 @@ pub fn build_workspace_view_model(input: WorkspaceViewModelBuildInput) -> Worksp
     };
 
     WorkspaceViewModel {
+        selected_conversation_id,
+        tasks,
         active_task,
         recent_task_refs,
         pending_review_items,
@@ -788,6 +823,7 @@ fn task_item_from_input(input: TaskViewModelTaskInput) -> TaskViewModelItem {
         terminal_delivery_status,
         final_delivery_evidence_present,
         items: input.canonical_items,
+        work_plan: input.work_plan,
         artifacts: input.canonical_artifacts,
         pending_blockers: dedup_strings(input.pending_blockers),
         needs_attention: input.needs_attention,
@@ -866,6 +902,7 @@ fn run_only_item(run: AgentRun) -> TaskViewModelItem {
         terminal_delivery_status,
         final_delivery_evidence_present: false,
         items: Vec::new(),
+        work_plan: None,
         artifacts: Vec::new(),
         pending_blockers: dedup_strings(pending_blockers),
         needs_attention: false,
@@ -1594,6 +1631,7 @@ mod tests {
         });
         let workspace = build_workspace_view_model(WorkspaceViewModelBuildInput {
             tasks,
+            selected_conversation_id: None,
             review_items: Vec::new(),
             active_task_activity: vec![WorkspaceActivityItem::from_product_event(
                 "event-1",
@@ -1624,6 +1662,54 @@ mod tests {
             workspace.provider_privacy_boundary_summary.risk,
             ProductRiskLevel::Unknown
         );
+        assert_eq!(workspace.tasks.len(), 1);
+    }
+
+    #[test]
+    fn workspace_scopes_tasks_to_the_selected_conversation() {
+        let tasks = build_tasks_view_model(TasksViewModelBuildInput {
+            task_inputs: vec![
+                TaskViewModelTaskInput {
+                    task_session_id: "task-selected".into(),
+                    conversation_id: Some("conversation-selected".into()),
+                    title: "Selected work".into(),
+                    session_status: Some(AgentTaskSessionStatus::Running),
+                    ..Default::default()
+                },
+                TaskViewModelTaskInput {
+                    task_session_id: "task-other".into(),
+                    conversation_id: Some("conversation-other".into()),
+                    title: "Other work".into(),
+                    session_status: Some(AgentTaskSessionStatus::Running),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        });
+        let workspace = build_workspace_view_model(WorkspaceViewModelBuildInput {
+            tasks,
+            selected_conversation_id: Some("conversation-selected".into()),
+            review_items: Vec::new(),
+            active_task_activity: Vec::new(),
+            provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary::unknown(),
+            source_refs: Vec::new(),
+            contract_limitations: Vec::new(),
+        });
+
+        assert_eq!(
+            workspace.selected_conversation_id.as_deref(),
+            Some("conversation-selected")
+        );
+        assert_eq!(workspace.tasks.len(), 1);
+        assert_eq!(workspace.tasks[0].canonical_task_id, "task-selected");
+        assert_eq!(
+            workspace
+                .active_task
+                .as_ref()
+                .map(|task| task.canonical_task_id.as_str()),
+            Some("task-selected")
+        );
+        assert_eq!(workspace.recent_task_refs.len(), 1);
     }
 
     #[test]
@@ -1705,6 +1791,7 @@ mod tests {
 
         let workspace = build_workspace_view_model(WorkspaceViewModelBuildInput {
             tasks,
+            selected_conversation_id: None,
             review_items: Vec::new(),
             active_task_activity: vec![WorkspaceActivityItem::from_product_event(
                 "event-ignored",

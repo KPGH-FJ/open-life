@@ -8,7 +8,6 @@ import { ProductWorkbenchJourney } from "./ProductWorkbenchJourney";
 
 describe("OpenLife product shell", () => {
   it("uses Workbench as the single task surface and removes retired top-level pages", async () => {
-    const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
     render(
       <ProductWorkbenchJourney
@@ -19,22 +18,45 @@ describe("OpenLife product shell", () => {
     );
 
     expect(await screen.findByRole("heading", { name: "工作区", level: 1 })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^对话/ })).toHaveAttribute("aria-current", "page");
-    expect(screen.getByRole("button", { name: /^结果/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^需处理/ })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Workbench/ })).toHaveAttribute(
+      "aria-current",
+      "page"
+    );
+    expect(screen.queryByRole("button", { name: /^结果/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /^需处理/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^今日/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^任务/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^审核中心/ })).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: /^结果/ }));
-    expect(await screen.findByText(/共 \d+ 项，当前显示 \d+ 项/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^结果/ })).toHaveAttribute("aria-current", "page");
-
-    await user.click(screen.getByRole("button", { name: /^需处理/ }));
+    expect(await screen.findByRole("heading", { name: "Work 进度与结果" })).toBeInTheDocument();
+    expect(await screen.findByTestId("canonical-work-contract")).toHaveTextContent("交付最终回答");
     expect(
       await screen.findByRole("heading", { name: "读取本地客户访谈记录", level: 2 })
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^需处理/ })).toHaveAttribute("aria-current", "page");
+  });
+
+  it("opens a LifeModel checkpoint inline without restoring a separate Review page", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
+    render(
+      <ProductWorkbenchJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        durableTruthDataSource={dataSource}
+      />
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^个人智能/ }));
+    await user.click(await screen.findByRole("button", { name: "查看并决定" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "把上午作为优先深度工作时段", level: 2 })
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Workbench/ })).toHaveAttribute(
+      "aria-current",
+      "page"
+    );
+    expect(screen.queryByRole("button", { name: /^审核中心/ })).not.toBeInTheDocument();
   });
 
   it("loads transmission boundary independently of Workbench lifecycle health", async () => {
@@ -52,7 +74,6 @@ describe("OpenLife product shell", () => {
   });
 
   it("shows canonical blocked Work in Needs Attention even when Review is empty", async () => {
-    const user = userEvent.setup();
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
       ...fixture,
@@ -93,6 +114,15 @@ describe("OpenLife product shell", () => {
             status: "empty" as const,
             data: { ...snapshot.reviewEnvelope.data!, items: [] },
           },
+          workspaceEnvelope: {
+            ...snapshot.workspaceEnvelope,
+            data: {
+              ...snapshot.workspaceEnvelope.data!,
+              tasks: [blockedTask],
+              activeTask: blockedTask,
+              pendingReviewItems: [],
+            },
+          },
         };
       },
     };
@@ -105,11 +135,12 @@ describe("OpenLife product shell", () => {
       />
     );
 
-    await user.click(await screen.findByRole("button", { name: /^需处理/ }));
     expect(
-      await screen.findByRole("button", { name: /查询官网标题.*需要处理：read_tool_blocked/ })
+      await screen.findByRole("button", {
+        name: /查询官网标题.*需要处理：所需资料当前不可访问/,
+      })
     ).toBeInTheDocument();
-    expect(screen.getByText("1 项需要处理")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Work 进度与结果" })).toBeInTheDocument();
     expect(screen.queryByText("当前没有可展示的任务。")).not.toBeInTheDocument();
   });
 

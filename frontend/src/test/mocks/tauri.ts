@@ -304,7 +304,6 @@ export function createMockTasksViewModelEnvelope(
       items: [
         {
           canonicalTaskId: "mainchat_task_mock",
-          taskSessionId: "mainchat_task_mock",
           relatedRunIds: ["run_mainchat_mock"],
           conversationId: "session-1",
           title: "mock goal",
@@ -383,9 +382,9 @@ export function createMockWorkspaceViewModelEnvelope(
   const now = new Date().toISOString();
   const base: ViewModelEnvelope<WorkspaceViewModel> = {
     data: {
+      tasks: [],
       activeTask: {
         canonicalTaskId: "mainchat_task_mock",
-        taskSessionId: "mainchat_task_mock",
         relatedRunIds: ["run_mainchat_mock"],
         conversationId: "conversation_mock",
         title: "mock goal",

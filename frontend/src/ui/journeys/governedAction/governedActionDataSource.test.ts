@@ -89,25 +89,13 @@ describe("governed action Tauri data source", () => {
     });
   });
 
-  it("maps only supported review decisions and rejects retired task resume", async () => {
+  it("maps only supported review decisions", async () => {
     tauriMocks.acceptProposal.mockResolvedValue(undefined);
     tauriMocks.rejectProposal.mockResolvedValue(undefined);
     tauriMocks.postponeProposal.mockResolvedValue(undefined);
     await tauriGovernedActionDataSource.dispatchReviewAction(action("approve"));
     await tauriGovernedActionDataSource.dispatchReviewAction(action("reject"));
     await tauriGovernedActionDataSource.dispatchReviewAction(action("later"));
-    await expect(
-      tauriGovernedActionDataSource.resumeTask({
-        id: "task-1:resume",
-        label: "Resume",
-        kind: "resume",
-        effect: "task_resume_request",
-        enabled: true,
-        targetTaskId: "task-1",
-        completionProofAfterDispatch: false,
-      } satisfies TaskControl)
-    ).rejects.toThrow("canonical_task_resume_unavailable");
-
     expect(tauriMocks.acceptProposal).toHaveBeenCalledWith("review-1");
     expect(tauriMocks.rejectProposal).toHaveBeenCalledWith("review-1");
     expect(tauriMocks.postponeProposal).toHaveBeenCalledWith("review-1");

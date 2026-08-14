@@ -65,15 +65,15 @@ test.describe("OpenLife Workbench browser shell", () => {
     });
   }
 
-  test("Workbench exposes conversation, results, and attention as one surface", async ({
+  test("Workbench keeps conversation, Work, results, and decisions on one product surface", async ({
     page,
   }) => {
     await page.goto("/#/workspace");
-    for (const name of ["对话", "结果", "需处理"]) {
-      await expect(page.getByRole("button", { name: new RegExp(`^${name}`) })).toBeVisible();
-    }
-    await page.getByRole("button", { name: /^结果/ }).click();
-    await expect(page.getByRole("heading", { name: "结果", level: 1 })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Workbench/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^对话/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^结果/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: /^需处理/ })).toHaveCount(0);
+    await expect(page.getByRole("heading", { name: "工作区", level: 1 })).toBeVisible();
     await expect(page).toHaveURL(/#\/workspace$/);
   });
 
@@ -83,9 +83,8 @@ test.describe("OpenLife Workbench browser shell", () => {
     await page.setViewportSize({ width: 520, height: 760 });
     await page.goto("/#/workspace");
 
-    await expect(page.getByRole("button", { name: /^对话/ })).toBeVisible();
-    await expect(page.getByRole("button", { name: /^结果/ })).toBeVisible();
-    await expect(page.getByRole("button", { name: /^需处理/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^Workbench/ })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^个人智能/ })).toBeVisible();
     await expect(page.getByRole("button", { name: "设置" })).toBeVisible();
 
     await page.getByRole("button", { name: "设置" }).focus();

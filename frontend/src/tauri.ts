@@ -2742,7 +2742,6 @@ export type TaskArtifactViewModel = {
 
 export type TaskViewModelItem = {
   canonicalTaskId: string;
-  taskSessionId?: string;
   relatedRunIds: string[];
   conversationId?: string;
   title: string;
@@ -2751,6 +2750,35 @@ export type TaskViewModelItem = {
   terminalDeliveryStatus: TaskTerminalDeliveryStatus;
   finalDeliveryEvidencePresent: boolean;
   items: TaskItemViewModel[];
+  workPlan?: {
+    revision: number;
+    steps: Array<{
+      id: string;
+      kind:
+        | "analyze"
+        | "read_imported_document"
+        | "read_workspace_file"
+        | "web_search"
+        | "web_fetch"
+        | "use_selected_skill"
+        | "read_mcp"
+        | "draft_artifact"
+        | "verify"
+        | "deliver_result";
+      required: boolean;
+      dependsOn: string[];
+    }>;
+    completion: {
+      resultKind: "answer" | "artifact";
+      requiresVerification: boolean;
+    };
+    budgetPolicy: {
+      maxPlanAttempts: number;
+      maxProviderAttempts: number;
+      maxToolAttempts: number;
+      maxTotalItems: number;
+    };
+  };
   artifacts: TaskArtifactViewModel[];
   pendingBlockers: string[];
   needsAttention?: boolean;
@@ -2814,6 +2842,8 @@ export type WorkspaceActivityItem = {
 };
 
 export type WorkspaceViewModel = {
+  selectedConversationId?: string;
+  tasks: TaskViewModelItem[];
   activeTask?: TaskViewModelItem;
   recentTaskRefs: BackendEntityRef[];
   pendingReviewItems: ReviewItem[];
@@ -4187,8 +4217,12 @@ export async function getTasksViewModel(): Promise<ViewModelEnvelope<TasksViewMo
   return safeInvoke<ViewModelEnvelope<TasksViewModel>>("get_tasks_view_model");
 }
 
-export async function getWorkspaceViewModel(): Promise<ViewModelEnvelope<WorkspaceViewModel>> {
-  return safeInvoke<ViewModelEnvelope<WorkspaceViewModel>>("get_workspace_view_model");
+export async function getWorkspaceViewModel(
+  conversationId?: string | null
+): Promise<ViewModelEnvelope<WorkspaceViewModel>> {
+  return safeInvoke<ViewModelEnvelope<WorkspaceViewModel>>("get_workspace_view_model", {
+    ...optionalDualArg("conversationId", "conversation_id", conversationId ?? undefined),
+  });
 }
 
 export async function batchAcceptLowRiskProposals(proposalIds?: string[]): Promise<number> {

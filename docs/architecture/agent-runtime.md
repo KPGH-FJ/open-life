@@ -68,11 +68,16 @@ product presentation boundary. While waiting for Review it reads Change and
 Preview from the exact canonical ArtifactVersion and its digest-bound managed
 draft, not from Proposal content. After materialization it reads only a
 digest-matching regular file. It exposes bounded change, preview, verification,
-attention, and Undo fields to `TasksViewModel`. A stored completion label alone
-cannot preserve delivery when the current file is missing or its bytes drift.
+attention, and Undo fields to `TasksViewModel`. It also projects the current
+structured Work plan, completion contract, and immutable budget policy, while
+`WorkspaceViewModel` scopes Tasks and inline checkpoints to the selected
+Conversation. A stored completion label alone cannot preserve delivery when
+the current file is missing or its bytes drift.
 
 The former `main_chat_turn_pipeline.rs` compatibility wrapper is deleted.
-Buffered and streaming transports call `OpenLifeTurnRuntime` directly.
+Release buffered and streaming transports call `CanonicalChatRuntime` or
+`CanonicalWorkRuntime` by explicit composer mode. `OpenLifeTurnRuntime` remains
+test-only migration coverage and is not a release fallback.
 
 ## Kernel Responsibilities
 

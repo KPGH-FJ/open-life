@@ -757,7 +757,9 @@ describe("Workbench durable truth journey", () => {
     await screen.findByRole("heading", { name: "长期理解尚未建立" });
     await user.click(screen.getByRole("button", { name: "查看并决定" }));
     await screen.findByRole("heading", { name: "把上午作为优先深度工作时段", level: 2 });
-    await user.click(screen.getByRole("button", { name: /读取本地客户访谈记录\s+等待决定/ }));
+    expect(
+      screen.queryByRole("button", { name: /读取本地客户访谈记录\s+等待决定/ })
+    ).not.toBeInTheDocument();
 
     expect(screen.getByRole("button", { name: "返回个人智能" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回个人智能" }));

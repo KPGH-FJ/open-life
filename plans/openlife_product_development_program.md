@@ -110,49 +110,56 @@ signed binary did not obtain the canonical internal credential needed to open
 `task_runtime.db`; this is unknown native product evidence and is intentionally
 deferred to H5 rather than credited as a native golden path.
 
-## Current stage: H4 - Canonical Workbench Product Surface
+## Completed: H4 - Canonical Workbench Product Surface
+
+The shipped Workbench is now one Conversation-scoped surface. It combines Chat
+and Work history with the exact canonical Tasks for that Conversation, their
+structured plan, completion contract, bounded execution policy, ordered Items,
+backend controls, Needs Attention facts, inline Review checkpoints, Results,
+Changes, Preview, Verification, and Undo. A mismatched Conversation projection
+is hidden rather than shown under the wrong chat.
+
+Top-level Tasks and Review navigation and the duplicate frontend Resume
+lifecycle were deleted. Task controls and refreshed-state confirmation bind
+only to canonical Task identity. LifeModel and Settings checkpoints can open as
+one exact inline decision without exposing an unrelated global queue, and Back
+returns to the originating product context. Wide/narrow component tests, full
+frontend tests, browser-shell checks, production absence guards, and the full
+Rust repository gates passed before advancing.
+
+## Current stage: H5 - Behavior And Native Evidence Matrix
 
 ### In scope
 
-1. Make one Conversation Workbench present Chat history, Work plan, current
-   progress, steering, inline decisions, Results, Changes, Preview,
-   Verification, and Needs Attention from backend-owned canonical ViewModels.
-2. Keep Chat and Work as explicit composer modes without creating a second
-   Tasks workspace. A Work request exposes its durable completion contract and
-   remains inspectable inside the Conversation that owns it.
-3. Present Plan and execution Items as one ordered activity stream with honest
-   running, waiting-review, blocked, failed, effect-unknown, cancelled, and
-   completed states. Internal algorithm names and retired owner terminology do
-   not enter product UI.
-4. Put approval at the exact action checkpoint. Approve/reject returns to the
-   same Task/Run, refreshes backend truth, and never labels Proposal acceptance
-   as materialization or Task completion.
-5. Make steering, cancel, retry, Undo, and attention recovery use backend
-   control availability and exact entity refs. Delete frontend status inference,
-   proposal-derived Artifact presentation, duplicate Tasks/Review surfaces,
-   and obsolete compatibility state.
-
-### Out of scope
-
-- visual brand redesign beyond the Workbench interaction system;
-- new connectors, Computer Use, arbitrary shell, email/calendar send, or
-  scheduling expansion;
-- broader Memory or LifeModel learning; and
-- native/external-live behavior credit, which belongs to H5.
+1. Define one Chinese/English matrix for Chat and Work: direct answer,
+   document, Web, mixed-source report, selected Skill, read-only MCP, planning,
+   steering, checkpoint approval/rejection, cancellation, retry, Artifact
+   verification/Undo, blocked scope, provider failure, and effect unknown.
+2. Bind every row to its real production entrypoint, canonical Task/Run/Item or
+   Chat Turn result, expected user-visible state, and the minimum evidence
+   level that can prove it.
+3. Run controlled source tests first, then one exact signed macOS bundle with an
+   isolated profile through the required native golden paths. Process launch is
+   not a native product pass.
+4. Run only the minimum external-live provider and Web cases that cannot be
+   proven locally, with the user-selected provider/model and no silent route
+   substitution. Retain typed receipts and bounded metadata, not secrets or
+   source bodies.
+5. Repair product/runtime defects found by the matrix in the owning H0-H4
+   module; do not add an evaluation runtime, second harness, or fixture-only
+   product path.
 
 ### Acceptance
 
-- A user can stay in one Conversation to start Work, inspect its completion
-  contract and ordered progress, steer it, decide an exact checkpoint, inspect
-  verified output, and recover an attention state.
-- Every displayed task, plan, action, result, verification, and available
-  control is backed by a canonical backend ViewModel fact or is absent.
-- Narrow and wide layouts preserve composer, active Work, attention, and result
-  hierarchy with keyboard and screen-reader access.
-- Retired top-level Tasks/Review routes and duplicate frontend lifecycle/status
-  reducers remain absent from the production bundle.
-- Focused ViewModel/component/journey tests, browser-shell coverage, and full
-  repository gates pass before H4 is marked complete.
+- Every matrix row is pass, fail, blocked, or not-required with an exact reason;
+  mocks, browser-shell, native, and external-live evidence are never conflated.
+- Exact-native proves Conversation creation, Chat, canonical Work progress,
+  inline checkpoint continuation, verified result, cancellation/retry, and
+  restart recovery on the exact tested bundle.
+- Required live provider/Web rows prove real dispatch and terminal receipt
+  truth without provider fallback or unreviewed durable effects.
+- Any discovered failure is fixed and the proportional repository gates are
+  rerun before H5 is marked complete.
 
 ## Checks
 

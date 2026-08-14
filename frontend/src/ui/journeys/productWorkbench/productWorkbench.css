@@ -10,6 +10,36 @@
   color: var(--ol-ink);
 }
 
+.ol-conversation-workbench-layout {
+  display: grid;
+  width: min(100%, 1040px);
+  min-width: 0;
+  margin: 0 auto;
+}
+
+.ol-conversation-workbench-layout > * {
+  min-width: 0;
+}
+
+.ol-workbench-result-page--embedded {
+  width: 100%;
+  min-height: 0;
+  padding-top: var(--ol-space-8);
+  border-top: var(--ol-divider-width) solid var(--ol-line-strong);
+}
+
+.ol-conversation-checkpoints {
+  padding: var(--ol-space-10) var(--ol-space-12) var(--ol-space-12);
+  border-top: var(--ol-divider-width) solid var(--ol-line-strong);
+}
+
+.ol-conversation-checkpoints .ol-review-layout--embedded {
+  min-height: 0;
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: var(--ol-radius-3);
+  overflow: hidden;
+}
+
 .ol-workbench-attention {
   display: grid;
   width: 100%;
@@ -270,6 +300,74 @@
   line-height: var(--ol-line-body);
 }
 
+.ol-work-contract {
+  display: grid;
+  gap: var(--ol-space-4);
+  margin-top: var(--ol-space-4);
+}
+
+.ol-work-contract__completion {
+  display: grid;
+  gap: var(--ol-space-1);
+  padding: var(--ol-space-4);
+  border-left: 3px solid var(--ol-ink);
+  background: var(--ol-surface-sunken);
+}
+
+.ol-work-contract__completion > span,
+.ol-work-contract__completion > small,
+.ol-work-contract__steps small,
+.ol-work-contract__budget {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-work-contract__steps {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-work-contract__steps li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: var(--ol-space-3);
+  align-items: center;
+  padding: var(--ol-space-3) 0;
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-work-contract__steps li > span {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border: var(--ol-divider-width) solid var(--ol-control-boundary);
+  border-radius: 999px;
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-caption);
+}
+
+.ol-work-contract__steps li > div {
+  display: grid;
+  gap: var(--ol-space-1);
+}
+
+.ol-work-contract__budget summary {
+  width: fit-content;
+  cursor: pointer;
+  color: var(--ol-ink-secondary);
+}
+
+.ol-work-contract__budget p {
+  max-width: 70ch;
+  margin: var(--ol-space-2) 0 0;
+}
+
 .ol-task-result-grid {
   display: grid;
   gap: var(--ol-space-5);
@@ -393,5 +491,26 @@
 @media (prefers-reduced-motion: reduce) {
   .ol-workbench-result-task-row {
     transition: none;
+  }
+}
+
+@media (max-width: 860px) {
+  .ol-workbench-result-page,
+  .ol-conversation-checkpoints {
+    padding-right: var(--ol-space-5);
+    padding-left: var(--ol-space-5);
+  }
+
+  .ol-workbench-result-page-heading--with-actions,
+  .ol-workbench-result-section-heading,
+  .ol-workbench-result-action-area {
+    grid-template-columns: minmax(0, 1fr);
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ol-workbench-result-action-row,
+  .ol-workbench-result-task-controls {
+    justify-content: flex-start;
   }
 }

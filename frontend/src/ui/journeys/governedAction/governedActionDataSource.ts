@@ -33,10 +33,9 @@ export type GovernedActionSnapshot = {
 };
 
 export interface GovernedActionDataSource {
-  load(): Promise<GovernedActionSnapshot>;
+  load(conversationId?: string | null): Promise<GovernedActionSnapshot>;
   dispatchReviewAction(action: ReviewAction): Promise<void>;
   editLifeModelLearningProposal(proposalId: string, statement: string): Promise<void>;
-  resumeTask(control: TaskControl): Promise<void>;
   dispatchTaskControl(control: TaskControl): Promise<void>;
   requestArtifactUndo(artifactId: string): Promise<void>;
 }
@@ -81,9 +80,11 @@ function settledEnvelope<T>(
       );
 }
 
-async function loadGovernedActionSnapshot(): Promise<GovernedActionSnapshot> {
+async function loadGovernedActionSnapshot(
+  conversationId?: string | null
+): Promise<GovernedActionSnapshot> {
   const [workspaceResult, reviewResult, tasksResult] = await Promise.allSettled([
-    getWorkspaceViewModel(),
+    getWorkspaceViewModel(conversationId),
     getReviewCenterViewModel(),
     getTasksViewModel(),
   ]);
@@ -191,9 +192,6 @@ export const tauriGovernedActionDataSource: GovernedActionDataSource = {
     ) {
       throw new Error("lifemodel_learning_edit_receipt_unverified");
     }
-  },
-  resumeTask: async control => {
-    throw new Error(`canonical_task_resume_unavailable:${control.targetTaskId}`);
   },
   dispatchTaskControl,
   async requestArtifactUndo(artifactId) {

@@ -202,27 +202,12 @@ function permissionItem(stage: FixtureStage, incomplete: boolean): ReviewItem {
   };
 }
 
-function resumeControl(): TaskControl {
-  return {
-    id: `${taskId}:resume`,
-    label: "继续任务",
-    kind: "resume",
-    effect: "task_resume_request",
-    enabled: true,
-    requiresConfirmation: true,
-    targetTaskId: taskId,
-    targetActionId: "action-read-interview-notes",
-    completionProofAfterDispatch: false,
-  };
-}
-
 function activeTask(stage: FixtureStage): TaskViewModelItem {
   const pending = stage === "pending" || stage === "deferred";
   const rejected = stage === "rejected";
   const running = stage === "running";
   return {
     canonicalTaskId: taskId,
-    taskSessionId: taskId,
     relatedRunIds: ["run-interview-notes-01"],
     conversationId: "conversation-research-plan",
     title: "整理三次客户访谈，归纳下周要验证的问题",
@@ -231,6 +216,30 @@ function activeTask(stage: FixtureStage): TaskViewModelItem {
     terminalDeliveryStatus: rejected ? "blocked" : "not_terminal",
     finalDeliveryEvidencePresent: false,
     items: [],
+    workPlan: {
+      revision: 1,
+      steps: [
+        {
+          id: "read-notes",
+          kind: "read_workspace_file",
+          required: true,
+          dependsOn: [],
+        },
+        {
+          id: "deliver",
+          kind: "deliver_result",
+          required: true,
+          dependsOn: ["read-notes"],
+        },
+      ],
+      completion: { resultKind: "answer", requiresVerification: false },
+      budgetPolicy: {
+        maxPlanAttempts: 2,
+        maxProviderAttempts: 6,
+        maxToolAttempts: 8,
+        maxTotalItems: 32,
+      },
+    },
     artifacts: [],
     pendingBlockers: pending
       ? ["读取本地访谈记录前需要你的决定；当前尚未访问文件。"]
@@ -240,8 +249,8 @@ function activeTask(stage: FixtureStage): TaskViewModelItem {
     pendingReviewItemRefs: pending
       ? [{ id: reviewItemId, kind: "review_item", label: "读取访谈记录的权限请求" }]
       : [],
-    allowedControls: stage === "approved" ? [resumeControl()] : [],
-    nextRecommendedControl: stage === "approved" ? "resume" : pending ? "open_review_item" : "none",
+    allowedControls: [],
+    nextRecommendedControl: pending ? "open_review_item" : "none",
     latestResultPreview: {
       status: rejected ? "blocked" : "not_terminal",
       label: running ? "正在读取并比较访谈记录" : "任务停在文件读取之前",
@@ -344,6 +353,8 @@ function buildSnapshot(
   const task = activeTask(stage);
   const reviewItems = empty ? [] : [item, durableItem, ...(providerItem ? [providerItem] : [])];
   const workspace: WorkspaceViewModel = {
+    selectedConversationId: empty ? undefined : task.conversationId,
+    tasks: empty ? [] : [task],
     ...(empty ? {} : { activeTask: task }),
     recentTaskRefs: empty ? [] : [{ id: taskId, kind: "task", label: task.title }],
     pendingReviewItems: !empty && (stage === "pending" || stage === "deferred") ? [item] : [],
@@ -522,13 +533,6 @@ export function workbenchJourneyFixtureDataSource(
   async function applyTaskControl(control: TaskControl): Promise<void> {
     if (readStatus(id) !== "ready") throw new Error("fixture_workspace_read_model_not_ready");
     if (control.targetTaskId !== taskId) throw new Error("fixture_task_control_target_mismatch");
-    if (control.kind === "resume") {
-      if (stage !== "approved" || control.effect !== "task_resume_request") {
-        throw new Error("fixture_resume_control_mismatch");
-      }
-      stage = "running";
-      return;
-    }
     throw new Error(`fixture_task_control_unsupported:${control.kind}`);
   }
   return {
@@ -691,15 +695,12 @@ export function workbenchJourneyFixtureDataSource(
         else if (reviewAction.kind === "reject") durableStage = "rejected";
         else if (reviewAction.kind === "later") durableStage = "deferred";
         else throw new Error("fixture_durable_review_action_unsupported");
-      } else if (reviewAction.kind === "approve") stage = "approved";
+      } else if (reviewAction.kind === "approve") stage = "running";
       else if (reviewAction.kind === "reject") stage = "rejected";
       else if (reviewAction.kind === "later") stage = "deferred";
       else throw new Error("fixture_review_action_unsupported");
     },
     async editLifeModelLearningProposal() {},
-    async resumeTask(control) {
-      await applyTaskControl(control);
-    },
     async dispatchTaskControl(control) {
       await applyTaskControl(control);
     },

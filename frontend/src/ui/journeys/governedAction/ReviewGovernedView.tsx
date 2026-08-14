@@ -270,6 +270,8 @@ export function ReviewGovernedView({
   onBackWorkspace,
   backLabel = "返回工作区",
   onOpenInspector,
+  visibleItems,
+  embedded = false,
 }: {
   snapshot: GovernedActionSnapshot | null;
   selectedItem: ReviewItem | null;
@@ -284,12 +286,15 @@ export function ReviewGovernedView({
   onBackWorkspace: () => void;
   backLabel?: string;
   onOpenInspector: () => void;
+  visibleItems?: readonly ReviewItem[];
+  embedded?: boolean;
 }) {
   const [learningDraft, setLearningDraft] = useState("");
   const [learningEditBusy, setLearningEditBusy] = useState(false);
   const envelope = snapshot?.reviewEnvelope;
-  const items =
-    envelope && (envelope.status === "ready" || envelope.status === "stale")
+  const items = visibleItems
+    ? [...visibleItems]
+    : envelope && (envelope.status === "ready" || envelope.status === "stale")
       ? (envelope.data?.items ?? [])
       : [];
   const queueSections = reviewQueueSections(items);
@@ -372,7 +377,7 @@ export function ReviewGovernedView({
   }
 
   return (
-    <div className="ol-review-layout">
+    <div className={`ol-review-layout${embedded ? " ol-review-layout--embedded" : ""}`}>
       <aside className="ol-review-queue" aria-label="审核项列表">
         <header>
           <span>需要逐项决定</span>

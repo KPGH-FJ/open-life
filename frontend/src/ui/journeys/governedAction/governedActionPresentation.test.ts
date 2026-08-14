@@ -7,7 +7,6 @@ import type {
 } from "@/tauri";
 import type { GovernedActionSnapshot } from "./governedActionDataSource";
 import {
-  findExactResumeControl,
   governedBoundaryEnvelope,
   reviewContext,
   workspaceContext,
@@ -42,7 +41,6 @@ function envelope<T>(
 function activeTask(): TaskViewModelItem {
   return {
     canonicalTaskId: "task-1",
-    taskSessionId: "task-1",
     relatedRunIds: [],
     title: "Prepare interview synthesis",
     strategy: "react",
@@ -107,6 +105,7 @@ function snapshot(status: ViewModelEnvelope<unknown>["status"] = "ready"): Gover
   return {
     workspaceEnvelope: envelope(
       {
+        tasks: [activeTask()],
         activeTask: activeTask(),
         recentTaskRefs: [],
         pendingReviewItems: [],
@@ -177,12 +176,5 @@ describe("governed action presentation", () => {
       label: "已允许一次，尚未继续任务",
       status: "neutral",
     });
-  });
-
-  it("returns resume only when task and control identities match", () => {
-    expect(findExactResumeControl(snapshot())?.id).toBe("task-1:resume");
-    const mismatched = snapshot();
-    mismatched.workspaceEnvelope.data!.activeTask!.allowedControls[0].targetTaskId = "task-2";
-    expect(findExactResumeControl(mismatched)).toBeNull();
   });
 });

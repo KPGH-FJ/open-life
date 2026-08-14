@@ -6,12 +6,13 @@ use openlife_core::agent::{
     TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel, TaskArtifactUndoViewModel,
     TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel, TaskArtifactViewModel,
     TaskItemViewModel, TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelTaskInput,
-    TasksViewModel, TasksViewModelBuildInput, ViewModelEnvelope, ViewModelStatus, ViewModelWarning,
-    ViewModelWarningSeverity, WorkspaceActivityItem, WorkspaceViewModel,
-    WorkspaceViewModelBuildInput,
+    TaskWorkPlanStepViewModel, TaskWorkPlanViewModel, TasksViewModel, TasksViewModelBuildInput,
+    ViewModelEnvelope, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
+    WorkspaceActivityItem, WorkspaceViewModel, WorkspaceViewModelBuildInput,
 };
 use openlife_core::task_runtime::{
     CanonicalArtifactSnapshot, CanonicalArtifactStatus, CanonicalTaskSnapshot, CanonicalTaskStatus,
+    CanonicalWorkPlanRecord,
 };
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -34,8 +35,9 @@ pub async fn get_tasks_view_model(
 #[tauri::command]
 pub async fn get_workspace_view_model(
     state: State<'_, Arc<AppState>>,
+    conversation_id: Option<String>,
 ) -> Result<ViewModelEnvelope<WorkspaceViewModel>, String> {
-    get_workspace_view_model_with_state(state.inner()).await
+    get_workspace_view_model_with_state(state.inner(), conversation_id.as_deref()).await
 }
 
 pub(crate) async fn get_tasks_view_model_with_state(
@@ -109,6 +111,7 @@ async fn load_tasks_read_model_snapshot(
 
 pub(crate) async fn get_workspace_view_model_with_state(
     state: &Arc<AppState>,
+    conversation_id: Option<&str>,
 ) -> Result<ViewModelEnvelope<WorkspaceViewModel>, String> {
     let mut snapshot = load_tasks_read_model_snapshot(state).await?;
     let tasks_status = snapshot.envelope.status;
@@ -118,13 +121,16 @@ pub(crate) async fn get_workspace_view_model_with_state(
         .take()
         .ok_or_else(|| "TasksViewModel data unavailable for WorkspaceViewModel".to_string())?;
     let active_task_id = tasks.items.iter().find_map(|item| {
-        matches!(
-            item.lifecycle_status,
-            TaskLifecycleStatus::Running
-                | TaskLifecycleStatus::WaitingReview
-                | TaskLifecycleStatus::WaitingPermission
-                | TaskLifecycleStatus::Blocked
-        )
+        let in_selected_conversation = conversation_id
+            .is_none_or(|selected| item.conversation_id.as_deref() == Some(selected));
+        (in_selected_conversation
+            && matches!(
+                item.lifecycle_status,
+                TaskLifecycleStatus::Running
+                    | TaskLifecycleStatus::WaitingReview
+                    | TaskLifecycleStatus::WaitingPermission
+                    | TaskLifecycleStatus::Blocked
+            ))
         .then_some(item.canonical_task_id.clone())
     });
     let active_task_activity = active_task_id
@@ -139,6 +145,7 @@ pub(crate) async fn get_workspace_view_model_with_state(
         .unwrap_or_else(ProviderPrivacyBoundarySummary::unknown);
     let model = build_workspace_view_model(WorkspaceViewModelBuildInput {
         tasks,
+        selected_conversation_id: conversation_id.map(str::to_owned),
         review_items: snapshot.review_items,
         active_task_activity,
         provider_privacy_boundary_summary: provider_summary,
@@ -149,7 +156,7 @@ pub(crate) async fn get_workspace_view_model_with_state(
         contract_limitations: vec![
             "Task controls and review actions are requests only; completion requires a refreshed backend read model.".into(),
             "Workspace activity is metadata-only. Resource, Web, and artifact bodies remain behind their typed evidence owners.".into(),
-            "activeTask is the global active task and can belong to a conversation other than the one currently selected in the Workspace.".into(),
+            "When selectedConversationId is present, tasks, activeTask, review checkpoints, and activity are restricted to that exact Conversation.".into(),
         ],
     });
     let status = workspace_composition_status(
@@ -210,23 +217,50 @@ async fn load_canonical_task_inputs(
         ));
         return LoadedTaskInputs::default();
     };
-    let snapshots = match store.lock().await.list_task_snapshots(100) {
-        Ok(snapshots) => snapshots,
-        Err(error) => {
-            warnings.push(warning(
-                "canonical_task_runtime_read_failed",
-                format!("TasksViewModel could not load canonical Task snapshots: {error}"),
-            ));
-            return LoadedTaskInputs::default();
-        }
+    let snapshots_with_plans = {
+        let store = store.lock().await;
+        let snapshots = match store.list_task_snapshots(100) {
+            Ok(snapshots) => snapshots,
+            Err(error) => {
+                warnings.push(warning(
+                    "canonical_task_runtime_read_failed",
+                    format!("TasksViewModel could not load canonical Task snapshots: {error}"),
+                ));
+                return LoadedTaskInputs::default();
+            }
+        };
+        snapshots
+            .into_iter()
+            .map(|snapshot| {
+                let plan = match snapshot.runs.last() {
+                    Some(run) => store.load_work_plan(&run.run_id),
+                    None => Ok(None),
+                };
+                (snapshot, plan)
+            })
+            .collect::<Vec<_>>()
     };
     let mut loaded = LoadedTaskInputs::default();
-    for snapshot in snapshots {
+    for (snapshot, plan) in snapshots_with_plans {
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(error) => {
+                warnings.push(warning(
+                    "canonical_work_plan_read_failed",
+                    format!(
+                        "TasksViewModel could not load the canonical Work plan for task {}: {error}",
+                        snapshot.task.id
+                    ),
+                ));
+                None
+            }
+        };
         let (input, activity) = canonical_task_input(
             state,
             review_items,
             review_projection_authoritative,
             snapshot,
+            plan,
         )
         .await;
         loaded.activity_by_task.insert(
@@ -246,6 +280,7 @@ async fn canonical_task_input(
     review_items: &[ReviewItem],
     review_projection_authoritative: bool,
     snapshot: CanonicalTaskSnapshot,
+    work_plan: Option<CanonicalWorkPlanRecord>,
 ) -> (TaskViewModelTaskInput, Vec<WorkspaceActivityItem>) {
     let run_ids = snapshot
         .runs
@@ -364,6 +399,22 @@ async fn canonical_task_input(
             canonical_terminal_delivery_status: Some(terminal_status),
             canonical_final_delivery_evidence_present: Some(delivery_proven),
             canonical_items,
+            work_plan: work_plan.map(|record| TaskWorkPlanViewModel {
+                revision: record.plan_revision,
+                steps: record
+                    .plan
+                    .steps
+                    .into_iter()
+                    .map(|step| TaskWorkPlanStepViewModel {
+                        id: step.id,
+                        kind: step.kind,
+                        required: step.required,
+                        depends_on: step.depends_on,
+                    })
+                    .collect(),
+                completion: record.plan.completion,
+                budget_policy: record.budget_policy,
+            }),
             canonical_artifacts,
             pending_blockers: blockers,
             needs_attention,
@@ -1251,6 +1302,53 @@ mod tests {
                 scope_digest: None,
             })
             .unwrap();
+        let work_plan = openlife_core::work_orchestration::StructuredWorkPlan {
+            schema_version: openlife_core::work_orchestration::WORK_PLAN_SCHEMA_VERSION.into(),
+            steps: vec![
+                openlife_core::work_orchestration::WorkPlanStep {
+                    id: "draft".into(),
+                    kind: openlife_core::work_orchestration::WorkPlanStepKind::DraftArtifact,
+                    required: true,
+                    depends_on: Vec::new(),
+                    target_id: None,
+                    target_contract_digest: None,
+                },
+                openlife_core::work_orchestration::WorkPlanStep {
+                    id: "verify".into(),
+                    kind: openlife_core::work_orchestration::WorkPlanStepKind::Verify,
+                    required: true,
+                    depends_on: vec!["draft".into()],
+                    target_id: None,
+                    target_contract_digest: None,
+                },
+                openlife_core::work_orchestration::WorkPlanStep {
+                    id: "deliver".into(),
+                    kind: openlife_core::work_orchestration::WorkPlanStepKind::DeliverResult,
+                    required: true,
+                    depends_on: vec!["verify".into()],
+                    target_id: None,
+                    target_contract_digest: None,
+                },
+            ],
+            completion: openlife_core::work_orchestration::WorkCompletionContract {
+                result_kind: openlife_core::work_orchestration::WorkResultKind::Artifact,
+                requires_verification: true,
+            },
+        };
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .persist_work_plan(
+                &task_id,
+                &run_id,
+                1,
+                &work_plan,
+                openlife_core::work_orchestration::WorkRunBudgetPolicy::default(),
+            )
+            .unwrap();
         let prepared = state
             .canonical_task_runtime_store
             .as_ref()
@@ -1349,6 +1447,14 @@ mod tests {
             openlife_core::agent::TaskLifecycleStatus::WaitingReview
         );
         assert_eq!(task.items.len(), 4);
+        let projected_plan = task.work_plan.as_ref().expect("work plan is projected");
+        assert_eq!(projected_plan.revision, 1);
+        assert_eq!(projected_plan.steps.len(), 3);
+        assert_eq!(
+            projected_plan.completion.result_kind,
+            openlife_core::work_orchestration::WorkResultKind::Artifact
+        );
+        assert!(projected_plan.completion.requires_verification);
         assert_eq!(
             task.items.iter().map(|item| item.kind).collect::<Vec<_>>(),
             vec![

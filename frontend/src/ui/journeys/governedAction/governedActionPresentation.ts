@@ -2,7 +2,6 @@ import type {
   EvidenceRef,
   ProviderPrivacyBoundarySummary,
   ReviewItem,
-  TaskControl,
   ViewModelEnvelope,
 } from "@/tauri";
 import type {
@@ -190,20 +189,6 @@ export function reviewContext(
   };
 }
 
-export function findExactResumeControl(snapshot: GovernedActionSnapshot): TaskControl | null {
-  if (snapshot.workspaceEnvelope.status !== "ready") return null;
-  const task = snapshot.workspaceEnvelope.data?.activeTask;
-  if (!task?.taskSessionId || task.canonicalTaskId !== task.taskSessionId) return null;
-  return (
-    task.allowedControls.find(
-      control =>
-        control.kind === "resume" &&
-        control.effect === "task_resume_request" &&
-        control.targetTaskId === task.taskSessionId
-    ) ?? null
-  );
-}
-
 export function workspaceInspector(
   snapshot: GovernedActionSnapshot | null,
   selectedEvidence: string
@@ -256,9 +241,7 @@ export function workspaceInspector(
         : "当前没有等待决定的精确权限项。",
     nextAction: permissionItem
       ? "进入需处理事项核对访问范围并作出决定。"
-      : findExactResumeControl(snapshot)?.enabled
-        ? "请求继续任务，然后再次刷新同一任务状态。"
-        : "查看当前活动与来源；没有后端允许的动作时保持只读。",
+      : "查看当前活动与来源；没有后端允许的动作时保持只读。",
     evidence,
     evidenceFeedback: selectedEvidence
       ? `已选择 ${selectedEvidence}；这里只展示引用元数据，不展开敏感正文。`
@@ -268,7 +251,6 @@ export function workspaceInspector(
     technicalDetails: [
       { label: "workspaceStatus", value: snapshot.workspaceEnvelope.status },
       { label: "activeTaskId", value: task?.canonicalTaskId ?? "none" },
-      { label: "taskSessionId", value: task?.taskSessionId ?? "none" },
       { label: "lifecycle", value: task?.lifecycleStatus ?? "none" },
       {
         label: "reviewItemIds",

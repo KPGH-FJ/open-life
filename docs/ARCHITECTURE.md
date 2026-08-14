@@ -161,6 +161,11 @@ verified delivery, and effect-unknown states. They do not overlay TaskSession
 or AgentRun state. Current Work controls use canonical cancel and retry IPCs.
 Unresolved review, blocked, failed, effect-unknown, and stale-scope facts are
 projected as backend-owned Needs Attention state rather than inferred by React.
+`WorkspaceViewModel` accepts the selected Conversation identity and returns only
+that Conversation's Tasks and related Review checkpoints. Each Task projection
+also carries the current structured Work plan, completion requirement, and
+immutable budget policy from `canonical_work_plans`; React does not reconstruct
+them from messages or Item labels.
 
 The canonical Artifact path adds backend-owned Result, Change, Preview,
 Verification, and Undo projections to each Work ArtifactVersion. A pending
@@ -225,9 +230,11 @@ The following remain capability migration consumers, not Work lifecycle owners:
   than creating a report-only Artifact owner;
 - PlanExecute session/store/IPC ownership is retired; remaining PlanExecute
   names are drafting algorithms or test fixtures; and
-- Today, Tasks, and Review remain top-level frontend surfaces during migration.
+- Today, Tasks, and Review are retired product routes. Their backend facts are
+  presented only inside the Conversation Workbench or an exact domain
+  checkpoint opened from Personal Intelligence or Settings.
 
-R1-R7 migrate these consumers vertically and delete each old writer, read
+H0-H6 migrate these consumers vertically and delete each old writer, read
 model, IPC, and frontend surface only after its complete replacement exists.
 Adding another compatibility store or restoring a retired route is forbidden.
 
