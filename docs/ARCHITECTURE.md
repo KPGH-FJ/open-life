@@ -85,6 +85,23 @@ same canonical Item/ItemAttempt rows reconstruct consumed budget after restart.
 session, queue, or second lifecycle owner. A FinalResult cannot be committed
 while any canonical non-final Item is non-terminal or while a required plan
 step lacks successful evidence.
+
+The current `openlife.work-plan.v2` contract distinguishes imported-document,
+workspace-file, Web Search, Web Fetch, selected Skill, and registered read-only
+MCP capability phases. Fixed capabilities cannot carry model-authored targets.
+An MCP step must select an exact policy-bounded manifest id; the runtime adds
+the current execution-contract digest after parsing and rechecks it immediately
+before ToolGateway dispatch. Executable arguments remain backend-derived from
+the authenticated Task, Project, resource, and user-goal scope.
+
+One observation-driven plan revision is permitted only when every earlier tool
+attempt succeeded but its evidence cannot satisfy a bounded citation contract.
+The replacement plan stays in the same Run, cannot repeat an already completed
+execution capability, cannot widen the registered target set, and inherits the
+original budget. Every admitted revision is retained in
+`canonical_work_plan_revisions`; failed, cancelled, blocked, or effect-unknown
+attempts are terminal and can never be hidden by replanning. Release Work does
+not compile the retired ReAct or PlanExecute execution branches.
 While Review is pending, the exact assistant Conversation Item identity is
 stored as a deferred result relation. Approval can therefore complete the same
 FinalResult after restart without inventing a second Task owner.

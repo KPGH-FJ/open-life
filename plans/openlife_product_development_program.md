@@ -76,45 +76,58 @@ and then fail closed. Controlled document, Web, selected Skill, builtin MCP,
 registered MCP, retry, cancellation, artifact-review, and failure tests remain
 green on the same Task/Run owner.
 
-## Current stage: H2 - Unified Capability Loop
+## Completed: H2 - Unified Capability Loop
+
+Work plan schema v2 now selects imported-document, workspace-file, Web Search,
+Web Fetch, selected Skill, and exact registered read-only MCP capabilities from
+the Policy-bounded set. Fixed capabilities cannot carry model targets; MCP
+selection is bound to the current manifest id and execution-contract digest,
+and all executable arguments remain runtime-derived. Every adapter executes as
+a canonical ItemAttempt with ToolGateway/provider receipt and digest-only
+Observation. One bounded evidence-driven plan revision may continue the same
+Run without widening scope, repeating completed capabilities, resetting budget,
+or hiding failed/unknown work. Release compatibility code no longer compiles
+the retired ReAct or PlanExecute execution branches. Focused capability tests
+and all repository gates passed before advancing.
+
+## Current stage: H3 - Result And Effect Loop
 
 ### In scope
 
-1. Replace keyword-selected Work tools with one model-driven, manifest-bounded
-   capability selection contract inside the structured plan/Run.
-2. Route local document, workspace file, Web search/fetch, selected Skill, and
-   registered read-only MCP through one ItemScheduler and ItemExecutor.
-3. Preserve exact task/project/resource/provider scope and ToolGateway receipts
-   for every adapter attempt; the model cannot mint a tool, permission, or
-   argument outside the manifest and PolicyDecision.
-4. Support bounded observation-driven continuation and replanning in the same
-   Run without restoring ReAct or PlanExecute as product owners.
-5. Delete the replaced keyword selectors, legacy ReAct product path,
-   strategy projection, and any release consumer that still treats them as a
-   separate execution lifecycle.
+1. Make ArtifactVersion identity, content digest, provenance, draft, Review
+   checkpoint, materialization, verification, and Undo one canonical lifecycle
+   independent of Proposal identity.
+2. Route every supported file effect through one ItemExecutor/materializer
+   contract with exact target preconditions, typed receipt, cancellation fence,
+   and effect-unknown semantics.
+3. Resume the same Task/Run after inline or Review Center decisions; approval
+   grants only the exact checkpoint and is never treated as materialization.
+4. Recover crashes at prepared, dispatched, confirmed, projection-pending, and
+   Undo boundaries without blind redispatch or a second Artifact owner.
+5. Project Changes, Preview, Verification, Needs Attention, and Undo solely from
+   canonical ArtifactVersion and ItemAttempt truth, then delete replaced
+   proposal-derived artifact identity and duplicate result projections.
 
 ### Out of scope
 
 - new connectors, Computer Use, arbitrary shell, email/calendar send, or
   scheduling expansion;
-- write/effect lifecycle expansion reserved for H3;
+- broad new file-edit semantics beyond the existing reviewed artifact effects;
 - broader Memory or LifeModel learning; and
 - migration of retired task execution/test data.
 
 ### Acceptance
 
-- Ordinary natural-language Work selects eligible capabilities without
-  requiring product-specific keywords such as `web.search` or `mcp`.
-- Every selected capability is present in the policy-bounded manifest and every
-  execution is a canonical ItemAttempt with a ToolGateway/provider receipt.
-- Document + Web, selected Skill, registered MCP, and workspace-file scenarios
-  complete or fail closed through the same adaptive loop.
-- A failed/unknown observation cannot be hidden by later successful work;
-  bounded replanning never widens scope or resets the Run budget.
-- No release Work branch enters the retired ReAct/PlanExecute/task-session
-  lifecycle, and replaced selectors and frontend/backend consumers are gone.
-- Focused capability-loop tests and full repository gates pass before H2 is
-  marked complete.
+- An Artifact has stable identity before Review and every version binds exact
+  Task/Run/Item provenance, target precondition, content digest, and status.
+- Approve, reject, cancel, retry, materialize, verify, and Undo produce truthful
+  same-lifecycle transitions; unknown physical effects never become success.
+- Restart recovery is idempotent at every effect boundary and never writes the
+  file twice or invents completion from Proposal status.
+- Backend ViewModels expose canonical Changes, Preview, Verification, attention,
+  and Undo facts without joining a retired TaskSession or AgentRun owner.
+- Focused Artifact/effect/recovery tests and full repository gates pass before
+  H3 is marked complete.
 
 ## Checks
 

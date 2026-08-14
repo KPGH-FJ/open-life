@@ -128,28 +128,31 @@ had no product caller and are retired. The remaining Proactive core is limited
 to proposal-rejection evidence compatibility; it does not own LifeModel,
 learning, or the Agent runtime.
 
-## ReAct And Tool Execution
+## Canonical Capability Execution
 
-ReAct tool selection starts in
-`src-tauri/src/main_chat_react_tool_selection.rs`. It builds governed action
-plans, candidate contracts, target allowlists, action-target allowlists, and
-metadata-safe candidate labels. Generic MCP read candidates are bounded and
-filtered to exclude high-risk, confirmation-required, write-like, disabled,
-declarative-only, or contract-unsafe manifests.
+Release Work capability selection is part of the schema-validated structured
+plan owned by `canonical_work_runtime.rs`; ReAct and PlanExecute are not product
+routes or lifecycle owners. The planner receives only Policy-authorized
+capability kinds and exact eligible registered read-only MCP manifest ids. The
+runtime rejects invented kinds, targets, permissions, manifest digests, and
+executable arguments. It binds the selected MCP target to the current manifest
+execution-contract digest before persisting the plan.
 
-Provider-ranked candidate preselection is allowed only when the route,
-credential, network, and contract checks pass. The model response must be an
-exact complete permutation in a one-field JSON object. Invalid responses are
-ignored and deterministic ordering is kept.
+`main_chat_kernel.rs` converts admitted plan steps into exact bounded adapter
+requests. Imported documents remain bound to the source Turn, workspace reads
+remain inside the resolved workspace root, Web Search/Fetch remain subject to
+network policy and citation validation, selected Skills contribute bounded
+context, and registered MCP reads pass the live manifest and permission checks.
+Actual reads execute through `ToolGateway`; every dispatch is a canonical
+ItemAttempt with a typed receipt and a digest-only Observation.
 
-`src-tauri/src/main_chat_react_runtime.rs` runs the governed AgentLoop with
-`allow_writes=false`. It blocks allowlist violations, unsupported action types,
-wrong action-target pairs, missing planned actions, and policy-denied selected
-candidates as explicit blockers instead of silently executing a fallback.
-
-`src-tauri/src/main_chat_react_execution.rs` executes accepted read actions
-through `ToolGateway` and the ActionExecutor with write access disabled. Local
-network policy can convert a web/network attempt into a structured blocker.
+One bounded observation-driven replacement plan may continue the same Run when
+all prior tool attempts succeeded but evidence validation still cannot produce
+a deliverable. It cannot repeat completed capabilities, expand registered MCP
+targets, reset the Run budget, or erase earlier receipts. Any failed, blocked,
+cancelled, or effect-unknown attempt terminates instead. The former ReAct and
+PlanExecute execution branches compile only for historical compatibility tests;
+release Chat and Work cannot enter them.
 
 The first migrated knowledge-work path also exposes production
 `document.read`. Policy grants it only for explicit attachment/bound-document

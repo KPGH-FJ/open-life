@@ -976,6 +976,7 @@ pub(crate) enum TaskSessionWrite {
     Cancel(String),
     RecordActionQueueId(String),
     RecordContextSnapshotRef(String),
+    #[cfg(test)]
     UpdatePlanSummary(Option<String>),
 }
 
@@ -1024,6 +1025,7 @@ fn apply_task_session_write(
         TaskSessionWrite::RecordContextSnapshotRef(context_snapshot_ref) => {
             store.record_context_snapshot_ref(task_session_id, &context_snapshot_ref)
         }
+        #[cfg(test)]
         TaskSessionWrite::UpdatePlanSummary(summary) => {
             store.update_plan_summary(task_session_id, summary)
         }

@@ -7,15 +7,17 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-pub const WORK_PLAN_SCHEMA_VERSION: &str = "openlife.work-plan.v1";
+pub const WORK_PLAN_SCHEMA_VERSION: &str = "openlife.work-plan.v2";
 pub const MAX_WORK_PLAN_STEPS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkPlanStepKind {
     Analyze,
-    ReadLocalDocument,
-    ResearchWeb,
+    ReadImportedDocument,
+    ReadWorkspaceFile,
+    WebSearch,
+    WebFetch,
     UseSelectedSkill,
     ReadMcp,
     DraftArtifact,
@@ -27,8 +29,10 @@ impl WorkPlanStepKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Analyze => "analyze",
-            Self::ReadLocalDocument => "read_local_document",
-            Self::ResearchWeb => "research_web",
+            Self::ReadImportedDocument => "read_imported_document",
+            Self::ReadWorkspaceFile => "read_workspace_file",
+            Self::WebSearch => "web_search",
+            Self::WebFetch => "web_fetch",
             Self::UseSelectedSkill => "use_selected_skill",
             Self::ReadMcp => "read_mcp",
             Self::DraftArtifact => "draft_artifact",
@@ -46,6 +50,17 @@ pub struct WorkPlanStep {
     pub required: bool,
     #[serde(default)]
     pub depends_on: Vec<String>,
+    /// Exact registered manifest identity for extension capabilities. Fixed
+    /// built-in capabilities are represented by their step kind and must not
+    /// carry a target. The model selects only from the bounded manifest ids
+    /// supplied by the runtime; it never supplies executable arguments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
+    /// Runtime-bound digest of the exact registered execution contract. This
+    /// is added after model output validation and prevents a later manifest
+    /// replacement from inheriting authority solely by reusing an id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_contract_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -74,6 +89,7 @@ impl StructuredWorkPlan {
     pub fn parse_and_validate(
         raw: &str,
         allowed_kinds: &HashSet<WorkPlanStepKind>,
+        allowed_mcp_target_ids: &HashSet<String>,
     ) -> Result<Self, String> {
         let trimmed = raw.trim();
         let json = trimmed
@@ -83,11 +99,15 @@ impl StructuredWorkPlan {
             .unwrap_or(trimmed);
         let plan: Self =
             serde_json::from_str(json).map_err(|_| "work_plan_json_invalid".to_string())?;
-        plan.validate(allowed_kinds)?;
+        plan.validate(allowed_kinds, allowed_mcp_target_ids)?;
         Ok(plan)
     }
 
-    pub fn validate(&self, allowed_kinds: &HashSet<WorkPlanStepKind>) -> Result<(), String> {
+    pub fn validate(
+        &self,
+        allowed_kinds: &HashSet<WorkPlanStepKind>,
+        allowed_mcp_target_ids: &HashSet<String>,
+    ) -> Result<(), String> {
         if self.schema_version != WORK_PLAN_SCHEMA_VERSION {
             return Err("work_plan_schema_version_invalid".into());
         }
@@ -104,6 +124,25 @@ impl StructuredWorkPlan {
             }
             if !allowed_kinds.contains(&step.kind) {
                 return Err("work_plan_capability_not_allowed".into());
+            }
+            match step.kind {
+                WorkPlanStepKind::ReadMcp => {
+                    let target_id = step
+                        .target_id
+                        .as_deref()
+                        .ok_or_else(|| "work_plan_mcp_target_missing".to_string())?;
+                    validate_target_id(target_id)?;
+                    if !allowed_mcp_target_ids.contains(target_id) {
+                        return Err("work_plan_mcp_target_not_allowed".into());
+                    }
+                    if let Some(digest) = step.target_contract_digest.as_deref() {
+                        validate_contract_digest(digest)?;
+                    }
+                }
+                _ if step.target_id.is_some() || step.target_contract_digest.is_some() => {
+                    return Err("work_plan_fixed_capability_target_forbidden".into())
+                }
+                _ => {}
             }
             if step.depends_on.len() > MAX_WORK_PLAN_STEPS {
                 return Err("work_plan_dependency_count_invalid".into());
@@ -163,6 +202,28 @@ fn validate_step_id(value: &str) -> Result<(), String> {
         || !bytes.all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
     {
         return Err("work_plan_step_id_invalid".into());
+    }
+    Ok(())
+}
+
+fn validate_target_id(value: &str) -> Result<(), String> {
+    if value.is_empty()
+        || value.len() > 128
+        || !value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_' | b':' | b'/')
+        })
+    {
+        return Err("work_plan_target_id_invalid".into());
+    }
+    Ok(())
+}
+
+fn validate_contract_digest(value: &str) -> Result<(), String> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err("work_plan_target_contract_digest_invalid".into());
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("work_plan_target_contract_digest_invalid".into());
     }
     Ok(())
 }
@@ -291,7 +352,7 @@ mod tests {
     fn allowed() -> HashSet<WorkPlanStepKind> {
         [
             WorkPlanStepKind::Analyze,
-            WorkPlanStepKind::ResearchWeb,
+            WorkPlanStepKind::WebSearch,
             WorkPlanStepKind::DraftArtifact,
             WorkPlanStepKind::Verify,
             WorkPlanStepKind::DeliverResult,
@@ -303,8 +364,9 @@ mod tests {
     #[test]
     fn validates_a_bounded_dependency_ordered_plan() {
         let plan = StructuredWorkPlan::parse_and_validate(
-            r#"{"schemaVersion":"openlife.work-plan.v1","steps":[{"id":"research","kind":"research_web","required":true,"dependsOn":[]},{"id":"verify","kind":"verify","required":true,"dependsOn":["research"]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["verify"]}],"completion":{"resultKind":"answer","requiresVerification":true}}"#,
+            r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"research","kind":"web_search","required":true,"dependsOn":[]},{"id":"verify","kind":"verify","required":true,"dependsOn":["research"]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["verify"]}],"completion":{"resultKind":"answer","requiresVerification":true}}"#,
             &allowed(),
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(plan.steps.len(), 3);
@@ -313,15 +375,17 @@ mod tests {
     #[test]
     fn rejects_ungranted_capability_and_forward_dependency() {
         let ungranted = StructuredWorkPlan::parse_and_validate(
-            r#"{"schemaVersion":"openlife.work-plan.v1","steps":[{"id":"read","kind":"read_local_document","required":true,"dependsOn":[]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["read"]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#,
+            r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"read","kind":"read_imported_document","required":true,"dependsOn":[]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["read"]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#,
             &allowed(),
+            &HashSet::new(),
         )
         .unwrap_err();
         assert_eq!(ungranted, "work_plan_capability_not_allowed");
 
         let forward = StructuredWorkPlan::parse_and_validate(
-            r#"{"schemaVersion":"openlife.work-plan.v1","steps":[{"id":"research","kind":"research_web","required":true,"dependsOn":["deliver"]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":[]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#,
+            r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"research","kind":"web_search","required":true,"dependsOn":["deliver"]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":[]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#,
             &allowed(),
+            &HashSet::new(),
         )
         .unwrap_err();
         assert_eq!(forward, "work_plan_dependency_order_invalid");
@@ -350,8 +414,9 @@ mod tests {
         );
 
         let plan = StructuredWorkPlan::parse_and_validate(
-            r#"{"schemaVersion":"openlife.work-plan.v1","steps":[{"id":"research","kind":"research_web","required":true,"dependsOn":[]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["research"]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#,
+            r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"research","kind":"web_search","required":true,"dependsOn":[]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["research"]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#,
             &allowed(),
+            &HashSet::new(),
         )
         .unwrap();
         assert_eq!(WorkItemScheduler::schedule(&plan).len(), 2);
@@ -363,5 +428,27 @@ mod tests {
             &plan,
             &HashSet::from(["research".to_string(), "deliver".to_string()])
         ));
+    }
+
+    #[test]
+    fn mcp_target_must_be_an_exact_allowed_manifest_identity() {
+        let allowed_kinds =
+            HashSet::from([WorkPlanStepKind::ReadMcp, WorkPlanStepKind::DeliverResult]);
+        let allowed_targets = HashSet::from(["weather.current".to_string()]);
+        let plan = StructuredWorkPlan::parse_and_validate(
+            r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"read","kind":"read_mcp","required":true,"dependsOn":[],"targetId":"weather.current"},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["read"]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#,
+            &allowed_kinds,
+            &allowed_targets,
+        )
+        .unwrap();
+        assert_eq!(plan.steps[0].target_id.as_deref(), Some("weather.current"));
+
+        let error = StructuredWorkPlan::parse_and_validate(
+            r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"read","kind":"read_mcp","required":true,"dependsOn":[],"targetId":"unregistered.tool"},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["read"]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#,
+            &allowed_kinds,
+            &allowed_targets,
+        )
+        .unwrap_err();
+        assert_eq!(error, "work_plan_mcp_target_not_allowed");
     }
 }

@@ -34,13 +34,14 @@ use openlife_core::task_runtime::{
     BeginGeneralTaskRunInput, CanonicalAttentionKind, CanonicalTaskItemStatus, CanonicalTaskStatus,
     CompleteGeneralTaskInput, DeferGeneralTaskResultInput, GeneralArtifactDraftInput,
 };
+use openlife_core::tool_manifest::ToolSource;
 use openlife_core::work_orchestration::{
     StructuredWorkPlan, WorkCompletionContract, WorkCompletionEvaluator, WorkCompletionEvidence,
     WorkItemExecutor, WorkItemScheduler, WorkPlanStepKind, WorkResultKind,
     WORK_PLAN_SCHEMA_VERSION,
 };
 use serde_json::Value;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 pub(crate) struct CanonicalWorkInput {
@@ -442,9 +443,10 @@ async fn run_canonical_work_with_resource_scope(
             "model": provider.model_id,
         }),
     );
-    let work_plan = match generate_structured_work_plan(
+    let mut work_plan = match generate_structured_work_plan(
         &client,
         &input,
+        state,
         &authorization,
         &ingress.policy_decision,
         &instruction_digest,
@@ -465,18 +467,9 @@ async fn run_canonical_work_with_resource_scope(
         }
     };
     persist_structured_work_plan(state, &input, begun_run.plan_revision, &work_plan).await?;
-    let plan_context = work_plan.canonical_json()?;
-    let mut extra_candidates = personal_context.memory.candidates;
-    extra_candidates.push(ContextSourceCandidate::new(
-        ContextSourceKind::StrategyContract,
-        format!("work-plan:{}", input.run_id),
-        plan_context,
-        "policy-bounded structured Work plan",
-        "private",
-        160,
-    ));
-    let kernel = MainChatKernel::new(client)
-        .with_context_config(MainChatKernelContextConfig {
+    let extra_candidates = personal_context.memory.candidates;
+    let kernel_context = work_plan_kernel_context(
+        MainChatKernelContextConfig {
             extra_candidates,
             life_model_context: Some(personal_context.life_model),
             authorized_memory_routing: Some(
@@ -486,14 +479,19 @@ async fn run_canonical_work_with_resource_scope(
             ),
             stream_provider_tokens: input.stream,
             ..MainChatKernelContextConfig::default()
-        })
+        },
+        &input.run_id,
+        &work_plan,
+    )?;
+    let kernel = MainChatKernel::new(client.clone())
+        .with_context_config(kernel_context.clone())
         .with_structured_work_plan(work_plan.clone());
-    let kernel_result = {
+    let mut kernel_result = {
         let future = kernel.run_canonical_work(
             MainChatTurnInput {
                 session_id: input.conversation_id.clone(),
-                messages: history,
-                provider_authorization: authorization,
+                messages: history.clone(),
+                provider_authorization: authorization.clone(),
                 selected_skill_id: input.selected_skill_id.clone(),
                 policy_decision: ingress.policy_decision.clone(),
                 model_supplied_tool_arguments: None,
@@ -514,6 +512,79 @@ async fn run_canonical_work_with_resource_scope(
             }
         }
     };
+    let mut prior_replan_tool_calls = Vec::new();
+    if should_attempt_observation_replan(&kernel_result) {
+        let revised_plan = match generate_revised_work_plan(
+            &client,
+            &input,
+            state,
+            &authorization,
+            &ingress.policy_decision,
+            &instruction_digest,
+            &work_plan,
+            &kernel_result,
+            &mut sink,
+        )
+        .await
+        {
+            Ok(plan) => plan,
+            Err(error) => {
+                terminalize_failure(
+                    state,
+                    &input,
+                    CanonicalTaskStatus::Blocked,
+                    CanonicalTaskItemStatus::Blocked,
+                    &error,
+                )
+                .await?;
+                return Err(error);
+            }
+        };
+        if let Some(revised_plan) = revised_plan {
+            if let Err(error) = persist_revised_work_plan(state, &input, &revised_plan).await {
+                terminalize_failure(
+                    state,
+                    &input,
+                    CanonicalTaskStatus::Failed,
+                    CanonicalTaskItemStatus::Failed,
+                    &error,
+                )
+                .await?;
+                return Err(error);
+            }
+            prior_replan_tool_calls = std::mem::take(&mut kernel_result.tool_calls);
+            work_plan = revised_plan;
+            let revised_kernel_context =
+                work_plan_kernel_context(kernel_context.clone(), &input.run_id, &work_plan)?;
+            let revised_kernel = MainChatKernel::new(client.clone())
+                .with_context_config(revised_kernel_context)
+                .with_structured_work_plan(work_plan.clone());
+            let future = revised_kernel.run_canonical_work(
+                MainChatTurnInput {
+                    session_id: input.conversation_id.clone(),
+                    messages: history,
+                    provider_authorization: authorization,
+                    selected_skill_id: input.selected_skill_id.clone(),
+                    policy_decision: ingress.policy_decision.clone(),
+                    model_supplied_tool_arguments: None,
+                    runtime_fact_direct_answer: false,
+                },
+                &input.run_id,
+                Arc::clone(state),
+                execution_epoch.clone(),
+                &mut sink,
+            );
+            tokio::pin!(future);
+            kernel_result = tokio::select! {
+                result = &mut future => result,
+                _ = cancellation.token.cancelled() => {
+                    terminalize_failure(state, &input, CanonicalTaskStatus::Cancelled,
+                        CanonicalTaskItemStatus::Cancelled, "work_cancelled").await?;
+                    return Err("canonical_work_cancelled".into());
+                }
+            };
+        }
+    }
     let personal_suggestion =
         match crate::personal_intelligence_ports::apply_authorized_personal_intelligence_suggestion(
             state,
@@ -613,6 +684,10 @@ async fn run_canonical_work_with_resource_scope(
         )
         .await?;
         return Err(code);
+    }
+    if !prior_replan_tool_calls.is_empty() {
+        prior_replan_tool_calls.append(&mut kernel_result.tool_calls);
+        kernel_result.tool_calls = prior_replan_tool_calls;
     }
     if let Some(write_outcome) = kernel_result
         .write_outcome
@@ -748,6 +823,26 @@ async fn run_canonical_work_with_resource_scope(
     ))
 }
 
+fn work_plan_kernel_context(
+    mut context: MainChatKernelContextConfig,
+    run_id: &str,
+    plan: &StructuredWorkPlan,
+) -> Result<MainChatKernelContextConfig, String> {
+    let source_id = format!("work-plan:{run_id}");
+    context
+        .extra_candidates
+        .retain(|candidate| candidate.source_id != source_id);
+    context.extra_candidates.push(ContextSourceCandidate::new(
+        ContextSourceKind::StrategyContract,
+        source_id,
+        plan.canonical_json()?,
+        "policy-bounded structured Work plan",
+        "private",
+        160,
+    ));
+    Ok(context)
+}
+
 async fn stage_canonical_work_artifacts_for_review(
     state: &Arc<AppState>,
     input: &CanonicalWorkInput,
@@ -870,13 +965,17 @@ fn allowed_work_plan_kinds(
     if policy.allows(AllowedCapability::ProviderGeneration) {
         allowed.insert(WorkPlanStepKind::Analyze);
     }
-    if policy.allows(AllowedCapability::ImportedResourceRead)
-        || policy.allows(AllowedCapability::WorkspaceFileRead)
-    {
-        allowed.insert(WorkPlanStepKind::ReadLocalDocument);
+    if policy.allows(AllowedCapability::ImportedResourceRead) {
+        allowed.insert(WorkPlanStepKind::ReadImportedDocument);
     }
-    if policy.allows(AllowedCapability::WebSearch) || policy.allows(AllowedCapability::WebFetch) {
-        allowed.insert(WorkPlanStepKind::ResearchWeb);
+    if policy.allows(AllowedCapability::WorkspaceFileRead) {
+        allowed.insert(WorkPlanStepKind::ReadWorkspaceFile);
+    }
+    if policy.allows(AllowedCapability::WebSearch) {
+        allowed.insert(WorkPlanStepKind::WebSearch);
+    }
+    if policy.allows(AllowedCapability::WebFetch) {
+        allowed.insert(WorkPlanStepKind::WebFetch);
     }
     if policy.allows(AllowedCapability::McpReadOnly) {
         allowed.insert(WorkPlanStepKind::ReadMcp);
@@ -890,47 +989,53 @@ fn allowed_work_plan_kinds(
     allowed
 }
 
+async fn allowed_work_mcp_targets(
+    state: &Arc<AppState>,
+    policy: &PolicyDecision,
+) -> HashMap<String, String> {
+    if !policy.allows(AllowedCapability::McpReadOnly) {
+        return HashMap::new();
+    }
+    state
+        .mcp_registry
+        .lock()
+        .await
+        .list_manifests()
+        .into_iter()
+        .filter(|manifest| matches!(manifest.source, ToolSource::Mcp { .. }))
+        .filter(
+            crate::main_chat_react_tool_selection::main_chat_manifest_is_governed_read_candidate,
+        )
+        .map(|manifest| {
+            let digest = manifest.execution_contract_digest();
+            (manifest.id, digest)
+        })
+        .collect()
+}
+
 fn deterministic_policy_plan(
     allowed: &HashSet<WorkPlanStepKind>,
-    user_text: &str,
+    allowed_mcp_targets: &HashMap<String, String>,
 ) -> StructuredWorkPlan {
-    let lower = user_text.to_ascii_lowercase();
-    let explicit_mcp = lower.contains("mcp");
-    let explicit_web = lower.contains("web")
-        || lower.contains("http://")
-        || lower.contains("https://")
-        || lower.contains("搜索")
-        || lower.contains("最新")
-        || lower.contains("实时");
-    let read_kind_count = [
-        WorkPlanStepKind::ReadLocalDocument,
-        WorkPlanStepKind::ResearchWeb,
-        WorkPlanStepKind::ReadMcp,
-    ]
-    .into_iter()
-    .filter(|kind| allowed.contains(kind))
-    .count();
     let mut steps = Vec::new();
+    let prefer_exact_mcp =
+        allowed.contains(&WorkPlanStepKind::ReadMcp) && !allowed_mcp_targets.is_empty();
+    let prefer_exact_fetch = allowed.contains(&WorkPlanStepKind::WebFetch);
+    let prefer_bound_import = allowed.contains(&WorkPlanStepKind::ReadImportedDocument);
     for (id, kind) in [
-        ("read_document", WorkPlanStepKind::ReadLocalDocument),
-        ("research", WorkPlanStepKind::ResearchWeb),
+        (
+            "read_imported_document",
+            WorkPlanStepKind::ReadImportedDocument,
+        ),
+        ("read_workspace_file", WorkPlanStepKind::ReadWorkspaceFile),
+        ("web_search", WorkPlanStepKind::WebSearch),
+        ("web_fetch", WorkPlanStepKind::WebFetch),
         ("use_skill", WorkPlanStepKind::UseSelectedSkill),
-        ("read_mcp", WorkPlanStepKind::ReadMcp),
         ("draft", WorkPlanStepKind::DraftArtifact),
     ] {
-        let selected = match kind {
-            // Imported resources are already bound to this exact Work Turn;
-            // when Policy authorized that lane they remain required evidence
-            // even when the same task also requests Web or MCP reads.
-            WorkPlanStepKind::ReadLocalDocument => allowed.contains(&kind),
-            WorkPlanStepKind::ResearchWeb => {
-                allowed.contains(&kind) && (explicit_web || read_kind_count == 1)
-            }
-            WorkPlanStepKind::ReadMcp => {
-                allowed.contains(&kind) && (explicit_mcp || read_kind_count == 1)
-            }
-            _ => allowed.contains(&kind),
-        };
+        let selected = allowed.contains(&kind)
+            && !(kind == WorkPlanStepKind::WebSearch && (prefer_exact_mcp || prefer_exact_fetch))
+            && !(kind == WorkPlanStepKind::ReadWorkspaceFile && prefer_bound_import);
         if selected {
             steps.push(openlife_core::work_orchestration::WorkPlanStep {
                 id: id.into(),
@@ -941,14 +1046,37 @@ fn deterministic_policy_plan(
                     .map(|step: &openlife_core::work_orchestration::WorkPlanStep| step.id.clone())
                     .into_iter()
                     .collect(),
+                target_id: None,
+                target_contract_digest: None,
+            });
+        }
+    }
+    if allowed.contains(&WorkPlanStepKind::ReadMcp) {
+        if let Some((target_id, contract_digest)) = allowed_mcp_targets
+            .iter()
+            .min_by(|left, right| left.0.cmp(right.0))
+        {
+            steps.push(openlife_core::work_orchestration::WorkPlanStep {
+                id: "read_mcp".into(),
+                kind: WorkPlanStepKind::ReadMcp,
+                required: true,
+                depends_on: steps
+                    .last()
+                    .map(|step| step.id.clone())
+                    .into_iter()
+                    .collect(),
+                target_id: Some(target_id.clone()),
+                target_contract_digest: Some(contract_digest.clone()),
             });
         }
     }
     let requires_verification = steps.iter().any(|step| {
         matches!(
             step.kind,
-            WorkPlanStepKind::ReadLocalDocument
-                | WorkPlanStepKind::ResearchWeb
+            WorkPlanStepKind::ReadImportedDocument
+                | WorkPlanStepKind::ReadWorkspaceFile
+                | WorkPlanStepKind::WebSearch
+                | WorkPlanStepKind::WebFetch
                 | WorkPlanStepKind::ReadMcp
                 | WorkPlanStepKind::DraftArtifact
         )
@@ -963,6 +1091,8 @@ fn deterministic_policy_plan(
                 .map(|step| step.id.clone())
                 .into_iter()
                 .collect(),
+            target_id: None,
+            target_contract_digest: None,
         });
     }
     steps.push(openlife_core::work_orchestration::WorkPlanStep {
@@ -974,6 +1104,8 @@ fn deterministic_policy_plan(
             .map(|step| step.id.clone())
             .into_iter()
             .collect(),
+        target_id: None,
+        target_contract_digest: None,
     });
     StructuredWorkPlan {
         schema_version: WORK_PLAN_SCHEMA_VERSION.into(),
@@ -990,25 +1122,35 @@ fn deterministic_policy_plan(
 }
 
 #[cfg(not(test))]
-fn work_plan_system_prompt(allowed: &HashSet<WorkPlanStepKind>) -> String {
+fn work_plan_system_prompt(
+    allowed: &HashSet<WorkPlanStepKind>,
+    allowed_mcp_target_ids: &HashSet<String>,
+) -> String {
     let mut kinds = allowed.iter().map(|kind| kind.as_str()).collect::<Vec<_>>();
     kinds.sort_unstable();
+    let mut mcp_targets = allowed_mcp_target_ids.iter().cloned().collect::<Vec<_>>();
+    mcp_targets.sort_unstable();
     format!(
-        "You are the planning phase of OpenLife Work. Return exactly one JSON object and no prose. Never include user text, filenames, URLs, secrets, or inferred permissions in the plan. Use schemaVersion '{WORK_PLAN_SCHEMA_VERSION}'. steps must contain 1-{max} dependency-ordered objects with exactly id, kind, required, dependsOn. Allowed kind values for this policy decision are: {kinds}. The final step must be one required deliver_result. Add a required verify step when completion.requiresVerification is true. completion has exactly resultKind ('answer' or 'artifact') and requiresVerification (boolean). Use artifact only when draft_artifact is allowed and required. Prefer the smallest plan that can produce the requested outcome.",
+        "You are the planning phase of OpenLife Work. Return exactly one JSON object and no prose. Never include user text, filenames, URLs, secrets, tool arguments, or inferred permissions in the plan. Use schemaVersion '{WORK_PLAN_SCHEMA_VERSION}'. steps must contain 1-{max} dependency-ordered objects with exactly id, kind, required, dependsOn, plus targetId only for read_mcp. Allowed kind values for this policy decision are: {kinds}. Allowed read_mcp targetId values are: {mcp_targets}. Fixed built-in kinds must omit targetId. The final step must be one required deliver_result. Add a required verify step when completion.requiresVerification is true. completion has exactly resultKind ('answer' or 'artifact') and requiresVerification (boolean). Use artifact only when draft_artifact is allowed and required. Prefer the smallest plan that can produce the requested outcome.",
         max = openlife_core::work_orchestration::MAX_WORK_PLAN_STEPS,
-        kinds = kinds.join(", ")
+        kinds = kinds.join(", "),
+        mcp_targets = if mcp_targets.is_empty() { "none".into() } else { mcp_targets.join(", ") },
     )
 }
 
 async fn generate_structured_work_plan(
     client: &SchedulerMainChatModelClient,
     input: &CanonicalWorkInput,
+    state: &Arc<AppState>,
     authorization: &MainChatProviderAuthorization,
     policy: &PolicyDecision,
     instruction_digest: &str,
     sink: &mut CanonicalChatEventSink<'_>,
 ) -> Result<StructuredWorkPlan, String> {
     let allowed = allowed_work_plan_kinds(policy, input.selected_skill_id.as_deref());
+    let allowed_mcp_targets = allowed_work_mcp_targets(state, policy).await;
+    let allowed_mcp_target_ids = allowed_mcp_targets.keys().cloned().collect::<HashSet<_>>();
+    #[cfg(not(test))]
     let current_user = input
         .messages
         .last()
@@ -1016,20 +1158,20 @@ async fn generate_structured_work_plan(
         .cloned()
         .ok_or_else(|| "work_plan_current_user_missing".to_string())?;
     if !policy.allows(AllowedCapability::ProviderGeneration) {
-        let plan = deterministic_policy_plan(&allowed, &current_user.content);
-        plan.validate(&allowed)?;
+        let plan = deterministic_policy_plan(&allowed, &allowed_mcp_targets);
+        plan.validate(&allowed, &allowed_mcp_target_ids)?;
         return Ok(plan);
     }
     #[cfg(test)]
     {
         let _ = (client, authorization, instruction_digest, sink);
-        let plan = deterministic_policy_plan(&allowed, &current_user.content);
-        plan.validate(&allowed)?;
+        let plan = deterministic_policy_plan(&allowed, &allowed_mcp_targets);
+        plan.validate(&allowed, &allowed_mcp_target_ids)?;
         return Ok(plan);
     }
     #[cfg(not(test))]
     {
-        let base_prompt = work_plan_system_prompt(&allowed);
+        let base_prompt = work_plan_system_prompt(&allowed, &allowed_mcp_target_ids);
         let mut last_error = "work_plan_generation_failed".to_string();
         for attempt in 0..2 {
             sink.work_provider_lifecycle
@@ -1079,8 +1221,19 @@ async fn generate_structured_work_plan(
                 .clear_unobserved_plan_invocation();
             match result {
                 Ok(generation) => {
-                    match StructuredWorkPlan::parse_and_validate(&generation.content, &allowed) {
-                        Ok(plan) => return Ok(plan),
+                    match StructuredWorkPlan::parse_and_validate(
+                        &generation.content,
+                        &allowed,
+                        &allowed_mcp_target_ids,
+                    ) {
+                        Ok(plan) => match bind_work_plan_manifest_contracts(
+                            plan,
+                            &allowed,
+                            &allowed_mcp_targets,
+                        ) {
+                            Ok(plan) => return Ok(plan),
+                            Err(error) => last_error = error,
+                        },
                         Err(error) => last_error = error,
                     }
                 }
@@ -1092,6 +1245,238 @@ async fn generate_structured_work_plan(
             }
         }
         Err(last_error)
+    }
+}
+
+#[cfg(not(test))]
+fn bind_work_plan_manifest_contracts(
+    mut plan: StructuredWorkPlan,
+    allowed: &HashSet<WorkPlanStepKind>,
+    allowed_mcp_targets: &HashMap<String, String>,
+) -> Result<StructuredWorkPlan, String> {
+    if plan
+        .steps
+        .iter()
+        .any(|step| step.target_contract_digest.is_some())
+    {
+        return Err("work_plan_model_minted_manifest_digest".into());
+    }
+    for step in &mut plan.steps {
+        if let Some(target_id) = step.target_id.as_deref() {
+            step.target_contract_digest = allowed_mcp_targets.get(target_id).cloned();
+        }
+    }
+    let allowed_ids = allowed_mcp_targets.keys().cloned().collect::<HashSet<_>>();
+    plan.validate(allowed, &allowed_ids)?;
+    Ok(plan)
+}
+
+fn should_attempt_observation_replan(result: &crate::main_chat_kernel::MainChatTurnResult) -> bool {
+    observation_replan_is_admissible(
+        &result
+            .tool_calls
+            .iter()
+            .map(|call| call.status.as_str())
+            .collect::<Vec<_>>(),
+        result.assistant_message.is_some(),
+        &result.blockers,
+    )
+}
+
+fn observation_replan_is_admissible(
+    tool_statuses: &[&str],
+    assistant_message_present: bool,
+    blockers: &[String],
+) -> bool {
+    !tool_statuses.is_empty()
+        && tool_statuses.iter().all(|status| *status == "succeeded")
+        && !assistant_message_present
+        && !blockers.is_empty()
+        && blockers.iter().all(|code| {
+            matches!(
+                code.as_str(),
+                "web_search_observation_invalid"
+                    | "web_citation_contract_invalid"
+                    | "context_evidence_citation_missing"
+                    | "context_evidence_citation_not_allowed"
+            )
+        })
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "replan keeps policy, scope, prior plan, observations, and provider lifecycle explicit"
+)]
+async fn generate_revised_work_plan(
+    client: &SchedulerMainChatModelClient,
+    input: &CanonicalWorkInput,
+    state: &Arc<AppState>,
+    authorization: &MainChatProviderAuthorization,
+    policy: &PolicyDecision,
+    instruction_digest: &str,
+    prior_plan: &StructuredWorkPlan,
+    result: &crate::main_chat_kernel::MainChatTurnResult,
+    sink: &mut CanonicalChatEventSink<'_>,
+) -> Result<Option<StructuredWorkPlan>, String> {
+    #[cfg(test)]
+    {
+        let _ = (
+            client,
+            input,
+            state,
+            authorization,
+            policy,
+            instruction_digest,
+            prior_plan,
+            result,
+            sink,
+        );
+        Ok(None)
+    }
+    #[cfg(not(test))]
+    {
+        let allowed = allowed_work_plan_kinds(policy, input.selected_skill_id.as_deref());
+        let mut allowed_mcp_targets = allowed_work_mcp_targets(state, policy).await;
+        let prior_mcp_targets = prior_plan
+            .steps
+            .iter()
+            .filter_map(|step| {
+                Some((
+                    step.target_id.as_ref()?.clone(),
+                    step.target_contract_digest.as_ref()?.clone(),
+                ))
+            })
+            .collect::<HashMap<_, _>>();
+        allowed_mcp_targets
+            .retain(|target_id, digest| prior_mcp_targets.get(target_id) == Some(digest));
+        let allowed_ids = allowed_mcp_targets.keys().cloned().collect::<HashSet<_>>();
+        let observation_summary = result
+            .tool_calls
+            .iter()
+            .map(|call| {
+                serde_json::json!({
+                    "capability": call.name,
+                    "target": call.target,
+                    "status": call.status,
+                    "blockerCode": call.blocker,
+                    "receiptTransport": call.execution_receipt.as_ref()
+                        .map(|receipt| receipt.transport_status.as_str()),
+                })
+            })
+            .collect::<Vec<_>>();
+        let system_prompt = format!(
+            "{}\n\nThis is the one allowed observation-driven replan for the same Run. The prior plan was {}. Metadata-safe observation outcomes were {}. Return a complete replacement plan within exactly the same allowed capability and target lists. Prefer an alternative eligible evidence path and do not repeat an unchanged plan. Successful prior attempts remain durable and budgets do not reset.",
+            work_plan_system_prompt(&allowed, &allowed_ids),
+            prior_plan.canonical_json()?,
+            serde_json::to_string(&observation_summary)
+                .map_err(|_| "work_replan_observation_summary_invalid".to_string())?,
+        );
+        sink.work_provider_lifecycle
+            .as_mut()
+            .ok_or_else(|| "canonical_work_provider_lifecycle_missing".to_string())?
+            .prepare_plan_invocation()?;
+        let current_user = input
+            .messages
+            .last()
+            .filter(|message| message.role == "user")
+            .cloned()
+            .ok_or_else(|| "work_replan_current_user_missing".to_string())?;
+        let request = MainChatModelRequest {
+            session_id: input.conversation_id.clone(),
+            messages: vec![current_user],
+            provider_authorization: authorization.clone(),
+            system_prompt,
+            supplemental_context_blocks: Vec::new(),
+            context_snapshot_ref: instruction_digest.to_string(),
+            selected_context_refs: Vec::new(),
+            raw_life_model_included: false,
+            raw_unbounded_memory_included: false,
+            selected_skill_id: input.selected_skill_id.clone(),
+            payload_purpose: ProviderPayloadPurpose::MainChatWorkPlan,
+            stream_provider_tokens: false,
+            additional_resource_context_allowed: false,
+            required_resource_selection_digest: None,
+        };
+        let progress_session_id = input.conversation_id.clone();
+        let generation = {
+            let mut emit_progress =
+                |progress| emit_main_chat_model_progress(progress, &progress_session_id, sink);
+            client
+                .generate_direct_answer(request, &mut emit_progress)
+                .await
+        };
+        if let Some(receipt) = match &generation {
+            Ok(generation) => generation.provider_receipt.as_ref(),
+            Err(failure) => failure.provider_receipt.as_ref(),
+        } {
+            emit_provider_receipt(receipt, sink)?;
+        }
+        sink.work_provider_lifecycle
+            .as_mut()
+            .ok_or_else(|| "canonical_work_provider_lifecycle_missing".to_string())?
+            .clear_unobserved_plan_invocation();
+        let generation = generation.map_err(|failure| {
+            failure
+                .blocker_code
+                .unwrap_or_else(|| "work_replan_provider_failed".into())
+        })?;
+        let parsed =
+            StructuredWorkPlan::parse_and_validate(&generation.content, &allowed, &allowed_ids)?;
+        let revised = bind_work_plan_manifest_contracts(parsed, &allowed, &allowed_mcp_targets)?;
+        if revised == *prior_plan {
+            return Err("work_replan_unchanged".into());
+        }
+        let prior_capabilities = result
+            .tool_calls
+            .iter()
+            .filter(|call| call.status == "succeeded")
+            .filter_map(work_tool_call_execution_identity)
+            .collect::<HashSet<_>>();
+        if revised
+            .steps
+            .iter()
+            .filter_map(work_plan_execution_identity)
+            .any(|identity| prior_capabilities.contains(&identity))
+        {
+            return Err("work_replan_repeats_completed_capability".into());
+        }
+        Ok(Some(revised))
+    }
+}
+
+#[cfg(not(test))]
+fn work_tool_call_execution_identity(
+    call: &crate::main_chat_kernel::MainChatKernelToolCall,
+) -> Option<String> {
+    match call.name.as_str() {
+        "document.read" => Some(WorkPlanStepKind::ReadImportedDocument.as_str().to_string()),
+        "file.read" => Some(WorkPlanStepKind::ReadWorkspaceFile.as_str().to_string()),
+        "web.search" => Some(WorkPlanStepKind::WebSearch.as_str().to_string()),
+        "web.fetch" => Some(WorkPlanStepKind::WebFetch.as_str().to_string()),
+        "mcp.read_only" if !call.target.trim().is_empty() => {
+            Some(format!("read_mcp:{}", call.target))
+        }
+        _ => None,
+    }
+}
+
+fn work_plan_execution_identity(
+    step: &openlife_core::work_orchestration::WorkPlanStep,
+) -> Option<String> {
+    match step.kind {
+        WorkPlanStepKind::ReadImportedDocument
+        | WorkPlanStepKind::ReadWorkspaceFile
+        | WorkPlanStepKind::WebSearch
+        | WorkPlanStepKind::WebFetch => Some(step.kind.as_str().to_string()),
+        WorkPlanStepKind::ReadMcp => step
+            .target_id
+            .as_ref()
+            .map(|target| format!("read_mcp:{target}")),
+        WorkPlanStepKind::Analyze
+        | WorkPlanStepKind::UseSelectedSkill
+        | WorkPlanStepKind::DraftArtifact
+        | WorkPlanStepKind::Verify
+        | WorkPlanStepKind::DeliverResult => None,
     }
 }
 
@@ -1149,6 +1534,55 @@ async fn persist_structured_work_plan(
     Ok(())
 }
 
+async fn persist_revised_work_plan(
+    state: &Arc<AppState>,
+    input: &CanonicalWorkInput,
+    plan: &StructuredWorkPlan,
+) -> Result<(), String> {
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let current = store
+        .lock()
+        .await
+        .load_work_plan(&input.run_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_work_replan_current_plan_missing".to_string())?;
+    let revised = store
+        .lock()
+        .await
+        .revise_work_plan(&input.task_id, &input.run_id, current.plan_revision, plan)
+        .map_err(|error| error.to_string())?;
+    for step in &plan.steps {
+        let usage = store
+            .lock()
+            .await
+            .work_run_budget_usage(&input.run_id)
+            .map_err(|error| error.to_string())?;
+        revised.budget_policy.admit_item(usage)?;
+        let payload_digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+            &serde_json::to_value(step).map_err(|_| "work_plan_step_serialization_failed")?,
+        )
+        .1;
+        store
+            .lock()
+            .await
+            .append_completed_plan_item(
+                &input.task_id,
+                &input.run_id,
+                &format!(
+                    "item:plan-step:{}:r{}:{}",
+                    input.run_id, revised.plan_revision, step.id
+                ),
+                &format!("work_plan_step_declared:{}", step.kind.as_str()),
+                &payload_digest,
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn evaluate_work_plan_execution(
     plan: &StructuredWorkPlan,
     result: &crate::main_chat_kernel::MainChatTurnResult,
@@ -1159,6 +1593,12 @@ fn evaluate_work_plan_execution(
             .tool_calls
             .iter()
             .any(|call| names.contains(&call.name.as_str()) && call.status.as_str() == "succeeded")
+    };
+    let tool_target_succeeded = |target: &str| {
+        result
+            .tool_calls
+            .iter()
+            .any(|call| call.target == target && call.status.as_str() == "succeeded")
     };
     let deliverable_present = result
         .assistant_message
@@ -1179,13 +1619,17 @@ fn evaluate_work_plan_execution(
         .into_iter()
         .filter(|step| match step.kind {
             WorkPlanStepKind::Analyze => provider_state == ProviderInvocationState::Completed,
-            WorkPlanStepKind::ReadLocalDocument => tool_succeeded(&["document.read", "file.read"]),
-            WorkPlanStepKind::ResearchWeb => tool_succeeded(&["web.search", "web.fetch"]),
+            WorkPlanStepKind::ReadImportedDocument => tool_succeeded(&["document.read"]),
+            WorkPlanStepKind::ReadWorkspaceFile => tool_succeeded(&["file.read"]),
+            WorkPlanStepKind::WebSearch => tool_succeeded(&["web.search"]),
+            WorkPlanStepKind::WebFetch => tool_succeeded(&["web.fetch"]),
             WorkPlanStepKind::UseSelectedSkill => result
                 .context_metadata
                 .as_ref()
                 .is_some_and(|metadata| metadata.selected_skill_instruction_loaded),
-            WorkPlanStepKind::ReadMcp => tool_succeeded(&["mcp.read_only"]),
+            WorkPlanStepKind::ReadMcp => {
+                step.target_id.as_deref().is_some_and(tool_target_succeeded)
+            }
             WorkPlanStepKind::DraftArtifact => result.write_outcome.is_some(),
             WorkPlanStepKind::Verify => verification_complete,
             WorkPlanStepKind::DeliverResult => deliverable_present,
@@ -1727,13 +2171,19 @@ mod tests {
         assert_eq!(waiting.runs.len(), 1);
         assert_eq!(waiting.runs[0].status, CanonicalTaskStatus::WaitingReview);
         assert_eq!(waiting.artifacts.len(), 1);
+        let tool_items = waiting
+            .items
+            .iter()
+            .filter(|item| item.kind == CanonicalTaskItemKind::ToolCall)
+            .collect::<Vec<_>>();
         assert_eq!(
-            waiting
-                .items
+            tool_items.len(),
+            2,
+            "unexpected Work tools: {:?}",
+            tool_items
                 .iter()
-                .filter(|item| item.kind == CanonicalTaskItemKind::ToolCall)
-                .count(),
-            2
+                .map(|item| item.summary_code.as_str())
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             waiting
@@ -2314,7 +2764,7 @@ mod tests {
             .unwrap();
         let mut request = input(&conversation_id);
         request.messages[0].content =
-            "读取附件并使用 web.search 查询公开网页，生成一份带引用的 Markdown 报告 combined.md，等待我确认后保存。"
+            "读取附件并检索今天公开网页中的相关信息，生成一份带引用的 Markdown 报告 combined.md，等待我确认后保存。"
                 .into();
         crate::main_chat_command_surface_tests::import_frozen_resources_to_command_surface_state(
             &state,
@@ -2343,13 +2793,19 @@ mod tests {
             .unwrap();
         assert_eq!(waiting.task.status, CanonicalTaskStatus::WaitingReview);
         assert_eq!(waiting.artifacts.len(), 1);
+        let combined_tool_items = waiting
+            .items
+            .iter()
+            .filter(|item| item.kind == CanonicalTaskItemKind::ToolCall)
+            .collect::<Vec<_>>();
         assert_eq!(
-            waiting
-                .items
+            combined_tool_items.len(),
+            2,
+            "unexpected combined Work tools: {:?}",
+            combined_tool_items
                 .iter()
-                .filter(|item| item.kind == CanonicalTaskItemKind::ToolCall)
-                .count(),
-            2
+                .map(|item| item.summary_code.as_str())
+                .collect::<Vec<_>>()
         );
         assert_eq!(
             waiting
@@ -2801,6 +3257,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_file_read_uses_the_same_canonical_tool_attempt_and_receipt() {
+        let state = canonical_state("Workspace evidence summarized.").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "H2 workspace file")
+            .unwrap();
+        let mut request = input(&conversation_id);
+        request.messages[0].content = "Read README.md and summarize it.".into();
+        let task_id = request.task_id.clone();
+
+        let output = run_canonical_work(request, &state, &mut |_, _| {})
+            .await
+            .unwrap();
+
+        assert!(output.result.tool_invoked);
+        assert_eq!(output.result.tool_calls.len(), 1);
+        assert_eq!(output.result.tool_calls[0].name, "file.read");
+        assert_eq!(
+            output.result.tool_calls[0].status,
+            crate::ToolCallStatus::Success
+        );
+        assert!(output.result.tool_calls[0].execution_receipt.is_some());
+        let snapshot = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.task.status, CanonicalTaskStatus::Completed);
+        assert!(snapshot.items.iter().any(|item| {
+            item.kind == CanonicalTaskItemKind::ToolCall
+                && item.summary_code == "work_tool_call:file.read"
+                && item.status == CanonicalTaskItemStatus::Completed
+        }));
+        assert_eq!(snapshot.attempts.len(), 1);
+        assert_eq!(snapshot.attempts[0].executor_kind, "tool");
+        assert_eq!(
+            snapshot.attempts[0].status,
+            CanonicalTaskItemStatus::Completed
+        );
+    }
+
+    #[tokio::test]
     async fn task_bound_document_read_uses_exact_turn_and_canonical_tool_lifecycle() {
         let state = crate::main_chat_command_surface_tests::isolated_command_surface_state_with_resource_runtime();
         let provider_requests = crate::main_chat_acceptance_test_support::configure_live_resource_eval_state_with_all_citations_local_http_provider(&state).await;
@@ -2965,61 +3472,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn governed_mcp_read_uses_same_canonical_tool_gateway_contract() {
-        let state = canonical_state("MCP evidence reviewed.").await;
-        state
-            .tool_permission_store
-            .lock()
-            .await
-            .grant(
-                "builtin_echo",
-                "builtin",
-                "low",
-                "read",
-                openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
-                None,
-            )
-            .unwrap();
-        let conversation_id = uuid::Uuid::new_v4().to_string();
-        state
-            .conversation_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .create_conversation(&conversation_id, "R3 MCP")
-            .unwrap();
-        let mut request = input(&conversation_id);
-        request.messages[0].content = "Use mcp builtin_echo read-only now.".into();
-        let task_id = request.task_id.clone();
-        let output = run_canonical_work(request, &state, &mut |_, _| {})
-            .await
-            .unwrap();
-        assert!(output.result.tool_invoked);
-        assert_eq!(output.result.tool_calls[0].name, "mcp.read_only");
-        let snapshot = state
-            .canonical_task_runtime_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .load_task_snapshot(&task_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(snapshot.attempts.len(), 1);
-        assert!(snapshot.items.iter().any(|item| {
-            item.kind == CanonicalTaskItemKind::ToolCall
-                && item.summary_code == "work_tool_call:mcp.read_only"
-                && item.status == CanonicalTaskItemStatus::Completed
-        }));
-        assert!(snapshot.items.iter().any(|item| {
-            item.kind == CanonicalTaskItemKind::Observation
-                && item.summary_code == "work_tool_observation:mcp.read_only"
-                && item.status == CanonicalTaskItemStatus::Completed
-        }));
-    }
-
-    #[tokio::test]
     async fn registered_stdio_mcp_read_uses_canonical_attempt_and_receipt() {
         use openlife_core::tool_manifest::{ToolIdempotencyContract, ToolManifest, ToolSource};
         use std::collections::HashMap;
@@ -3095,7 +3547,8 @@ for line in sys.stdin:
             .create_conversation(&conversation_id, "R3 registered MCP")
             .unwrap();
         let mut request = input(&conversation_id);
-        request.messages[0].content = "Use mcp lookup_notes read-only now.".into();
+        request.messages[0].content =
+            "Use the registered lookup_notes integration to read my bounded notes.".into();
         let task_id = request.task_id.clone();
 
         let output = run_canonical_work(request, &state, &mut |_, _| {})
@@ -3120,6 +3573,21 @@ for line in sys.stdin:
             snapshot.attempts[0].status,
             CanonicalTaskItemStatus::Completed
         );
+        let persisted_plan = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_work_plan(&snapshot.runs[0].run_id)
+            .unwrap()
+            .unwrap();
+        assert!(persisted_plan.plan.steps.iter().any(|step| {
+            step.kind == WorkPlanStepKind::ReadMcp
+                && step.target_id.as_deref() == Some(manifest.id.as_str())
+                && step.target_contract_digest.as_deref()
+                    == Some(manifest.execution_contract_digest().as_str())
+        }));
         assert!(snapshot.items.iter().any(|item| {
             item.kind == CanonicalTaskItemKind::Observation
                 && item.summary_code == "work_tool_observation:mcp.read_only"
@@ -3511,5 +3979,95 @@ for line in sys.stdin:
         assert_eq!(failed.0, CanonicalTaskStatus::Failed);
         assert_eq!(failed.1, CanonicalTaskItemStatus::Failed);
         assert!(provider_non_success_terminal(ProviderInvocationState::Completed).is_none());
+    }
+
+    #[test]
+    fn observation_replan_requires_successful_receipts_and_a_recoverable_evidence_blocker() {
+        let recoverable = vec!["web_citation_contract_invalid".to_string()];
+        assert!(observation_replan_is_admissible(
+            &["succeeded"],
+            false,
+            &recoverable,
+        ));
+        for terminal_status in ["failed", "blocked", "effect_unknown", "cancelled"] {
+            assert!(
+                !observation_replan_is_admissible(&[terminal_status], false, &recoverable),
+                "{terminal_status} attempts must remain visible and terminal"
+            );
+        }
+        assert!(!observation_replan_is_admissible(
+            &["succeeded"],
+            true,
+            &recoverable,
+        ));
+        assert!(!observation_replan_is_admissible(
+            &["succeeded"],
+            false,
+            &["tool_execution_failed".to_string()],
+        ));
+    }
+
+    #[test]
+    fn observation_replan_cannot_repeat_a_completed_execution_capability() {
+        let web_search = openlife_core::work_orchestration::WorkPlanStep {
+            id: "search".into(),
+            kind: WorkPlanStepKind::WebSearch,
+            required: true,
+            depends_on: Vec::new(),
+            target_id: None,
+            target_contract_digest: None,
+        };
+        let web_fetch = openlife_core::work_orchestration::WorkPlanStep {
+            id: "fetch".into(),
+            kind: WorkPlanStepKind::WebFetch,
+            required: true,
+            depends_on: Vec::new(),
+            target_id: None,
+            target_contract_digest: None,
+        };
+        assert_eq!(
+            work_plan_execution_identity(&web_search),
+            Some("web_search".into())
+        );
+        assert_ne!(
+            work_plan_execution_identity(&web_search),
+            work_plan_execution_identity(&web_fetch)
+        );
+    }
+
+    #[test]
+    fn revised_plan_replaces_the_prior_strategy_contract_in_kernel_context() {
+        let search_plan = deterministic_policy_plan(
+            &HashSet::from([
+                WorkPlanStepKind::WebSearch,
+                WorkPlanStepKind::Verify,
+                WorkPlanStepKind::DeliverResult,
+            ]),
+            &HashMap::new(),
+        );
+        let fetch_plan = deterministic_policy_plan(
+            &HashSet::from([
+                WorkPlanStepKind::WebFetch,
+                WorkPlanStepKind::Verify,
+                WorkPlanStepKind::DeliverResult,
+            ]),
+            &HashMap::new(),
+        );
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let first = work_plan_kernel_context(
+            MainChatKernelContextConfig::default(),
+            &run_id,
+            &search_plan,
+        )
+        .unwrap();
+        let revised = work_plan_kernel_context(first, &run_id, &fetch_plan).unwrap();
+        let strategy = revised
+            .extra_candidates
+            .iter()
+            .filter(|candidate| candidate.source_id == format!("work-plan:{run_id}"))
+            .collect::<Vec<_>>();
+        assert_eq!(strategy.len(), 1);
+        assert_eq!(strategy[0].content, fetch_plan.canonical_json().unwrap());
+        assert!(!strategy[0].content.contains("web_search"));
     }
 }

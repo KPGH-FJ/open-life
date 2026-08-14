@@ -389,6 +389,18 @@ fn canonical_work_release_surface_has_no_legacy_task_control_or_runtime_fallback
         legacy_kernel.contains("generated_artifact_requires_canonical_work_runtime"),
         "compatibility kernel must fail closed instead of creating a second Artifact owner"
     );
+    assert!(
+        legacy_kernel.contains(
+            "#[cfg(test)]\n    {\n        let use_agent_loop = !context_request.is_source_bound()"
+        ),
+        "retired ReAct execution must not compile into the release compatibility kernel"
+    );
+    assert!(
+        legacy_kernel.contains(
+            "#[cfg(test)]\n    if main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::PlanExecute"
+        ),
+        "retired PlanExecute execution must not compile into the release compatibility kernel"
+    );
 }
 
 #[test]

@@ -2438,7 +2438,7 @@ fn requested_read_capabilities(intent: &IntentFrame) -> Vec<AllowedCapability> {
     {
         capabilities.push(AllowedCapability::WebSearch);
     }
-    if lower.contains("mcp") {
+    if lower.contains("mcp") || requests_registered_read_integration(&lower) {
         capabilities.push(AllowedCapability::McpReadOnly);
     }
     if !is_negated_workspace_file_read_intent(&lower)
@@ -2503,6 +2503,29 @@ fn requested_read_capabilities(intent: &IntentFrame) -> Vec<AllowedCapability> {
         capabilities.push(AllowedCapability::ProviderGeneration);
     }
     capabilities
+}
+
+fn requests_registered_read_integration(lower: &str) -> bool {
+    let names_a_registered_surface =
+        contains_any(
+            lower,
+            &[
+                "registered",
+                "connected",
+                "configured",
+                "已注册",
+                "已连接",
+                "已配置",
+            ],
+        ) && contains_any(lower, &["integration", "tool", "集成", "工具"]);
+    let requests_a_read = contains_any(
+        lower,
+        &[
+            "read", "look up", "lookup", "find", "search", "inspect", "读取", "查找", "查询",
+            "搜索", "查看",
+        ],
+    );
+    names_a_registered_surface && requests_a_read
 }
 
 fn requests_imported_resource_read(lower: &str) -> bool {
@@ -16801,6 +16824,7 @@ fn has_explicit_governed_read_intent(lower: &str) -> bool {
         return false;
     }
     requests_imported_resource_read(lower)
+        || requests_registered_read_integration(lower)
         || contains_any(
             lower,
             &[

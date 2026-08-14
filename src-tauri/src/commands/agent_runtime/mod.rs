@@ -2,8 +2,10 @@ use crate::AppState;
 use std::sync::Arc;
 use tauri::State;
 
+#[cfg(test)]
 mod plan_execute_product;
 
+#[cfg(test)]
 pub(crate) use plan_execute_product::*;
 
 #[tauri::command]

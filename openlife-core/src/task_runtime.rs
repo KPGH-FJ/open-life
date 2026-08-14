@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 13;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 14;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -677,6 +677,7 @@ impl CanonicalTaskRuntimeStore {
                 "canonical_task_items",
                 "canonical_task_item_attempts",
                 "canonical_work_plans",
+                "canonical_work_plan_revisions",
                 "canonical_task_final_results",
                 "canonical_task_deferred_results",
                 "canonical_steering",
@@ -831,6 +832,23 @@ impl CanonicalTaskRuntimeStore {
                 FOREIGN KEY(task_id, run_id)
                     REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
              ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS canonical_work_plan_revisions (
+                run_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                plan_revision INTEGER NOT NULL CHECK(plan_revision > 0),
+                schema_version TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                plan_digest TEXT NOT NULL,
+                max_plan_attempts INTEGER NOT NULL CHECK(max_plan_attempts > 0),
+                max_provider_attempts INTEGER NOT NULL CHECK(max_provider_attempts > 0),
+                max_tool_attempts INTEGER NOT NULL CHECK(max_tool_attempts > 0),
+                max_total_items INTEGER NOT NULL CHECK(max_total_items > 0),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(run_id, plan_revision),
+                UNIQUE(task_id, run_id, plan_revision),
+                FOREIGN KEY(task_id, run_id)
+                    REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+             ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS canonical_task_final_results (
                 task_id TEXT PRIMARY KEY,
                 run_id TEXT NOT NULL,
@@ -920,7 +938,7 @@ impl CanonicalTaskRuntimeStore {
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '13')
+             VALUES ('schema_version', '14')
              ON CONFLICT(key) DO NOTHING;
              INSERT INTO canonical_task_runtime_metadata(key, value)
              VALUES ('store_identity', 'canonical_task_runtime_store:' || lower(hex(randomblob(16))))
@@ -961,6 +979,9 @@ impl CanonicalTaskRuntimeStore {
         }
         if Self::schema_version(&conn)? == 12 {
             Self::migrate_v12_to_v13(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 13 {
+            Self::migrate_v13_to_v14(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -1695,6 +1716,41 @@ impl CanonicalTaskRuntimeStore {
         Ok(())
     }
 
+    fn migrate_v13_to_v14(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS canonical_work_plan_revisions (
+                run_id TEXT NOT NULL,
+                task_id TEXT NOT NULL,
+                plan_revision INTEGER NOT NULL CHECK(plan_revision > 0),
+                schema_version TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                plan_digest TEXT NOT NULL,
+                max_plan_attempts INTEGER NOT NULL CHECK(max_plan_attempts > 0),
+                max_provider_attempts INTEGER NOT NULL CHECK(max_provider_attempts > 0),
+                max_tool_attempts INTEGER NOT NULL CHECK(max_tool_attempts > 0),
+                max_total_items INTEGER NOT NULL CHECK(max_total_items > 0),
+                created_at TEXT NOT NULL,
+                PRIMARY KEY(run_id, plan_revision),
+                UNIQUE(task_id, run_id, plan_revision),
+                FOREIGN KEY(task_id, run_id)
+                    REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+             ) WITHOUT ROWID;
+             INSERT OR IGNORE INTO canonical_work_plan_revisions (
+                run_id, task_id, plan_revision, schema_version, plan_json,
+                plan_digest, max_plan_attempts, max_provider_attempts,
+                max_tool_attempts, max_total_items, created_at
+             ) SELECT run_id, task_id, plan_revision, schema_version, plan_json,
+                      plan_digest, max_plan_attempts, max_provider_attempts,
+                      max_tool_attempts, max_total_items, created_at
+                 FROM canonical_work_plans;
+             UPDATE canonical_task_runtime_metadata SET value = '14'
+              WHERE key = 'schema_version' AND value = '13';",
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     fn validate_schema(conn: &Connection) -> Result<()> {
         let version = Self::schema_version(conn)?;
         if version != TASK_RUNTIME_SCHEMA_VERSION {
@@ -2224,7 +2280,12 @@ impl CanonicalTaskRuntimeStore {
             anyhow::bail!("canonical_work_plan_revision_invalid");
         }
         let allowed = plan.steps.iter().map(|step| step.kind).collect();
-        plan.validate(&allowed)
+        let allowed_mcp_targets = plan
+            .steps
+            .iter()
+            .filter_map(|step| step.target_id.clone())
+            .collect();
+        plan.validate(&allowed, &allowed_mcp_targets)
             .map_err(|code| anyhow::anyhow!(code))?;
         let plan_json = plan
             .canonical_json()
@@ -2278,10 +2339,143 @@ impl CanonicalTaskRuntimeStore {
                 now
             ],
         )?;
+        insert_work_plan_revision_in_tx(
+            &tx,
+            task_id,
+            run_id,
+            plan_revision,
+            plan,
+            &plan_json,
+            &plan_digest,
+            budget_policy,
+            &now,
+        )?;
         let persisted = load_work_plan_in_tx(&tx, run_id)?
             .ok_or_else(|| anyhow::anyhow!("canonical_work_plan_missing_after_insert"))?;
         tx.commit()?;
         Ok(persisted)
+    }
+
+    /// Atomically replace the current execution plan while retaining every
+    /// admitted revision. The Run budget policy is immutable and the caller
+    /// must present the exact current revision, so replanning cannot reset
+    /// attempts or race a steering/terminal transition.
+    pub fn revise_work_plan(
+        &self,
+        task_id: &str,
+        run_id: &str,
+        base_plan_revision: u64,
+        plan: &StructuredWorkPlan,
+    ) -> Result<CanonicalWorkPlanRecord> {
+        validate_uuid("task_id", task_id)?;
+        validate_uuid("run_id", run_id)?;
+        if base_plan_revision == 0 {
+            anyhow::bail!("canonical_work_replan_base_revision_invalid");
+        }
+        let allowed = plan.steps.iter().map(|step| step.kind).collect();
+        let allowed_mcp_targets = plan
+            .steps
+            .iter()
+            .filter_map(|step| step.target_id.clone())
+            .collect();
+        plan.validate(&allowed, &allowed_mcp_targets)
+            .map_err(|code| anyhow::anyhow!(code))?;
+        let plan_json = plan
+            .canonical_json()
+            .map_err(|code| anyhow::anyhow!(code))?;
+        validate_nonempty("work_plan_json", &plan_json, 32_768)?;
+        let plan_digest = sha256_text(&plan_json);
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (status, stored_revision): (String, i64) = tx.query_row(
+            "SELECT status, plan_revision FROM canonical_task_runs
+             WHERE task_id = ?1 AND run_id = ?2",
+            params![task_id, run_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        if status != "running" {
+            anyhow::bail!("canonical_work_replan_run_not_running");
+        }
+        if u64::try_from(stored_revision)? != base_plan_revision {
+            anyhow::bail!("canonical_work_replan_revision_stale");
+        }
+        let current = load_work_plan_in_tx(&tx, run_id)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_work_replan_current_plan_missing"))?;
+        if current.task_id != task_id || current.plan_revision != base_plan_revision {
+            anyhow::bail!("canonical_work_replan_current_identity_conflict");
+        }
+        let next_revision = base_plan_revision
+            .checked_add(1)
+            .ok_or_else(|| anyhow::anyhow!("canonical_work_replan_revision_overflow"))?;
+        let changed = tx.execute(
+            "UPDATE canonical_task_runs SET plan_revision = ?3, updated_at = ?4
+             WHERE task_id = ?1 AND run_id = ?2 AND status = 'running'
+               AND plan_revision = ?5",
+            params![
+                task_id,
+                run_id,
+                i64::try_from(next_revision)?,
+                now,
+                i64::try_from(base_plan_revision)?
+            ],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("canonical_work_replan_run_cas_conflict");
+        }
+        let plan_changed = tx.execute(
+            "UPDATE canonical_work_plans
+             SET plan_revision = ?3, schema_version = ?4, plan_json = ?5,
+                 plan_digest = ?6, created_at = ?7
+             WHERE task_id = ?1 AND run_id = ?2 AND plan_revision = ?8",
+            params![
+                task_id,
+                run_id,
+                i64::try_from(next_revision)?,
+                plan.schema_version,
+                plan_json,
+                plan_digest,
+                now,
+                i64::try_from(base_plan_revision)?
+            ],
+        )?;
+        if plan_changed != 1 {
+            anyhow::bail!("canonical_work_replan_plan_cas_conflict");
+        }
+        insert_work_plan_revision_in_tx(
+            &tx,
+            task_id,
+            run_id,
+            next_revision,
+            plan,
+            &plan_json,
+            &plan_digest,
+            current.budget_policy,
+            &now,
+        )?;
+        let revised = load_work_plan_in_tx(&tx, run_id)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_work_replan_missing_after_update"))?;
+        tx.commit()?;
+        Ok(revised)
+    }
+
+    pub fn list_work_plan_revisions(&self, run_id: &str) -> Result<Vec<CanonicalWorkPlanRecord>> {
+        validate_uuid("run_id", run_id)?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        let mut statement = tx.prepare(
+            "SELECT task_id, run_id, plan_revision, schema_version, plan_json,
+                    plan_digest, max_plan_attempts, max_provider_attempts,
+                    max_tool_attempts, max_total_items, created_at
+             FROM canonical_work_plan_revisions
+             WHERE run_id = ?1 ORDER BY plan_revision ASC",
+        )?;
+        let records = statement
+            .query_map([run_id], row_to_work_plan_record)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(statement);
+        tx.commit()?;
+        Ok(records)
     }
 
     pub fn load_work_plan(&self, run_id: &str) -> Result<Option<CanonicalWorkPlanRecord>> {
@@ -5144,90 +5338,114 @@ fn load_work_plan_in_tx(
                 max_tool_attempts, max_total_items, created_at
          FROM canonical_work_plans WHERE run_id = ?1",
         [run_id],
-        |row| {
-            let plan_revision = u64::try_from(row.get::<_, i64>(2)?).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    2,
-                    rusqlite::types::Type::Integer,
-                    error.into(),
-                )
-            })?;
-            let schema_version: String = row.get(3)?;
-            let plan_json: String = row.get(4)?;
-            let plan: StructuredWorkPlan = serde_json::from_str(&plan_json).map_err(|error| {
-                rusqlite::Error::FromSqlConversionFailure(
-                    4,
-                    rusqlite::types::Type::Text,
-                    error.into(),
-                )
-            })?;
-            if plan.schema_version != schema_version {
-                return Err(rusqlite::Error::FromSqlConversionFailure(
-                    3,
-                    rusqlite::types::Type::Text,
-                    anyhow::anyhow!("canonical_work_plan_schema_projection_mismatch").into(),
-                ));
-            }
-            let plan_digest: String = row.get(5)?;
-            if sha256_text(&plan_json) != plan_digest {
-                return Err(rusqlite::Error::FromSqlConversionFailure(
-                    5,
-                    rusqlite::types::Type::Text,
-                    anyhow::anyhow!("canonical_work_plan_digest_mismatch").into(),
-                ));
-            }
-            Ok(CanonicalWorkPlanRecord {
-                task_id: row.get(0)?,
-                run_id: row.get(1)?,
-                plan_revision,
-                plan,
-                plan_digest,
-                budget_policy: WorkRunBudgetPolicy {
-                    max_plan_attempts: u32::try_from(row.get::<_, i64>(6)?).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            6,
-                            rusqlite::types::Type::Integer,
-                            error.into(),
-                        )
-                    })?,
-                    max_provider_attempts: u32::try_from(row.get::<_, i64>(7)?).map_err(
-                        |error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                7,
-                                rusqlite::types::Type::Integer,
-                                error.into(),
-                            )
-                        },
-                    )?,
-                    max_tool_attempts: u32::try_from(row.get::<_, i64>(8)?).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            8,
-                            rusqlite::types::Type::Integer,
-                            error.into(),
-                        )
-                    })?,
-                    max_total_items: u32::try_from(row.get::<_, i64>(9)?).map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            9,
-                            rusqlite::types::Type::Integer,
-                            error.into(),
-                        )
-                    })?,
-                },
-                created_at: parse_timestamp(row.get(10)?, "work_plan_created_at").map_err(
-                    |error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            10,
-                            rusqlite::types::Type::Text,
-                            error.into(),
-                        )
-                    },
-                )?,
-            })
-        },
+        row_to_work_plan_record,
     )
     .optional()
     .map_err(Into::into)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "canonical plan history insert mirrors one bounded SQLite row"
+)]
+fn insert_work_plan_revision_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    run_id: &str,
+    plan_revision: u64,
+    plan: &StructuredWorkPlan,
+    plan_json: &str,
+    plan_digest: &str,
+    budget_policy: WorkRunBudgetPolicy,
+    created_at: &str,
+) -> Result<()> {
+    tx.execute(
+        "INSERT INTO canonical_work_plan_revisions (
+            run_id, task_id, plan_revision, schema_version, plan_json,
+            plan_digest, max_plan_attempts, max_provider_attempts,
+            max_tool_attempts, max_total_items, created_at
+         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        params![
+            run_id,
+            task_id,
+            i64::try_from(plan_revision)?,
+            plan.schema_version,
+            plan_json,
+            plan_digest,
+            i64::from(budget_policy.max_plan_attempts),
+            i64::from(budget_policy.max_provider_attempts),
+            i64::from(budget_policy.max_tool_attempts),
+            i64::from(budget_policy.max_total_items),
+            created_at,
+        ],
+    )?;
+    Ok(())
+}
+
+fn row_to_work_plan_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalWorkPlanRecord> {
+    let plan_revision = u64::try_from(row.get::<_, i64>(2)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(2, rusqlite::types::Type::Integer, error.into())
+    })?;
+    let schema_version: String = row.get(3)?;
+    let plan_json: String = row.get(4)?;
+    let plan: StructuredWorkPlan = serde_json::from_str(&plan_json).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(4, rusqlite::types::Type::Text, error.into())
+    })?;
+    if plan.schema_version != schema_version {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            3,
+            rusqlite::types::Type::Text,
+            anyhow::anyhow!("canonical_work_plan_schema_projection_mismatch").into(),
+        ));
+    }
+    let plan_digest: String = row.get(5)?;
+    if sha256_text(&plan_json) != plan_digest {
+        return Err(rusqlite::Error::FromSqlConversionFailure(
+            5,
+            rusqlite::types::Type::Text,
+            anyhow::anyhow!("canonical_work_plan_digest_mismatch").into(),
+        ));
+    }
+    Ok(CanonicalWorkPlanRecord {
+        task_id: row.get(0)?,
+        run_id: row.get(1)?,
+        plan_revision,
+        plan,
+        plan_digest,
+        budget_policy: WorkRunBudgetPolicy {
+            max_plan_attempts: u32::try_from(row.get::<_, i64>(6)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Integer,
+                    error.into(),
+                )
+            })?,
+            max_provider_attempts: u32::try_from(row.get::<_, i64>(7)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    7,
+                    rusqlite::types::Type::Integer,
+                    error.into(),
+                )
+            })?,
+            max_tool_attempts: u32::try_from(row.get::<_, i64>(8)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    8,
+                    rusqlite::types::Type::Integer,
+                    error.into(),
+                )
+            })?,
+            max_total_items: u32::try_from(row.get::<_, i64>(9)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    9,
+                    rusqlite::types::Type::Integer,
+                    error.into(),
+                )
+            })?,
+        },
+        created_at: parse_timestamp(row.get(10)?, "work_plan_created_at").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, error.into())
+        })?,
+    })
 }
 
 fn load_snapshot_for_task(
@@ -7992,6 +8210,8 @@ mod tests {
                 kind: crate::work_orchestration::WorkPlanStepKind::DeliverResult,
                 required: true,
                 depends_on: Vec::new(),
+                target_id: None,
+                target_contract_digest: None,
             }],
             completion: crate::work_orchestration::WorkCompletionContract {
                 result_kind: crate::work_orchestration::WorkResultKind::Answer,
@@ -8014,6 +8234,45 @@ mod tests {
             store.work_run_budget_policy(&run_id).unwrap(),
             WorkRunBudgetPolicy::default()
         );
+        let revised_plan = StructuredWorkPlan {
+            schema_version: crate::work_orchestration::WORK_PLAN_SCHEMA_VERSION.into(),
+            steps: vec![
+                crate::work_orchestration::WorkPlanStep {
+                    id: "verify".into(),
+                    kind: crate::work_orchestration::WorkPlanStepKind::Verify,
+                    required: true,
+                    depends_on: Vec::new(),
+                    target_id: None,
+                    target_contract_digest: None,
+                },
+                crate::work_orchestration::WorkPlanStep {
+                    id: "deliver".into(),
+                    kind: crate::work_orchestration::WorkPlanStepKind::DeliverResult,
+                    required: true,
+                    depends_on: vec!["verify".into()],
+                    target_id: None,
+                    target_contract_digest: None,
+                },
+            ],
+            completion: crate::work_orchestration::WorkCompletionContract {
+                result_kind: crate::work_orchestration::WorkResultKind::Answer,
+                requires_verification: true,
+            },
+        };
+        let revised = store
+            .revise_work_plan(&task_id, &run_id, begun.plan_revision, &revised_plan)
+            .unwrap();
+        assert_eq!(revised.plan_revision, begun.plan_revision + 1);
+        assert_eq!(revised.budget_policy, WorkRunBudgetPolicy::default());
+        let revisions = store.list_work_plan_revisions(&run_id).unwrap();
+        assert_eq!(revisions.len(), 2);
+        assert_eq!(revisions[0].plan, structured_plan);
+        assert_eq!(revisions[1].plan, revised_plan);
+        assert!(store
+            .revise_work_plan(&task_id, &run_id, begun.plan_revision, &revisions[0].plan)
+            .unwrap_err()
+            .to_string()
+            .contains("canonical_work_replan_revision_stale"));
         let plan_item_id = format!("item:plan-step:{run_id}:deliver");
         store
             .append_completed_plan_item(

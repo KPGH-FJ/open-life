@@ -74,13 +74,19 @@ use crate::main_chat_generation_support::{
 use crate::main_chat_react_runtime::MainChatReactCanonicalToolDelta;
 use crate::main_chat_react_runtime::{
     attach_main_chat_read_observation_metadata, attach_main_chat_replay_synthesis_observation,
-    bind_main_chat_observation_metadata_to_queue_action, try_run_main_chat_react_agent_loop,
-    MainChatReactAgentLoopAttempt,
+    bind_main_chat_observation_metadata_to_queue_action,
+};
+#[cfg(test)]
+use crate::main_chat_react_runtime::{
+    try_run_main_chat_react_agent_loop, MainChatReactAgentLoopAttempt,
+};
+#[cfg(test)]
+use crate::main_chat_react_tool_selection::{
+    build_main_chat_react_action_plan, MainChatReactActionPlan,
 };
 use crate::main_chat_react_tool_selection::{
-    build_main_chat_react_action_plan, main_chat_manifest_has_write_like_surface,
-    main_chat_manifest_is_governed_read_candidate, normalize_main_chat_mcp_read_arguments,
-    MainChatReactActionPlan, MainChatReactToolCandidate,
+    main_chat_manifest_has_write_like_surface, main_chat_manifest_is_governed_read_candidate,
+    normalize_main_chat_mcp_read_arguments, MainChatReactToolCandidate,
 };
 use crate::main_chat_replay_contract::{
     DurableMainChatReplayExecutionEnvelope, DurableMainChatReplayExecutionInput,
@@ -1432,18 +1438,47 @@ fn resolve_kernel_mcp_read_decision(
         .get("arguments")
         .cloned()
         .unwrap_or_else(|| serde_json::json!({}));
+    let planned_manifest_contract_digest = decision
+        .governed_input
+        .get("planned_manifest_contract_digest")
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
 
     let candidates = if requested_tool_name.is_empty() {
         kernel_mcp_read_candidates(registry, &selection_query, KERNEL_MCP_CANDIDATE_LIMIT)
     } else {
         match kernel_find_explicit_mcp_manifest(registry, &requested_tool_name) {
-            Ok(manifest) if kernel_manifest_is_explicit_read_target_candidate(&manifest) => {
+            Ok(manifest)
+                if kernel_manifest_is_explicit_read_target_candidate(&manifest)
+                    && planned_manifest_contract_digest
+                        .as_deref()
+                        .is_none_or(|expected| {
+                            expected == manifest.execution_contract_digest()
+                        }) =>
+            {
                 vec![kernel_mcp_candidate_from_manifest(
                     manifest,
                     supplied_arguments,
                     1,
                     "explicit_manifest_identity",
                 )]
+            }
+            Ok(manifest) if planned_manifest_contract_digest.is_some() => {
+                return Err(Box::new(kernel_mcp_resolution_blocker(
+                    decision,
+                    "mcp_read_manifest_contract_drifted",
+                    format!(
+                        "Registered MCP target '{}' changed after the Work plan was admitted.",
+                        manifest.id
+                    ),
+                    serde_json::json!({
+                        "manifestId": manifest.id,
+                        "manifestSource": manifest.source.to_string(),
+                        "plannedManifestContractDigest": planned_manifest_contract_digest,
+                        "currentManifestContractDigest": manifest.execution_contract_digest(),
+                    }),
+                )));
             }
             Ok(manifest) => {
                 return Err(Box::new(kernel_mcp_resolution_blocker(
@@ -2689,6 +2724,7 @@ where
         // imported evidence and therefore cannot complete an attachment turn.
         direct_reply = None;
     }
+    #[cfg(test)]
     let react_life_model_prompt = life_model_context.as_ref().and_then(|context| {
         context
             .candidates
@@ -2696,6 +2732,7 @@ where
             .find(|candidate| candidate.source_id == "lifemodel.v2.runtime")
             .map(|candidate| candidate.content.clone())
     });
+    #[cfg(test)]
     let react_tool_preference_hints = life_model_context
         .as_ref()
         .map(|context| context.tool_preference_hints.clone())
@@ -2750,102 +2787,125 @@ where
         false,
     )));
 
-    let use_agent_loop = !context_request.is_source_bound()
-        && kernel.replayed_read_observations.is_empty()
-        && runtime_fact_answer.is_none()
-        && main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
-            &main_chat_agent_turn.decision.policy_decision,
-            &messages,
-            provider_runtime,
-        )
-        .await;
-    if use_agent_loop {
-        let plan = build_main_chat_react_action_plan(session_id, &user_text)?;
-        let mut react_messages = messages.clone();
-        if let Some(prompt) = react_life_model_prompt {
-            react_messages.insert(
-                0,
-                ChatMessage {
-                    role: "system".into(),
-                    content: prompt,
-                },
+    #[cfg(test)]
+    {
+        let use_agent_loop = !context_request.is_source_bound()
+            && kernel.replayed_read_observations.is_empty()
+            && runtime_fact_answer.is_none()
+            && main_chat_react_turn_requires_governed_agent_loop_candidate_selection(
+                &main_chat_agent_turn.decision.policy_decision,
+                &messages,
+                provider_runtime,
+            )
+            .await;
+        if use_agent_loop {
+            let plan = build_main_chat_react_action_plan(session_id, &user_text)?;
+            let mut react_messages = messages.clone();
+            if let Some(prompt) = react_life_model_prompt {
+                react_messages.insert(
+                    0,
+                    ChatMessage {
+                        role: "system".into(),
+                        content: prompt,
+                    },
+                );
+            }
+            let (mut react_context_metadata, _) =
+                kernel.compile_context(session_id, sanitized_selected_skill_id.clone(), &user_text);
+            event_sink.emit(MainChatKernelEvent::ContextLoaded {
+                context_snapshot_ref: react_context_metadata.context_snapshot_ref.clone(),
+                selected_source_count: react_context_metadata.selected_source_count,
+                selected_skill_instruction_loaded: react_context_metadata
+                    .selected_skill_instruction_loaded,
+            });
+            let (_, privacy_map) = privacy_engine.desensitize_batch(
+                &messages
+                    .iter()
+                    .map(|message| message.content.clone())
+                    .collect::<Vec<_>>(),
             );
-        }
-        let (mut react_context_metadata, _) =
-            kernel.compile_context(session_id, sanitized_selected_skill_id.clone(), &user_text);
-        event_sink.emit(MainChatKernelEvent::ContextLoaded {
-            context_snapshot_ref: react_context_metadata.context_snapshot_ref.clone(),
-            selected_source_count: react_context_metadata.selected_source_count,
-            selected_skill_instruction_loaded: react_context_metadata
-                .selected_skill_instruction_loaded,
-        });
-        let (_, privacy_map) = privacy_engine.desensitize_batch(
-            &messages
-                .iter()
-                .map(|message| message.content.clone())
-                .collect::<Vec<_>>(),
-        );
-        let agent_loop_attempt = {
-            let progress_session_id = session_id.to_string();
-            let mut emit_progress = |progress| {
-                emit_main_chat_model_progress(progress, &progress_session_id, event_sink)
+            let agent_loop_attempt = {
+                let progress_session_id = session_id.to_string();
+                let mut emit_progress = |progress| {
+                    emit_main_chat_model_progress(progress, &progress_session_id, event_sink)
+                };
+                try_run_main_chat_react_agent_loop(
+                    state,
+                    &task_session_id,
+                    canonical_run_id,
+                    session_id,
+                    &user_text,
+                    &react_messages,
+                    &privacy_engine,
+                    &privacy_map,
+                    &plan,
+                    &react_tool_preference_hints,
+                    &provider_authorization,
+                    provider_runtime,
+                    execution_epoch,
+                    &mut emit_progress,
+                )
+                .await?
             };
-            try_run_main_chat_react_agent_loop(
-                state,
-                &task_session_id,
-                canonical_run_id,
+            let life_model_tool_preference_applied = agent_loop_attempt
+                .metadata
+                .get("lifeModelToolPreferenceApplied")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if life_model_tool_preference_applied {
+                if let Some(metadata) = react_context_metadata.life_model_context.as_mut() {
+                    metadata.influence_receipt.status = "applied_equivalent_tool_preference".into();
+                    metadata
+                        .influence_receipt
+                        .applied_surfaces
+                        .push("equivalent_tool_ranking".into());
+                }
+            }
+            if let Some(metadata) = react_context_metadata.life_model_context.as_ref() {
+                event_sink.emit(MainChatKernelEvent::LifeModelContextLoaded {
+                    available: metadata.available,
+                    model_version: metadata.model_version,
+                    selected_item_count: metadata.selected_item_refs.len(),
+                    status: metadata.influence_receipt.status.clone(),
+                    source_id: metadata.source_id.clone(),
+                    selected_item_refs: metadata.selected_item_refs.clone(),
+                    reason_codes: metadata.influence_receipt.reason_codes.clone(),
+                    receipt: metadata.product_receipt(),
+                });
+            }
+            for receipt in &agent_loop_attempt.provider_receipts {
+                emit_provider_receipt(receipt, event_sink)?;
+            }
+            execution_transcript.extend(agent_loop_attempt.transcript_entries.clone());
+            let provider_durability_proofs = agent_loop_attempt.provider_durability_proofs.clone();
+            let kernel_result = kernel_turn_result_from_react_agent_loop_attempt(
+                agent_loop_attempt,
+                &plan,
+                &scheduler,
+            );
+            let kernel_events = event_sink.events().to_vec();
+            if !kernel_result.blockers.is_empty() {
+                return build_blocked_kernel_command_surface_result(
+                    session_id,
+                    &task_session_id,
+                    canonical_run_id,
+                    execution_epoch,
+                    terminal_owner_review_origin,
+                    state,
+                    main_chat_agent_turn,
+                    execution_transcript,
+                    kernel_result,
+                    scheduler,
+                    provider_durability_scope,
+                    provider_durability_proofs,
+                    event_sink_label,
+                    kernel_events,
+                )
+                .await;
+            }
+            return build_successful_kernel_command_surface_result(
                 session_id,
                 &user_text,
-                &react_messages,
-                &privacy_engine,
-                &privacy_map,
-                &plan,
-                &react_tool_preference_hints,
-                &provider_authorization,
-                provider_runtime,
-                execution_epoch,
-                &mut emit_progress,
-            )
-            .await?
-        };
-        let life_model_tool_preference_applied = agent_loop_attempt
-            .metadata
-            .get("lifeModelToolPreferenceApplied")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        if life_model_tool_preference_applied {
-            if let Some(metadata) = react_context_metadata.life_model_context.as_mut() {
-                metadata.influence_receipt.status = "applied_equivalent_tool_preference".into();
-                metadata
-                    .influence_receipt
-                    .applied_surfaces
-                    .push("equivalent_tool_ranking".into());
-            }
-        }
-        if let Some(metadata) = react_context_metadata.life_model_context.as_ref() {
-            event_sink.emit(MainChatKernelEvent::LifeModelContextLoaded {
-                available: metadata.available,
-                model_version: metadata.model_version,
-                selected_item_count: metadata.selected_item_refs.len(),
-                status: metadata.influence_receipt.status.clone(),
-                source_id: metadata.source_id.clone(),
-                selected_item_refs: metadata.selected_item_refs.clone(),
-                reason_codes: metadata.influence_receipt.reason_codes.clone(),
-                receipt: metadata.product_receipt(),
-            });
-        }
-        for receipt in &agent_loop_attempt.provider_receipts {
-            emit_provider_receipt(receipt, event_sink)?;
-        }
-        execution_transcript.extend(agent_loop_attempt.transcript_entries.clone());
-        let provider_durability_proofs = agent_loop_attempt.provider_durability_proofs.clone();
-        let kernel_result =
-            kernel_turn_result_from_react_agent_loop_attempt(agent_loop_attempt, &plan, &scheduler);
-        let kernel_events = event_sink.events().to_vec();
-        if !kernel_result.blockers.is_empty() {
-            return build_blocked_kernel_command_surface_result(
-                session_id,
-                &task_session_id,
                 canonical_run_id,
                 execution_epoch,
                 terminal_owner_review_origin,
@@ -2856,33 +2916,17 @@ where
                 scheduler,
                 provider_durability_scope,
                 provider_durability_proofs,
+                provider_config,
+                false,
+                None,
                 event_sink_label,
                 kernel_events,
             )
             .await;
         }
-        return build_successful_kernel_command_surface_result(
-            session_id,
-            &user_text,
-            canonical_run_id,
-            execution_epoch,
-            terminal_owner_review_origin,
-            state,
-            main_chat_agent_turn,
-            execution_transcript,
-            kernel_result,
-            scheduler,
-            provider_durability_scope,
-            provider_durability_proofs,
-            provider_config,
-            false,
-            None,
-            event_sink_label,
-            kernel_events,
-        )
-        .await;
     }
 
+    #[cfg(test)]
     if main_chat_agent_turn.decision.selected_strategy == MainChatAgentStrategy::PlanExecute {
         return build_kernel_plan_execute_command_surface_result(
             session_id,
@@ -6207,7 +6251,18 @@ where
             } else if let Some(plan) = self.structured_work_plan.as_ref() {
                 plan_work_read_tools(&input, plan, input.model_supplied_tool_arguments.is_some())
             } else {
-                plan_kernel_read_tools(&input, input.model_supplied_tool_arguments.is_some())
+                // Release Chat never selects tools, and release Work must
+                // arrive with a policy-validated structured plan. Keyword
+                // selection remains test-only until the legacy harness tests
+                // are deleted with their owner.
+                #[cfg(test)]
+                {
+                    plan_kernel_read_tools(&input, input.model_supplied_tool_arguments.is_some())
+                }
+                #[cfg(not(test))]
+                {
+                    Vec::new()
+                }
             };
         let mut route_metadata = self.model_client.route_metadata();
         if !read_tool_decisions.is_empty()
@@ -8644,6 +8699,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn kernel_turn_result_from_react_agent_loop_attempt(
     attempt: MainChatReactAgentLoopAttempt,
     plan: &MainChatReactActionPlan,
@@ -13672,7 +13728,7 @@ fn plan_kernel_read_tools(
             enforce_kernel_read_capability(
                 input,
                 AllowedCapability::McpReadOnly,
-                kernel_mcp_read_tool_decision(user_text, model_arguments_ignored),
+                kernel_mcp_read_tool_decision(None, None, user_text, model_arguments_ignored),
             ),
         ]);
         return decisions;
@@ -13741,60 +13797,54 @@ fn plan_work_read_tools(
     let mut decisions = Vec::new();
     for step in &plan.steps {
         let decision = match step.kind {
-            WorkPlanStepKind::ReadLocalDocument => {
-                if input
-                    .policy_decision
-                    .allows(AllowedCapability::ImportedResourceRead)
-                {
-                    kernel_document_read_tool_decision(input, user_text, model_arguments_ignored)
-                } else {
-                    enforce_kernel_read_capability(
-                        input,
-                        AllowedCapability::WorkspaceFileRead,
-                        MainChatKernelReadToolDecision {
-                            tool_name: "file.read".into(),
-                            queue_action_type: "file.read".into(),
-                            executor_action_type: "mcp_tool".into(),
-                            requested_target: "file.read".into(),
-                            target: "file.read".into(),
-                            governed_input: serde_json::json!({
-                                "rawUserText": user_text,
-                                "governedInputSource": "structured_work_plan_workspace_scope",
-                            }),
-                            reason:
-                                "structured Work plan requires a workspace-scoped document read"
-                                    .into(),
-                            model_arguments_ignored,
-                            fixture_backed_read: false,
-                            selection_metadata: None,
-                        },
-                    )
-                }
-            }
-            WorkPlanStepKind::ResearchWeb => {
-                let has_url = user_text
-                    .split_whitespace()
-                    .map(trim_main_chat_tool_token)
-                    .any(|token| token.starts_with("http://") || token.starts_with("https://"));
-                if has_url && input.policy_decision.allows(AllowedCapability::WebFetch) {
-                    kernel_web_fetch_read_tool_decision(user_text, model_arguments_ignored)
-                } else {
-                    enforce_kernel_read_capability(
-                        input,
-                        AllowedCapability::WebSearch,
-                        kernel_web_search_read_tool_decision(
-                            user_text,
-                            "structured_work_plan_user_goal",
-                            "structured Work plan requires governed Web evidence",
-                            model_arguments_ignored,
-                        ),
-                    )
-                }
-            }
+            WorkPlanStepKind::ReadImportedDocument => enforce_kernel_read_capability(
+                input,
+                AllowedCapability::ImportedResourceRead,
+                kernel_document_read_tool_decision(input, user_text, model_arguments_ignored),
+            ),
+            WorkPlanStepKind::ReadWorkspaceFile => enforce_kernel_read_capability(
+                input,
+                AllowedCapability::WorkspaceFileRead,
+                MainChatKernelReadToolDecision {
+                    tool_name: "file.read".into(),
+                    queue_action_type: "file.read".into(),
+                    executor_action_type: "mcp_tool".into(),
+                    requested_target: "file.read".into(),
+                    target: "file.read".into(),
+                    governed_input: serde_json::json!({
+                        "rawUserText": user_text,
+                        "governedInputSource": "structured_work_plan_workspace_scope",
+                    }),
+                    reason: "structured Work plan requires a workspace-scoped file read".into(),
+                    model_arguments_ignored,
+                    fixture_backed_read: false,
+                    selection_metadata: None,
+                },
+            ),
+            WorkPlanStepKind::WebSearch => enforce_kernel_read_capability(
+                input,
+                AllowedCapability::WebSearch,
+                kernel_web_search_read_tool_decision(
+                    user_text,
+                    "structured_work_plan_user_goal",
+                    "structured Work plan selected governed Web search",
+                    model_arguments_ignored,
+                ),
+            ),
+            WorkPlanStepKind::WebFetch => enforce_kernel_read_capability(
+                input,
+                AllowedCapability::WebFetch,
+                kernel_web_fetch_read_tool_decision(user_text, model_arguments_ignored),
+            ),
             WorkPlanStepKind::ReadMcp => enforce_kernel_read_capability(
                 input,
                 AllowedCapability::McpReadOnly,
-                kernel_mcp_read_tool_decision(user_text, model_arguments_ignored),
+                kernel_mcp_read_tool_decision(
+                    step.target_id.as_deref(),
+                    step.target_contract_digest.as_deref(),
+                    user_text,
+                    model_arguments_ignored,
+                ),
             ),
             WorkPlanStepKind::Analyze
             | WorkPlanStepKind::UseSelectedSkill
@@ -14056,6 +14106,8 @@ fn kernel_web_fetch_read_tool_decision(
 }
 
 fn kernel_mcp_read_tool_decision(
+    exact_target_id: Option<&str>,
+    exact_contract_digest: Option<&str>,
     user_text: &str,
     model_arguments_ignored: bool,
 ) -> MainChatKernelReadToolDecision {
@@ -14066,8 +14118,12 @@ fn kernel_mcp_read_tool_decision(
         requested_target: "mcp.call_tool".into(),
         target: "mcp.call_tool".into(),
         governed_input: serde_json::json!({
-            "tool_name": infer_kernel_mcp_tool_name(user_text).unwrap_or_default(),
+            "tool_name": exact_target_id
+                .map(str::to_string)
+                .or_else(|| infer_kernel_mcp_tool_name(user_text))
+                .unwrap_or_default(),
             "arguments": {},
+            "planned_manifest_contract_digest": exact_contract_digest,
             "selection_query": bounded_text(user_text, MAX_TOOL_QUERY_CHARS),
             "governedInputSource": "kernel_mcp_read_manifest_selection",
         }),
@@ -14166,7 +14222,7 @@ fn plan_kernel_read_tool(
         return Some(enforce_kernel_read_capability(
             input,
             AllowedCapability::McpReadOnly,
-            kernel_mcp_read_tool_decision(user_text, model_arguments_ignored),
+            kernel_mcp_read_tool_decision(None, None, user_text, model_arguments_ignored),
         ));
     }
 
@@ -15686,6 +15742,7 @@ fn context_summary_from_kernel_result(result: &MainChatTurnResult) -> ContextSum
     clippy::too_many_arguments,
     reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
 )]
+#[cfg(test)]
 async fn build_kernel_plan_execute_command_surface_result<C, S>(
     session_id: &str,
     user_text: &str,
@@ -16429,6 +16486,20 @@ mod tests {
     use openlife_core::agent::model_router::{ModelRouter, ProviderAvailability};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn structured_work_mcp_target_fails_closed_when_manifest_contract_drifts() {
+        let registry = McpRegistry::new();
+        let decision = kernel_mcp_read_tool_decision(
+            Some("life_model.read"),
+            Some(&"0".repeat(64)),
+            "Read my current profile.",
+            true,
+        );
+        let blocker = resolve_kernel_mcp_read_decision(&registry, decision)
+            .expect_err("changed manifest contract must not execute");
+        assert_eq!(blocker.reason_code, "mcp_read_manifest_contract_drifted");
+    }
 
     #[test]
     fn direct_answer_prompt_states_when_no_markdown_working_memory_was_selected() {
