@@ -62,9 +62,10 @@ pub struct CredentialBootstrapSnapshot {
 }
 
 impl CredentialBootstrapSnapshot {
-    pub(crate) fn from_statuses(statuses: [CredentialBootstrapStatus; 5]) -> Self {
+    pub(crate) fn from_statuses(statuses: [CredentialBootstrapStatus; 6]) -> Self {
         let purpose_names = [
             "agent_run_receipts",
+            "canonical_task_receipts",
             "main_chat_events",
             "action_queue",
             "task_store",
@@ -118,7 +119,7 @@ impl CredentialBootstrapSnapshot {
 
 impl Default for CredentialBootstrapSnapshot {
     fn default() -> Self {
-        Self::from_statuses([CredentialBootstrapStatus::Unknown; 5])
+        Self::from_statuses([CredentialBootstrapStatus::Unknown; 6])
     }
 }
 
@@ -282,9 +283,9 @@ pub struct AppState {
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
     pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
-    /// ADR 0017 owner for stable Task identity, Run membership, typed report
-    /// Items, and Artifact metadata. AgentRunStore still owns execution
-    /// receipts during the vertical migration.
+    /// Canonical Work owner for Task, Run, Item, ItemAttempt, FinalResult, and
+    /// Artifact metadata. Its receipts use the independent canonical Task
+    /// authority; legacy AgentRun state is not part of this lifecycle.
     pub canonical_task_runtime_store:
         Option<Arc<Mutex<openlife_core::task_runtime::CanonicalTaskRuntimeStore>>>,
     pub evidence_store: Arc<Mutex<openlife_core::agent::EvidenceStore>>,

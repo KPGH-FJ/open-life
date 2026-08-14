@@ -532,6 +532,48 @@ impl PersistenceCoordinator {
         }
     }
 
+    /// Admits one product path against only the canonical stores it will
+    /// actually read or mutate. This is intentionally narrower than the
+    /// process-wide diagnostic mode: an unavailable compatibility or unrelated
+    /// domain store must not disable canonical Chat or Work.
+    pub fn require_effects_for_stores(
+        &self,
+        required_stores: &[&str],
+    ) -> Result<(), PersistenceGateError> {
+        let state = self
+            .state
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.isolated_evaluation {
+            return Ok(());
+        }
+        if !state.sealed {
+            return Err(PersistenceGateError::EffectsBlocked {
+                mode: PersistenceRuntimeMode::Initializing,
+            });
+        }
+        if !state.global_reason_codes.is_empty() {
+            let stores = state.stores.values().cloned().collect::<Vec<_>>();
+            return Err(PersistenceGateError::EffectsBlocked {
+                mode: runtime_mode(&stores, &state.global_reason_codes, true, false),
+            });
+        }
+        for store in required_stores {
+            let mode = state
+                .stores
+                .get(*store)
+                .map(|health| health.mode)
+                .unwrap_or(PersistenceStoreMode::Unavailable);
+            if mode != PersistenceStoreMode::ReadWriteCanonical {
+                return Err(PersistenceGateError::StoreUnavailable {
+                    store: (*store).to_string(),
+                    mode,
+                });
+            }
+        }
+        Ok(())
+    }
+
     /// Mints the narrow recovery capability only from the durable journal's
     /// current non-terminal receipt. A caller-created receipt is insufficient:
     /// every field must match the journal-owned receipt exactly.
@@ -1560,6 +1602,61 @@ mod tests {
             ),
             Err(PersistenceGateError::StoreUnavailable { store, .. })
                 if store == "LifeModelFileStore"
+        ));
+    }
+
+    #[test]
+    fn scoped_agent_admission_ignores_unrelated_retired_store_health() {
+        let coordinator = PersistenceCoordinator::with_expected_stores([
+            "ConversationStore",
+            "CanonicalTaskRuntimeStore",
+            "AgentRunStore",
+            "MainChatAgentSessionStore",
+        ]);
+        coordinator.register_read_write("ConversationStore");
+        coordinator.register_read_write("CanonicalTaskRuntimeStore");
+        coordinator.register_unavailable(
+            "AgentRunStore",
+            "retired_store_unavailable",
+            "retired receipt key missing",
+        );
+        coordinator.register_unavailable(
+            "MainChatAgentSessionStore",
+            "retired_store_unavailable",
+            "retired receipt key missing",
+        );
+        coordinator.seal();
+
+        assert!(coordinator.require_effects_allowed().is_err());
+        coordinator
+            .require_effects_for_stores(&["ConversationStore"])
+            .expect("canonical Chat ignores unrelated retired stores");
+        coordinator
+            .require_effects_for_stores(&["ConversationStore", "CanonicalTaskRuntimeStore"])
+            .expect("canonical Work ignores unrelated retired stores");
+    }
+
+    #[test]
+    fn scoped_agent_admission_requires_every_named_canonical_store() {
+        let coordinator = PersistenceCoordinator::with_expected_stores([
+            "ConversationStore",
+            "CanonicalTaskRuntimeStore",
+        ]);
+        coordinator.register_read_write("ConversationStore");
+        coordinator.register_unavailable(
+            "CanonicalTaskRuntimeStore",
+            "open_failed",
+            "task runtime unavailable",
+        );
+        coordinator.seal();
+
+        assert!(matches!(
+            coordinator.require_effects_for_stores(&[
+                "ConversationStore",
+                "CanonicalTaskRuntimeStore",
+            ]),
+            Err(PersistenceGateError::StoreUnavailable { store, .. })
+                if store == "CanonicalTaskRuntimeStore"
         ));
     }
 

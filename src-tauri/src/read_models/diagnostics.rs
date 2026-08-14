@@ -106,6 +106,10 @@ pub(crate) async fn get_product_diagnostics_view_model_with_state(
     state: &Arc<AppState>,
 ) -> ProductDiagnosticsViewModel {
     let health = state.persistence_coordinator.snapshot();
+    let canonical_work_ready = state
+        .persistence_coordinator
+        .require_effects_for_stores(&["ConversationStore", "CanonicalTaskRuntimeStore"])
+        .is_ok();
     let mut blocker_codes = health
         .global_reason_codes
         .iter()
@@ -193,7 +197,7 @@ pub(crate) async fn get_product_diagnostics_view_model_with_state(
         blocker_codes.insert("canonical_task_runtime_store:unavailable".into());
     }
 
-    if !health.canonical_writes_allowed {
+    if !canonical_work_ready {
         blocker_codes.insert(format!(
             "persistence_mode:{}",
             runtime_mode_label(health.mode)
@@ -212,10 +216,14 @@ pub(crate) async fn get_product_diagnostics_view_model_with_state(
         status: status.into(),
         app_version: env!("CARGO_PKG_VERSION").into(),
         runtime_build: crate::runtime_build_info::collect_runtime_build_info().await,
-        persistence_mode: runtime_mode_label(health.mode).into(),
-        canonical_writes_allowed: health.canonical_writes_allowed,
-        provider_dispatch_allowed: health.provider_dispatch_allowed,
-        tool_dispatch_allowed: health.tool_dispatch_allowed,
+        persistence_mode: if canonical_work_ready {
+            "read_write".into()
+        } else {
+            runtime_mode_label(health.mode).into()
+        },
+        canonical_writes_allowed: canonical_work_ready,
+        provider_dispatch_allowed: canonical_work_ready,
+        tool_dispatch_allowed: canonical_work_ready,
         stores,
         counts,
         credential_bootstrap: state.credential_bootstrap_snapshot.clone(),

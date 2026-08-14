@@ -12,16 +12,16 @@ use crate::secret_store::{
     inspect_existing_mcp_audit_keys, selected_keyring_service_classification,
     IntegrityKeyHydration, KeyringSecretStore, McpAuditKeyHydrationInspection,
     ProviderCredentialHydrationStatus, SecretReader, StartupKeyringSecretStore,
-    ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
-    TASK_STORE_AUTHORITY_KEY_REF,
+    ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF, CANONICAL_TASK_RECEIPT_KEY_REF,
+    MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::{AppState, CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{load_mcp_audit_keyring_from_path, privacy_policy_path, McpAuditKeyringLoad};
 use openlife_core::agent::{
     main_chat_agent_v1::{ActionQueueAuthorityKey, ActionQueueStore, AgentTaskSessionStore},
-    AgentProposal, AgentRunReceiptKey, DurableWriteRequest, DurableWriteSource,
-    DurableWriteSubject, MemoryLifecycleStore, ProposalSource, ProposalStore, ProposalType,
-    ReviewWorkflow, RiskLevel,
+    AgentProposal, AgentRunReceiptKey, CanonicalTaskReceiptKey, DurableWriteRequest,
+    DurableWriteSource, DurableWriteSubject, MemoryLifecycleStore, ProposalSource, ProposalStore,
+    ProposalType, ReviewWorkflow, RiskLevel,
 };
 use openlife_core::config::AppConfig;
 use openlife_core::conversation::ConversationStore;
@@ -1987,6 +1987,7 @@ pub(crate) fn bootstrap_with_secret_store_for_test(
     let fixed_material = base64::engine::general_purpose::STANDARD.encode([0x54_u8; 32]);
     for secret_ref in [
         AGENT_RUN_RECEIPT_KEY_REF,
+        CANONICAL_TASK_RECEIPT_KEY_REF,
         MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
         ACTION_QUEUE_AUTHORITY_KEY_REF,
         TASK_STORE_AUTHORITY_KEY_REF,
@@ -2091,6 +2092,13 @@ fn bootstrap_with_secret_store(
         ],
         secret_store,
     );
+    let (canonical_task_credential_status, canonical_task_receipt_key_material) =
+        inspect_fixed_credential(
+            &data_dir,
+            CANONICAL_TASK_RECEIPT_KEY_REF,
+            &["task_runtime.db"],
+            secret_store,
+        );
     let (main_chat_event_credential_status, main_chat_event_integrity_key) =
         inspect_fixed_credential(
             &data_dir,
@@ -2283,6 +2291,24 @@ fn bootstrap_with_secret_store(
             None
         }
     };
+    let canonical_task_receipt_key = match canonical_task_receipt_key_material {
+        Some(key) => match CanonicalTaskReceiptKey::from_bytes(key) {
+            Ok(key) => Some(key),
+            Err(error) => {
+                startup_warnings.borrow_mut().push(format!(
+                    "Canonical Task receipt key is invalid; Work persistence is disabled: {error}"
+                ));
+                None
+            }
+        },
+        None => {
+            startup_warnings.borrow_mut().push(format!(
+                "Canonical Task receipt key is unavailable; Work persistence is disabled: {}",
+                canonical_task_credential_status.as_str()
+            ));
+            None
+        }
+    };
     let agent_runs_db_path = data_dir.join("agent_runs.db");
     let agent_run_store = init_store(
         || {
@@ -2331,7 +2357,7 @@ fn bootstrap_with_secret_store(
     let canonical_task_runtime_db_path = data_dir.join("task_runtime.db");
     let canonical_task_runtime_store = init_store(
         || {
-            let key = agent_run_receipt_key
+            let key = canonical_task_receipt_key
                 .as_ref()
                 .ok_or_else(|| "canonical_task_receipt_key_unavailable".to_string())?;
             openlife_core::task_runtime::CanonicalTaskRuntimeStore::new_with_receipt_key(
@@ -2347,7 +2373,7 @@ fn bootstrap_with_secret_store(
             .map_err(|error| error.to_string())
         },
         || {
-            let key = agent_run_receipt_key
+            let key = canonical_task_receipt_key
                 .as_ref()
                 .ok_or_else(|| "canonical_task_receipt_key_unavailable".to_string())?;
             openlife_core::task_runtime::CanonicalTaskRuntimeStore::new_in_memory_with_receipt_key(
@@ -3245,6 +3271,7 @@ fn bootstrap_with_secret_store(
     };
     let credential_bootstrap_snapshot = CredentialBootstrapSnapshot::from_statuses([
         agent_run_credential_status,
+        canonical_task_credential_status,
         main_chat_event_credential_status,
         action_queue_credential_status,
         task_store_credential_status,
@@ -3589,6 +3616,7 @@ mod tests {
             Self {
                 values: std::sync::Mutex::new(std::collections::HashMap::from([
                     (AGENT_RUN_RECEIPT_KEY_REF.into(), encoded.clone()),
+                    (CANONICAL_TASK_RECEIPT_KEY_REF.into(), encoded.clone()),
                     (MAIN_CHAT_EVENT_INTEGRITY_KEY_REF.into(), encoded.clone()),
                     (ACTION_QUEUE_AUTHORITY_KEY_REF.into(), encoded.clone()),
                     (TASK_STORE_AUTHORITY_KEY_REF.into(), encoded),
@@ -3715,7 +3743,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s1_credential_fresh_bootstrap_is_zero_write_and_reports_five_initialization_slots() {
+    fn nkr_s1_credential_fresh_bootstrap_is_zero_write_and_reports_six_initialization_slots() {
         let directory = tempfile::tempdir().unwrap();
         let secrets = TestSecretStore::empty();
 
@@ -3731,16 +3759,16 @@ mod tests {
                 .exists(),
             "fresh bootstrap must not manufacture a legacy LifeModel YAML"
         );
-        assert_eq!(result.state.credential_bootstrap_snapshot.purposes.len(), 6);
-        assert!(result.state.credential_bootstrap_snapshot.purposes[..5]
+        assert_eq!(result.state.credential_bootstrap_snapshot.purposes.len(), 7);
+        assert!(result.state.credential_bootstrap_snapshot.purposes[..6]
             .iter()
             .all(|purpose| purpose.status == CredentialBootstrapStatus::InitializationRequired));
         assert_eq!(
-            result.state.credential_bootstrap_snapshot.purposes[5].purpose,
+            result.state.credential_bootstrap_snapshot.purposes[6].purpose,
             "provider_api_key"
         );
         assert_eq!(
-            result.state.credential_bootstrap_snapshot.purposes[5].status,
+            result.state.credential_bootstrap_snapshot.purposes[6].status,
             CredentialBootstrapStatus::MissingExistingData
         );
         assert_eq!(result.state.credential_bootstrap_snapshot.digest.len(), 64);
@@ -3756,28 +3784,31 @@ mod tests {
             &secrets,
         );
 
-        assert!(result.state.credential_bootstrap_snapshot.purposes[..5]
-            .iter()
-            .all(|purpose| purpose.status == CredentialBootstrapStatus::Available));
-        assert!(result.state.agent_run_store.is_some());
-        assert!(result.state.main_chat_agent_session_store.is_some());
-        assert!(result.state.main_chat_agent_event_store.is_some());
-        assert!(result.state.main_chat_action_queue_store.is_some());
+        assert_eq!(
+            result.state.credential_bootstrap_snapshot.purposes[1].status,
+            CredentialBootstrapStatus::Available
+        );
+        assert!(result.state.canonical_task_runtime_store.is_some());
+        assert!(result.state.agent_run_store.is_none());
+        assert!(result.state.main_chat_agent_session_store.is_none());
+        assert!(result.state.main_chat_agent_event_store.is_none());
+        assert!(result.state.main_chat_action_queue_store.is_none());
     }
 
     #[test]
-    fn reconstruction_existing_protected_data_never_triggers_credential_creation() {
+    fn reconstruction_retired_protected_data_does_not_block_canonical_initialization() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::write(directory.path().join("agent_runs.db"), b"existing").unwrap();
         let secrets = TestSecretStore::empty();
 
-        let error =
-            initialize_fresh_profile_credentials(directory.path(), &secrets, &secrets).unwrap_err();
+        let created =
+            initialize_fresh_profile_credentials(directory.path(), &secrets, &secrets).unwrap();
 
-        assert!(error
-            .to_string()
-            .contains("existing protected data has no matching internal credential"));
-        assert_eq!(secrets.operation_counts(), (0, 0));
+        assert!(created);
+        assert_eq!(secrets.operation_counts(), (1, 0));
+        assert!(SecretStore::get(&secrets, CANONICAL_TASK_RECEIPT_KEY_REF)
+            .unwrap()
+            .is_some());
     }
 
     #[test]
@@ -3788,9 +3819,10 @@ mod tests {
             directory.path().to_path_buf(),
             &secrets,
         );
-        assert!(first.state.credential_bootstrap_snapshot.purposes[..5]
-            .iter()
-            .all(|purpose| purpose.status == CredentialBootstrapStatus::Available));
+        assert_eq!(
+            first.state.credential_bootstrap_snapshot.purposes[1].status,
+            CredentialBootstrapStatus::Available
+        );
         secrets.reset_operation_counts();
 
         let second = bootstrap_with_fresh_profile_initialization_for_test(
@@ -3798,10 +3830,59 @@ mod tests {
             &secrets,
         );
 
-        assert!(second.state.credential_bootstrap_snapshot.purposes[..5]
-            .iter()
-            .all(|purpose| purpose.status == CredentialBootstrapStatus::Available));
+        assert_eq!(
+            second.state.credential_bootstrap_snapshot.purposes[1].status,
+            CredentialBootstrapStatus::Available
+        );
         assert_eq!(secrets.operation_counts(), (0, 0));
+    }
+
+    #[test]
+    fn h0_canonical_chat_and_work_boot_without_retired_execution_credentials() {
+        use base64::Engine as _;
+
+        struct Reader<'a>(&'a TestSecretStore);
+        impl SecretReader for Reader<'_> {
+            fn read_secret(&self, secret_ref: &str) -> anyhow::Result<Option<String>> {
+                SecretStore::get(self.0, secret_ref)
+            }
+        }
+
+        let directory = tempfile::tempdir().unwrap();
+        let encoded = base64::engine::general_purpose::STANDARD.encode([0xC7; 32]);
+        let secrets = TestSecretStore {
+            values: std::sync::Mutex::new(std::collections::HashMap::from([(
+                CANONICAL_TASK_RECEIPT_KEY_REF.into(),
+                encoded,
+            )])),
+            set_count: std::sync::atomic::AtomicUsize::new(0),
+            delete_count: std::sync::atomic::AtomicUsize::new(0),
+        };
+
+        let result = bootstrap_with_secret_store(directory.path().to_path_buf(), &Reader(&secrets));
+        result.state.persistence_coordinator.seal();
+
+        assert!(result.state.conversation_store.is_some());
+        assert!(result.state.canonical_task_runtime_store.is_some());
+        assert!(result.state.agent_run_store.is_none());
+        assert!(result.state.main_chat_agent_session_store.is_none());
+        assert!(result.state.main_chat_action_queue_store.is_none());
+        assert!(result.state.main_chat_agent_event_store.is_none());
+        result
+            .state
+            .persistence_coordinator
+            .require_effects_for_stores(&["ConversationStore"])
+            .unwrap();
+        result
+            .state
+            .persistence_coordinator
+            .require_effects_for_stores(&["ConversationStore", "CanonicalTaskRuntimeStore"])
+            .unwrap();
+        assert!(result
+            .state
+            .persistence_coordinator
+            .require_effects_allowed()
+            .is_err());
     }
 
     #[tokio::test]
@@ -4306,7 +4387,7 @@ mod tests {
             .iter()
             .any(|warning| warning.contains("MCP audit database preflight is unavailable")));
         assert_eq!(
-            result.state.credential_bootstrap_snapshot.purposes[4].status,
+            result.state.credential_bootstrap_snapshot.purposes[5].status,
             CredentialBootstrapStatus::Unknown
         );
     }
@@ -4332,7 +4413,7 @@ mod tests {
         assert!(!keyring_path.exists());
         assert!(!directory.path().join("mcp_audit.db").exists());
         assert_eq!(
-            first.state.credential_bootstrap_snapshot.purposes[4].status,
+            first.state.credential_bootstrap_snapshot.purposes[5].status,
             CredentialBootstrapStatus::InitializationRequired
         );
         drop(first);
@@ -4342,7 +4423,7 @@ mod tests {
         assert!(secrets.mcp_secret_refs().is_empty());
         assert!(!keyring_path.exists());
         assert_eq!(
-            restarted.state.credential_bootstrap_snapshot.purposes[4].status,
+            restarted.state.credential_bootstrap_snapshot.purposes[5].status,
             CredentialBootstrapStatus::InitializationRequired
         );
     }
@@ -4383,7 +4464,7 @@ mod tests {
             before_db
         );
         assert_eq!(
-            result.state.credential_bootstrap_snapshot.purposes[4].status,
+            result.state.credential_bootstrap_snapshot.purposes[5].status,
             CredentialBootstrapStatus::InitializationRequired
         );
     }
@@ -4411,7 +4492,7 @@ mod tests {
 
         assert_eq!(secrets.operation_counts(), (0, 0));
         assert_eq!(
-            result.state.credential_bootstrap_snapshot.purposes[4].status,
+            result.state.credential_bootstrap_snapshot.purposes[5].status,
             CredentialBootstrapStatus::Invalid
         );
         assert!(result

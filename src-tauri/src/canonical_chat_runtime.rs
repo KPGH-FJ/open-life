@@ -372,7 +372,7 @@ pub(crate) async fn run_canonical_chat(
     validate_input(&input)?;
     state
         .persistence_coordinator
-        .require_effects_allowed()
+        .require_effects_for_stores(&["ConversationStore"])
         .map_err(|error| error.to_string())?;
     let conversation_store = state
         .conversation_store

@@ -47,8 +47,9 @@ use crate::secret_store::{
     hydrate_or_create_canonical_store_integrity_key, hydrate_or_create_integrity_key,
     inspect_existing_mcp_audit_keys, inspect_integrity_key_access, stage_config_secrets,
     IntegrityKeyInspection, KeyringSecretStore, McpAuditKeyHydrationInspection, SecretStore,
-    ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
-    MCP_AUDIT_KEY_REF_PREFIX, PROVIDER_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
+    ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF, CANONICAL_TASK_RECEIPT_KEY_REF,
+    MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, MCP_AUDIT_KEY_REF_PREFIX, PROVIDER_KEY_REF,
+    TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::{CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{
@@ -265,6 +266,12 @@ fn inspect_required_credential_snapshot(
                 "life_events.db",
                 "main_chat_agent_sessions.db",
             ],
+        ),
+        inspect_fixed_credential_status(
+            data_dir,
+            store,
+            CANONICAL_TASK_RECEIPT_KEY_REF,
+            &["task_runtime.db"],
         ),
         inspect_fixed_credential_status(
             data_dir,
@@ -523,6 +530,7 @@ fn initialize_required_credentials_after_confirmation(
     let mut created = Vec::<CreatedCredential>::new();
     for (purpose, secret_ref) in [
         ("agent_run_receipts", AGENT_RUN_RECEIPT_KEY_REF),
+        ("canonical_task_receipts", CANONICAL_TASK_RECEIPT_KEY_REF),
         ("main_chat_events", MAIN_CHAT_EVENT_INTEGRITY_KEY_REF),
         ("action_queue", ACTION_QUEUE_AUTHORITY_KEY_REF),
         ("task_store", TASK_STORE_AUTHORITY_KEY_REF),
@@ -5110,7 +5118,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_credential_initialization_creates_exactly_five_empty_slots() {
+    fn nkr_s2_credential_initialization_creates_exactly_six_empty_slots() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
@@ -5138,10 +5146,11 @@ mod tests {
                 "created",
                 "created",
                 "created",
+                "created",
                 "missing_existing_data",
             ]
         );
-        assert_eq!(*store.writes.lock().unwrap(), 5);
+        assert_eq!(*store.writes.lock().unwrap(), 6);
         assert_eq!(*store.deletes.lock().unwrap(), 0);
         let serialized = serde_json::to_string(&report).unwrap();
         assert!(!serialized.contains("keychain://"));
@@ -5156,6 +5165,7 @@ mod tests {
         let store = RecoverySecretStore::default();
         for (index, secret_ref) in [
             AGENT_RUN_RECEIPT_KEY_REF,
+            CANONICAL_TASK_RECEIPT_KEY_REF,
             MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
             ACTION_QUEUE_AUTHORITY_KEY_REF,
             TASK_STORE_AUTHORITY_KEY_REF,
@@ -5185,6 +5195,7 @@ mod tests {
             CredentialBootstrapStatus::Unavailable,
             CredentialBootstrapStatus::Unavailable,
             CredentialBootstrapStatus::Unavailable,
+            CredentialBootstrapStatus::Unavailable,
             CredentialBootstrapStatus::InitializationRequired,
         ])
         .with_provider_status(CredentialBootstrapStatus::Unavailable);
@@ -5201,6 +5212,7 @@ mod tests {
         assert!(report.initialization_completed_for_restart);
         for purpose in [
             "agent_run_receipts",
+            "canonical_task_receipts",
             "main_chat_events",
             "action_queue",
             "task_store",
@@ -5311,6 +5323,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         for file_name in [
             "agent_runs.db",
+            "task_runtime.db",
             "main_chat_agent_events.db",
             "main_chat_action_queue.db",
             "tasks.db",
@@ -5327,11 +5340,11 @@ mod tests {
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
 
         assert!(eligible_credential_purposes(&snapshot).is_empty());
-        assert!(snapshot.purposes[..4]
+        assert!(snapshot.purposes[..5]
             .iter()
             .all(|item| item.status == CredentialBootstrapStatus::MissingExistingData));
         assert_eq!(
-            snapshot.purposes[4].status,
+            snapshot.purposes[5].status,
             CredentialBootstrapStatus::Unknown
         );
         assert_eq!(*store.writes.lock().unwrap(), 0);
@@ -5345,6 +5358,7 @@ mod tests {
         let store = RecoverySecretStore::default();
         for secret_ref in [
             AGENT_RUN_RECEIPT_KEY_REF,
+            CANONICAL_TASK_RECEIPT_KEY_REF,
             MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
             ACTION_QUEUE_AUTHORITY_KEY_REF,
             TASK_STORE_AUTHORITY_KEY_REF,
@@ -5355,7 +5369,7 @@ mod tests {
 
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
 
-        assert!(snapshot.purposes[..4]
+        assert!(snapshot.purposes[..5]
             .iter()
             .all(|item| item.status == CredentialBootstrapStatus::Invalid));
         assert_eq!(*store.writes.lock().unwrap(), 0);
@@ -5427,7 +5441,7 @@ mod tests {
             report
                 .items
                 .iter()
-                .find(|item| item.purpose == "action_queue")
+                .find(|item| item.purpose == "main_chat_events")
                 .unwrap()
                 .status,
             "cleanup_unknown"
@@ -5459,8 +5473,8 @@ mod tests {
                 .unwrap();
 
         assert_eq!(report.cleanup_status, "compensated");
-        assert_eq!(*store.writes.lock().unwrap(), 5);
-        assert_eq!(*store.deletes.lock().unwrap(), 5);
+        assert_eq!(*store.writes.lock().unwrap(), 6);
+        assert_eq!(*store.deletes.lock().unwrap(), 6);
         assert!(store.values.lock().unwrap().is_empty());
         assert!(!directory.path().join("mcp_audit_keys.json").exists());
     }
@@ -5557,8 +5571,8 @@ mod tests {
                 .status,
             "cleanup_unknown"
         );
-        assert_eq!(*store.writes.lock().unwrap(), 5);
-        assert_eq!(*store.deletes.lock().unwrap(), 4);
+        assert_eq!(*store.writes.lock().unwrap(), 6);
+        assert_eq!(*store.deletes.lock().unwrap(), 5);
         assert_eq!(store.values.lock().unwrap().len(), 1);
         assert!(directory.path().join("mcp_audit_keys.json").exists());
     }

@@ -21,6 +21,7 @@ const MAIN_CHAT_EVENT_INTEGRITY_ACCOUNT: &str = "main-chat-event-integrity-key-v
 const ACTION_QUEUE_AUTHORITY_ACCOUNT: &str = "action-queue-authority-key-v1";
 const TASK_STORE_AUTHORITY_ACCOUNT: &str = "task-store-authority-key-v1";
 const AGENT_RUN_RECEIPT_ACCOUNT: &str = "agent-run-receipt-key-v1";
+const CANONICAL_TASK_RECEIPT_ACCOUNT: &str = "canonical-task-receipt-key-v1";
 const MCP_AUDIT_ACCOUNT_PREFIX: &str = "mcp-audit-key-epoch-";
 const PROVIDER_SECRET_ENVELOPE_VERSION: &str = "openlife_provider_secret_v1";
 static SELECTED_KEYRING_SERVICE: OnceLock<std::result::Result<String, String>> = OnceLock::new();
@@ -35,6 +36,8 @@ pub(crate) const TASK_STORE_AUTHORITY_KEY_REF: &str =
     "keychain://com.openlife.desktop/task-store-authority-key-v1";
 pub(crate) const AGENT_RUN_RECEIPT_KEY_REF: &str =
     "keychain://com.openlife.desktop/agent-run-receipt-key-v1";
+pub(crate) const CANONICAL_TASK_RECEIPT_KEY_REF: &str =
+    "keychain://com.openlife.desktop/canonical-task-receipt-key-v1";
 pub(crate) const MCP_AUDIT_KEY_REF_PREFIX: &str =
     "keychain://com.openlife.desktop/mcp-audit-key-epoch-";
 
@@ -257,6 +260,7 @@ fn keyring_account_for_secret_ref(secret_ref: &str) -> Result<String> {
         ACTION_QUEUE_AUTHORITY_KEY_REF => ACTION_QUEUE_AUTHORITY_ACCOUNT.to_string(),
         TASK_STORE_AUTHORITY_KEY_REF => TASK_STORE_AUTHORITY_ACCOUNT.to_string(),
         AGENT_RUN_RECEIPT_KEY_REF => AGENT_RUN_RECEIPT_ACCOUNT.to_string(),
+        CANONICAL_TASK_RECEIPT_KEY_REF => CANONICAL_TASK_RECEIPT_ACCOUNT.to_string(),
         value if value.starts_with(MCP_AUDIT_KEY_REF_PREFIX) => {
             let epoch = value.trim_start_matches(MCP_AUDIT_KEY_REF_PREFIX);
             if epoch.is_empty() || !epoch.chars().all(|character| character.is_ascii_digit()) {
@@ -444,6 +448,7 @@ pub(crate) fn hydrate_or_create_integrity_key(
         MAIN_CHAT_EVENT_INTEGRITY_KEY_REF
             | ACTION_QUEUE_AUTHORITY_KEY_REF
             | AGENT_RUN_RECEIPT_KEY_REF
+            | CANONICAL_TASK_RECEIPT_KEY_REF
     ) {
         anyhow::bail!("unsupported OpenLife integrity key purpose");
     }
@@ -476,6 +481,7 @@ pub(crate) fn inspect_and_hydrate_integrity_key<R: SecretReader + ?Sized>(
             | ACTION_QUEUE_AUTHORITY_KEY_REF
             | TASK_STORE_AUTHORITY_KEY_REF
             | AGENT_RUN_RECEIPT_KEY_REF
+            | CANONICAL_TASK_RECEIPT_KEY_REF
     ) {
         return IntegrityKeyHydration::Invalid;
     }

@@ -580,7 +580,7 @@ pub struct BoundReportReview {
 pub struct CanonicalTaskRuntimeStore {
     conn: Arc<Mutex<Connection>>,
     db_path: Option<PathBuf>,
-    receipt_key: Option<crate::agent::AgentRunReceiptKey>,
+    receipt_key: Option<crate::agent::CanonicalTaskReceiptKey>,
     store_identity: String,
 }
 
@@ -591,7 +591,7 @@ impl CanonicalTaskRuntimeStore {
 
     pub fn new_with_receipt_key(
         path: impl Into<PathBuf>,
-        installation_key: crate::agent::AgentRunReceiptKey,
+        installation_key: crate::agent::CanonicalTaskReceiptKey,
     ) -> Result<Self> {
         let path = path.into();
         Self::new_internal(path, Some(installation_key))
@@ -599,7 +599,7 @@ impl CanonicalTaskRuntimeStore {
 
     fn new_internal(
         path: PathBuf,
-        installation_key: Option<crate::agent::AgentRunReceiptKey>,
+        installation_key: Option<crate::agent::CanonicalTaskReceiptKey>,
     ) -> Result<Self> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -633,13 +633,13 @@ impl CanonicalTaskRuntimeStore {
     }
 
     pub fn new_in_memory_with_receipt_key(
-        receipt_key: crate::agent::AgentRunReceiptKey,
+        receipt_key: crate::agent::CanonicalTaskReceiptKey,
     ) -> Result<Self> {
         Self::new_in_memory_internal(Some(receipt_key))
     }
 
     fn new_in_memory_internal(
-        receipt_key: Option<crate::agent::AgentRunReceiptKey>,
+        receipt_key: Option<crate::agent::CanonicalTaskReceiptKey>,
     ) -> Result<Self> {
         let mut store = Self {
             conn: Arc::new(Mutex::new(Connection::open_in_memory()?)),

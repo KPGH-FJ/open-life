@@ -86,17 +86,13 @@ pub(crate) async fn get_review_center_view_model_with_state(
     materialization_overrides.extend(dispatch_materialization_overrides);
     warnings.append(&mut dispatch_warnings);
     warnings.append(&mut safe_path_warnings);
-    let safe_mode_reason = if state.startup_warnings.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "Safe Mode is active because startup warnings exist: {}",
-            state.startup_warnings.join("; ")
-        ))
-    };
+    // Review availability is owned by the exact Proposal/Artifact capability
+    // being reviewed. Unrelated startup warnings (including retired execution
+    // stores) must not turn the whole Review Center into Safe Mode.
+    let safe_mode_reason = None;
     let model = build_review_center_view_model(ReviewCenterBuildInput {
         proposals,
-        safe_mode_active: !state.startup_warnings.is_empty(),
+        safe_mode_active: false,
         safe_mode_reason,
         safe_paths,
         safe_path_overrides,

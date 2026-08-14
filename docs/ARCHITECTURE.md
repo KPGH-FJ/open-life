@@ -2,10 +2,9 @@
 
 ## Status
 
-Stable source map and accepted reconstruction direction for OpenLife. Sections
-marked "current" describe the production tree; sections marked "target"
-describe accepted R0-R8 work that is not yet product credit. Current source and
-accepted ADRs remain authoritative.
+Stable source map for the completed R0-R8 baseline and the accepted H0-H6
+capable-Agent direction. Current source and accepted ADRs remain authoritative;
+the active plan defines the migration order.
 
 ## Current product path
 
@@ -143,14 +142,18 @@ renders these typed projections; it does not read files, proposals, or
 bound move: it preserves the original verified Task history and is presented
 as a later reversal instead of being misclassified as missing delivery.
 
-## Reconstruction target
+## Capable-Agent target
 
-ADR 0018 extends ADR 0017 with one shared Conversation spine:
+ADR 0019 extends the reconstructed Conversation spine with one adaptive Agent
+loop and clean replacement contract:
 
 ```text
 Workbench -> optional Project -> Conversation -> Turn -> typed Item
                                            \-> optional Work Task
-                                               -> Run -> Item -> ItemAttempt
+                                               -> Run -> PlanRevision
+                                               -> Item -> ItemAttempt
+                                               -> Observation
+                                               -> CompletionEvaluator
                                                -> FinalResult
                                                -> ArtifactVersion
 ```

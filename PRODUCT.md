@@ -67,9 +67,9 @@ harness. Migrate complete vertical product capabilities, delete each replaced
 legacy owner and frontend consumer, and prove completion at the required unit,
 integration, browser, exact-native, and external-live evidence level.
 
-S0-S7 are historical exploration and reusable evidence, not current product
-completion. The active R0-R8 sequence is defined by the single plan in
-`plans/` and ADR 0018.
+S0-S7 are historical exploration. R0-R8 is the completed reconstruction
+baseline, not completion of the capable general Agent. The active H0-H6
+sequence is defined by the single plan in `plans/`, ADR 0018, and ADR 0019.
 
 Repository governance remains small and conventional: one active plan, normal
 source tests, normal CI, and concise architecture and decision records.

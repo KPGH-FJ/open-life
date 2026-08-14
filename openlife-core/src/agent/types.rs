@@ -242,6 +242,17 @@ pub const AGENT_RUN_RECEIPT_KEY_BYTES: usize = 32;
 #[derive(Clone)]
 pub struct AgentRunReceiptKey([u8; AGENT_RUN_RECEIPT_KEY_BYTES]);
 
+/// Purpose-scoped receipt authority for the canonical Task/Run/Item store.
+/// It intentionally has a distinct type and derivation domain from the
+/// retired AgentRun lifecycle authority.
+#[derive(Clone)]
+pub struct CanonicalTaskReceiptKey([u8; AGENT_RUN_RECEIPT_KEY_BYTES]);
+
+pub(crate) trait ContentReceiptAuthorityKey {
+    fn sign_receipt(&self, purpose: &str, material: &str) -> String;
+    fn verify_receipt(&self, purpose: &str, material: &str, encoded_tag: &str) -> bool;
+}
+
 impl AgentRunReceiptKey {
     pub fn from_bytes(bytes: [u8; AGENT_RUN_RECEIPT_KEY_BYTES]) -> anyhow::Result<Self> {
         if bytes.iter().all(|byte| *byte == 0) {
@@ -342,7 +353,121 @@ impl AgentRunReceiptKey {
     }
 }
 
+impl CanonicalTaskReceiptKey {
+    pub fn from_bytes(bytes: [u8; AGENT_RUN_RECEIPT_KEY_BYTES]) -> anyhow::Result<Self> {
+        if bytes.iter().all(|byte| *byte == 0) {
+            anyhow::bail!("canonical_task_receipt_key_must_not_be_all_zero");
+        }
+        Ok(Self(bytes))
+    }
+
+    pub(crate) fn derive_for_canonical_database_slot(
+        &self,
+        canonical_path: &std::path::Path,
+    ) -> anyhow::Result<Self> {
+        let mut material = b"openlife-canonical-task-database-slot-key-v1\0".to_vec();
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            material.extend_from_slice(b"unix\0");
+            material.extend_from_slice(canonical_path.as_os_str().as_bytes());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            material.extend_from_slice(b"windows-utf16le\0");
+            for unit in canonical_path.as_os_str().encode_wide() {
+                material.extend_from_slice(&unit.to_le_bytes());
+            }
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            material.extend_from_slice(b"portable-lossy\0");
+            material.extend_from_slice(canonical_path.to_string_lossy().as_bytes());
+        }
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.0);
+        let tag = ring::hmac::sign(&key, &material);
+        let bytes: [u8; AGENT_RUN_RECEIPT_KEY_BYTES] = tag
+            .as_ref()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("canonical_task_database_slot_key_derivation_failed"))?;
+        Self::from_bytes(bytes)
+    }
+
+    fn signing_message(purpose: &str, material: &str) -> String {
+        format!(
+            "openlife-canonical-task-receipt-v1\0purpose\0{}:{}\0material\0{}:{}",
+            purpose.len(),
+            purpose,
+            material.len(),
+            material
+        )
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    #[doc(hidden)]
+    pub fn test_key() -> Self {
+        Self([0xC7; AGENT_RUN_RECEIPT_KEY_BYTES])
+    }
+}
+
+impl ContentReceiptAuthorityKey for AgentRunReceiptKey {
+    fn sign_receipt(&self, purpose: &str, material: &str) -> String {
+        self.sign(purpose, material)
+    }
+
+    fn verify_receipt(&self, purpose: &str, material: &str, encoded_tag: &str) -> bool {
+        self.verify(purpose, material, encoded_tag)
+    }
+}
+
+impl ContentReceiptAuthorityKey for CanonicalTaskReceiptKey {
+    fn sign_receipt(&self, purpose: &str, material: &str) -> String {
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.0);
+        let message = Self::signing_message(purpose, material);
+        let tag = ring::hmac::sign(&key, message.as_bytes());
+        let hex = tag
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("hmac-sha256:{hex}")
+    }
+
+    fn verify_receipt(&self, purpose: &str, material: &str, encoded_tag: &str) -> bool {
+        let Some(hex) = encoded_tag.strip_prefix("hmac-sha256:") else {
+            return false;
+        };
+        if hex.len() != 64 {
+            return false;
+        }
+        let mut tag = [0u8; 32];
+        for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+            let Ok(pair) = std::str::from_utf8(pair) else {
+                return false;
+            };
+            let Ok(byte) = u8::from_str_radix(pair, 16) else {
+                return false;
+            };
+            tag[index] = byte;
+        }
+        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.0);
+        ring::hmac::verify(
+            &key,
+            Self::signing_message(purpose, material).as_bytes(),
+            &tag,
+        )
+        .is_ok()
+    }
+}
+
 impl Drop for AgentRunReceiptKey {
+    fn drop(&mut self) {
+        self.0.fill(0);
+    }
+}
+
+impl Drop for CanonicalTaskReceiptKey {
     fn drop(&mut self) {
         self.0.fill(0);
     }
@@ -351,6 +476,12 @@ impl Drop for AgentRunReceiptKey {
 impl std::fmt::Debug for AgentRunReceiptKey {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str("AgentRunReceiptKey([REDACTED])")
+    }
+}
+
+impl std::fmt::Debug for CanonicalTaskReceiptKey {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CanonicalTaskReceiptKey([REDACTED])")
     }
 }
 
@@ -659,8 +790,8 @@ impl std::fmt::Debug for BoundContentReceipt {
 }
 
 impl BoundContentReceipt {
-    pub(crate) fn issue_durable(
-        key: &AgentRunReceiptKey,
+    pub(crate) fn issue_durable<K: ContentReceiptAuthorityKey>(
+        key: &K,
         evidence: crate::agent::action_executor::tool_executor::ObservedToolBodyIssueEvidence,
         observed_binding: &ContentReceiptBinding,
         canonical_binding: &ContentReceiptBinding,
@@ -701,20 +832,20 @@ impl BoundContentReceipt {
             body_receipt: String::new(),
             authority_tag: String::new(),
         };
-        durable.binding_receipt = key.sign(
+        durable.binding_receipt = key.sign_receipt(
             "agent_run_bound_content_binding_v2",
             &canonical_binding.material(),
         );
         let body_material = durable.body_material(observed_binding, observed_body);
-        durable.body_receipt = key.sign("agent_run_bound_content_body_v2", &body_material);
-        if !key.verify(
+        durable.body_receipt = key.sign_receipt("agent_run_bound_content_body_v2", &body_material);
+        if !key.verify_receipt(
             "agent_run_bound_content_body_v2",
             &body_material,
             &durable.body_receipt,
         ) {
             anyhow::bail!("bound_content_receipt_body_issue_failed");
         }
-        durable.authority_tag = key.sign(
+        durable.authority_tag = key.sign_receipt(
             "agent_run_bound_content_authority_v2",
             &durable.canonical_material(),
         );
@@ -742,25 +873,25 @@ impl BoundContentReceipt {
         )
     }
 
-    pub(crate) fn verify_observed_body(
+    pub(crate) fn verify_observed_body<K: ContentReceiptAuthorityKey>(
         &self,
-        key: &AgentRunReceiptKey,
+        key: &K,
         observed_binding: &ContentReceiptBinding,
         observed_body: &str,
     ) -> bool {
         self.version == BOUND_CONTENT_RECEIPT_VERSION_CURRENT
             && self.byte_count == observed_body.len()
             && observed_binding.same_graph_owner_identity(self)
-            && key.verify(
+            && key.verify_receipt(
                 "agent_run_bound_content_body_v2",
                 &self.body_material(observed_binding, observed_body),
                 &self.body_receipt,
             )
     }
 
-    pub(crate) fn verify_durable(
+    pub(crate) fn verify_durable<K: ContentReceiptAuthorityKey>(
         &self,
-        key: &AgentRunReceiptKey,
+        key: &K,
         canonical_binding: &ContentReceiptBinding,
     ) -> bool {
         self.version == BOUND_CONTENT_RECEIPT_VERSION_CURRENT
@@ -770,12 +901,12 @@ impl BoundContentReceipt {
             && is_exact_hmac_sha256(&self.binding_receipt)
             && is_exact_hmac_sha256(&self.body_receipt)
             && is_exact_hmac_sha256(&self.authority_tag)
-            && key.verify(
+            && key.verify_receipt(
                 "agent_run_bound_content_binding_v2",
                 &canonical_binding.material(),
                 &self.binding_receipt,
             )
-            && key.verify(
+            && key.verify_receipt(
                 "agent_run_bound_content_authority_v2",
                 &self.canonical_material(),
                 &self.authority_tag,

@@ -244,7 +244,7 @@ async fn run_canonical_work_with_resource_scope(
         .map_err(|_| "canonical_work_concurrency_limit_reached".to_string())?;
     state
         .persistence_coordinator
-        .require_effects_allowed()
+        .require_effects_for_stores(&["ConversationStore", "CanonicalTaskRuntimeStore"])
         .map_err(|error| error.to_string())?;
     let conversation_store = state
         .conversation_store
