@@ -168,6 +168,24 @@ export function tasksContext(envelope: ViewModelEnvelope<TasksViewModel>): Workb
   };
 }
 
+export function taskNeedsAttention(item: TaskViewModelItem): boolean {
+  return (
+    item.needsAttention === true ||
+    [
+      "waiting_permission",
+      "waiting_review",
+      "blocked",
+      "failed",
+      "remote_unknown",
+      "completed_with_pending_review",
+      "completed_needs_evidence",
+      "unknown",
+    ].includes(item.lifecycleStatus) ||
+    item.pendingBlockers.length > 0 ||
+    item.pendingReviewItemRefs.length > 0
+  );
+}
+
 export function taskLifecyclePresentation(item: TaskViewModelItem): ProductStatusPresentation {
   switch (item.lifecycleStatus) {
     case "running":

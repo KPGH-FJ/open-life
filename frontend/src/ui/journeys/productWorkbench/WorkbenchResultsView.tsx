@@ -21,6 +21,7 @@ import {
 } from "@/ui/journeys/governedAction/taskControlContract";
 import {
   formatBackendTime,
+  taskNeedsAttention,
   taskLifecyclePresentation,
   taskPrimaryQuestion,
 } from "./workbenchPresentation";
@@ -35,21 +36,7 @@ function taskMatchesFilter(item: TaskViewModelItem, filter: TaskFilter): boolean
     );
   }
   if (filter === "attention") {
-    return (
-      item.needsAttention === true ||
-      [
-        "waiting_permission",
-        "waiting_review",
-        "blocked",
-        "failed",
-        "remote_unknown",
-        "completed_with_pending_review",
-        "completed_needs_evidence",
-        "unknown",
-      ].includes(item.lifecycleStatus) ||
-      item.pendingBlockers.length > 0 ||
-      item.pendingReviewItemRefs.length > 0
-    );
+    return taskNeedsAttention(item);
   }
   return [
     "completed",
@@ -264,6 +251,7 @@ export function WorkbenchResultsView({
   onConfirmTaskControl,
   onCancelTaskControlConfirmation,
   onRequestArtifactUndo,
+  fixedFilter,
 }: {
   envelope: ViewModelEnvelope<TasksViewModel>;
   refreshing: boolean;
@@ -277,6 +265,7 @@ export function WorkbenchResultsView({
   onConfirmTaskControl: () => void;
   onCancelTaskControlConfirmation: () => void;
   onRequestArtifactUndo: (artifactId: string) => Promise<void>;
+  fixedFilter?: TaskFilter;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<TaskFilter>("all");
@@ -284,14 +273,15 @@ export function WorkbenchResultsView({
   const items = envelope.data?.items ?? [];
   const listAvailable = envelope.data !== null && !["error", "loading"].includes(envelope.status);
   const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
+  const activeFilter = fixedFilter ?? filter;
   const visibleItems = useMemo(
     () =>
       items.filter(
         item =>
-          taskMatchesFilter(item, filter) &&
+          taskMatchesFilter(item, activeFilter) &&
           (!normalizedQuery || taskSearchText(item).includes(normalizedQuery))
       ),
-    [filter, items, normalizedQuery]
+    [activeFilter, items, normalizedQuery]
   );
   const selectedTask = items.find(item => item.canonicalTaskId === selectedTaskId) ?? null;
   const executableControls = selectedTask?.allowedControls.filter(isExecutableTaskControl) ?? [];
@@ -331,15 +321,17 @@ export function WorkbenchResultsView({
           <h2>{taskPrimaryQuestion(envelope)}</h2>
           <p>生命周期、阻塞、结果和可用动作都只来自后端任务读模型。</p>
         </div>
-        <FoundationActionButton
-          label="重新读取"
-          variant="quiet"
-          icon={<RefreshCw size={18} strokeWidth={1.75} aria-hidden="true" />}
-          loading={refreshing}
-          loadingLabel="正在读取"
-          {...actionAttributes(refreshAction)}
-          onClick={onRefresh}
-        />
+        {!fixedFilter && (
+          <FoundationActionButton
+            label="重新读取"
+            variant="quiet"
+            icon={<RefreshCw size={18} strokeWidth={1.75} aria-hidden="true" />}
+            loading={refreshing}
+            loadingLabel="正在读取"
+            {...actionAttributes(refreshAction)}
+            onClick={onRefresh}
+          />
+        )}
       </header>
 
       {envelope.status === "loading" && (
@@ -377,26 +369,28 @@ export function WorkbenchResultsView({
                   placeholder="搜索任务"
                   onChange={event => {
                     setQuery(event.target.value);
-                    announceVisible(event.target.value, filter);
+                    announceVisible(event.target.value, activeFilter);
                   }}
                 />
               </label>
-              <label className="ol-workbench-result-filter">
-                <span className="ol-sr-only">筛选任务</span>
-                <select
-                  value={filter}
-                  onChange={event => {
-                    const nextFilter = event.target.value as TaskFilter;
-                    setFilter(nextFilter);
-                    announceVisible(query, nextFilter);
-                  }}
-                >
-                  <option value="all">全部</option>
-                  <option value="attention">需要处理</option>
-                  <option value="active">进行中</option>
-                  <option value="terminal">最近结果</option>
-                </select>
-              </label>
+              {!fixedFilter && (
+                <label className="ol-workbench-result-filter">
+                  <span className="ol-sr-only">筛选任务</span>
+                  <select
+                    value={filter}
+                    onChange={event => {
+                      const nextFilter = event.target.value as TaskFilter;
+                      setFilter(nextFilter);
+                      announceVisible(query, nextFilter);
+                    }}
+                  >
+                    <option value="all">全部</option>
+                    <option value="attention">需要处理</option>
+                    <option value="active">进行中</option>
+                    <option value="terminal">最近结果</option>
+                  </select>
+                </label>
+              )}
             </div>
           </div>
 

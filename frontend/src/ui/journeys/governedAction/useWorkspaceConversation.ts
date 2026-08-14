@@ -1084,7 +1084,9 @@ export function useWorkspaceConversation(
         });
         announce(
           sessionCreated || selectedSessionId
-            ? "消息发送失败；当前不会显示成功结论。"
+            ? mode === "work"
+              ? "这项工作未完成；请在结果或需处理中核对后端记录的任务状态。"
+              : "消息发送失败；当前不会显示成功结论。"
             : "新会话未能建立；没有发送消息。"
         );
         try {

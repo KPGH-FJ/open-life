@@ -313,6 +313,17 @@ fn canonical_work_release_surface_has_no_legacy_task_control_or_runtime_fallback
             "release handler must not expose retired TaskSession command {retired_command}"
         );
     }
+    for relative in [
+        "../openlife-core/src/mcp.rs",
+        "../openlife-core/src/agent/action_executor/core_os_tools.rs",
+    ] {
+        let source =
+            std::fs::read_to_string(root.join(relative)).expect("read Core OS tool source");
+        assert!(
+            !source.contains("agent_run.lookup"),
+            "release Core OS tools must not expose the retired AgentRun lookup surface in {relative}"
+        );
+    }
     let frontend = std::fs::read_to_string(root.join("../frontend/src/tauri.ts"))
         .expect("read frontend Tauri bridge");
     for retired_command in [

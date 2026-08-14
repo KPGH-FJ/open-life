@@ -284,25 +284,6 @@ pub(crate) async fn snapshot_tool_gateway_resources_for_scheduler(
 mod tests {
     use super::*;
 
-    struct RecordingDurableFailureObserver {
-        coordinator: Arc<crate::persistence_coordinator::PersistenceCoordinator>,
-        failures: std::sync::Mutex<Vec<(String, String)>>,
-    }
-
-    impl openlife_core::agent::DurableStoreFailureObserver for RecordingDurableFailureObserver {
-        fn durable_store_failed(&self, store_kind: &'static str, raw_error: &str) {
-            self.failures
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .push((store_kind.into(), raw_error.into()));
-            openlife_core::agent::DurableStoreFailureObserver::durable_store_failed(
-                self.coordinator.as_ref(),
-                store_kind,
-                raw_error,
-            );
-        }
-    }
-
     #[tokio::test]
     async fn governed_snapshot_tracks_each_config_generation_without_global_search_state() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
@@ -505,91 +486,6 @@ mod tests {
             state.persistence_coordinator.snapshot().mode,
             crate::persistence_coordinator::PersistenceRuntimeMode::UnavailableDegraded,
             "receipt issuance must expose its raw AgentRunStore failure before ToolGateway rewrites it"
-        );
-        assert!(state
-            .persistence_coordinator
-            .require_effects_allowed()
-            .is_err());
-    }
-
-    #[tokio::test]
-    async fn cloned_core_os_agent_run_lookup_toctou_degrades_before_future_effects() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory
-            .path()
-            .join("tool-gateway-core-os-run-lookup-toctou.db");
-        let store = openlife_core::agent::AgentRunStore::new(&path).unwrap();
-        let mut owner = openlife_core::agent::AgentRun::new_tool_execution_run("agent_run.lookup");
-        // Keep this adapter-fault fixture outside privacy patterns so it reaches dispatch.
-        owner.id = "agent-run-lookup-toctou-owner".into();
-        store.create_run(&owner).unwrap();
-
-        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        Arc::get_mut(&mut state)
-            .expect("test state has one outer owner")
-            .agent_run_store = Some(Arc::new(tokio::sync::Mutex::new(store)));
-        install_release_like_persistence_coordinator(&mut state);
-        let resources = snapshot_tool_gateway_resources_for_main_chat_read(&state)
-            .await
-            .expect("healthy AgentRun Core OS snapshot");
-        let failure_observer = RecordingDurableFailureObserver {
-            coordinator: Arc::clone(&resources.governed.shared.persistence_coordinator),
-            failures: std::sync::Mutex::new(Vec::new()),
-        };
-
-        let fault = rusqlite::Connection::open(&path).unwrap();
-        fault.execute_batch("DROP TABLE agent_runs;").unwrap();
-        drop(fault);
-        let context = openlife_core::agent::ActionExecutionContext::new(
-            &resources.governed.shared.registry,
-            &resources.governed.shared.permission_store,
-            &resources.governed.shared.audit_store,
-            &resources.governed.shared.privacy_engine,
-            &resources.governed.shared.safe_paths,
-        )
-        .with_tool_audit_persistence_observer(
-            resources.governed.shared.persistence_coordinator.as_ref(),
-        )
-        .with_durable_store_failure_observer(&failure_observer)
-        .with_agent_run_store(&resources.agent_run_store);
-        let result = openlife_core::agent::ToolGateway::from_executor_config(Default::default())
-            .execute(
-                openlife_core::agent::AgentActionRequest {
-                    action_type: "builtin_tool".into(),
-                    target: "agent_run.lookup".into(),
-                    input: serde_json::json!({"arguments": {"run_id": owner.id}}),
-                    source_run_id: None,
-                    step_index: 0,
-                },
-                &context,
-            )
-            .await
-            .expect("Core OS store failure is represented as a failed tool result");
-        assert_ne!(
-            result.status,
-            openlife_core::agent::ActionExecutionStatus::Succeeded
-        );
-        let observed_failures = failure_observer
-            .failures
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        assert_eq!(
-            result.execution_receipt.dispatch_kind,
-            openlife_core::tool_execution_receipt::ToolDispatchKind::Local,
-            "the TOCTOU fault must be observed inside the admitted adapter; result={result:?}; observed_failures={observed_failures:?}"
-        );
-        assert_eq!(result.execution_receipt.dispatch_attempt_count, 1);
-        assert!(
-            observed_failures
-                .iter()
-                .any(|(store, _)| store == "AgentRunStore"),
-            "AgentRunStore raw failure did not reach the durable observer: result={result:?}; observed_failures={observed_failures:?}"
-        );
-        assert_eq!(
-            state.persistence_coordinator.snapshot().mode,
-            crate::persistence_coordinator::PersistenceRuntimeMode::UnavailableDegraded,
-            "Core OS must observe and classify the raw AgentRunStore failure before converting it to action output; observed_failures={observed_failures:?}"
         );
         assert!(state
             .persistence_coordinator

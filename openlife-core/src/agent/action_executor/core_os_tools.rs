@@ -32,7 +32,6 @@ impl super::ActionExecutor {
             "memory.search",
             "tool.list_available",
             "proposal.list",
-            "agent_run.lookup",
             "life_model.propose_patch",
             "memory.propose_write",
             "memory.propose_archive",
@@ -211,47 +210,6 @@ impl super::ActionExecutor {
                             "status": "unavailable",
                             "reason": "ProposalStore not available in execution context",
                             "proposals": []
-                        })
-                        .to_string()
-                    }
-                }
-                "agent_run.lookup" => {
-                    let run_id = args
-                        .get("run_id")
-                        .or_else(|| args.get("runId"))
-                        .and_then(Value::as_str)
-                        .unwrap_or("");
-                    if run_id.is_empty() {
-                        serde_json::json!({
-                            "status": "error",
-                            "reason": "agent_run.lookup requires run_id"
-                        })
-                        .to_string()
-                    } else if let Some(store) = ctx.agent_run_store {
-                        let run = match store.get_run(run_id) {
-                            Ok(run) => run,
-                            Err(error) => {
-                                ctx.observe_durable_store_failure("AgentRunStore", &error);
-                                return Err(anyhow::anyhow!(
-                                    "Failed to lookup agent run: {}",
-                                    error
-                                ));
-                            }
-                        };
-                        match run {
-                            Some(run) => serde_json::to_string(&run).unwrap_or_else(|_| {
-                                "{\"error\":\"serialization failed\"}".to_string()
-                            }),
-                            None => serde_json::json!({
-                                "status": "not_found",
-                                "run_id": run_id
-                            })
-                            .to_string(),
-                        }
-                    } else {
-                        serde_json::json!({
-                            "status": "unavailable",
-                            "reason": "AgentRunStore not available in execution context"
                         })
                         .to_string()
                     }

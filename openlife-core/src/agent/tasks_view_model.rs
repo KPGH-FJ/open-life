@@ -714,6 +714,7 @@ pub fn build_workspace_view_model(input: WorkspaceViewModelBuildInput) -> Worksp
 }
 
 fn task_item_from_input(input: TaskViewModelTaskInput) -> TaskViewModelItem {
+    let canonical_runtime_item = input.canonical_task_id.is_some();
     let lifecycle_status = input
         .canonical_lifecycle_status
         .unwrap_or_else(|| lifecycle_status_for_task(&input));
@@ -727,14 +728,22 @@ fn task_item_from_input(input: TaskViewModelTaskInput) -> TaskViewModelItem {
     let mut evidence_refs = input.evidence_refs;
     evidence_refs.push(EvidenceRef {
         id: input.task_session_id.clone(),
-        label: "Main Chat task session".into(),
+        label: if canonical_runtime_item {
+            "Canonical Work Task".into()
+        } else {
+            "Compatibility task session".into()
+        },
         source: EvidenceSource::Task,
         sensitivity: Some(EvidenceSensitivity::LocalPrivate),
     });
     for run_id in &input.related_run_ids {
         evidence_refs.push(EvidenceRef {
             id: run_id.clone(),
-            label: "AgentRun".into(),
+            label: if canonical_runtime_item {
+                "Canonical Work Run".into()
+            } else {
+                "Compatibility AgentRun".into()
+            },
             source: EvidenceSource::Task,
             sensitivity: Some(EvidenceSensitivity::LocalPrivate),
         });
@@ -1318,6 +1327,7 @@ mod tests {
             task_inputs: vec![TaskViewModelTaskInput {
                 task_session_id: "execution-session-1".into(),
                 canonical_task_id: Some("canonical-report-task".into()),
+                related_run_ids: vec!["canonical-work-run-1".into()],
                 title: "Report".into(),
                 session_status: Some(AgentTaskSessionStatus::Completed),
                 final_delivery_present: true,
@@ -1341,6 +1351,18 @@ mod tests {
         );
         assert!(!item.final_delivery_evidence_present);
         assert_eq!(item.artifacts.len(), 1);
+        assert!(item
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.label == "Canonical Work Task"));
+        assert!(item
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.label == "Canonical Work Run"));
+        assert!(!item
+            .evidence_refs
+            .iter()
+            .any(|evidence| evidence.label == "AgentRun"));
         assert_eq!(model.summary.waiting_review_count, 1);
         assert_eq!(model.summary.completed_count, 0);
     }

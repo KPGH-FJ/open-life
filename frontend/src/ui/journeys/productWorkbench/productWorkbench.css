@@ -10,6 +10,16 @@
   color: var(--ol-ink);
 }
 
+.ol-workbench-attention {
+  display: grid;
+  width: 100%;
+  gap: var(--ol-space-8);
+}
+
+.ol-workbench-attention .ol-workbench-result-page {
+  min-height: 0;
+}
+
 .ol-workbench-result-page-heading {
   display: grid;
   gap: var(--ol-space-2);

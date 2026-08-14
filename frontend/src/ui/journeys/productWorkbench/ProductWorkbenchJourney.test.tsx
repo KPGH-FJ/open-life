@@ -51,6 +51,68 @@ describe("OpenLife product shell", () => {
     expect(await screen.findByText("本地路由，未外传")).toBeInTheDocument();
   });
 
+  it("shows canonical blocked Work in Needs Attention even when Review is empty", async () => {
+    const user = userEvent.setup();
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      load: async () => {
+        const snapshot = await fixture.load();
+        const blockedTask = {
+          ...snapshot.tasksEnvelope.data!.items[0],
+          canonicalTaskId: "task:web-blocked",
+          title: "查询官网标题",
+          lifecycleStatus: "blocked" as const,
+          terminalDeliveryStatus: "blocked" as const,
+          finalDeliveryEvidencePresent: false,
+          needsAttention: true,
+          attentionReasonCodes: ["read_tool_blocked"],
+          pendingBlockers: ["read_tool_blocked"],
+          pendingReviewItemRefs: [],
+        };
+        return {
+          ...snapshot,
+          tasksEnvelope: {
+            ...snapshot.tasksEnvelope,
+            status: "ready" as const,
+            data: {
+              ...snapshot.tasksEnvelope.data!,
+              items: [blockedTask],
+              summary: {
+                ...snapshot.tasksEnvelope.data!.summary,
+                total: 1,
+                blockedCount: 1,
+                waitingPermissionCount: 0,
+                waitingReviewCount: 0,
+                pendingReviewCount: 0,
+              },
+            },
+          },
+          reviewEnvelope: {
+            ...snapshot.reviewEnvelope,
+            status: "empty" as const,
+            data: { ...snapshot.reviewEnvelope.data!, items: [] },
+          },
+        };
+      },
+    };
+
+    render(
+      <ProductWorkbenchJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+      />
+    );
+
+    await user.click(await screen.findByRole("button", { name: /^需处理/ }));
+    expect(
+      await screen.findByRole("button", { name: /查询官网标题.*需要处理：read_tool_blocked/ })
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 项需要处理")).toBeInTheDocument();
+    expect(screen.queryByText("当前没有可展示的任务。")).not.toBeInTheDocument();
+  });
+
   it("shows only implemented settings categories", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");

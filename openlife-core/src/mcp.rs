@@ -930,15 +930,6 @@ impl McpRegistry {
             ToolIdempotencyContract::Idempotent,
         );
 
-        self.register_core_os_tool(
-            "agent_run.lookup",
-            "按 ID 查询 AgentRun 执行记录",
-            "low",
-            vec!["read".into()],
-            "read",
-            ToolIdempotencyContract::Idempotent,
-        );
-
         // Permission tools: let the agent inspect and request tool permissions.
         self.register_core_os_tool(
             "permission.check",

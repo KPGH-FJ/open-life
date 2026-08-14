@@ -430,6 +430,25 @@ describe("workspace conversation journey", () => {
     expect(result.current.pendingResources).toHaveLength(1);
   });
 
+  it("directs failed Work to its durable Results or Needs Attention state", async () => {
+    const announce = vi.fn();
+    const dataSource = source({
+      streamTurn: vi.fn().mockRejectedValue(new Error("read_tool_blocked")),
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.setMode("work"));
+    act(() => result.current.setDraft("查询官网标题"));
+
+    await act(async () => result.current.send());
+
+    expect(announce).toHaveBeenCalledWith(
+      "这项工作未完成；请在结果或需处理中核对后端记录的任务状态。"
+    );
+  });
+
   it("fails closed when an attachment turn returns a foreign terminal identity", async () => {
     const dataSource = source({
       streamTurn: vi.fn().mockResolvedValue({

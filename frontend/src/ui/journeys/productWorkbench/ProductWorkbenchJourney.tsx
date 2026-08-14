@@ -25,11 +25,11 @@ import {
   boundaryPresentation,
   collectBoundaryEvidence,
   taskLifecyclePresentation,
+  taskNeedsAttention,
   tasksContext,
   toWorkbenchEvidence,
 } from "./workbenchPresentation";
 import {
-  reviewContext,
   reviewInspector,
   workspaceContext,
   workspaceInspector,
@@ -38,6 +38,7 @@ import {
   useGovernedActionJourney,
   WorkspaceGovernedView,
   type GovernedActionDataSource,
+  type GovernedActionSnapshot,
   type WorkspaceConversationDataSource,
 } from "@/ui/journeys/governedAction";
 import {
@@ -262,6 +263,49 @@ function taskInspector(
   };
 }
 
+function attentionContext(
+  tasks: ViewModelEnvelope<TasksViewModel>,
+  snapshot: GovernedActionSnapshot | null,
+  selectedTask: TaskViewModelItem | null
+): WorkbenchContextSummary {
+  if (selectedTask && taskNeedsAttention(selectedTask)) {
+    return {
+      eyebrow: "Workbench",
+      title: "需处理",
+      status: taskLifecyclePresentation(selectedTask),
+    };
+  }
+  const taskCount = tasks.data?.items.filter(taskNeedsAttention).length ?? 0;
+  const reviewCount = snapshot?.reviewEnvelope.data?.items.length ?? 0;
+  const total = taskCount + reviewCount;
+  if (total > 0) {
+    return {
+      eyebrow: "Workbench",
+      title: "需处理",
+      status: { label: `${total} 项需要处理`, status: "waiting" },
+    };
+  }
+  if (tasks.status === "error" || snapshot?.reviewEnvelope.status === "error") {
+    return {
+      eyebrow: "Workbench",
+      title: "需处理",
+      status: { label: "状态不完整", status: "error" },
+    };
+  }
+  if (tasks.status === "stale" || snapshot?.reviewEnvelope.status === "stale") {
+    return {
+      eyebrow: "Workbench",
+      title: "需处理",
+      status: { label: "状态已陈旧", status: "stale" },
+    };
+  }
+  return {
+    eyebrow: "Workbench",
+    title: "需处理",
+    status: { label: "暂无待处理项", status: "neutral" },
+  };
+}
+
 function unavailableInspector(title: string): WorkbenchInspectorModel {
   return {
     title,
@@ -449,6 +493,7 @@ export function ProductWorkbenchJourney({
       setMode("product");
       setActiveSurface("workspace");
       setWorkbenchSurface(id);
+      if (id === "attention") setSelectedTask(null);
       setInspectorOpen(false);
       setSelectedEvidence("");
       requestFocus(`workbench-${id}`);
@@ -568,8 +613,11 @@ export function ProductWorkbenchJourney({
         return { ...resultContext, eyebrow: "Workbench", title: "结果" };
       }
       if (workbenchSurface === "attention") {
-        const attentionContext = reviewContext(governed.snapshot, governed.selectedItem);
-        return { ...attentionContext, eyebrow: "Workbench", title: "需处理" };
+        return attentionContext(
+          effectiveTasksSnapshot.envelope,
+          governed.snapshot,
+          effectiveSelectedTask
+        );
       }
       return workspaceContext(governed.snapshot);
     }
@@ -609,7 +657,9 @@ export function ProductWorkbenchJourney({
         return taskInspector(effectiveTasksSnapshot, effectiveSelectedTask, selectedEvidence);
       }
       if (workbenchSurface === "attention") {
-        return reviewInspector(governed.snapshot, governed.selectedItem, selectedEvidence);
+        return effectiveSelectedTask
+          ? taskInspector(effectiveTasksSnapshot, effectiveSelectedTask, selectedEvidence)
+          : reviewInspector(governed.snapshot, governed.selectedItem, selectedEvidence);
       }
       return workspaceInspector(governed.snapshot, selectedEvidence);
     }
@@ -655,6 +705,7 @@ export function ProductWorkbenchJourney({
     setMode("product");
     setActiveSurface("workspace");
     setWorkbenchSurface("attention");
+    setSelectedTask(null);
     setInspectorOpen(false);
     setSelectedEvidence("");
     requestFocus(`review-${item.id}`);
@@ -709,44 +760,67 @@ export function ProductWorkbenchJourney({
     governedActionDataSource
   ) {
     content = (
-      <ReviewGovernedView
-        snapshot={governed.snapshot}
-        selectedItem={governed.selectedItem}
-        refreshing={governed.refreshing}
-        dispatchState={governed.reviewState}
-        onRefresh={() => void governed.load(true)}
-        onSelectItem={item => {
-          governed.selectReviewItem(item);
-          setSelectedEvidence("");
-          setAnnouncement(`已选择“${item.decisionContext.title}”；没有记录任何决定。`);
-        }}
-        onRequestAction={governed.requestReviewAction}
-        onConfirmAction={governed.confirmReviewAction}
-        onCancelConfirmation={governed.cancelReviewConfirmation}
-        onEditLifeModelLearning={governed.editLifeModelLearning}
-        backLabel={
-          reviewReturnSurface === "life-model"
-            ? "返回个人智能"
-            : reviewReturnSurface === "settings"
-              ? "返回模型与供应商"
-              : undefined
-        }
-        onBackWorkspace={() => {
-          if (reviewReturnSurface === "settings") {
-            setMode("settings");
-            setActiveSurface(settingsReturnSurface);
-            onRouteChange?.({ mode: "settings", surface: settingsReturnSurface });
-            setActiveSettingsId("model-provider");
-            setInspectorOpen(false);
+      <div className="ol-workbench-attention" data-testid="workbench-attention-view">
+        <WorkbenchResultsView
+          envelope={effectiveTasksSnapshot.envelope}
+          refreshing={governed.refreshing}
+          selectedTaskId={effectiveSelectedTask?.canonicalTaskId ?? null}
+          fixedFilter="attention"
+          onRefresh={() => void governed.load(true)}
+          onSelectTask={selectTask}
+          onOpenInspector={openInspector}
+          onAnnounce={setAnnouncement}
+          taskControlState={governed.taskControlState}
+          onRequestTaskControl={governed.requestTaskControl}
+          onConfirmTaskControl={governed.confirmTaskControl}
+          onCancelTaskControlConfirmation={governed.cancelTaskControlConfirmation}
+          onRequestArtifactUndo={async artifactId => {
+            if (!governedActionDataSource) return;
+            await governedActionDataSource.requestArtifactUndo(artifactId);
+            setAnnouncement("撤销建议已进入需处理；批准前不会移动文件。");
+            await governed.load(true);
+          }}
+        />
+        <ReviewGovernedView
+          snapshot={governed.snapshot}
+          selectedItem={governed.selectedItem}
+          refreshing={governed.refreshing}
+          dispatchState={governed.reviewState}
+          onRefresh={() => void governed.load(true)}
+          onSelectItem={item => {
+            governed.selectReviewItem(item);
+            setSelectedTask(null);
             setSelectedEvidence("");
-            requestFocus("settings-review-return");
-            setAnnouncement("已返回模型与供应商；审核决定不会自动重新测试或保存设置。 ");
-          } else {
-            navigateProduct(reviewReturnSurface);
+            setAnnouncement(`已选择“${item.decisionContext.title}”；没有记录任何决定。`);
+          }}
+          onRequestAction={governed.requestReviewAction}
+          onConfirmAction={governed.confirmReviewAction}
+          onCancelConfirmation={governed.cancelReviewConfirmation}
+          onEditLifeModelLearning={governed.editLifeModelLearning}
+          backLabel={
+            reviewReturnSurface === "life-model"
+              ? "返回个人智能"
+              : reviewReturnSurface === "settings"
+                ? "返回模型与供应商"
+                : undefined
           }
-        }}
-        onOpenInspector={openInspector}
-      />
+          onBackWorkspace={() => {
+            if (reviewReturnSurface === "settings") {
+              setMode("settings");
+              setActiveSurface(settingsReturnSurface);
+              onRouteChange?.({ mode: "settings", surface: settingsReturnSurface });
+              setActiveSettingsId("model-provider");
+              setInspectorOpen(false);
+              setSelectedEvidence("");
+              requestFocus("settings-review-return");
+              setAnnouncement("已返回模型与供应商；审核决定不会自动重新测试或保存设置。 ");
+            } else {
+              navigateProduct(reviewReturnSurface);
+            }
+          }}
+          onOpenInspector={openInspector}
+        />
+      </div>
     );
   } else if (
     activeSurface === "workspace" &&
