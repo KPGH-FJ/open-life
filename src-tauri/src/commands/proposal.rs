@@ -3,7 +3,6 @@ use crate::{
         commit_artifact_move, commit_staged_artifact, confirmed_artifact_receipt,
         confirmed_move_receipt, confirmed_move_receipt_from_paths, inspect_artifact_filesystem,
         inspect_artifact_move, prepare_artifact_materialization,
-        prepare_artifact_materialization_for_artifact,
         prepare_artifact_materialization_with_precondition_for_artifact, prepare_artifact_move,
         stage_artifact_bytes, ArtifactFilesystemFailure, ArtifactFilesystemObservation,
         ArtifactMaterializationReceipt, ArtifactTargetPrecondition,
@@ -50,7 +49,7 @@ fn canonical_work_artifact_id(proposal: &AgentProposal) -> Option<&str> {
             .after
             .get("artifactVersion")
             .and_then(Value::as_u64)
-            != Some(1)
+            .is_none_or(|version| version == 0)
         || proposal
             .after
             .get("canonicalTaskId")
@@ -645,12 +644,50 @@ async fn project_confirmed_effect_projection_only(
     }
 }
 
+struct ArtifactEffectRecoveryRecord {
+    proposal_id: String,
+    dispatch_claim_id: String,
+    target_reference_digest: String,
+    content_digest: String,
+    byte_size: u64,
+    media_type: String,
+    state: ArtifactEffectState,
+}
+
 async fn reconcile_artifact_effects_with_state(
     state: &Arc<AppState>,
     limit: i64,
 ) -> Result<(usize, bool), String> {
     let bounded_limit = limit.clamp(1, 200);
-    let records = {
+    let mut records = if let Some(store) = state.canonical_task_runtime_store.as_ref() {
+        store
+            .lock()
+            .await
+            .list_artifact_effects_for_reconciliation(bounded_limit as u64)
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .map(|record| ArtifactEffectRecoveryRecord {
+                proposal_id: record.proposal_id,
+                dispatch_claim_id: record.dispatch_claim_id,
+                target_reference_digest: record.target_reference_digest,
+                content_digest: record.content_digest,
+                byte_size: record.byte_size,
+                media_type: record.media_type,
+                state: match record.state {
+                    openlife_core::task_runtime::CanonicalArtifactEffectState::Prepared => {
+                        ArtifactEffectState::Prepared
+                    }
+                    openlife_core::task_runtime::CanonicalArtifactEffectState::Staged => {
+                        ArtifactEffectState::Staged
+                    }
+                    _ => unreachable!("only open canonical effects are listed"),
+                },
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let legacy_records = {
         let store = state
             .proposal_store
             .as_ref()
@@ -661,6 +698,21 @@ async fn reconcile_artifact_effects_with_state(
             .list_artifact_effects_for_reconciliation(bounded_limit)
             .map_err(|error| runtime_proposal_store_error(state, error))?
     };
+    records.extend(
+        legacy_records
+            .into_iter()
+            .map(|record| ArtifactEffectRecoveryRecord {
+                proposal_id: record.proposal_id,
+                dispatch_claim_id: record.dispatch_claim_id,
+                target_reference_digest: record.target_reference_digest,
+                content_digest: record.content_digest,
+                byte_size: record.byte_size,
+                media_type: record.media_type,
+                state: record.state,
+            }),
+    );
+    records.sort_by(|left, right| left.proposal_id.cmp(&right.proposal_id));
+    records.truncate(bounded_limit as usize);
     let backlog_may_remain = records.len() == bounded_limit as usize;
     let mut reconciled = 0usize;
     for record in records {
@@ -762,22 +814,13 @@ async fn reconcile_artifact_effects_with_state(
                 ArtifactFilesystemObservation::Confirmed {
                     observed_content_digest,
                 } => {
-                    let store = state
-                        .proposal_store
-                        .as_ref()
-                        .ok_or_else(proposal_store_missing)?
-                        .lock()
-                        .await;
-                    if !store
-                        .finish_artifact_confirmed(
-                            &record.proposal_id,
-                            &record.dispatch_claim_id,
-                            &observed_content_digest,
-                        )
-                        .map_err(|error| runtime_proposal_store_error(state, error))?
-                    {
-                        return Err("artifact move recovery confirmation CAS lost".into());
-                    }
+                    persist_artifact_confirmed(
+                        state,
+                        &record.proposal_id,
+                        &record.dispatch_claim_id,
+                        &observed_content_digest,
+                    )
+                    .await?;
                 }
                 ArtifactFilesystemObservation::NoStagedOrFinalBytes
                     if record.state == ArtifactEffectState::Prepared =>
@@ -805,29 +848,28 @@ async fn reconcile_artifact_effects_with_state(
             reconciled += 1;
             continue;
         }
-        let Some(path) = proposal.after.get("path").and_then(Value::as_str) else {
-            persist_artifact_unknown(
-                state,
-                &record.proposal_id,
-                &record.dispatch_claim_id,
-                "artifact_recovery_path_missing",
-            )
-            .await?;
-            reconciled += 1;
-            continue;
+        let resolved = match resolve_artifact_effect_input(state, &proposal).await {
+            Ok(resolved) => resolved,
+            Err(_) => {
+                persist_artifact_unknown(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    "artifact_recovery_canonical_source_invalid",
+                )
+                .await?;
+                reconciled += 1;
+                continue;
+            }
         };
-        let content = proposal
-            .after
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        let prepared = match prepare_artifact_materialization_for_artifact(
-            &artifact_id_for_proposal(&proposal),
+        let prepared = match prepare_artifact_materialization_with_precondition_for_artifact(
+            &resolved.artifact_id,
             &record.proposal_id,
             &record.dispatch_claim_id,
-            path,
-            content,
+            &resolved.path,
+            &resolved.content,
             &safe_paths,
+            resolved.target_precondition,
         ) {
             Ok(prepared) => prepared,
             Err(_) => {
@@ -866,22 +908,13 @@ async fn reconcile_artifact_effects_with_state(
             ArtifactFilesystemObservation::Confirmed {
                 observed_content_digest,
             } => {
-                let store = state
-                    .proposal_store
-                    .as_ref()
-                    .ok_or_else(proposal_store_missing)?
-                    .lock()
-                    .await;
-                if !store
-                    .finish_artifact_confirmed(
-                        &record.proposal_id,
-                        &record.dispatch_claim_id,
-                        &observed_content_digest,
-                    )
-                    .map_err(|error| runtime_proposal_store_error(state, error))?
-                {
-                    return Err("artifact recovery confirmation CAS lost".into());
-                }
+                persist_artifact_confirmed(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    &observed_content_digest,
+                )
+                .await?;
                 reconciled += 1;
             }
             ArtifactFilesystemObservation::Staged => {
@@ -893,22 +926,13 @@ async fn reconcile_artifact_effects_with_state(
                 .await
                 {
                     Ok(Ok(observed_content_digest)) => {
-                        let store = state
-                            .proposal_store
-                            .as_ref()
-                            .ok_or_else(proposal_store_missing)?
-                            .lock()
-                            .await;
-                        if !store
-                            .finish_artifact_confirmed(
-                                &record.proposal_id,
-                                &record.dispatch_claim_id,
-                                &observed_content_digest,
-                            )
-                            .map_err(|error| runtime_proposal_store_error(state, error))?
-                        {
-                            return Err("artifact staged recovery confirmation CAS lost".into());
-                        }
+                        persist_artifact_confirmed(
+                            state,
+                            &record.proposal_id,
+                            &record.dispatch_claim_id,
+                            &observed_content_digest,
+                        )
+                        .await?;
                     }
                     Ok(Err(failure)) => {
                         persist_artifact_unknown(
@@ -985,6 +1009,73 @@ async fn release_startup_artifact_claims_proven_before_effect(
     let backlog_may_remain = claims.len() == bounded_limit as usize;
     let mut released = 0usize;
     for (proposal_id, claim_id) in claims {
+        let canonical_effect = match state.canonical_task_runtime_store.as_ref() {
+            Some(store) => store
+                .lock()
+                .await
+                .load_artifact_effect(&proposal_id)
+                .map_err(|error| error.to_string())?,
+            None => None,
+        };
+        if let Some(effect) = canonical_effect {
+            use openlife_core::task_runtime::CanonicalArtifactEffectState;
+            match effect.state {
+                CanonicalArtifactEffectState::Prepared | CanonicalArtifactEffectState::Staged => {
+                    // The canonical recovery pass below owns inspection of these
+                    // in-flight bytes. They are not evidence of a pre-effect claim.
+                    continue;
+                }
+                CanonicalArtifactEffectState::Confirmed => {
+                    ensure_effect_dispatch_projection_pending(state, &proposal_id, &claim_id)
+                        .await?;
+                    continue;
+                }
+                CanonicalArtifactEffectState::FailedBeforeEffect => {
+                    let store = state
+                        .proposal_store
+                        .as_ref()
+                        .ok_or_else(proposal_store_missing)?
+                        .lock()
+                        .await;
+                    if store
+                        .mark_dispatch_failed_before_effect(
+                            &proposal_id,
+                            &claim_id,
+                            effect
+                                .error_code
+                                .as_deref()
+                                .unwrap_or("canonical_artifact_failed_before_effect"),
+                        )
+                        .map_err(|error| runtime_proposal_store_error(state, error))?
+                    {
+                        released += 1;
+                    }
+                    continue;
+                }
+                CanonicalArtifactEffectState::EffectUnknown => {
+                    let store = state
+                        .proposal_store
+                        .as_ref()
+                        .ok_or_else(proposal_store_missing)?
+                        .lock()
+                        .await;
+                    if store
+                        .mark_dispatch_unknown(
+                            &proposal_id,
+                            &claim_id,
+                            effect
+                                .error_code
+                                .as_deref()
+                                .unwrap_or("canonical_artifact_effect_unknown"),
+                        )
+                        .map_err(|error| runtime_proposal_store_error(state, error))?
+                    {
+                        released += 1;
+                    }
+                    continue;
+                }
+            }
+        }
         let store = state
             .proposal_store
             .as_ref()
@@ -1284,7 +1375,19 @@ async fn confirmed_artifact_receipt_from_store(
     if proposal.proposal_type != ProposalType::ExternalWriteAction {
         return Ok(None);
     }
-    let record = {
+    let canonical_record = if canonical_work_artifact_id(proposal).is_some() {
+        match state.canonical_task_runtime_store.as_ref() {
+            Some(store) => store
+                .lock()
+                .await
+                .load_artifact_effect(&proposal.id)
+                .map_err(|error| error.to_string())?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let legacy_record = if canonical_record.is_none() {
         let store = state
             .proposal_store
             .as_ref()
@@ -1294,11 +1397,42 @@ async fn confirmed_artifact_receipt_from_store(
         store
             .artifact_effect(&proposal.id)
             .map_err(|error| runtime_proposal_store_error(state, error))?
+    } else {
+        None
     };
-    let Some(record) = record.filter(|record| record.state == ArtifactEffectState::Confirmed)
-    else {
+    let effect = if let Some(record) = canonical_record.filter(|record| {
+        record.state == openlife_core::task_runtime::CanonicalArtifactEffectState::Confirmed
+    }) {
+        (
+            record.dispatch_claim_id,
+            record.target_reference_digest,
+            record.content_digest,
+            record.byte_size,
+            record.media_type,
+            record.observed_content_digest,
+        )
+    } else if let Some(record) =
+        legacy_record.filter(|record| record.state == ArtifactEffectState::Confirmed)
+    {
+        (
+            record.dispatch_claim_id,
+            record.target_reference_digest,
+            record.content_digest,
+            record.byte_size,
+            record.media_type,
+            record.observed_content_digest,
+        )
+    } else {
         return Ok(None);
     };
+    let (
+        dispatch_claim_id,
+        expected_target_reference_digest,
+        content_digest,
+        byte_size,
+        media_type,
+        observed_content_digest,
+    ) = effect;
     let operation = proposal
         .after
         .get("operation")
@@ -1317,56 +1451,48 @@ async fn confirmed_artifact_receipt_from_store(
             .ok_or_else(|| "confirmed artifact move lost target_path".to_string())?;
         let safe_paths = artifact_safe_paths_for_proposal(state, proposal).await?;
         let (target_reference_digest, observation) =
-            inspect_artifact_move(source, target, &record.content_digest, &safe_paths)?;
-        if target_reference_digest != record.target_reference_digest
+            inspect_artifact_move(source, target, &content_digest, &safe_paths)?;
+        if target_reference_digest != expected_target_reference_digest
             || !matches!(observation, ArtifactFilesystemObservation::Confirmed { .. })
         {
             return Err("confirmed artifact move receipt binding mismatch".into());
         }
-        let observed = record
-            .observed_content_digest
-            .filter(|digest| digest == &record.content_digest)
+        let observed = observed_content_digest
+            .filter(|digest| digest == &content_digest)
             .ok_or_else(|| "confirmed artifact move observed digest missing".to_string())?;
         let mut receipt = confirmed_move_receipt_from_paths(
             &proposal.id,
             target,
             target_reference_digest,
             observed,
-            record.byte_size,
-            record.media_type,
+            byte_size,
+            media_type,
         );
         receipt.artifact_id = artifact_id_for_proposal(proposal);
         return Ok(Some(receipt));
     }
-    let path = proposal
-        .after
-        .get("path")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "confirmed artifact Proposal lost after.path".to_string())?;
-    let content = proposal
-        .after
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let resolved = resolve_artifact_effect_input(state, proposal).await?;
+    let path = resolved.path.as_str();
+    let content = resolved.content.as_str();
     let safe_paths = artifact_safe_paths_for_proposal(state, proposal).await?;
-    let prepared = prepare_artifact_materialization_for_artifact(
-        &artifact_id_for_proposal(proposal),
+    let prepared = prepare_artifact_materialization_with_precondition_for_artifact(
+        &resolved.artifact_id,
         &proposal.id,
-        &record.dispatch_claim_id,
+        &dispatch_claim_id,
         path,
         content,
         &safe_paths,
+        resolved.target_precondition,
     )?;
-    if prepared.target_reference_digest != record.target_reference_digest
-        || prepared.content_digest != record.content_digest
-        || prepared.byte_size != record.byte_size
-        || prepared.media_type != record.media_type
+    if prepared.target_reference_digest != expected_target_reference_digest
+        || prepared.content_digest != content_digest
+        || prepared.byte_size != byte_size
+        || prepared.media_type != media_type
     {
         return Err("confirmed artifact receipt binding mismatch".into());
     }
-    let observed = record
-        .observed_content_digest
-        .filter(|digest| digest == &record.content_digest)
+    let observed = observed_content_digest
+        .filter(|digest| digest == &content_digest)
         .ok_or_else(|| "confirmed artifact observed digest missing".to_string())?;
     Ok(Some(confirmed_artifact_receipt(&prepared, observed)))
 }
@@ -1583,6 +1709,26 @@ async fn persist_artifact_failed_before_effect(
     claim_id: &str,
     error_code: &str,
 ) -> Result<(), String> {
+    if let Some(store) = state.canonical_task_runtime_store.as_ref() {
+        let store = store.lock().await;
+        if store
+            .load_artifact_by_proposal(proposal_id)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            if store
+                .load_artifact_effect(proposal_id)
+                .map_err(|error| error.to_string())?
+                .is_some()
+                && !store
+                    .finish_artifact_effect_failed_before_effect(proposal_id, claim_id, error_code)
+                    .map_err(|error| error.to_string())?
+            {
+                return Err("canonical_artifact_failed_before_effect_cas_lost".into());
+            }
+            return Ok(());
+        }
+    }
     let store = state
         .proposal_store
         .as_ref()
@@ -1615,6 +1761,22 @@ async fn persist_artifact_unknown(
     claim_id: &str,
     error_code: &str,
 ) -> Result<(), String> {
+    if let Some(store) = state.canonical_task_runtime_store.as_ref() {
+        let store = store.lock().await;
+        if store
+            .load_artifact_by_proposal(proposal_id)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            if !store
+                .finish_artifact_effect_unknown(proposal_id, claim_id, error_code)
+                .map_err(|error| error.to_string())?
+            {
+                return Err("canonical_artifact_unknown_receipt_cas_lost".into());
+            }
+            return Ok(());
+        }
+    }
     let store = state
         .proposal_store
         .as_ref()
@@ -1630,6 +1792,153 @@ async fn persist_artifact_unknown(
     Ok(())
 }
 
+async fn persist_artifact_confirmed(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+    claim_id: &str,
+    observed_content_digest: &str,
+) -> Result<(), String> {
+    if let Some(store) = state.canonical_task_runtime_store.as_ref() {
+        let store = store.lock().await;
+        if store
+            .load_artifact_effect(proposal_id)
+            .map_err(|error| error.to_string())?
+            .is_some()
+        {
+            if !store
+                .finish_artifact_effect_confirmed(proposal_id, claim_id, observed_content_digest)
+                .map_err(|error| error.to_string())?
+            {
+                return Err("canonical_artifact_confirmed_receipt_cas_lost".into());
+            }
+            drop(store);
+            if !ensure_effect_dispatch_projection_pending(state, proposal_id, claim_id).await? {
+                return Err("canonical_artifact_dispatch_projection_receipt_cas_lost".into());
+            }
+            return Ok(());
+        }
+    }
+    let store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(proposal_store_missing)?
+        .lock()
+        .await;
+    if !store
+        .finish_artifact_confirmed(proposal_id, claim_id, observed_content_digest)
+        .map_err(|error| runtime_proposal_store_error(state, error))?
+    {
+        return Err("artifact_confirmed_receipt_cas_lost".into());
+    }
+    Ok(())
+}
+
+async fn ensure_effect_dispatch_projection_pending(
+    state: &Arc<AppState>,
+    proposal_id: &str,
+    claim_id: &str,
+) -> Result<bool, String> {
+    let store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(proposal_store_missing)?
+        .lock()
+        .await;
+    let dispatch_state = store
+        .dispatch_state(proposal_id)
+        .map_err(|error| runtime_proposal_store_error(state, error))?;
+    match dispatch_state.as_deref() {
+        Some("confirmed_projection_pending" | "confirmed") => Ok(true),
+        Some("claimed") => store
+            .mark_effect_confirmed_projection_pending(proposal_id, claim_id)
+            .map_err(|error| runtime_proposal_store_error(state, error)),
+        _ => Ok(false),
+    }
+}
+
+struct ResolvedArtifactEffectInput {
+    artifact_id: String,
+    path: String,
+    content: String,
+    target_precondition: ArtifactTargetPrecondition,
+}
+
+async fn resolve_artifact_effect_input(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<ResolvedArtifactEffectInput, String> {
+    let Some(artifact_id) = canonical_work_artifact_id(proposal) else {
+        let path = proposal
+            .after
+            .get("path")
+            .and_then(Value::as_str)
+            .ok_or_else(|| "artifact_path_missing".to_string())?;
+        let content = proposal
+            .after
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        return Ok(ResolvedArtifactEffectInput {
+            artifact_id: artifact_id_for_proposal(proposal),
+            path: path.to_string(),
+            content: content.to_string(),
+            target_precondition: reviewed_artifact_target_precondition(&proposal.after)?,
+        });
+    };
+    let expected_version = proposal
+        .after
+        .get("artifactVersion")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "canonical_artifact_version_missing".to_string())?;
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let store = store.lock().await;
+    let artifact = store
+        .load_artifact_by_proposal(&proposal.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_artifact_review_checkpoint_missing".to_string())?;
+    if artifact.id != artifact_id || artifact.current_version != expected_version {
+        return Err("canonical_artifact_review_version_mismatch".into());
+    }
+    let version = store
+        .load_artifact_version(artifact_id, expected_version)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_artifact_version_missing".to_string())?;
+    let path = version
+        .target_reference
+        .ok_or_else(|| "canonical_artifact_target_reference_missing".to_string())?;
+    let draft_reference = version
+        .draft_reference
+        .ok_or_else(|| "canonical_artifact_draft_reference_missing".to_string())?;
+    let target_precondition = match (
+        version.expected_target_absent,
+        version.expected_target_digest,
+    ) {
+        (Some(true), None) => ArtifactTargetPrecondition::Absent,
+        (Some(false), Some(digest)) => ArtifactTargetPrecondition::ContentDigest(digest),
+        _ => return Err("canonical_artifact_target_precondition_missing".into()),
+    };
+    drop(store);
+    let bytes = std::fs::read(&draft_reference)
+        .map_err(|_| "canonical_artifact_draft_read_failed".to_string())?;
+    if bytes.len() > EXTERNAL_WRITE_MAX_SIZE {
+        return Err("artifact_content_too_large".into());
+    }
+    let content =
+        String::from_utf8(bytes).map_err(|_| "canonical_artifact_draft_not_utf8".to_string())?;
+    if openlife_core::agent::metadata_safe_text_digest(&content).1 != artifact.content_digest {
+        return Err("canonical_artifact_draft_digest_mismatch".into());
+    }
+    Ok(ResolvedArtifactEffectInput {
+        artifact_id: artifact_id.to_string(),
+        path,
+        content,
+        target_precondition,
+    })
+}
+
 async fn apply_external_write_artifact(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
@@ -1643,20 +1952,17 @@ async fn apply_external_write_artifact(
     if matches!(operation, "move" | "trash" | "restore") {
         return apply_external_move_artifact(state, proposal, claim_id).await;
     }
-    let path = match proposal.after.get("path").and_then(Value::as_str) {
-        Some(path) => path,
-        None => {
-            let code = "artifact_path_missing";
+    let resolved = match resolve_artifact_effect_input(state, proposal).await {
+        Ok(resolved) => resolved,
+        Err(error) => {
+            let code = "artifact_canonical_source_invalid";
             let _ =
                 persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
-            return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
+            return ArtifactApplyOutcome::FailedBeforeEffect(error);
         }
     };
-    let content = proposal
-        .after
-        .get("content")
-        .and_then(Value::as_str)
-        .unwrap_or("");
+    let path = resolved.path.as_str();
+    let content = resolved.content.as_str();
     if content.len() > EXTERNAL_WRITE_MAX_SIZE {
         let code = "artifact_content_too_large";
         let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
@@ -1671,23 +1977,14 @@ async fn apply_external_write_artifact(
             return ArtifactApplyOutcome::FailedBeforeEffect(error);
         }
     };
-    let target_precondition = match reviewed_artifact_target_precondition(&proposal.after) {
-        Ok(precondition) => precondition,
-        Err(error) => {
-            let code = "artifact_target_precondition_missing";
-            let _ =
-                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
-            return ArtifactApplyOutcome::FailedBeforeEffect(error);
-        }
-    };
     let prepared = match prepare_artifact_materialization_with_precondition_for_artifact(
-        &artifact_id_for_proposal(proposal),
+        &resolved.artifact_id,
         &proposal.id,
         claim_id,
         path,
         content,
         &safe_paths,
-        target_precondition,
+        resolved.target_precondition,
     ) {
         Ok(prepared) => prepared,
         Err(error) => {
@@ -1715,22 +2012,41 @@ async fn apply_external_write_artifact(
             return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
         }
     }
-    let prepared_record = {
+    let canonical_effect = canonical_work_artifact_id(proposal).is_some();
+    let prepared_record: Result<(), String> = if canonical_effect {
+        match state.canonical_task_runtime_store.as_ref() {
+            Some(store) => match store.lock().await.prepare_artifact_effect(
+                &proposal.id,
+                claim_id,
+                &prepared.target_reference_digest,
+                &prepared.content_digest,
+                prepared.byte_size,
+                &prepared.media_type,
+            ) {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err("canonical_artifact_effect_owner_missing".into()),
+                Err(error) => Err(error.to_string()),
+            },
+            None => Err("canonical_task_runtime_store_unavailable".into()),
+        }
+    } else {
         let store = match state.proposal_store.as_ref() {
             Some(store) => store.lock().await,
             None => return ArtifactApplyOutcome::FailedBeforeEffect(proposal_store_missing()),
         };
-        store.prepare_artifact_effect(
-            &proposal.id,
-            claim_id,
-            &prepared.target_reference_digest,
-            &prepared.content_digest,
-            prepared.byte_size,
-            &prepared.media_type,
-        )
+        store
+            .prepare_artifact_effect(
+                &proposal.id,
+                claim_id,
+                &prepared.target_reference_digest,
+                &prepared.content_digest,
+                prepared.byte_size,
+                &prepared.media_type,
+            )
+            .map(|_| ())
+            .map_err(|error| runtime_proposal_store_error(state, error))
     };
     if let Err(error) = prepared_record {
-        let detail = runtime_proposal_store_error(state, error);
         let _ = persist_artifact_failed_before_effect(
             state,
             &proposal.id,
@@ -1738,7 +2054,7 @@ async fn apply_external_write_artifact(
             "artifact_prepare_receipt_failed",
         )
         .await;
-        return ArtifactApplyOutcome::FailedBeforeEffect(detail);
+        return ArtifactApplyOutcome::FailedBeforeEffect(error);
     }
 
     let stage_prepared = prepared.clone();
@@ -1763,14 +2079,25 @@ async fn apply_external_write_artifact(
             return ArtifactApplyOutcome::Unknown(code.into());
         }
     }
-    let staged = {
+    let staged: Result<bool, String> = if canonical_effect {
+        match state.canonical_task_runtime_store.as_ref() {
+            Some(store) => store
+                .lock()
+                .await
+                .mark_artifact_effect_staged(&proposal.id, claim_id)
+                .map_err(|error| error.to_string()),
+            None => Err("canonical_task_runtime_store_unavailable".into()),
+        }
+    } else {
         let store = state
             .proposal_store
             .as_ref()
             .expect("ProposalStore checked before artifact staging")
             .lock()
             .await;
-        store.mark_artifact_staged(&proposal.id, claim_id)
+        store
+            .mark_artifact_staged(&proposal.id, claim_id)
+            .map_err(|error| runtime_proposal_store_error(state, error))
     };
     if !matches!(staged, Ok(true)) {
         let code = "artifact_staged_receipt_unconfirmed";
@@ -1797,14 +2124,25 @@ async fn apply_external_write_artifact(
             return ArtifactApplyOutcome::Unknown(code.into());
         }
     };
-    let confirmed = {
+    let confirmed: Result<bool, String> = if canonical_effect {
+        match state.canonical_task_runtime_store.as_ref() {
+            Some(store) => store
+                .lock()
+                .await
+                .finish_artifact_effect_confirmed(&proposal.id, claim_id, &observed_digest)
+                .map_err(|error| error.to_string()),
+            None => Err("canonical_task_runtime_store_unavailable".into()),
+        }
+    } else {
         let store = state
             .proposal_store
             .as_ref()
             .expect("ProposalStore checked before artifact confirmation")
             .lock()
             .await;
-        store.finish_artifact_confirmed(&proposal.id, claim_id, &observed_digest)
+        store
+            .finish_artifact_confirmed(&proposal.id, claim_id, &observed_digest)
+            .map_err(|error| runtime_proposal_store_error(state, error))
     };
     if !matches!(confirmed, Ok(true)) {
         return ArtifactApplyOutcome::Unknown("artifact_confirmed_receipt_unavailable".into());
@@ -1867,22 +2205,41 @@ async fn apply_external_move_artifact(
                 return ArtifactApplyOutcome::FailedBeforeEffect(error);
             }
         };
-    let prepared_record = {
+    let canonical_effect = canonical_work_artifact_id(proposal).is_some();
+    let prepared_record: Result<(), String> = if canonical_effect {
+        match state.canonical_task_runtime_store.as_ref() {
+            Some(store) => match store.lock().await.prepare_artifact_effect(
+                &proposal.id,
+                claim_id,
+                &prepared.target_reference_digest,
+                &prepared.content_digest,
+                prepared.byte_size,
+                &prepared.media_type,
+            ) {
+                Ok(Some(_)) => Ok(()),
+                Ok(None) => Err("canonical_artifact_effect_owner_missing".into()),
+                Err(error) => Err(error.to_string()),
+            },
+            None => Err("canonical_task_runtime_store_unavailable".into()),
+        }
+    } else {
         let store = match state.proposal_store.as_ref() {
             Some(store) => store.lock().await,
             None => return ArtifactApplyOutcome::FailedBeforeEffect(proposal_store_missing()),
         };
-        store.prepare_artifact_effect(
-            &proposal.id,
-            claim_id,
-            &prepared.target_reference_digest,
-            &prepared.content_digest,
-            prepared.byte_size,
-            &prepared.media_type,
-        )
+        store
+            .prepare_artifact_effect(
+                &proposal.id,
+                claim_id,
+                &prepared.target_reference_digest,
+                &prepared.content_digest,
+                prepared.byte_size,
+                &prepared.media_type,
+            )
+            .map(|_| ())
+            .map_err(|error| runtime_proposal_store_error(state, error))
     };
     if let Err(error) = prepared_record {
-        let detail = runtime_proposal_store_error(state, error);
         let _ = persist_artifact_failed_before_effect(
             state,
             &proposal.id,
@@ -1890,7 +2247,7 @@ async fn apply_external_move_artifact(
             "artifact_move_prepare_receipt_failed",
         )
         .await;
-        return ArtifactApplyOutcome::FailedBeforeEffect(detail);
+        return ArtifactApplyOutcome::FailedBeforeEffect(error);
     }
     let move_prepared = prepared.clone();
     let move_safe_paths = safe_paths.clone();
@@ -1914,14 +2271,25 @@ async fn apply_external_move_artifact(
             return ArtifactApplyOutcome::Unknown(code.into());
         }
     };
-    let confirmed = {
+    let confirmed: Result<bool, String> = if canonical_effect {
+        match state.canonical_task_runtime_store.as_ref() {
+            Some(store) => store
+                .lock()
+                .await
+                .finish_artifact_effect_confirmed(&proposal.id, claim_id, &observed_digest)
+                .map_err(|error| error.to_string()),
+            None => Err("canonical_task_runtime_store_unavailable".into()),
+        }
+    } else {
         let store = state
             .proposal_store
             .as_ref()
             .expect("ProposalStore checked before artifact move")
             .lock()
             .await;
-        store.finish_artifact_confirmed(&proposal.id, claim_id, &observed_digest)
+        store
+            .finish_artifact_confirmed(&proposal.id, claim_id, &observed_digest)
+            .map_err(|error| runtime_proposal_store_error(state, error))
     };
     if !matches!(confirmed, Ok(true)) {
         return ArtifactApplyOutcome::Unknown("artifact_move_confirmed_receipt_unavailable".into());
@@ -4120,16 +4488,21 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
     let learning_materialization =
         reconcile_lifemodel_learning_materialization_response(state, &proposal, &mut warnings)
             .await;
-    let effect_receipt_persisted = if artifact_materialization.is_some() {
+    let canonical_artifact_effect =
+        artifact_materialization.is_some() && canonical_work_artifact_id(&proposal).is_some();
+    let effect_receipt_persisted = if artifact_materialization.is_some()
+        && !canonical_artifact_effect
+    {
+        // Legacy Artifact effects advance the generic dispatch receipt atomically
+        // inside ProposalStore::finish_artifact_confirmed.
         true
     } else {
-        let store = state
-            .proposal_store
-            .as_ref()
-            .ok_or_else(proposal_store_missing)?
-            .lock()
-            .await;
-        match store.mark_effect_confirmed_projection_pending(&proposal_id, &dispatch_claim_id) {
+        // Canonical Artifact effects are owned by CanonicalTaskRuntimeStore. The
+        // ProposalStore still owns the Review dispatch checkpoint, so advance only
+        // that generic receipt after the canonical effect is durably confirmed.
+        match ensure_effect_dispatch_projection_pending(state, &proposal_id, &dispatch_claim_id)
+            .await
+        {
             Ok(true) => true,
             Ok(false) => {
                 warnings.push(
@@ -5176,11 +5549,21 @@ pub(crate) async fn request_artifact_undo_with_state(
         .materialized_reference
         .clone()
         .ok_or_else(|| "canonical_artifact_materialized_reference_missing".to_string())?;
-    let original_proposal_id = artifact
-        .proposal_id
-        .as_deref()
+    let original_proposal_id = canonical_store
+        .lock()
+        .await
+        .load_task_snapshot(&artifact.task_id)
+        .map_err(|error| error.to_string())?
+        .and_then(|snapshot| {
+            snapshot
+                .artifacts
+                .into_iter()
+                .find(|snapshot| snapshot.artifact.id == artifact.id)
+                .and_then(|snapshot| snapshot.review_checkpoint)
+                .map(|checkpoint| checkpoint.proposal_id)
+        })
         .ok_or_else(|| "canonical_artifact_review_origin_missing".to_string())?;
-    let original_proposal = get_proposal_with_state(state, original_proposal_id).await?;
+    let original_proposal = get_proposal_with_state(state, &original_proposal_id).await?;
     if original_proposal
         .after
         .get("expected_target_absent")
@@ -7529,6 +7912,20 @@ mod tests {
                 media_type: "text/markdown; charset=utf-8",
             })
             .unwrap();
+        let draft_path = temp_dir.path().join("canonical-report-v1.draft");
+        std::fs::write(&draft_path, content).unwrap();
+        runtime
+            .lock()
+            .await
+            .bind_general_artifact_version_source(
+                &prepared.artifact_id,
+                prepared.version,
+                &file_path.to_string_lossy(),
+                &draft_path.to_string_lossy(),
+                true,
+                None,
+            )
+            .unwrap();
         let proposal = AgentProposal::new(
             ProposalType::ExternalWriteAction,
             &format!("filesystem.{}", file_path.display()),
@@ -7580,6 +7977,25 @@ mod tests {
             response["canonical_task_runtime_projection_status"],
             "confirmed"
         );
+        assert_eq!(
+            runtime
+                .lock()
+                .await
+                .load_artifact_effect(&proposal.id)
+                .unwrap()
+                .unwrap()
+                .state,
+            openlife_core::task_runtime::CanonicalArtifactEffectState::Confirmed
+        );
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .artifact_effect(&proposal.id)
+            .unwrap()
+            .is_none());
         let typed_response = typed_accept_proposal_response(response.clone())
             .expect("the shipped IPC contract must preserve canonical report projection truth");
         assert_eq!(
@@ -7616,6 +8032,356 @@ mod tests {
             "confirmed"
         );
         assert_eq!(std::fs::read_to_string(&file_path).unwrap(), content);
+
+        let revised_content = "# Canonical report\n\nRevised.";
+        let revised_digest = format!("sha256:{:x}", Sha256::digest(revised_content.as_bytes()));
+        let revised_run_id = uuid::Uuid::new_v4().to_string();
+        runtime
+            .lock()
+            .await
+            .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &revised_run_id,
+                execution_session_id: "turn-work-artifact-v2",
+                instruction_digest: &format!(
+                    "sha256:{:x}",
+                    Sha256::digest(b"canonical Work artifact outcome")
+                ),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+        let revised = runtime
+            .lock()
+            .await
+            .prepare_general_artifact(openlife_core::task_runtime::GeneralArtifactDraftInput {
+                task_id: &task_id,
+                run_id: &revised_run_id,
+                target_reference: &file_path.to_string_lossy(),
+                content_digest: &revised_digest,
+                media_type: "text/markdown; charset=utf-8",
+            })
+            .unwrap();
+        assert_eq!(revised.artifact_id, prepared.artifact_id);
+        assert_eq!(revised.version, 2);
+        let revised_draft_path = temp_dir.path().join("canonical-report-v2.draft");
+        std::fs::write(&revised_draft_path, revised_content).unwrap();
+        runtime
+            .lock()
+            .await
+            .bind_general_artifact_version_source(
+                &revised.artifact_id,
+                revised.version,
+                &file_path.to_string_lossy(),
+                &revised_draft_path.to_string_lossy(),
+                false,
+                Some(&content_digest),
+            )
+            .unwrap();
+        let revised_proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.{}", file_path.display()),
+            serde_json::json!({
+                "path": file_path.to_string_lossy(),
+                "content": "proposal snapshot is not the execution owner",
+                "content_hash": revised_digest,
+                "operation": "propose_write",
+                "expected_target_absent": false,
+                "expected_target_digest": content_digest,
+                "artifactId": revised.artifact_id,
+                "canonicalTaskId": revised.task_id,
+                "artifactDraftItemId": revised.artifact_draft_item_id,
+                "artifactVersion": revised.version,
+                "generatedByProvider": true,
+            }),
+            "Materialize the revised report after Review",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::ChatConversation,
+        );
+        runtime
+            .lock()
+            .await
+            .bind_artifact_review(&revised.artifact_id, &revised_proposal.id)
+            .unwrap();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&revised_proposal)
+            .unwrap();
+
+        let revised_response = accept_proposal_with_state(revised_proposal.id.clone(), &state)
+            .await
+            .unwrap();
+        assert_eq!(revised_response["effect_status"], "confirmed");
+        assert_eq!(
+            revised_response["artifactMaterialization"]["artifactId"],
+            prepared.artifact_id
+        );
+        assert_eq!(
+            std::fs::read_to_string(&file_path).unwrap(),
+            revised_content
+        );
+        let revised_snapshot = runtime
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap()
+            .artifacts
+            .into_iter()
+            .find(|snapshot| snapshot.artifact.id == prepared.artifact_id)
+            .unwrap();
+        assert_eq!(revised_snapshot.artifact.current_version, 2);
+        assert_eq!(
+            revised_snapshot.current_version.content_digest,
+            revised_digest
+        );
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .artifact_effect(&revised_proposal.id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn startup_projects_a_confirmed_canonical_artifact_without_redispatch() {
+        use sha2::{Digest, Sha256};
+
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        let proposals_db = temp_dir.path().join("canonical-effect-proposals.db");
+        let task_runtime_db = temp_dir.path().join("canonical-effect-runtime.db");
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .canonical_task_runtime_store = Some(Arc::new(Mutex::new(
+            openlife_core::task_runtime::CanonicalTaskRuntimeStore::new(&task_runtime_db).unwrap(),
+        )));
+
+        let safe_path = temp_dir.path().join("safe-confirmed-restart");
+        std::fs::create_dir_all(&safe_path).unwrap();
+        let safe_path = safe_path.canonicalize().unwrap();
+        let safe_paths = vec![safe_path.to_string_lossy().into_owned()];
+        state.config.lock().await.system.safe_paths = safe_paths.clone();
+        let file_path = safe_path.join("confirmed-before-projection.md");
+        let content = "# Confirmed canonical effect";
+        let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let runtime = state.canonical_task_runtime_store.as_ref().unwrap();
+        runtime
+            .lock()
+            .await
+            .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: "turn-confirmed-effect-restart",
+                instruction_digest: &format!(
+                    "sha256:{:x}",
+                    Sha256::digest(b"confirm before projection restart")
+                ),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+        let artifact = runtime
+            .lock()
+            .await
+            .prepare_general_artifact(openlife_core::task_runtime::GeneralArtifactDraftInput {
+                task_id: &task_id,
+                run_id: &run_id,
+                target_reference: &file_path.to_string_lossy(),
+                content_digest: &content_digest,
+                media_type: "text/markdown; charset=utf-8",
+            })
+            .unwrap();
+        let draft_path = temp_dir.path().join("confirmed-effect-v1.draft");
+        std::fs::write(&draft_path, content).unwrap();
+        runtime
+            .lock()
+            .await
+            .bind_general_artifact_version_source(
+                &artifact.artifact_id,
+                artifact.version,
+                &file_path.to_string_lossy(),
+                &draft_path.to_string_lossy(),
+                true,
+                None,
+            )
+            .unwrap();
+        let proposal = AgentProposal::new(
+            ProposalType::ExternalWriteAction,
+            &format!("filesystem.{}", file_path.display()),
+            serde_json::json!({
+                "path": file_path.to_string_lossy(),
+                "content": content,
+                "content_hash": content_digest,
+                "operation": "propose_write",
+                "expected_target_absent": true,
+                "expected_target_digest": null,
+                "artifactId": artifact.artifact_id,
+                "canonicalTaskId": artifact.task_id,
+                "artifactDraftItemId": artifact.artifact_draft_item_id,
+                "artifactVersion": artifact.version,
+                "generatedByProvider": true,
+            }),
+            "Confirmed canonical effect restart fixture",
+            1.0,
+            RiskLevel::High,
+            ProposalSource::ChatConversation,
+        );
+        runtime
+            .lock()
+            .await
+            .bind_artifact_review(&artifact.artifact_id, &proposal.id)
+            .unwrap();
+        state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_proposal(&proposal)
+            .unwrap();
+
+        let claim_id = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .claim_dispatch(&proposal.id)
+            .unwrap()
+            .unwrap();
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        runtime
+            .lock()
+            .await
+            .begin_artifact_materialization_attempt(
+                &proposal.id,
+                &attempt_id,
+                &format!("sha256:{:x}", Sha256::digest(b"restart materialization")),
+            )
+            .unwrap()
+            .unwrap();
+        let prepared = prepare_artifact_materialization_with_precondition_for_artifact(
+            &artifact.artifact_id,
+            &proposal.id,
+            &claim_id,
+            &file_path.to_string_lossy(),
+            content,
+            &safe_paths,
+            ArtifactTargetPrecondition::Absent,
+        )
+        .unwrap();
+        runtime
+            .lock()
+            .await
+            .prepare_artifact_effect(
+                &proposal.id,
+                &claim_id,
+                &prepared.target_reference_digest,
+                &prepared.content_digest,
+                prepared.byte_size,
+                &prepared.media_type,
+            )
+            .unwrap()
+            .unwrap();
+        stage_artifact_bytes(&prepared, content).unwrap();
+        assert!(runtime
+            .lock()
+            .await
+            .mark_artifact_effect_staged(&proposal.id, &claim_id)
+            .unwrap());
+        let observed_digest = commit_staged_artifact(&prepared, &safe_paths).unwrap();
+        assert!(runtime
+            .lock()
+            .await
+            .finish_artifact_effect_confirmed(&proposal.id, &claim_id, &observed_digest)
+            .unwrap());
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal.id)
+                .unwrap()
+                .as_deref(),
+            Some("claimed")
+        );
+
+        Arc::get_mut(&mut state).unwrap().proposal_store = Some(Arc::new(Mutex::new(
+            ProposalStore::new(&proposals_db).unwrap(),
+        )));
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .canonical_task_runtime_store = Some(Arc::new(Mutex::new(
+            openlife_core::task_runtime::CanonicalTaskRuntimeStore::new(&task_runtime_db).unwrap(),
+        )));
+        let startup_coordinator =
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap();
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            startup_coordinator.register_read_write(*store);
+        }
+        Arc::get_mut(&mut state).unwrap().persistence_coordinator = Arc::new(startup_coordinator);
+        let report = reconcile_startup_durable_proposal_projections_with_state(&state, 200)
+            .await
+            .unwrap();
+        assert_eq!(report.proposal_projections_repaired, 1);
+        assert_eq!(std::fs::read_to_string(&file_path).unwrap(), content);
+        assert_eq!(
+            state
+                .proposal_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .dispatch_state(&proposal.id)
+                .unwrap()
+                .as_deref(),
+            Some("confirmed")
+        );
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .artifact_effect(&proposal.id)
+            .unwrap()
+            .is_none());
+        let snapshot = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_artifact(&artifact.artifact_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            snapshot.status,
+            openlife_core::task_runtime::CanonicalArtifactStatus::Materialized
+        );
     }
 
     #[tokio::test]
@@ -7661,6 +8427,20 @@ mod tests {
                 content_digest: &digest,
                 media_type: "text/markdown; charset=utf-8",
             })
+            .unwrap();
+        let draft_path = temp_dir.path().join("governed-undo-v1.draft");
+        std::fs::write(&draft_path, content).unwrap();
+        runtime
+            .lock()
+            .await
+            .bind_general_artifact_version_source(
+                &prepared.artifact_id,
+                prepared.version,
+                &file_path.to_string_lossy(),
+                &draft_path.to_string_lossy(),
+                true,
+                None,
+            )
             .unwrap();
         let proposal = AgentProposal::new(
             ProposalType::ExternalWriteAction,
@@ -7732,6 +8512,25 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(accepted["effect_status"], "confirmed");
+        assert_eq!(
+            runtime
+                .lock()
+                .await
+                .load_artifact_effect(&undo_proposal_id)
+                .unwrap()
+                .unwrap()
+                .state,
+            openlife_core::task_runtime::CanonicalArtifactEffectState::Confirmed
+        );
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .artifact_effect(&undo_proposal_id)
+            .unwrap()
+            .is_none());
         assert!(!file_path.exists());
         assert_eq!(std::fs::read_to_string(&undo_target).unwrap(), content);
         let snapshot = runtime

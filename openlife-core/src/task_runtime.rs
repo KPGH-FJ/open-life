@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 14;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -224,8 +224,71 @@ pub struct CanonicalArtifactRecord {
     pub media_type: String,
     pub target_reference_digest: String,
     pub content_digest: String,
-    pub proposal_id: Option<String>,
     pub materialized_reference: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalArtifactReviewCheckpointRecord {
+    pub artifact_id: String,
+    pub version: u64,
+    pub proposal_id: String,
+    pub item_id: String,
+    pub status: String,
+    pub created_at: DateTime<Utc>,
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CanonicalArtifactEffectState {
+    Prepared,
+    Staged,
+    Confirmed,
+    FailedBeforeEffect,
+    EffectUnknown,
+}
+
+impl CanonicalArtifactEffectState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Prepared => "prepared",
+            Self::Staged => "staged",
+            Self::Confirmed => "confirmed",
+            Self::FailedBeforeEffect => "failed_before_effect",
+            Self::EffectUnknown => "effect_unknown",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self> {
+        match value {
+            "prepared" => Ok(Self::Prepared),
+            "staged" => Ok(Self::Staged),
+            "confirmed" => Ok(Self::Confirmed),
+            "failed_before_effect" => Ok(Self::FailedBeforeEffect),
+            "effect_unknown" => Ok(Self::EffectUnknown),
+            _ => anyhow::bail!("canonical_artifact_effect_state_invalid:{value}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CanonicalArtifactEffectRecord {
+    pub artifact_id: String,
+    pub version: u64,
+    pub proposal_id: String,
+    pub attempt_id: String,
+    pub dispatch_claim_id: String,
+    pub target_reference_digest: String,
+    pub content_digest: String,
+    pub byte_size: u64,
+    pub media_type: String,
+    pub state: CanonicalArtifactEffectState,
+    pub observed_content_digest: Option<String>,
+    pub error_code: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -239,6 +302,10 @@ pub struct CanonicalArtifactVersionRecord {
     pub content_digest: String,
     pub materialized_reference: Option<String>,
     pub observed_content_digest: Option<String>,
+    pub target_reference: Option<String>,
+    pub draft_reference: Option<String>,
+    pub expected_target_absent: Option<bool>,
+    pub expected_target_digest: Option<String>,
     pub created_at: DateTime<Utc>,
     pub materialized_at: Option<DateTime<Utc>>,
 }
@@ -396,6 +463,7 @@ pub struct CanonicalAttentionRecord {
 pub struct CanonicalArtifactSnapshot {
     pub artifact: CanonicalArtifactRecord,
     pub current_version: CanonicalArtifactVersionRecord,
+    pub review_checkpoint: Option<CanonicalArtifactReviewCheckpointRecord>,
     pub undo: Option<CanonicalArtifactUndoRecord>,
 }
 
@@ -403,6 +471,7 @@ pub struct CanonicalArtifactSnapshot {
 #[serde(rename_all = "camelCase")]
 pub struct CanonicalArtifactUndoRecord {
     pub artifact_id: String,
+    pub version: u64,
     pub proposal_id: String,
     pub source_reference: String,
     pub target_reference: String,
@@ -493,8 +562,9 @@ pub struct ReportArtifactDraftInput<'a> {
 ///
 /// The caller supplies the exact Task/Run identities that already own the
 /// provider and tool attempts. The Task store adds only Artifact metadata; the
-/// proposal and the file bytes remain owned by ReviewWorkflow and the
-/// materializer respectively.
+/// ReviewWorkflow owns only the decision checkpoint. Artifact identity and
+/// version state remain canonical here; file bytes are owned by the workspace
+/// draft/materialization layer.
 pub struct GeneralArtifactDraftInput<'a> {
     pub task_id: &'a str,
     pub run_id: &'a str,
@@ -562,6 +632,13 @@ pub struct PreparedReportArtifact {
 
 pub type PreparedGeneralArtifact = PreparedReportArtifact;
 
+pub fn general_artifact_id(task_id: &str, target_reference: &str, media_type: &str) -> String {
+    stable_id(
+        "artifact",
+        &[task_id, &sha256_text(target_reference), media_type],
+    )
+}
+
 pub fn report_verification_item_id(
     artifact_id: &str,
     version: u64,
@@ -586,6 +663,7 @@ pub fn report_final_result_item_id(task_id: &str, run_id: &str) -> String {
 pub struct BoundReportReview {
     pub task_id: String,
     pub artifact_id: String,
+    pub version: u64,
     pub checkpoint_item_id: String,
     pub proposal_id: String,
 }
@@ -684,6 +762,8 @@ impl CanonicalTaskRuntimeStore {
                 "canonical_task_attention",
                 "canonical_artifacts",
                 "canonical_artifact_versions",
+                "canonical_artifact_review_checkpoints",
+                "canonical_artifact_effects",
                 "canonical_artifact_undo",
             ],
         )?;
@@ -872,7 +952,6 @@ impl CanonicalTaskRuntimeStore {
                 media_type TEXT NOT NULL,
                 target_reference_digest TEXT NOT NULL,
                 content_digest TEXT NOT NULL,
-                proposal_id TEXT UNIQUE,
                 materialized_reference TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -912,12 +991,57 @@ impl CanonicalTaskRuntimeStore {
                 observed_content_digest TEXT,
                 created_at TEXT NOT NULL,
                 materialized_at TEXT,
+                target_reference TEXT,
+                draft_reference TEXT,
+                expected_target_absent INTEGER CHECK(expected_target_absent IN (0, 1)),
+                expected_target_digest TEXT,
                 PRIMARY KEY(artifact_id, version),
                 FOREIGN KEY(artifact_id) REFERENCES canonical_artifacts(id) ON DELETE RESTRICT,
                 FOREIGN KEY(source_item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT
              ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS canonical_artifact_review_checkpoints (
+                artifact_id TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK(version > 0),
+                proposal_id TEXT NOT NULL UNIQUE,
+                item_id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL CHECK(status IN (
+                    'waiting', 'accepted', 'rejected', 'failed', 'effect_unknown'
+                )),
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                PRIMARY KEY(artifact_id, version),
+                FOREIGN KEY(artifact_id, version)
+                    REFERENCES canonical_artifact_versions(artifact_id, version)
+                    ON DELETE RESTRICT,
+                FOREIGN KEY(item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS canonical_artifact_effects (
+                proposal_id TEXT PRIMARY KEY,
+                artifact_id TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK(version > 0),
+                attempt_id TEXT NOT NULL UNIQUE,
+                dispatch_claim_id TEXT NOT NULL,
+                target_reference_digest TEXT NOT NULL,
+                content_digest TEXT NOT NULL,
+                byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+                media_type TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN (
+                    'prepared', 'staged', 'confirmed',
+                    'failed_before_effect', 'effect_unknown'
+                )),
+                observed_content_digest TEXT,
+                error_code TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(artifact_id, version)
+                    REFERENCES canonical_artifact_versions(artifact_id, version)
+                    ON DELETE RESTRICT,
+                FOREIGN KEY(attempt_id)
+                    REFERENCES canonical_task_item_attempts(attempt_id) ON DELETE RESTRICT
+             ) WITHOUT ROWID;
              CREATE TABLE IF NOT EXISTS canonical_artifact_undo (
-                artifact_id TEXT PRIMARY KEY,
+                artifact_id TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK(version > 0),
                 proposal_id TEXT NOT NULL UNIQUE,
                 source_reference TEXT NOT NULL,
                 target_reference TEXT NOT NULL,
@@ -927,7 +1051,10 @@ impl CanonicalTaskRuntimeStore {
                 )),
                 created_at TEXT NOT NULL,
                 resolved_at TEXT,
-                FOREIGN KEY(artifact_id) REFERENCES canonical_artifacts(id) ON DELETE RESTRICT
+                PRIMARY KEY(artifact_id, version),
+                FOREIGN KEY(artifact_id, version)
+                    REFERENCES canonical_artifact_versions(artifact_id, version)
+                    ON DELETE RESTRICT
              ) WITHOUT ROWID;
              CREATE INDEX IF NOT EXISTS idx_canonical_task_items_run
                 ON canonical_task_items(run_id, sequence);
@@ -938,7 +1065,7 @@ impl CanonicalTaskRuntimeStore {
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '14')
+             VALUES ('schema_version', '15')
              ON CONFLICT(key) DO NOTHING;
              INSERT INTO canonical_task_runtime_metadata(key, value)
              VALUES ('store_identity', 'canonical_task_runtime_store:' || lower(hex(randomblob(16))))
@@ -982,6 +1109,9 @@ impl CanonicalTaskRuntimeStore {
         }
         if Self::schema_version(&conn)? == 13 {
             Self::migrate_v13_to_v14(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 14 {
+            Self::migrate_v14_to_v15(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -1751,6 +1881,180 @@ impl CanonicalTaskRuntimeStore {
         Ok(())
     }
 
+    fn migrate_v14_to_v15(conn: &mut Connection) -> Result<()> {
+        let existing_columns = {
+            let mut statement = conn.prepare("PRAGMA table_info(canonical_artifact_versions)")?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+            columns
+        };
+        let undo_columns = {
+            let mut statement = conn.prepare("PRAGMA table_info(canonical_artifact_undo)")?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+            columns
+        };
+        let artifact_columns = {
+            let mut statement = conn.prepare("PRAGMA table_info(canonical_artifacts)")?;
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+            columns
+        };
+        let foreign_keys_enabled: bool =
+            conn.pragma_query_value(None, "foreign_keys", |row| Ok(row.get::<_, i64>(0)? != 0))?;
+        if foreign_keys_enabled {
+            conn.pragma_update(None, "foreign_keys", "OFF")?;
+        }
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            for (column, definition) in [
+                ("target_reference", "TEXT"),
+                ("draft_reference", "TEXT"),
+                (
+                    "expected_target_absent",
+                    "INTEGER CHECK(expected_target_absent IN (0, 1))",
+                ),
+                ("expected_target_digest", "TEXT"),
+            ] {
+                if !existing_columns.contains(column) {
+                    tx.execute(
+                        &format!(
+                            "ALTER TABLE canonical_artifact_versions ADD COLUMN {column} {definition}"
+                        ),
+                        [],
+                    )?;
+                }
+            }
+            if artifact_columns.contains("proposal_id") {
+                tx.execute_batch(
+                    "CREATE TABLE canonical_artifacts_v15 (
+                        id TEXT PRIMARY KEY,
+                        task_id TEXT NOT NULL,
+                        source_item_id TEXT NOT NULL UNIQUE,
+                        current_version INTEGER NOT NULL CHECK(current_version > 0),
+                        status TEXT NOT NULL CHECK(status IN (
+                            'draft', 'waiting_review', 'materialized', 'failed', 'effect_unknown'
+                        )),
+                        media_type TEXT NOT NULL,
+                        target_reference_digest TEXT NOT NULL,
+                        content_digest TEXT NOT NULL,
+                        materialized_reference TEXT,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL,
+                        FOREIGN KEY(task_id) REFERENCES canonical_tasks(id) ON DELETE RESTRICT,
+                        FOREIGN KEY(source_item_id)
+                            REFERENCES canonical_task_items(id) ON DELETE RESTRICT
+                     );
+                     INSERT INTO canonical_artifacts_v15 (
+                        id, task_id, source_item_id, current_version, status,
+                        media_type, target_reference_digest, content_digest,
+                        materialized_reference, created_at, updated_at
+                     ) SELECT id, task_id, source_item_id, current_version, status,
+                              media_type, target_reference_digest, content_digest,
+                              materialized_reference, created_at, updated_at
+                         FROM canonical_artifacts;
+                     DROP TABLE canonical_artifacts;
+                     ALTER TABLE canonical_artifacts_v15 RENAME TO canonical_artifacts;",
+                )?;
+            }
+            if !undo_columns.contains("version") {
+                tx.execute_batch(
+                    "ALTER TABLE canonical_artifact_undo RENAME TO canonical_artifact_undo_v14;
+                 CREATE TABLE canonical_artifact_undo (
+                    artifact_id TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK(version > 0),
+                    proposal_id TEXT NOT NULL UNIQUE,
+                    source_reference TEXT NOT NULL,
+                    target_reference TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'waiting_review', 'undone', 'failed', 'effect_unknown'
+                    )),
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    PRIMARY KEY(artifact_id, version),
+                    FOREIGN KEY(artifact_id, version)
+                        REFERENCES canonical_artifact_versions(artifact_id, version)
+                        ON DELETE RESTRICT
+                 ) WITHOUT ROWID;
+                 INSERT INTO canonical_artifact_undo (
+                    artifact_id, version, proposal_id, source_reference,
+                    target_reference, content_digest, status, created_at, resolved_at
+                 ) SELECT undo.artifact_id, artifact.current_version, undo.proposal_id,
+                          undo.source_reference, undo.target_reference, undo.content_digest,
+                          undo.status, undo.created_at, undo.resolved_at
+                     FROM canonical_artifact_undo_v14 undo
+                     JOIN canonical_artifacts artifact ON artifact.id = undo.artifact_id;
+                 DROP TABLE canonical_artifact_undo_v14;",
+                )?;
+            }
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS canonical_artifact_review_checkpoints (
+                artifact_id TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK(version > 0),
+                proposal_id TEXT NOT NULL UNIQUE,
+                item_id TEXT NOT NULL UNIQUE,
+                status TEXT NOT NULL CHECK(status IN (
+                    'waiting', 'accepted', 'rejected', 'failed', 'effect_unknown'
+                )),
+                created_at TEXT NOT NULL,
+                resolved_at TEXT,
+                PRIMARY KEY(artifact_id, version),
+                FOREIGN KEY(artifact_id, version)
+                    REFERENCES canonical_artifact_versions(artifact_id, version)
+                    ON DELETE RESTRICT,
+                FOREIGN KEY(item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT
+             ) WITHOUT ROWID;
+             CREATE TABLE IF NOT EXISTS canonical_artifact_effects (
+                proposal_id TEXT PRIMARY KEY,
+                artifact_id TEXT NOT NULL,
+                version INTEGER NOT NULL CHECK(version > 0),
+                attempt_id TEXT NOT NULL UNIQUE,
+                dispatch_claim_id TEXT NOT NULL,
+                target_reference_digest TEXT NOT NULL,
+                content_digest TEXT NOT NULL,
+                byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
+                media_type TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN (
+                    'prepared', 'staged', 'confirmed',
+                    'failed_before_effect', 'effect_unknown'
+                )),
+                observed_content_digest TEXT,
+                error_code TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(artifact_id, version)
+                    REFERENCES canonical_artifact_versions(artifact_id, version)
+                    ON DELETE RESTRICT,
+                FOREIGN KEY(attempt_id)
+                    REFERENCES canonical_task_item_attempts(attempt_id) ON DELETE RESTRICT
+             ) WITHOUT ROWID;
+             CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
+                ON canonical_artifacts(task_id, created_at, id);
+             UPDATE canonical_task_runtime_metadata SET value = '15'
+              WHERE key = 'schema_version' AND value = '14';",
+            )?;
+            tx.commit()?;
+            Ok(())
+        })();
+        if foreign_keys_enabled {
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+        }
+        migration?;
+        let foreign_key_violation: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check LIMIT 1)",
+            [],
+            |row| row.get(0),
+        )?;
+        if foreign_key_violation {
+            anyhow::bail!("canonical_task_runtime_v15_foreign_key_violation");
+        }
+        Ok(())
+    }
+
     fn validate_schema(conn: &Connection) -> Result<()> {
         let version = Self::schema_version(conn)?;
         if version != TASK_RUNTIME_SCHEMA_VERSION {
@@ -1831,7 +2135,7 @@ impl CanonicalTaskRuntimeStore {
             && existing_run.is_none()
             && !matches!(
                 task.3.as_str(),
-                "failed" | "blocked" | "cancelled" | "interrupted"
+                "completed" | "failed" | "blocked" | "cancelled" | "interrupted"
             )
         {
             anyhow::bail!("canonical_general_task_not_retryable");
@@ -1933,6 +2237,16 @@ impl CanonicalTaskRuntimeStore {
             )?;
         }
         if !run_existed {
+            if task.3 == "completed" {
+                tx.execute(
+                    "DELETE FROM canonical_task_final_results WHERE task_id = ?1",
+                    [input.task_id],
+                )?;
+                tx.execute(
+                    "DELETE FROM canonical_task_deferred_results WHERE task_id = ?1",
+                    [input.task_id],
+                )?;
+            }
             tx.execute(
                 "UPDATE canonical_tasks SET status = 'running', updated_at = ?2 WHERE id = ?1",
                 params![input.task_id, now],
@@ -3743,9 +4057,9 @@ impl CanonicalTaskRuntimeStore {
                 "INSERT INTO canonical_artifacts (
                     id, task_id, source_item_id, current_version, status,
                     media_type, target_reference_digest, content_digest,
-                    proposal_id, materialized_reference, created_at, updated_at
+                    materialized_reference, created_at, updated_at
                  ) VALUES (?1, ?2, ?3, 1, 'draft', ?4, ?5, ?6,
-                           NULL, NULL, ?7, ?7)",
+                           NULL, ?7, ?7)",
                 params![
                     artifact_id,
                     task_id,
@@ -3785,16 +4099,8 @@ impl CanonicalTaskRuntimeStore {
         validate_nonempty("media_type", input.media_type, 256)?;
 
         let target_reference_digest = sha256_text(input.target_reference);
-        let artifact_id = stable_id(
-            "artifact",
-            &[
-                input.task_id,
-                input.run_id,
-                &target_reference_digest,
-                input.content_digest,
-            ],
-        );
-        let item_id = stable_id("item", &["artifact_draft", &artifact_id]);
+        let artifact_id =
+            general_artifact_id(input.task_id, input.target_reference, input.media_type);
         let now = Utc::now().to_rfc3339();
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -3814,7 +4120,7 @@ impl CanonicalTaskRuntimeStore {
         if run_status != CanonicalTaskStatus::Running.as_str() {
             anyhow::bail!("canonical_general_artifact_run_not_running");
         }
-        if let Some(existing) = tx
+        let existing = tx
             .query_row(
                 "SELECT task_id, source_item_id, current_version, status, media_type,
                         target_reference_digest, content_digest
@@ -3832,26 +4138,109 @@ impl CanonicalTaskRuntimeStore {
                     ))
                 },
             )
-            .optional()?
-        {
+            .optional()?;
+        if let Some(existing) = existing {
             if existing.0 != input.task_id
-                || existing.1 != item_id
-                || existing.2 != 1
-                || !matches!(existing.3.as_str(), "draft" | "waiting_review")
                 || existing.4 != input.media_type
                 || existing.5 != target_reference_digest
-                || existing.6 != input.content_digest
             {
                 anyhow::bail!("canonical_general_artifact_identity_conflict");
+            }
+            let current_version = u64::try_from(existing.2)?;
+            if existing.6 == input.content_digest {
+                let source_run_id: String = tx.query_row(
+                    "SELECT run_id FROM canonical_task_items WHERE id = ?1",
+                    [&existing.1],
+                    |row| row.get(0),
+                )?;
+                if source_run_id != input.run_id {
+                    anyhow::bail!("canonical_general_artifact_replay_run_conflict");
+                }
+                tx.commit()?;
+                return Ok(PreparedGeneralArtifact {
+                    task_id: input.task_id.to_string(),
+                    artifact_draft_item_id: existing.1,
+                    artifact_id,
+                    version: current_version,
+                });
+            }
+            if existing.3 == "effect_unknown" {
+                anyhow::bail!("canonical_general_artifact_effect_unknown_requires_reconciliation");
+            }
+            if matches!(existing.3.as_str(), "draft" | "waiting_review") {
+                anyhow::bail!("canonical_general_artifact_previous_version_unresolved");
+            }
+            let next_version = current_version
+                .checked_add(1)
+                .ok_or_else(|| anyhow::anyhow!("canonical_general_artifact_version_overflow"))?;
+            let item_id = stable_id(
+                "item",
+                &["artifact_draft", &artifact_id, &next_version.to_string()],
+            );
+            let sequence: i64 = tx.query_row(
+                "SELECT COALESCE(MAX(sequence), 0) + 1 FROM canonical_task_items WHERE task_id = ?1",
+                [input.task_id],
+                |row| row.get(0),
+            )?;
+            let payload_digest = sha256_text(&format!(
+                "{}\0{}\0{}\0{}",
+                target_reference_digest, input.content_digest, input.media_type, next_version
+            ));
+            tx.execute(
+                "INSERT INTO canonical_task_items (
+                    id, task_id, run_id, sequence, kind, status, summary_code,
+                    payload_digest, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, 'artifact_draft', 'completed',
+                           'work_artifact_version_prepared', ?5, ?6, ?6)",
+                params![
+                    item_id,
+                    input.task_id,
+                    input.run_id,
+                    sequence,
+                    payload_digest,
+                    now
+                ],
+            )?;
+            tx.execute(
+                "INSERT INTO canonical_artifact_versions (
+                    artifact_id, version, source_item_id, content_digest,
+                    materialized_reference, observed_content_digest,
+                    created_at, materialized_at
+                 ) VALUES (?1, ?2, ?3, ?4, NULL, NULL, ?5, NULL)",
+                params![
+                    artifact_id,
+                    i64::try_from(next_version)?,
+                    item_id,
+                    input.content_digest,
+                    now
+                ],
+            )?;
+            let changed = tx.execute(
+                "UPDATE canonical_artifacts
+                 SET source_item_id = ?2, current_version = ?3, status = 'draft',
+                     content_digest = ?4, materialized_reference = NULL, updated_at = ?5
+                 WHERE id = ?1 AND current_version = ?6",
+                params![
+                    artifact_id,
+                    item_id,
+                    i64::try_from(next_version)?,
+                    input.content_digest,
+                    now,
+                    i64::try_from(current_version)?
+                ],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("canonical_general_artifact_version_cas_failed");
             }
             tx.commit()?;
             return Ok(PreparedGeneralArtifact {
                 task_id: input.task_id.to_string(),
                 artifact_draft_item_id: item_id,
                 artifact_id,
-                version: 1,
+                version: next_version,
             });
         }
+        let item_id = stable_id("item", &["artifact_draft", &artifact_id, "1"]);
         let sequence: i64 = tx.query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM canonical_task_items WHERE task_id = ?1",
             [input.task_id],
@@ -3880,9 +4269,9 @@ impl CanonicalTaskRuntimeStore {
             "INSERT INTO canonical_artifacts (
                 id, task_id, source_item_id, current_version, status,
                 media_type, target_reference_digest, content_digest,
-                proposal_id, materialized_reference, created_at, updated_at
+                materialized_reference, created_at, updated_at
              ) VALUES (?1, ?2, ?3, 1, 'draft', ?4, ?5, ?6,
-                       NULL, NULL, ?7, ?7)",
+                       NULL, ?7, ?7)",
             params![
                 artifact_id,
                 input.task_id,
@@ -3910,6 +4299,71 @@ impl CanonicalTaskRuntimeStore {
         })
     }
 
+    pub fn bind_general_artifact_version_source(
+        &self,
+        artifact_id: &str,
+        version: u64,
+        target_reference: &str,
+        draft_reference: &str,
+        expected_target_absent: bool,
+        expected_target_digest: Option<&str>,
+    ) -> Result<CanonicalArtifactVersionRecord> {
+        validate_nonempty("artifact_id", artifact_id, 512)?;
+        validate_nonempty("target_reference", target_reference, 4096)?;
+        validate_nonempty("draft_reference", draft_reference, 4096)?;
+        if version == 0 {
+            anyhow::bail!("canonical_artifact_version_invalid");
+        }
+        match (expected_target_absent, expected_target_digest) {
+            (true, None) => {}
+            (false, Some(digest)) => validate_digest("expected_target_digest", digest)?,
+            _ => anyhow::bail!("canonical_artifact_target_precondition_invalid"),
+        }
+        let conn = self.lock_conn()?;
+        let target_digest: String = conn.query_row(
+            "SELECT target_reference_digest FROM canonical_artifacts
+             WHERE id = ?1 AND current_version = ?2",
+            params![artifact_id, i64::try_from(version)?],
+            |row| row.get(0),
+        )?;
+        if target_digest != sha256_text(target_reference) {
+            anyhow::bail!("canonical_artifact_target_reference_mismatch");
+        }
+        let changed = conn.execute(
+            "UPDATE canonical_artifact_versions
+             SET target_reference = ?3, draft_reference = ?4,
+                 expected_target_absent = ?5, expected_target_digest = ?6
+             WHERE artifact_id = ?1 AND version = ?2
+               AND target_reference IS NULL AND draft_reference IS NULL
+               AND expected_target_absent IS NULL AND expected_target_digest IS NULL",
+            params![
+                artifact_id,
+                i64::try_from(version)?,
+                target_reference,
+                draft_reference,
+                if expected_target_absent { 1 } else { 0 },
+                expected_target_digest
+            ],
+        )?;
+        if changed != 1 {
+            drop(conn);
+            let existing = self
+                .load_artifact_version(artifact_id, version)?
+                .ok_or_else(|| anyhow::anyhow!("canonical_artifact_version_missing"))?;
+            if existing.target_reference.as_deref() != Some(target_reference)
+                || existing.draft_reference.as_deref() != Some(draft_reference)
+                || existing.expected_target_absent != Some(expected_target_absent)
+                || existing.expected_target_digest.as_deref() != expected_target_digest
+            {
+                anyhow::bail!("canonical_artifact_version_source_conflict");
+            }
+            return Ok(existing);
+        }
+        drop(conn);
+        self.load_artifact_version(artifact_id, version)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_artifact_version_missing_after_source_bind"))
+    }
+
     pub fn bind_report_review(
         &self,
         artifact_id: &str,
@@ -3925,26 +4379,32 @@ impl CanonicalTaskRuntimeStore {
     ) -> Result<BoundReportReview> {
         validate_nonempty("artifact_id", artifact_id, 512)?;
         validate_nonempty("proposal_id", proposal_id, 512)?;
-        let checkpoint_item_id = stable_id("item", &["review_checkpoint", artifact_id]);
         let now = Utc::now().to_rfc3339();
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (task_id, source_run_id, current_proposal): (String, String, Option<String>) = tx
+        let (task_id, source_run_id, current_version, artifact_status): (
+            String,
+            String,
+            i64,
+            String,
+        ) = tx
             .query_row(
-                "SELECT artifact.task_id, item.run_id, artifact.proposal_id
+                "SELECT artifact.task_id, item.run_id, artifact.current_version, artifact.status
                  FROM canonical_artifacts artifact
                  JOIN canonical_task_items item ON item.id = artifact.source_item_id
                  WHERE artifact.id = ?1",
                 [artifact_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .with_context(|| "canonical_report_artifact_missing_before_review")?;
-        if current_proposal
-            .as_deref()
-            .is_some_and(|current| current != proposal_id)
-        {
-            anyhow::bail!("canonical_report_artifact_proposal_conflict");
+        if !matches!(artifact_status.as_str(), "draft" | "waiting_review") {
+            anyhow::bail!("canonical_artifact_version_not_reviewable");
         }
+        let version = u64::try_from(current_version)?;
+        let checkpoint_item_id = stable_id(
+            "item",
+            &["review_checkpoint", artifact_id, &version.to_string()],
+        );
         let sequence: i64 = tx.query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM canonical_task_items
              WHERE task_id = ?1",
@@ -3967,7 +4427,36 @@ impl CanonicalTaskRuntimeStore {
                 now
             ],
         )?;
-        let materialized_item_id = stable_id("item", &["artifact_materialized", artifact_id]);
+        tx.execute(
+            "INSERT INTO canonical_artifact_review_checkpoints (
+                artifact_id, version, proposal_id, item_id, status, created_at, resolved_at
+             ) VALUES (?1, ?2, ?3, ?4, 'waiting', ?5, NULL)
+             ON CONFLICT(artifact_id, version) DO NOTHING",
+            params![
+                artifact_id,
+                current_version,
+                proposal_id,
+                checkpoint_item_id,
+                now
+            ],
+        )?;
+        let checkpoint: (String, String, String) = tx.query_row(
+            "SELECT proposal_id, item_id, status
+             FROM canonical_artifact_review_checkpoints
+             WHERE artifact_id = ?1 AND version = ?2",
+            params![artifact_id, current_version],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        if checkpoint.0 != proposal_id
+            || checkpoint.1 != checkpoint_item_id
+            || checkpoint.2 != "waiting"
+        {
+            anyhow::bail!("canonical_artifact_review_checkpoint_conflict");
+        }
+        let materialized_item_id = stable_id(
+            "item",
+            &["artifact_materialized", artifact_id, &version.to_string()],
+        );
         let materialized_sequence: i64 = tx.query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM canonical_task_items
              WHERE task_id = ?1",
@@ -3992,9 +4481,10 @@ impl CanonicalTaskRuntimeStore {
         )?;
         tx.execute(
             "UPDATE canonical_artifacts
-             SET status = 'waiting_review', proposal_id = ?2, updated_at = ?3
-             WHERE id = ?1 AND status IN ('draft', 'waiting_review')",
-            params![artifact_id, proposal_id, now],
+             SET status = 'waiting_review', updated_at = ?2
+             WHERE id = ?1 AND current_version = ?3
+               AND status IN ('draft', 'waiting_review')",
+            params![artifact_id, now, current_version],
         )?;
         tx.execute(
             "UPDATE canonical_tasks SET status = 'waiting_review', updated_at = ?2
@@ -4027,6 +4517,7 @@ impl CanonicalTaskRuntimeStore {
         Ok(BoundReportReview {
             task_id,
             artifact_id: artifact_id.to_string(),
+            version,
             checkpoint_item_id,
             proposal_id: proposal_id.to_string(),
         })
@@ -4044,25 +4535,32 @@ impl CanonicalTaskRuntimeStore {
         let owner = {
             let conn = self.lock_conn()?;
             conn.query_row(
-                "SELECT artifact.task_id, source.run_id, artifact.id
-                 FROM canonical_artifacts artifact
+                "SELECT artifact.task_id, source.run_id, artifact.id, checkpoint.version
+                 FROM canonical_artifact_review_checkpoints checkpoint
+                 JOIN canonical_artifacts artifact ON artifact.id = checkpoint.artifact_id
                  JOIN canonical_task_items source ON source.id = artifact.source_item_id
-                 WHERE artifact.proposal_id = ?1 AND artifact.status = 'waiting_review'",
+                 WHERE checkpoint.proposal_id = ?1 AND checkpoint.status = 'waiting'
+                   AND checkpoint.version = artifact.current_version
+                   AND artifact.status = 'waiting_review'",
                 [proposal_id],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 },
             )
             .optional()?
         };
-        let Some((task_id, run_id, artifact_id)) = owner else {
+        let Some((task_id, run_id, artifact_id, version)) = owner else {
             return Ok(None);
         };
-        let item_id = stable_id("item", &["artifact_materialized", &artifact_id]);
+        let item_id = stable_id(
+            "item",
+            &["artifact_materialized", &artifact_id, &version.to_string()],
+        );
         self.begin_item_attempt(BeginItemAttemptInput {
             attempt_id,
             task_id: &task_id,
@@ -4074,6 +4572,292 @@ impl CanonicalTaskRuntimeStore {
             request_digest,
         })
         .map(Some)
+    }
+
+    pub fn prepare_artifact_effect(
+        &self,
+        proposal_id: &str,
+        dispatch_claim_id: &str,
+        target_reference_digest: &str,
+        content_digest: &str,
+        byte_size: u64,
+        media_type: &str,
+    ) -> Result<Option<CanonicalArtifactEffectRecord>> {
+        for (label, value) in [
+            ("proposal_id", proposal_id),
+            ("dispatch_claim_id", dispatch_claim_id),
+            ("target_reference_digest", target_reference_digest),
+            ("content_digest", content_digest),
+            ("media_type", media_type),
+        ] {
+            validate_nonempty(label, value, 512)?;
+        }
+        validate_digest("target_reference_digest", target_reference_digest)?;
+        validate_digest("content_digest", content_digest)?;
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut owner = tx
+            .query_row(
+                "SELECT checkpoint.artifact_id, checkpoint.version, attempt.attempt_id,
+                        version.content_digest, artifact.target_reference_digest
+                 FROM canonical_artifact_review_checkpoints checkpoint
+                 JOIN canonical_artifacts artifact ON artifact.id = checkpoint.artifact_id
+                 JOIN canonical_artifact_versions version
+                   ON version.artifact_id = checkpoint.artifact_id
+                  AND version.version = checkpoint.version
+                 JOIN canonical_task_items item ON item.id = checkpoint.item_id
+                 JOIN canonical_task_item_attempts attempt
+                   ON attempt.task_id = item.task_id AND attempt.run_id = item.run_id
+                  AND attempt.executor_kind = 'materializer'
+                  AND attempt.status = 'running'
+                  AND attempt.item_id = (
+                    SELECT candidate.id FROM canonical_task_items candidate
+                     WHERE candidate.task_id = item.task_id
+                       AND candidate.run_id = item.run_id
+                       AND candidate.kind = 'artifact_materialized'
+                       AND candidate.sequence > item.sequence
+                     ORDER BY candidate.sequence ASC LIMIT 1
+                  )
+                 WHERE checkpoint.proposal_id = ?1
+                   AND checkpoint.status = 'waiting'
+                   AND checkpoint.version = artifact.current_version",
+                [proposal_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?;
+        if owner.is_none() {
+            owner = tx
+                .query_row(
+                    "SELECT undo.artifact_id, undo.version, attempt.attempt_id,
+                            undo.content_digest, undo.source_reference,
+                            undo.target_reference
+                     FROM canonical_artifact_undo undo
+                     JOIN canonical_artifacts artifact ON artifact.id = undo.artifact_id
+                     JOIN canonical_task_items item
+                       ON item.task_id = artifact.task_id
+                      AND item.kind = 'review_checkpoint'
+                      AND item.summary_code = 'artifact_undo_review_required'
+                     JOIN canonical_task_item_attempts attempt
+                       ON attempt.item_id = item.id
+                      AND attempt.executor_kind = 'materializer'
+                      AND attempt.status = 'running'
+                     WHERE undo.proposal_id = ?1 AND undo.status = 'waiting_review'
+                       AND undo.version = artifact.current_version",
+                    [proposal_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                            sha256_text(&format!(
+                                "{} -> {}",
+                                row.get::<_, String>(4)?,
+                                row.get::<_, String>(5)?
+                            )),
+                        ))
+                    },
+                )
+                .optional()?;
+        }
+        let Some((artifact_id, version, attempt_id, expected_content, expected_target)) = owner
+        else {
+            tx.commit()?;
+            return Ok(None);
+        };
+        if expected_content != content_digest {
+            anyhow::bail!("canonical_artifact_effect_content_mismatch");
+        }
+        if expected_target != target_reference_digest {
+            anyhow::bail!("canonical_artifact_effect_target_mismatch");
+        }
+        tx.execute(
+            "INSERT INTO canonical_artifact_effects (
+                proposal_id, artifact_id, version, attempt_id, dispatch_claim_id,
+                target_reference_digest, content_digest, byte_size, media_type,
+                state, observed_content_digest, error_code, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                       'prepared', NULL, NULL, ?10, ?10)
+             ON CONFLICT(proposal_id) DO NOTHING",
+            params![
+                proposal_id,
+                artifact_id,
+                version,
+                attempt_id,
+                dispatch_claim_id,
+                target_reference_digest,
+                content_digest,
+                i64::try_from(byte_size)?,
+                media_type,
+                now
+            ],
+        )?;
+        let record = load_artifact_effect_in_tx(&tx, proposal_id)?
+            .ok_or_else(|| anyhow::anyhow!("canonical_artifact_effect_missing_after_prepare"))?;
+        if record.artifact_id != artifact_id
+            || record.version != u64::try_from(version)?
+            || record.attempt_id != attempt_id
+            || record.dispatch_claim_id != dispatch_claim_id
+            || record.target_reference_digest != target_reference_digest
+            || record.content_digest != content_digest
+            || record.byte_size != byte_size
+            || record.media_type != media_type
+        {
+            anyhow::bail!("canonical_artifact_effect_identity_conflict");
+        }
+        tx.commit()?;
+        Ok(Some(record))
+    }
+
+    pub fn mark_artifact_effect_staged(
+        &self,
+        proposal_id: &str,
+        dispatch_claim_id: &str,
+    ) -> Result<bool> {
+        self.transition_artifact_effect(
+            proposal_id,
+            dispatch_claim_id,
+            CanonicalArtifactEffectState::Staged,
+            None,
+            None,
+        )
+    }
+
+    pub fn finish_artifact_effect_confirmed(
+        &self,
+        proposal_id: &str,
+        dispatch_claim_id: &str,
+        observed_content_digest: &str,
+    ) -> Result<bool> {
+        validate_digest("observed_content_digest", observed_content_digest)?;
+        self.transition_artifact_effect(
+            proposal_id,
+            dispatch_claim_id,
+            CanonicalArtifactEffectState::Confirmed,
+            Some(observed_content_digest),
+            None,
+        )
+    }
+
+    pub fn finish_artifact_effect_failed_before_effect(
+        &self,
+        proposal_id: &str,
+        dispatch_claim_id: &str,
+        error_code: &str,
+    ) -> Result<bool> {
+        self.transition_artifact_effect(
+            proposal_id,
+            dispatch_claim_id,
+            CanonicalArtifactEffectState::FailedBeforeEffect,
+            None,
+            Some(error_code),
+        )
+    }
+
+    pub fn finish_artifact_effect_unknown(
+        &self,
+        proposal_id: &str,
+        dispatch_claim_id: &str,
+        error_code: &str,
+    ) -> Result<bool> {
+        self.transition_artifact_effect(
+            proposal_id,
+            dispatch_claim_id,
+            CanonicalArtifactEffectState::EffectUnknown,
+            None,
+            Some(error_code),
+        )
+    }
+
+    fn transition_artifact_effect(
+        &self,
+        proposal_id: &str,
+        dispatch_claim_id: &str,
+        next: CanonicalArtifactEffectState,
+        observed_content_digest: Option<&str>,
+        error_code: Option<&str>,
+    ) -> Result<bool> {
+        validate_nonempty("proposal_id", proposal_id, 512)?;
+        validate_nonempty("dispatch_claim_id", dispatch_claim_id, 512)?;
+        if let Some(error_code) = error_code {
+            validate_nonempty("artifact_effect_error_code", error_code, 256)?;
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.lock_conn()?;
+        let allowed_prior = match next {
+            CanonicalArtifactEffectState::Staged => "prepared",
+            CanonicalArtifactEffectState::Confirmed => "prepared','staged",
+            CanonicalArtifactEffectState::FailedBeforeEffect => "prepared",
+            CanonicalArtifactEffectState::EffectUnknown => "prepared','staged",
+            CanonicalArtifactEffectState::Prepared => {
+                anyhow::bail!("canonical_artifact_effect_transition_invalid")
+            }
+        };
+        let sql = format!(
+            "UPDATE canonical_artifact_effects
+             SET state = ?3, observed_content_digest = ?4, error_code = ?5, updated_at = ?6
+             WHERE proposal_id = ?1 AND dispatch_claim_id = ?2
+               AND state IN ('{allowed_prior}')"
+        );
+        let changed = conn.execute(
+            &sql,
+            params![
+                proposal_id,
+                dispatch_claim_id,
+                next.as_str(),
+                observed_content_digest,
+                error_code,
+                now
+            ],
+        )?;
+        if changed == 1 {
+            return Ok(true);
+        }
+        let existing = load_artifact_effect_in_conn(&conn, proposal_id)?;
+        Ok(existing.is_some_and(|record| {
+            record.dispatch_claim_id == dispatch_claim_id
+                && record.state == next
+                && record.observed_content_digest.as_deref() == observed_content_digest
+                && record.error_code.as_deref() == error_code
+        }))
+    }
+
+    pub fn load_artifact_effect(
+        &self,
+        proposal_id: &str,
+    ) -> Result<Option<CanonicalArtifactEffectRecord>> {
+        let conn = self.lock_conn()?;
+        load_artifact_effect_in_conn(&conn, proposal_id)
+    }
+
+    pub fn list_artifact_effects_for_reconciliation(
+        &self,
+        limit: u64,
+    ) -> Result<Vec<CanonicalArtifactEffectRecord>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare(
+            "SELECT artifact_id, version, proposal_id, attempt_id, dispatch_claim_id,
+                    target_reference_digest, content_digest, byte_size, media_type,
+                    state, observed_content_digest, error_code, created_at, updated_at
+             FROM canonical_artifact_effects
+             WHERE state IN ('prepared', 'staged')
+             ORDER BY created_at ASC, proposal_id ASC LIMIT ?1",
+        )?;
+        let rows = statement.query_map(
+            [i64::try_from(limit.clamp(1, 200))?],
+            row_to_artifact_effect,
+        )?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn confirm_artifact_materialized(
@@ -4088,17 +4872,30 @@ impl CanonicalTaskRuntimeStore {
         let now = Utc::now().to_rfc3339();
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (artifact_id, task_id, source_item_id, expected_digest): (
+        let (artifact_id, task_id, source_item_id, current_version, expected_digest): (
             String,
             String,
             String,
+            i64,
             String,
         ) = tx
             .query_row(
-                "SELECT id, task_id, source_item_id, content_digest
-                 FROM canonical_artifacts WHERE proposal_id = ?1",
+                "SELECT artifact.id, artifact.task_id, artifact.source_item_id,
+                        artifact.current_version, artifact.content_digest
+                 FROM canonical_artifact_review_checkpoints checkpoint
+                 JOIN canonical_artifacts artifact ON artifact.id = checkpoint.artifact_id
+                 WHERE checkpoint.proposal_id = ?1
+                   AND checkpoint.version = artifact.current_version",
                 [proposal_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .with_context(|| "canonical_report_artifact_missing_for_confirmed_proposal")?;
         if expected_digest != observed_content_digest {
@@ -4140,8 +4937,8 @@ impl CanonicalTaskRuntimeStore {
         let artifact_changed = tx.execute(
             "UPDATE canonical_artifacts
              SET status = 'materialized', materialized_reference = ?2, updated_at = ?3
-             WHERE id = ?1 AND status = 'waiting_review'",
-            params![artifact_id, materialized_reference, now],
+             WHERE id = ?1 AND current_version = ?4 AND status = 'waiting_review'",
+            params![artifact_id, materialized_reference, now, current_version],
         )?;
         if artifact_changed != 1 {
             let existing: (String, Option<String>) = tx.query_row(
@@ -4155,7 +4952,14 @@ impl CanonicalTaskRuntimeStore {
                 anyhow::bail!("canonical_report_artifact_confirm_cas_failed");
             }
         }
-        let checkpoint_item_id = stable_id("item", &["review_checkpoint", &artifact_id]);
+        let checkpoint_item_id = stable_id(
+            "item",
+            &[
+                "review_checkpoint",
+                &artifact_id,
+                &current_version.to_string(),
+            ],
+        );
         tx.execute(
             "UPDATE canonical_task_items
              SET status = 'completed', summary_code = 'artifact_review_accepted',
@@ -4164,7 +4968,20 @@ impl CanonicalTaskRuntimeStore {
                AND status = 'waiting'",
             params![checkpoint_item_id, now],
         )?;
-        let materialized_item_id = stable_id("item", &["artifact_materialized", &artifact_id]);
+        tx.execute(
+            "UPDATE canonical_artifact_review_checkpoints
+             SET status = 'accepted', resolved_at = ?2
+             WHERE proposal_id = ?1 AND status = 'waiting'",
+            params![proposal_id, now],
+        )?;
+        let materialized_item_id = stable_id(
+            "item",
+            &[
+                "artifact_materialized",
+                &artifact_id,
+                &current_version.to_string(),
+            ],
+        );
         let run_id: String = tx.query_row(
             "SELECT run_id FROM canonical_task_items WHERE id = ?1",
             [&source_item_id],
@@ -4193,11 +5010,6 @@ impl CanonicalTaskRuntimeStore {
             params![materialized_item_id, materializer_receipt_digest, now],
         )?;
 
-        let current_version: i64 = tx.query_row(
-            "SELECT current_version FROM canonical_artifacts WHERE id = ?1",
-            [&artifact_id],
-            |row| row.get(0),
-        )?;
         let verification_item_id = report_verification_item_id(
             &artifact_id,
             u64::try_from(current_version)?,
@@ -4385,36 +5197,52 @@ impl CanonicalTaskRuntimeStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let owner = tx
             .query_row(
-                "SELECT artifact.task_id, item.run_id
-                 FROM canonical_artifacts artifact
+                "SELECT artifact.task_id, item.run_id, artifact.id, checkpoint.version
+                 FROM canonical_artifact_review_checkpoints checkpoint
+                 JOIN canonical_artifacts artifact ON artifact.id = checkpoint.artifact_id
                  JOIN canonical_task_items item ON item.id = artifact.source_item_id
-                 WHERE artifact.proposal_id = ?1",
+                 WHERE checkpoint.proposal_id = ?1
+                   AND checkpoint.version = artifact.current_version",
                 [proposal_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((task_id, run_id)) = owner else {
+        let Some((task_id, run_id, artifact_id, version)) = owner else {
             tx.commit()?;
             return Ok(());
         };
         tx.execute(
             "UPDATE canonical_artifacts SET status = 'effect_unknown', updated_at = ?2
-             WHERE proposal_id = ?1 AND status != 'materialized'",
+             WHERE id = ?1 AND current_version = ?3 AND status != 'materialized'",
+            params![artifact_id, now, version],
+        )?;
+        tx.execute(
+            "UPDATE canonical_artifact_review_checkpoints
+             SET status = 'effect_unknown', resolved_at = ?2
+             WHERE proposal_id = ?1 AND status = 'waiting'",
             params![proposal_id, now],
         )?;
-        let artifact_id: String = tx.query_row(
-            "SELECT id FROM canonical_artifacts WHERE proposal_id = ?1",
-            [proposal_id],
-            |row| row.get(0),
-        )?;
-        let checkpoint_item_id = stable_id("item", &["review_checkpoint", &artifact_id]);
+        let checkpoint_item_id = stable_id(
+            "item",
+            &["review_checkpoint", &artifact_id, &version.to_string()],
+        );
         tx.execute(
             "UPDATE canonical_task_items
              SET status = 'effect_unknown', summary_code = ?2, updated_at = ?3
              WHERE id = ?1 AND kind = 'review_checkpoint' AND status = 'waiting'",
             params![checkpoint_item_id, reason_code, now],
         )?;
-        let materialized_item_id = stable_id("item", &["artifact_materialized", &artifact_id]);
+        let materialized_item_id = stable_id(
+            "item",
+            &["artifact_materialized", &artifact_id, &version.to_string()],
+        );
         tx.execute(
             "UPDATE canonical_task_items
              SET status = 'effect_unknown', summary_code = ?2, updated_at = ?3
@@ -4514,36 +5342,52 @@ impl CanonicalTaskRuntimeStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let owner = tx
             .query_row(
-                "SELECT artifact.task_id, item.run_id
-                 FROM canonical_artifacts artifact
+                "SELECT artifact.task_id, item.run_id, artifact.id, checkpoint.version
+                 FROM canonical_artifact_review_checkpoints checkpoint
+                 JOIN canonical_artifacts artifact ON artifact.id = checkpoint.artifact_id
                  JOIN canonical_task_items item ON item.id = artifact.source_item_id
-                 WHERE artifact.proposal_id = ?1",
+                 WHERE checkpoint.proposal_id = ?1
+                   AND checkpoint.version = artifact.current_version",
                 [proposal_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
             )
             .optional()?;
-        let Some((task_id, run_id)) = owner else {
+        let Some((task_id, run_id, artifact_id, version)) = owner else {
             tx.commit()?;
             return Ok(());
         };
         tx.execute(
             "UPDATE canonical_artifacts SET status = 'failed', updated_at = ?2
-             WHERE proposal_id = ?1 AND status != 'materialized'",
+             WHERE id = ?1 AND current_version = ?3 AND status != 'materialized'",
+            params![artifact_id, now, version],
+        )?;
+        tx.execute(
+            "UPDATE canonical_artifact_review_checkpoints
+             SET status = 'failed', resolved_at = ?2
+             WHERE proposal_id = ?1 AND status = 'waiting'",
             params![proposal_id, now],
         )?;
-        let artifact_id: String = tx.query_row(
-            "SELECT id FROM canonical_artifacts WHERE proposal_id = ?1",
-            [proposal_id],
-            |row| row.get(0),
-        )?;
-        let checkpoint_item_id = stable_id("item", &["review_checkpoint", &artifact_id]);
+        let checkpoint_item_id = stable_id(
+            "item",
+            &["review_checkpoint", &artifact_id, &version.to_string()],
+        );
         tx.execute(
             "UPDATE canonical_task_items
              SET status = 'failed', summary_code = ?2, updated_at = ?3
              WHERE id = ?1 AND kind = 'review_checkpoint' AND status = 'waiting'",
             params![checkpoint_item_id, reason_code, now],
         )?;
-        let materialized_item_id = stable_id("item", &["artifact_materialized", &artifact_id]);
+        let materialized_item_id = stable_id(
+            "item",
+            &["artifact_materialized", &artifact_id, &version.to_string()],
+        );
         tx.execute(
             "UPDATE canonical_task_items
              SET status = 'failed', summary_code = ?2, updated_at = ?3
@@ -4587,14 +5431,25 @@ impl CanonicalTaskRuntimeStore {
         let now = Utc::now().to_rfc3339();
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let (artifact_id, task_id, run_id, status): (String, String, String, String) = tx
-            .query_row(
-                "SELECT artifact.id, artifact.task_id, item.run_id, artifact.status
-                 FROM canonical_artifacts artifact
+        let (artifact_id, task_id, run_id, version, status): (String, String, String, i64, String) =
+            tx.query_row(
+                "SELECT artifact.id, artifact.task_id, item.run_id,
+                        checkpoint.version, artifact.status
+                 FROM canonical_artifact_review_checkpoints checkpoint
+                 JOIN canonical_artifacts artifact ON artifact.id = checkpoint.artifact_id
                  JOIN canonical_task_items item ON item.id = artifact.source_item_id
-                 WHERE artifact.proposal_id = ?1",
+                 WHERE checkpoint.proposal_id = ?1
+                   AND checkpoint.version = artifact.current_version",
                 [proposal_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
             )
             .with_context(|| "canonical_report_artifact_missing_for_rejected_proposal")?;
         if status == CanonicalArtifactStatus::Materialized.as_str() {
@@ -4605,7 +5460,16 @@ impl CanonicalTaskRuntimeStore {
              WHERE id = ?1 AND status IN ('draft', 'waiting_review')",
             params![artifact_id, now],
         )?;
-        let checkpoint_item_id = stable_id("item", &["review_checkpoint", &artifact_id]);
+        tx.execute(
+            "UPDATE canonical_artifact_review_checkpoints
+             SET status = 'rejected', resolved_at = ?2
+             WHERE proposal_id = ?1 AND status = 'waiting'",
+            params![proposal_id, now],
+        )?;
+        let checkpoint_item_id = stable_id(
+            "item",
+            &["review_checkpoint", &artifact_id, &version.to_string()],
+        );
         tx.execute(
             "UPDATE canonical_task_items
              SET status = 'blocked', summary_code = 'artifact_review_rejected',
@@ -4614,7 +5478,10 @@ impl CanonicalTaskRuntimeStore {
                AND status = 'waiting'",
             params![checkpoint_item_id, now],
         )?;
-        let materialized_item_id = stable_id("item", &["artifact_materialized", &artifact_id]);
+        let materialized_item_id = stable_id(
+            "item",
+            &["artifact_materialized", &artifact_id, &version.to_string()],
+        );
         tx.execute(
             "UPDATE canonical_task_items
              SET status = 'cancelled', summary_code = 'artifact_review_rejected', updated_at = ?2
@@ -4685,7 +5552,7 @@ impl CanonicalTaskRuntimeStore {
         conn.query_row(
             "SELECT id, task_id, source_item_id, current_version, status,
                     media_type, target_reference_digest, content_digest,
-                    proposal_id, materialized_reference, created_at, updated_at
+                    materialized_reference, created_at, updated_at
              FROM canonical_artifacts WHERE id = ?1",
             [artifact_id],
             row_to_artifact,
@@ -4700,10 +5567,14 @@ impl CanonicalTaskRuntimeStore {
     ) -> Result<Option<CanonicalArtifactRecord>> {
         let conn = self.lock_conn()?;
         conn.query_row(
-            "SELECT id, task_id, source_item_id, current_version, status,
-                    media_type, target_reference_digest, content_digest,
-                    proposal_id, materialized_reference, created_at, updated_at
-             FROM canonical_artifacts WHERE proposal_id = ?1",
+            "SELECT artifact.id, artifact.task_id, artifact.source_item_id,
+                    artifact.current_version, artifact.status, artifact.media_type,
+                    artifact.target_reference_digest, artifact.content_digest,
+                    artifact.materialized_reference,
+                    artifact.created_at, artifact.updated_at
+             FROM canonical_artifact_review_checkpoints checkpoint
+             JOIN canonical_artifacts artifact ON artifact.id = checkpoint.artifact_id
+             WHERE checkpoint.proposal_id = ?1",
             [proposal_id],
             row_to_artifact,
         )
@@ -4727,9 +5598,9 @@ impl CanonicalTaskRuntimeStore {
         let now = Utc::now().to_rfc3339();
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let artifact: (String, String, Option<String>, String, String) = tx.query_row(
+        let artifact: (String, String, Option<String>, String, String, i64) = tx.query_row(
             "SELECT artifact.status, artifact.content_digest, artifact.materialized_reference,
-                    artifact.task_id, source.run_id
+                    artifact.task_id, source.run_id, artifact.current_version
              FROM canonical_artifacts artifact
              JOIN canonical_task_items source ON source.id = artifact.source_item_id
              WHERE artifact.id = ?1",
@@ -4741,6 +5612,7 @@ impl CanonicalTaskRuntimeStore {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             },
         )?;
@@ -4752,12 +5624,13 @@ impl CanonicalTaskRuntimeStore {
         }
         tx.execute(
             "INSERT INTO canonical_artifact_undo (
-                artifact_id, proposal_id, source_reference, target_reference,
+                artifact_id, version, proposal_id, source_reference, target_reference,
                 content_digest, status, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'waiting_review', ?6)
-             ON CONFLICT(artifact_id) DO NOTHING",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'waiting_review', ?7)
+             ON CONFLICT(artifact_id, version) DO NOTHING",
             params![
                 artifact_id,
+                artifact.5,
                 proposal_id,
                 source_reference,
                 target_reference,
@@ -4765,7 +5638,10 @@ impl CanonicalTaskRuntimeStore {
                 now
             ],
         )?;
-        let item_id = stable_id("item", &["artifact_undo", artifact_id]);
+        let item_id = stable_id(
+            "item",
+            &["artifact_undo", artifact_id, &artifact.5.to_string()],
+        );
         let sequence: i64 = tx.query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM canonical_task_items WHERE task_id = ?1",
             [&artifact.3],
@@ -4787,9 +5663,10 @@ impl CanonicalTaskRuntimeStore {
                 now
             ],
         )?;
-        let existing = load_artifact_undo_in_tx(&tx, artifact_id)?
+        let existing = load_artifact_undo_in_tx(&tx, artifact_id, u64::try_from(artifact.5)?)?
             .ok_or_else(|| anyhow::anyhow!("canonical_artifact_undo_missing_after_bind"))?;
-        if existing.proposal_id != proposal_id
+        if existing.version != u64::try_from(artifact.5)?
+            || existing.proposal_id != proposal_id
             || existing.source_reference != source_reference
             || existing.target_reference != target_reference
             || existing.content_digest != content_digest
@@ -4811,7 +5688,7 @@ impl CanonicalTaskRuntimeStore {
         let owner = {
             let conn = self.lock_conn()?;
             conn.query_row(
-                "SELECT artifact.task_id, source.run_id, undo.artifact_id
+                "SELECT artifact.task_id, source.run_id, undo.artifact_id, undo.version
                  FROM canonical_artifact_undo undo
                  JOIN canonical_artifacts artifact ON artifact.id = undo.artifact_id
                  JOIN canonical_task_items source ON source.id = artifact.source_item_id
@@ -4822,15 +5699,19 @@ impl CanonicalTaskRuntimeStore {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
                     ))
                 },
             )
             .optional()?
         };
-        let Some((task_id, run_id, artifact_id)) = owner else {
+        let Some((task_id, run_id, artifact_id, version)) = owner else {
             return Ok(None);
         };
-        let item_id = stable_id("item", &["artifact_undo", &artifact_id]);
+        let item_id = stable_id(
+            "item",
+            &["artifact_undo", &artifact_id, &version.to_string()],
+        );
         self.begin_item_attempt(BeginItemAttemptInput {
             attempt_id,
             task_id: &task_id,
@@ -4858,7 +5739,7 @@ impl CanonicalTaskRuntimeStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let undo = tx
             .query_row(
-                "SELECT artifact_id, proposal_id, source_reference, target_reference,
+                "SELECT artifact_id, version, proposal_id, source_reference, target_reference,
                         content_digest, status, created_at, resolved_at
                  FROM canonical_artifact_undo WHERE proposal_id = ?1",
                 [proposal_id],
@@ -4876,7 +5757,14 @@ impl CanonicalTaskRuntimeStore {
              WHERE proposal_id = ?1 AND status = 'waiting_review'",
             params![proposal_id, now],
         )?;
-        let item_id = stable_id("item", &["artifact_undo", &undo.artifact_id]);
+        let item_id = stable_id(
+            "item",
+            &[
+                "artifact_undo",
+                &undo.artifact_id,
+                &undo.version.to_string(),
+            ],
+        );
         let receipt_digest = sha256_text(&format!(
             "{}\0{}\0{}",
             proposal_id, target_reference, observed_content_digest
@@ -4897,7 +5785,7 @@ impl CanonicalTaskRuntimeStore {
         )?;
         tx.commit()?;
         drop(conn);
-        self.load_artifact_undo(&undo.artifact_id)?
+        self.load_artifact_undo_version(&undo.artifact_id, undo.version)?
             .ok_or_else(|| anyhow::anyhow!("canonical_artifact_undo_missing_after_confirm"))
     }
 
@@ -4905,12 +5793,26 @@ impl CanonicalTaskRuntimeStore {
         &self,
         artifact_id: &str,
     ) -> Result<Option<CanonicalArtifactUndoRecord>> {
+        let version = self
+            .load_artifact(artifact_id)?
+            .map(|artifact| artifact.current_version);
+        let Some(version) = version else {
+            return Ok(None);
+        };
+        self.load_artifact_undo_version(artifact_id, version)
+    }
+
+    pub fn load_artifact_undo_version(
+        &self,
+        artifact_id: &str,
+        version: u64,
+    ) -> Result<Option<CanonicalArtifactUndoRecord>> {
         let conn = self.lock_conn()?;
         conn.query_row(
-            "SELECT artifact_id, proposal_id, source_reference, target_reference,
+            "SELECT artifact_id, version, proposal_id, source_reference, target_reference,
                     content_digest, status, created_at, resolved_at
-             FROM canonical_artifact_undo WHERE artifact_id = ?1",
-            [artifact_id],
+             FROM canonical_artifact_undo WHERE artifact_id = ?1 AND version = ?2",
+            params![artifact_id, i64::try_from(version)?],
             row_to_artifact_undo,
         )
         .optional()
@@ -4930,14 +5832,14 @@ impl CanonicalTaskRuntimeStore {
         let now = Utc::now().to_rfc3339();
         let mut conn = self.lock_conn()?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let artifact_id = tx
+        let owner = tx
             .query_row(
-                "SELECT artifact_id FROM canonical_artifact_undo WHERE proposal_id = ?1",
+                "SELECT artifact_id, version FROM canonical_artifact_undo WHERE proposal_id = ?1",
                 [proposal_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
             )
             .optional()?;
-        let Some(artifact_id) = artifact_id else {
+        let Some((artifact_id, version)) = owner else {
             tx.commit()?;
             return Ok(false);
         };
@@ -4946,7 +5848,10 @@ impl CanonicalTaskRuntimeStore {
              WHERE proposal_id = ?1 AND status = 'waiting_review'",
             params![proposal_id, status, now],
         )?;
-        let item_id = stable_id("item", &["artifact_undo", &artifact_id]);
+        let item_id = stable_id(
+            "item",
+            &["artifact_undo", &artifact_id, &version.to_string()],
+        );
         tx.execute(
             "UPDATE canonical_task_items SET status = ?2, summary_code = ?3, updated_at = ?4
              WHERE id = ?1 AND kind = 'review_checkpoint'
@@ -4983,7 +5888,8 @@ impl CanonicalTaskRuntimeStore {
         conn.query_row(
             "SELECT artifact_id, version, source_item_id, content_digest,
                     materialized_reference, observed_content_digest,
-                    created_at, materialized_at
+                    created_at, materialized_at, target_reference, draft_reference,
+                    expected_target_absent, expected_target_digest
              FROM canonical_artifact_versions
              WHERE artifact_id = ?1 AND version = ?2",
             params![artifact_id, i64::try_from(version)?],
@@ -5047,12 +5953,14 @@ impl CanonicalTaskRuntimeStore {
                     "SELECT artifact.id, artifact.task_id, artifact.source_item_id,
                             artifact.current_version, artifact.status, artifact.media_type,
                             artifact.target_reference_digest, artifact.content_digest,
-                            artifact.proposal_id, artifact.materialized_reference,
+                            artifact.materialized_reference,
                             artifact.created_at, artifact.updated_at,
                             version.artifact_id, version.version, version.source_item_id,
                             version.content_digest, version.materialized_reference,
                             version.observed_content_digest, version.created_at,
-                            version.materialized_at
+                            version.materialized_at, version.target_reference,
+                            version.draft_reference, version.expected_target_absent,
+                            version.expected_target_digest
                      FROM canonical_artifacts artifact
                      JOIN canonical_artifact_versions version
                        ON version.artifact_id = artifact.id
@@ -5063,7 +5971,16 @@ impl CanonicalTaskRuntimeStore {
                 let rows = statement.query_map([&task.id], row_to_artifact_snapshot)?;
                 let mut snapshots = rows.collect::<std::result::Result<Vec<_>, _>>()?;
                 for snapshot in &mut snapshots {
-                    snapshot.undo = load_artifact_undo_in_tx(&tx, &snapshot.artifact.id)?;
+                    snapshot.review_checkpoint = load_artifact_review_checkpoint_in_tx(
+                        &tx,
+                        &snapshot.artifact.id,
+                        snapshot.current_version.version,
+                    )?;
+                    snapshot.undo = load_artifact_undo_in_tx(
+                        &tx,
+                        &snapshot.artifact.id,
+                        snapshot.current_version.version,
+                    )?;
                 }
                 snapshots
             };
@@ -5493,39 +6410,55 @@ fn load_snapshot_for_task(
             row_to_final_result,
         )
         .optional()?;
-    let artifacts = {
-        let mut statement = conn.prepare(
-            "SELECT artifact.id, artifact.task_id, artifact.source_item_id,
+    let artifacts =
+        {
+            let mut statement = conn.prepare(
+                "SELECT artifact.id, artifact.task_id, artifact.source_item_id,
                     artifact.current_version, artifact.status, artifact.media_type,
                     artifact.target_reference_digest, artifact.content_digest,
-                    artifact.proposal_id, artifact.materialized_reference,
+                    artifact.materialized_reference,
                     artifact.created_at, artifact.updated_at,
                     version.artifact_id, version.version, version.source_item_id,
                     version.content_digest, version.materialized_reference,
                     version.observed_content_digest, version.created_at,
-                    version.materialized_at
+                    version.materialized_at, version.target_reference,
+                    version.draft_reference, version.expected_target_absent,
+                    version.expected_target_digest
              FROM canonical_artifacts artifact
              JOIN canonical_artifact_versions version
                ON version.artifact_id = artifact.id
               AND version.version = artifact.current_version
              WHERE artifact.task_id = ?1
              ORDER BY artifact.created_at ASC, artifact.id ASC",
-        )?;
-        let rows = statement.query_map([&task.id], row_to_artifact_snapshot)?;
-        let mut snapshots = rows.collect::<std::result::Result<Vec<_>, _>>()?;
-        for snapshot in &mut snapshots {
-            snapshot.undo = conn
+            )?;
+            let rows = statement.query_map([&task.id], row_to_artifact_snapshot)?;
+            let mut snapshots = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+            for snapshot in &mut snapshots {
+                snapshot.review_checkpoint = conn
+                    .query_row(
+                        "SELECT artifact_id, version, proposal_id, item_id, status,
+                            created_at, resolved_at
+                     FROM canonical_artifact_review_checkpoints
+                     WHERE artifact_id = ?1 AND version = ?2",
+                        params![
+                            snapshot.artifact.id,
+                            i64::try_from(snapshot.current_version.version)?
+                        ],
+                        row_to_artifact_review_checkpoint,
+                    )
+                    .optional()?;
+                snapshot.undo = conn
                 .query_row(
-                    "SELECT artifact_id, proposal_id, source_reference, target_reference,
+                    "SELECT artifact_id, version, proposal_id, source_reference, target_reference,
                             content_digest, status, created_at, resolved_at
-                     FROM canonical_artifact_undo WHERE artifact_id = ?1",
-                    [&snapshot.artifact.id],
+                     FROM canonical_artifact_undo WHERE artifact_id = ?1 AND version = ?2",
+                    params![snapshot.artifact.id, i64::try_from(snapshot.current_version.version)?],
                     row_to_artifact_undo,
                 )
                 .optional()?;
-        }
-        snapshots
-    };
+            }
+            snapshots
+        };
     let attention = load_attention_for_task(conn, &task.id)?;
     Ok(CanonicalTaskSnapshot {
         task,
@@ -5856,13 +6789,12 @@ fn row_to_artifact(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalArtifac
         media_type: row.get(5)?,
         target_reference_digest: row.get(6)?,
         content_digest: row.get(7)?,
-        proposal_id: row.get(8)?,
-        materialized_reference: row.get(9)?,
-        created_at: parse_timestamp(row.get(10)?, "artifact_created_at").map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, error.into())
+        materialized_reference: row.get(8)?,
+        created_at: parse_timestamp(row.get(9)?, "artifact_created_at").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, error.into())
         })?,
-        updated_at: parse_timestamp(row.get(11)?, "artifact_updated_at").map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(11, rusqlite::types::Type::Text, error.into())
+        updated_at: parse_timestamp(row.get(10)?, "artifact_updated_at").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(10, rusqlite::types::Type::Text, error.into())
         })?,
     })
 }
@@ -5880,6 +6812,10 @@ fn row_to_artifact_version(
         content_digest: row.get(3)?,
         materialized_reference: row.get(4)?,
         observed_content_digest: row.get(5)?,
+        target_reference: row.get(8)?,
+        draft_reference: row.get(9)?,
+        expected_target_absent: row.get::<_, Option<i64>>(10)?.map(|value| value != 0),
+        expected_target_digest: row.get(11)?,
         created_at: parse_timestamp(row.get(6)?, "artifact_version_created_at").map_err(
             |error| {
                 rusqlite::Error::FromSqlConversionFailure(
@@ -6013,32 +6949,36 @@ fn row_to_artifact_snapshot(
     row: &rusqlite::Row<'_>,
 ) -> rusqlite::Result<CanonicalArtifactSnapshot> {
     let artifact = row_to_artifact(row)?;
-    let version = u64::try_from(row.get::<_, i64>(13)?).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(13, rusqlite::types::Type::Integer, error.into())
+    let version = u64::try_from(row.get::<_, i64>(12)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(12, rusqlite::types::Type::Integer, error.into())
     })?;
     let current_version = CanonicalArtifactVersionRecord {
-        artifact_id: row.get(12)?,
+        artifact_id: row.get(11)?,
         version,
-        source_item_id: row.get(14)?,
-        content_digest: row.get(15)?,
-        materialized_reference: row.get(16)?,
-        observed_content_digest: row.get(17)?,
-        created_at: parse_timestamp(row.get(18)?, "artifact_version_created_at").map_err(
+        source_item_id: row.get(13)?,
+        content_digest: row.get(14)?,
+        materialized_reference: row.get(15)?,
+        observed_content_digest: row.get(16)?,
+        target_reference: row.get(19)?,
+        draft_reference: row.get(20)?,
+        expected_target_absent: row.get::<_, Option<i64>>(21)?.map(|value| value != 0),
+        expected_target_digest: row.get(22)?,
+        created_at: parse_timestamp(row.get(17)?, "artifact_version_created_at").map_err(
             |error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    18,
+                    17,
                     rusqlite::types::Type::Text,
                     error.into(),
                 )
             },
         )?,
         materialized_at: row
-            .get::<_, Option<String>>(19)?
+            .get::<_, Option<String>>(18)?
             .map(|value| parse_timestamp(value, "artifact_version_materialized_at"))
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    19,
+                    18,
                     rusqlite::types::Type::Text,
                     error.into(),
                 )
@@ -6054,28 +6994,112 @@ fn row_to_artifact_snapshot(
     Ok(CanonicalArtifactSnapshot {
         artifact,
         current_version,
+        review_checkpoint: None,
         undo: None,
     })
 }
 
+fn row_to_artifact_effect(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CanonicalArtifactEffectRecord> {
+    let version = u64::try_from(row.get::<_, i64>(1)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Integer, error.into())
+    })?;
+    let byte_size = u64::try_from(row.get::<_, i64>(7)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Integer, error.into())
+    })?;
+    let state =
+        CanonicalArtifactEffectState::from_db(&row.get::<_, String>(9)?).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(9, rusqlite::types::Type::Text, error.into())
+        })?;
+    Ok(CanonicalArtifactEffectRecord {
+        artifact_id: row.get(0)?,
+        version,
+        proposal_id: row.get(2)?,
+        attempt_id: row.get(3)?,
+        dispatch_claim_id: row.get(4)?,
+        target_reference_digest: row.get(5)?,
+        content_digest: row.get(6)?,
+        byte_size,
+        media_type: row.get(8)?,
+        state,
+        observed_content_digest: row.get(10)?,
+        error_code: row.get(11)?,
+        created_at: parse_timestamp(row.get(12)?, "artifact_effect_created_at").map_err(
+            |error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    12,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            },
+        )?,
+        updated_at: parse_timestamp(row.get(13)?, "artifact_effect_updated_at").map_err(
+            |error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    13,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            },
+        )?,
+    })
+}
+
+fn load_artifact_effect_in_conn(
+    conn: &Connection,
+    proposal_id: &str,
+) -> Result<Option<CanonicalArtifactEffectRecord>> {
+    conn.query_row(
+        "SELECT artifact_id, version, proposal_id, attempt_id, dispatch_claim_id,
+                target_reference_digest, content_digest, byte_size, media_type,
+                state, observed_content_digest, error_code, created_at, updated_at
+         FROM canonical_artifact_effects WHERE proposal_id = ?1",
+        [proposal_id],
+        row_to_artifact_effect,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
+fn load_artifact_effect_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    proposal_id: &str,
+) -> Result<Option<CanonicalArtifactEffectRecord>> {
+    tx.query_row(
+        "SELECT artifact_id, version, proposal_id, attempt_id, dispatch_claim_id,
+                target_reference_digest, content_digest, byte_size, media_type,
+                state, observed_content_digest, error_code, created_at, updated_at
+         FROM canonical_artifact_effects WHERE proposal_id = ?1",
+        [proposal_id],
+        row_to_artifact_effect,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 fn row_to_artifact_undo(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalArtifactUndoRecord> {
+    let version = u64::try_from(row.get::<_, i64>(1)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Integer, error.into())
+    })?;
     Ok(CanonicalArtifactUndoRecord {
         artifact_id: row.get(0)?,
-        proposal_id: row.get(1)?,
-        source_reference: row.get(2)?,
-        target_reference: row.get(3)?,
-        content_digest: row.get(4)?,
-        status: row.get(5)?,
-        created_at: parse_timestamp(row.get(6)?, "artifact_undo_created_at").map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Text, error.into())
+        version,
+        proposal_id: row.get(2)?,
+        source_reference: row.get(3)?,
+        target_reference: row.get(4)?,
+        content_digest: row.get(5)?,
+        status: row.get(6)?,
+        created_at: parse_timestamp(row.get(7)?, "artifact_undo_created_at").map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(7, rusqlite::types::Type::Text, error.into())
         })?,
         resolved_at: row
-            .get::<_, Option<String>>(7)?
+            .get::<_, Option<String>>(8)?
             .map(|value| parse_timestamp(value, "artifact_undo_resolved_at"))
             .transpose()
             .map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
-                    7,
+                    8,
                     rusqlite::types::Type::Text,
                     error.into(),
                 )
@@ -6083,15 +7107,68 @@ fn row_to_artifact_undo(row: &rusqlite::Row<'_>) -> rusqlite::Result<CanonicalAr
     })
 }
 
+fn row_to_artifact_review_checkpoint(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<CanonicalArtifactReviewCheckpointRecord> {
+    let version = u64::try_from(row.get::<_, i64>(1)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Integer, error.into())
+    })?;
+    Ok(CanonicalArtifactReviewCheckpointRecord {
+        artifact_id: row.get(0)?,
+        version,
+        proposal_id: row.get(2)?,
+        item_id: row.get(3)?,
+        status: row.get(4)?,
+        created_at: parse_timestamp(row.get(5)?, "artifact_review_checkpoint_created_at").map_err(
+            |error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            },
+        )?,
+        resolved_at: row
+            .get::<_, Option<String>>(6)?
+            .map(|value| parse_timestamp(value, "artifact_review_checkpoint_resolved_at"))
+            .transpose()
+            .map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    6,
+                    rusqlite::types::Type::Text,
+                    error.into(),
+                )
+            })?,
+    })
+}
+
+fn load_artifact_review_checkpoint_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    artifact_id: &str,
+    version: u64,
+) -> Result<Option<CanonicalArtifactReviewCheckpointRecord>> {
+    tx.query_row(
+        "SELECT artifact_id, version, proposal_id, item_id, status,
+                created_at, resolved_at
+         FROM canonical_artifact_review_checkpoints
+         WHERE artifact_id = ?1 AND version = ?2",
+        params![artifact_id, i64::try_from(version)?],
+        row_to_artifact_review_checkpoint,
+    )
+    .optional()
+    .map_err(Into::into)
+}
+
 fn load_artifact_undo_in_tx(
     tx: &rusqlite::Transaction<'_>,
     artifact_id: &str,
+    version: u64,
 ) -> Result<Option<CanonicalArtifactUndoRecord>> {
     tx.query_row(
-        "SELECT artifact_id, proposal_id, source_reference, target_reference,
+        "SELECT artifact_id, version, proposal_id, source_reference, target_reference,
                 content_digest, status, created_at, resolved_at
-         FROM canonical_artifact_undo WHERE artifact_id = ?1",
-        [artifact_id],
+         FROM canonical_artifact_undo WHERE artifact_id = ?1 AND version = ?2",
+        params![artifact_id, i64::try_from(version)?],
         row_to_artifact_undo,
     )
     .optional()
@@ -7371,6 +8448,264 @@ mod tests {
     }
 
     #[test]
+    fn general_artifact_keeps_stable_identity_across_exact_versions() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let first_run_id = uuid::Uuid::new_v4().to_string();
+        store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &first_run_id,
+                execution_session_id: "turn-artifact-v1",
+                instruction_digest: &sha256_text("create a durable result"),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+        let target = "/safe/stable-result.md";
+        let media_type = "text/markdown; charset=utf-8";
+        let first_digest = sha256_text("# Version 1");
+        let first = store
+            .prepare_general_artifact(GeneralArtifactDraftInput {
+                task_id: &task_id,
+                run_id: &first_run_id,
+                target_reference: target,
+                content_digest: &first_digest,
+                media_type,
+            })
+            .unwrap();
+        assert_eq!(first.version, 1);
+        assert_eq!(
+            first.artifact_id,
+            general_artifact_id(&task_id, target, media_type)
+        );
+        store
+            .bind_general_artifact_version_source(
+                &first.artifact_id,
+                first.version,
+                target,
+                "/managed-drafts/stable-result-v1.draft",
+                true,
+                None,
+            )
+            .unwrap();
+        store
+            .bind_artifact_review(&first.artifact_id, "proposal-artifact-v1")
+            .unwrap();
+        let materializer_attempt_id = uuid::Uuid::new_v4().to_string();
+        store
+            .begin_artifact_materialization_attempt(
+                "proposal-artifact-v1",
+                &materializer_attempt_id,
+                &sha256_text("materialize stable artifact v1"),
+            )
+            .unwrap()
+            .unwrap();
+        let effect = store
+            .prepare_artifact_effect(
+                "proposal-artifact-v1",
+                "dispatch-artifact-v1",
+                &sha256_text(target),
+                &first_digest,
+                "# Version 1".len() as u64,
+                media_type,
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(effect.version, 1);
+        assert!(store
+            .mark_artifact_effect_staged("proposal-artifact-v1", "dispatch-artifact-v1")
+            .unwrap());
+        assert!(store
+            .finish_artifact_effect_confirmed(
+                "proposal-artifact-v1",
+                "dispatch-artifact-v1",
+                &first_digest,
+            )
+            .unwrap());
+        assert!(store
+            .list_artifact_effects_for_reconciliation(10)
+            .unwrap()
+            .is_empty());
+        store
+            .confirm_artifact_materialized("proposal-artifact-v1", target, &first_digest)
+            .unwrap();
+
+        let second_run_id = uuid::Uuid::new_v4().to_string();
+        store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &second_run_id,
+                execution_session_id: "turn-artifact-v2",
+                instruction_digest: &sha256_text("create a durable result"),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+        let second_digest = sha256_text("# Version 2");
+        let second = store
+            .prepare_general_artifact(GeneralArtifactDraftInput {
+                task_id: &task_id,
+                run_id: &second_run_id,
+                target_reference: target,
+                content_digest: &second_digest,
+                media_type,
+            })
+            .unwrap();
+        assert_eq!(second.artifact_id, first.artifact_id);
+        assert_eq!(second.version, 2);
+        store
+            .bind_general_artifact_version_source(
+                &second.artifact_id,
+                second.version,
+                target,
+                "/managed-drafts/stable-result-v2.draft",
+                false,
+                Some(&first_digest),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_artifact_version(&first.artifact_id, 1)
+                .unwrap()
+                .unwrap()
+                .content_digest,
+            first_digest
+        );
+        assert_eq!(
+            store
+                .load_artifact_version(&first.artifact_id, 2)
+                .unwrap()
+                .unwrap()
+                .content_digest,
+            second_digest
+        );
+        let stale_confirmation = store
+            .confirm_artifact_materialized("proposal-artifact-v1", target, &second_digest)
+            .unwrap_err();
+        assert!(stale_confirmation
+            .to_string()
+            .contains("canonical_report_artifact_missing_for_confirmed_proposal"));
+        let second_review = store
+            .bind_artifact_review(&second.artifact_id, "proposal-artifact-v2")
+            .unwrap();
+        assert_eq!(second_review.version, 2);
+        store
+            .confirm_artifact_materialized("proposal-artifact-v2", target, &second_digest)
+            .unwrap();
+        let snapshot = store.load_task_snapshot(&task_id).unwrap().unwrap();
+        assert_eq!(snapshot.artifacts.len(), 1);
+        assert_eq!(snapshot.artifacts[0].current_version.version, 2);
+        assert_eq!(
+            snapshot.artifacts[0]
+                .current_version
+                .expected_target_digest
+                .as_deref(),
+            Some(first_digest.as_str())
+        );
+        assert_eq!(
+            snapshot.artifacts[0]
+                .review_checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.proposal_id.as_str()),
+            Some("proposal-artifact-v2")
+        );
+    }
+
+    #[test]
+    fn canonical_artifact_effect_journal_survives_restart_without_second_owner() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task-runtime.db");
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let proposal_id = "proposal-restart-effect";
+        let dispatch_claim_id = "dispatch-restart-effect";
+        let target = "/safe/restart-effect.md";
+        let content_digest = sha256_text("# Restart effect");
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        {
+            let store = CanonicalTaskRuntimeStore::new(&path).unwrap();
+            store
+                .begin_general_task_run(BeginGeneralTaskRunInput {
+                    task_id: &task_id,
+                    conversation_id: &conversation_id,
+                    run_id: &run_id,
+                    execution_session_id: "turn-restart-effect",
+                    instruction_digest: &sha256_text("create restart effect"),
+                    plan_digest: None,
+                    project_id: None,
+                    project_revision: None,
+                    scope_digest: None,
+                })
+                .unwrap();
+            let prepared = store
+                .prepare_general_artifact(GeneralArtifactDraftInput {
+                    task_id: &task_id,
+                    run_id: &run_id,
+                    target_reference: target,
+                    content_digest: &content_digest,
+                    media_type: "text/markdown; charset=utf-8",
+                })
+                .unwrap();
+            store
+                .bind_artifact_review(&prepared.artifact_id, proposal_id)
+                .unwrap();
+            store
+                .begin_artifact_materialization_attempt(
+                    proposal_id,
+                    &attempt_id,
+                    &sha256_text("restart effect request"),
+                )
+                .unwrap()
+                .unwrap();
+            store
+                .prepare_artifact_effect(
+                    proposal_id,
+                    dispatch_claim_id,
+                    &sha256_text(target),
+                    &content_digest,
+                    "# Restart effect".len() as u64,
+                    "text/markdown; charset=utf-8",
+                )
+                .unwrap()
+                .unwrap();
+        }
+        let reopened = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        let prepared = reopened
+            .list_artifact_effects_for_reconciliation(10)
+            .unwrap();
+        assert_eq!(prepared.len(), 1);
+        assert_eq!(prepared[0].state, CanonicalArtifactEffectState::Prepared);
+        reopened
+            .mark_artifact_effect_staged(proposal_id, dispatch_claim_id)
+            .unwrap();
+        drop(reopened);
+        let reopened = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        assert_eq!(
+            reopened
+                .list_artifact_effects_for_reconciliation(10)
+                .unwrap()[0]
+                .state,
+            CanonicalArtifactEffectState::Staged
+        );
+        reopened
+            .finish_artifact_effect_confirmed(proposal_id, dispatch_claim_id, &content_digest)
+            .unwrap();
+        assert!(reopened
+            .list_artifact_effects_for_reconciliation(10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
     fn deferred_artifact_result_survives_restart_and_becomes_final_result() {
         let directory = tempfile::tempdir().unwrap();
         let db_path = directory.path().join("task-runtime.db");
@@ -7456,11 +8791,13 @@ mod tests {
         let reopened = CanonicalTaskRuntimeStore::new(&path).unwrap();
         assert_eq!(
             reopened
-                .load_artifact(&prepared.artifact_id)
+                .load_task_snapshot(&prepared.task_id)
                 .unwrap()
                 .unwrap()
-                .proposal_id
-                .as_deref(),
+                .artifacts[0]
+                .review_checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.proposal_id.as_str()),
             Some("proposal-1")
         );
         assert_eq!(reopened.run_count(&prepared.task_id).unwrap(), 1);
@@ -7580,6 +8917,31 @@ mod tests {
         assert_eq!(migrated[0].runs[0].execution_facts_version, 1);
         assert_eq!(migrated[0].runs[1].execution_facts_version, 5);
         assert_eq!(migrated[0].items.len(), 5);
+        let conn = store.lock_conn().unwrap();
+        let artifact_columns = {
+            let mut statement = conn
+                .prepare("PRAGMA table_info(canonical_artifacts)")
+                .unwrap();
+            let columns = statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            columns
+        };
+        assert!(!artifact_columns
+            .iter()
+            .any(|column| column == "proposal_id"));
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master
+                 WHERE type = 'index' AND name = 'idx_canonical_artifacts_task'",
+                [],
+                |row| row.get::<_, i64>(0)
+            )
+            .unwrap(),
+            1
+        );
     }
 
     #[test]

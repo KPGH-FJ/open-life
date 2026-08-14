@@ -90,44 +90,69 @@ or hiding failed/unknown work. Release compatibility code no longer compiles
 the retired ReAct or PlanExecute execution branches. Focused capability tests
 and all repository gates passed before advancing.
 
-## Current stage: H3 - Result And Effect Loop
+## Completed: H3 - Result And Effect Loop
+
+Work Artifact identity is now stable across versions and excludes Proposal id.
+Each ArtifactVersion owns exact Task/Run/Item provenance, a durable managed
+draft, target precondition, content digest, version-bound Review checkpoint,
+materializer ItemAttempt, effect journal, verification, and version-bound Undo.
+Changes and pending Preview read canonical version truth rather than Proposal
+payload. The old `canonical_artifacts.proposal_id` column and Work Artifact
+dual-write into ProposalStore were removed. Recovery now distinguishes
+prepared, staged, confirmed, failed-before-effect, effect-unknown, and
+confirmed-before-Review-projection without blind redispatch. V1 and V2
+materialization, rejection, Undo, exact replay, schema migration, restart
+recovery, backend projections, and full Rust/frontend repository gates pass.
+
+The exact signed macOS bundle also passed identity and resource-seal checks. An
+isolated launch remained stable and opened no network socket, but the newly
+signed binary did not obtain the canonical internal credential needed to open
+`task_runtime.db`; this is unknown native product evidence and is intentionally
+deferred to H5 rather than credited as a native golden path.
+
+## Current stage: H4 - Canonical Workbench Product Surface
 
 ### In scope
 
-1. Make ArtifactVersion identity, content digest, provenance, draft, Review
-   checkpoint, materialization, verification, and Undo one canonical lifecycle
-   independent of Proposal identity.
-2. Route every supported file effect through one ItemExecutor/materializer
-   contract with exact target preconditions, typed receipt, cancellation fence,
-   and effect-unknown semantics.
-3. Resume the same Task/Run after inline or Review Center decisions; approval
-   grants only the exact checkpoint and is never treated as materialization.
-4. Recover crashes at prepared, dispatched, confirmed, projection-pending, and
-   Undo boundaries without blind redispatch or a second Artifact owner.
-5. Project Changes, Preview, Verification, Needs Attention, and Undo solely from
-   canonical ArtifactVersion and ItemAttempt truth, then delete replaced
-   proposal-derived artifact identity and duplicate result projections.
+1. Make one Conversation Workbench present Chat history, Work plan, current
+   progress, steering, inline decisions, Results, Changes, Preview,
+   Verification, and Needs Attention from backend-owned canonical ViewModels.
+2. Keep Chat and Work as explicit composer modes without creating a second
+   Tasks workspace. A Work request exposes its durable completion contract and
+   remains inspectable inside the Conversation that owns it.
+3. Present Plan and execution Items as one ordered activity stream with honest
+   running, waiting-review, blocked, failed, effect-unknown, cancelled, and
+   completed states. Internal algorithm names and retired owner terminology do
+   not enter product UI.
+4. Put approval at the exact action checkpoint. Approve/reject returns to the
+   same Task/Run, refreshes backend truth, and never labels Proposal acceptance
+   as materialization or Task completion.
+5. Make steering, cancel, retry, Undo, and attention recovery use backend
+   control availability and exact entity refs. Delete frontend status inference,
+   proposal-derived Artifact presentation, duplicate Tasks/Review surfaces,
+   and obsolete compatibility state.
 
 ### Out of scope
 
+- visual brand redesign beyond the Workbench interaction system;
 - new connectors, Computer Use, arbitrary shell, email/calendar send, or
   scheduling expansion;
-- broad new file-edit semantics beyond the existing reviewed artifact effects;
 - broader Memory or LifeModel learning; and
-- migration of retired task execution/test data.
+- native/external-live behavior credit, which belongs to H5.
 
 ### Acceptance
 
-- An Artifact has stable identity before Review and every version binds exact
-  Task/Run/Item provenance, target precondition, content digest, and status.
-- Approve, reject, cancel, retry, materialize, verify, and Undo produce truthful
-  same-lifecycle transitions; unknown physical effects never become success.
-- Restart recovery is idempotent at every effect boundary and never writes the
-  file twice or invents completion from Proposal status.
-- Backend ViewModels expose canonical Changes, Preview, Verification, attention,
-  and Undo facts without joining a retired TaskSession or AgentRun owner.
-- Focused Artifact/effect/recovery tests and full repository gates pass before
-  H3 is marked complete.
+- A user can stay in one Conversation to start Work, inspect its completion
+  contract and ordered progress, steer it, decide an exact checkpoint, inspect
+  verified output, and recover an attention state.
+- Every displayed task, plan, action, result, verification, and available
+  control is backed by a canonical backend ViewModel fact or is absent.
+- Narrow and wide layouts preserve composer, active Work, attention, and result
+  hierarchy with keyboard and screen-reader access.
+- Retired top-level Tasks/Review routes and duplicate frontend lifecycle/status
+  reducers remain absent from the production bundle.
+- Focused ViewModel/component/journey tests, browser-shell coverage, and full
+  repository gates pass before H4 is marked complete.
 
 ## Checks
 

@@ -283,7 +283,9 @@ async fn canonical_task_input(
         .artifacts
         .iter()
         .filter(|artifact| artifact.artifact.status == CanonicalArtifactStatus::WaitingReview)
-        .filter_map(|artifact| artifact.artifact.proposal_id.as_ref())
+        .filter_map(|artifact| artifact.review_checkpoint.as_ref())
+        .filter(|checkpoint| checkpoint.status == "waiting")
+        .map(|checkpoint| &checkpoint.proposal_id)
         .map(|proposal_id| BackendEntityRef {
             id: proposal_id.clone(),
             kind: BackendEntityKind::ReviewItem,
@@ -662,11 +664,10 @@ async fn canonical_artifact_view(
     snapshot: &CanonicalArtifactSnapshot,
 ) -> TaskArtifactViewModel {
     let proposal_ref = snapshot
-        .artifact
-        .proposal_id
+        .review_checkpoint
         .as_ref()
-        .map(|proposal_id| BackendEntityRef {
-            id: proposal_id.clone(),
+        .map(|checkpoint| BackendEntityRef {
+            id: checkpoint.proposal_id.clone(),
             kind: BackendEntityKind::ReviewItem,
             label: "Artifact Review checkpoint".into(),
             href: None,
@@ -795,85 +796,33 @@ async fn artifact_presentation(
         reason_code: None,
     };
 
-    if let Some(proposal_id) = snapshot.artifact.proposal_id.as_deref() {
-        let proposal = if let Some(store) = state.proposal_store.as_ref() {
-            store.lock().await.get_proposal(proposal_id).ok().flatten()
+    if let (Some(target), Some(expected_absent)) = (
+        snapshot.current_version.target_reference.as_ref(),
+        snapshot.current_version.expected_target_absent,
+    ) {
+        change.kind = if expected_absent {
+            TaskArtifactChangeKind::Create
         } else {
-            None
+            TaskArtifactChangeKind::Replace
         };
-        if let Some(proposal) = proposal {
-            let after = &proposal.after;
-            let target = after.get("path").and_then(serde_json::Value::as_str);
-            let artifact_id = after.get("artifactId").and_then(serde_json::Value::as_str);
-            let version = after
-                .get("artifactVersion")
-                .and_then(serde_json::Value::as_u64);
-            let digest = after
-                .get("contentDigest")
-                .and_then(serde_json::Value::as_str);
-            if artifact_id == Some(snapshot.artifact.id.as_str())
-                && version == Some(snapshot.current_version.version)
-                && digest == Some(snapshot.artifact.content_digest.as_str())
-                && target.is_some_and(|value| {
-                    openlife_core::agent::metadata_safe_text_digest(value).1
-                        == snapshot.artifact.target_reference_digest
-                })
-            {
-                change.kind = if after
-                    .get("expected_target_absent")
-                    .and_then(serde_json::Value::as_bool)
-                    == Some(true)
-                {
-                    TaskArtifactChangeKind::Create
-                } else {
-                    TaskArtifactChangeKind::Replace
-                };
-                change.target_reference = target.map(str::to_string);
-                change.expected_prior_digest = after
-                    .get("expected_target_digest")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string);
-            }
-        }
+        change.target_reference = Some(target.clone());
+        change.expected_prior_digest = snapshot.current_version.expected_target_digest.clone();
     }
 
     if matches!(
         snapshot.artifact.status,
         CanonicalArtifactStatus::Draft | CanonicalArtifactStatus::WaitingReview
     ) {
-        if let Some(proposal_id) = snapshot.artifact.proposal_id.as_deref() {
-            let proposal = if let Some(store) = state.proposal_store.as_ref() {
-                store.lock().await.get_proposal(proposal_id).ok().flatten()
-            } else {
-                None
-            };
-            if let Some(proposal) = proposal {
-                let after = &proposal.after;
-                let target = after.get("path").and_then(serde_json::Value::as_str);
-                let content = after.get("content").and_then(serde_json::Value::as_str);
-                let artifact_id = after.get("artifactId").and_then(serde_json::Value::as_str);
-                let version = after
-                    .get("artifactVersion")
-                    .and_then(serde_json::Value::as_u64);
-                let digest = after
-                    .get("contentDigest")
-                    .and_then(serde_json::Value::as_str);
-                let exact = artifact_id == Some(snapshot.artifact.id.as_str())
-                    && version == Some(snapshot.current_version.version)
-                    && digest == Some(snapshot.artifact.content_digest.as_str())
-                    && target.is_some_and(|value| {
-                        openlife_core::agent::metadata_safe_text_digest(value).1
-                            == snapshot.artifact.target_reference_digest
-                    })
-                    && content.is_some_and(|value| {
-                        openlife_core::agent::metadata_safe_text_digest(value).1
-                            == snapshot.artifact.content_digest
-                    });
-                if exact {
-                    preview = bounded_artifact_preview(content.unwrap_or_default());
-                } else {
-                    preview = unavailable("artifact_proposal_binding_mismatch");
-                }
+        if let Some(draft_reference) = snapshot.current_version.draft_reference.as_deref() {
+            match read_canonical_artifact_draft(
+                state,
+                draft_reference,
+                &snapshot.artifact.content_digest,
+            )
+            .await
+            {
+                Ok(content) => preview = bounded_artifact_preview(&content),
+                Err(reason) => preview = unavailable(&reason),
             }
         }
         verification.reason_code = Some("artifact_waiting_materialization".to_string());
@@ -946,6 +895,53 @@ fn bounded_artifact_preview(content: &str) -> TaskArtifactPreviewViewModel {
         reason_code: (char_count > TASK_ARTIFACT_PREVIEW_MAX_CHARS)
             .then(|| "artifact_preview_truncated".to_string()),
     }
+}
+
+async fn read_canonical_artifact_draft(
+    state: &Arc<AppState>,
+    reference: &str,
+    expected_digest: &str,
+) -> Result<String, String> {
+    let path = Path::new(reference);
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| "canonical_artifact_draft_missing".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("canonical_artifact_draft_type_invalid".into());
+    }
+    if metadata.len() > TASK_ARTIFACT_READ_MAX_BYTES {
+        return Err("canonical_artifact_draft_too_large".into());
+    }
+    if !cfg!(test) {
+        let store = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .ok_or_else(|| "canonical_artifact_draft_root_unavailable".to_string())?;
+        let root = store
+            .lock()
+            .await
+            .db_path()
+            .and_then(Path::parent)
+            .map(Path::to_path_buf)
+            .map(|parent| parent.join("artifact-drafts"))
+            .ok_or_else(|| "canonical_artifact_draft_root_unavailable".to_string())?;
+        let canonical_root = root
+            .canonicalize()
+            .map_err(|_| "canonical_artifact_draft_root_unavailable".to_string())?;
+        let canonical_path = path
+            .canonicalize()
+            .map_err(|_| "canonical_artifact_draft_missing".to_string())?;
+        if !canonical_path.starts_with(canonical_root) {
+            return Err("canonical_artifact_draft_outside_store".into());
+        }
+    }
+    let bytes =
+        std::fs::read(path).map_err(|_| "canonical_artifact_draft_read_failed".to_string())?;
+    let content =
+        String::from_utf8(bytes).map_err(|_| "canonical_artifact_draft_not_utf8".to_string())?;
+    if openlife_core::agent::metadata_safe_text_digest(&content).1 != expected_digest {
+        return Err("canonical_artifact_draft_digest_mismatch".into());
+    }
+    Ok(content)
 }
 
 fn read_verified_artifact(path: &str, safe_paths: &[String]) -> Result<(String, String), String> {
@@ -1268,6 +1264,23 @@ mod tests {
                 content_digest: &content_digest,
                 media_type: "text/markdown; charset=utf-8",
             })
+            .unwrap();
+        let draft_path = artifact_dir.path().join("report-view.v1.draft");
+        std::fs::write(&draft_path, content).unwrap();
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .bind_general_artifact_version_source(
+                &prepared.artifact_id,
+                prepared.version,
+                &artifact_path_text,
+                &draft_path.to_string_lossy(),
+                true,
+                None,
+            )
             .unwrap();
         let mut proposal = openlife_core::agent::AgentProposal::new(
             openlife_core::agent::ProposalType::ExternalWriteAction,

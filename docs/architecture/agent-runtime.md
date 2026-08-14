@@ -63,12 +63,13 @@ the provider again; retry creates another Run and Turn for the same Task.
 tests and pre-R3/R4 internal consumers. It is not reachable as a release Chat or
 Work fallback.
 
-For canonical Work and report Tasks, `src-tauri/src/read_models/tasks.rs` is the product
-presentation boundary. It joins the canonical ArtifactVersion to an exact
-proposal while waiting for Review, or to a digest-matching regular file after
-materialization. It exposes bounded change, preview, and verification fields to
-`TasksViewModel`. A stored completion label alone cannot preserve delivery when
-the current file is missing or its bytes drift.
+For canonical Work and report Tasks, `src-tauri/src/read_models/tasks.rs` is the
+product presentation boundary. While waiting for Review it reads Change and
+Preview from the exact canonical ArtifactVersion and its digest-bound managed
+draft, not from Proposal content. After materialization it reads only a
+digest-matching regular file. It exposes bounded change, preview, verification,
+attention, and Undo fields to `TasksViewModel`. A stored completion label alone
+cannot preserve delivery when the current file is missing or its bytes drift.
 
 The former `main_chat_turn_pipeline.rs` compatibility wrapper is deleted.
 Buffered and streaming transports call `OpenLifeTurnRuntime` directly.
@@ -173,7 +174,13 @@ and optional Plan before the first governed read or provider call. It also owns
 ArtifactDraft, ReviewCheckpoint, materializer ItemAttempt, Verification,
 FinalResult, and Undo state. Final delivery requires the canonical FinalResult
 record and its exact completed Item; a confirmed Undo preserves that original
-completion proof and adds an independently receipted reversal. Active
+completion proof and adds an independently receipted reversal. Artifact
+identity is stable across versions and excludes Proposal id. Each version owns
+its provenance, managed draft reference, exact target precondition, content
+digest, Review checkpoint, and effect receipt. Restart recovery distinguishes
+prepared, staged, confirmed, failed-before-effect, and effect-unknown, and a
+confirmed effect can repair its pending Review projection without running the
+materializer again. Active
 Workspace steering is an authenticated Conversation message plus a digest-only
 Steering Item bound to the exact execution session, canonical Run, and base
 plan revision. The kernel consumes one pending in-scope Steering Item at the

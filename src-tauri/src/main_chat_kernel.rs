@@ -23503,11 +23503,14 @@ mod tests {
             .unwrap()
             .lock()
             .await
-            .load_artifact(&artifact_id)
+            .load_task_snapshot(&review.task_id)
             .unwrap()
             .unwrap();
         assert_eq!(
-            stored.proposal_id.as_deref(),
+            stored.artifacts[0]
+                .review_checkpoint
+                .as_ref()
+                .map(|checkpoint| checkpoint.proposal_id.as_str()),
             Some(review.proposal_id.as_str())
         );
     }

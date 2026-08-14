@@ -69,9 +69,13 @@ materialization/verification/final-result Items, ItemAttempts, and independent
 ArtifactVersion metadata in `task_runtime.db`. A Work Task and Run begin before
 governed reads or provider work. Completed tool and provider receipts append in
 the same Run before ArtifactDraft. The canonical store records identities and
-bounded digests, not prompt or response bodies. An Artifact exists before its
-Proposal; Review is a checkpoint relation; approval starts a materializer
-ItemAttempt; and confirmed materialization updates the same ArtifactVersion.
+bounded digests, not prompt or response bodies. Draft bytes live in an atomic,
+digest-bound file beside `task_runtime.db`; the exact target, draft reference,
+target precondition, provenance Item, and content digest belong to the numbered
+ArtifactVersion. An Artifact exists before its Proposal. Review is a
+version-bound checkpoint relation, approval starts a materializer ItemAttempt,
+and confirmed materialization updates that same ArtifactVersion. Proposal id is
+not an Artifact field or identity component.
 
 Each Work Run also owns one schema-validated structured plan in
 `canonical_work_plans`. The stored plan contains only bounded step ids, typed
@@ -160,17 +164,25 @@ projected as backend-owned Needs Attention state rather than inferred by React.
 
 The canonical Artifact path adds backend-owned Result, Change, Preview,
 Verification, and Undo projections to each Work ArtifactVersion. A pending
-preview is admitted only from the exact
-proposal whose Artifact id, version, target digest, content digest, and body
-digest all match. A materialized preview is reread only from a regular file
-inside the configured safe paths and is shown only when its current byte digest,
-the stored observed digest, and the canonical Verification Item agree. File
+preview is admitted only from that version's managed draft after regular-file,
+size, UTF-8, store-root, and content-digest checks; Proposal payload is not a
+content or preview owner. A materialized preview is reread only from a regular
+file inside the configured safe paths and is shown only when its current byte
+digest, stored observed digest, and canonical Verification Item agree. File
 drift, disappearance, symlinks, oversize content, or non-UTF-8 bytes remove the
 preview and prevent the Task from retaining delivered product credit. React
 renders these typed projections; it does not read files, proposals, or
-`task_runtime.db` itself. A confirmed governed Undo is an independent receipt-
-bound move: it preserves the original verified Task history and is presented
-as a later reversal instead of being misclassified as missing delivery.
+`task_runtime.db` itself.
+
+The canonical Artifact effect journal binds the exact ArtifactVersion,
+materializer ItemAttempt, Review dispatch claim, target digest, content digest,
+and physical effect state. `prepared`, `staged`, `confirmed`,
+`failed_before_effect`, and `effect_unknown` survive restart. Recovery inspects
+the exact filesystem facts, never blindly redispatches an ambiguous effect, and
+repairs a confirmed-but-unprojected Review decision without creating a
+ProposalStore Artifact record. A confirmed governed Undo is a version-bound,
+independently receipted move: it preserves the original verified Task history
+and is presented as a later reversal instead of missing delivery.
 
 ## Capable-Agent target
 

@@ -4,6 +4,9 @@
 //! Task -> Run -> Item -> ItemAttempt -> FinalResult. This release path never
 //! creates TaskSession, AgentRun, ActionQueue, or durable Main Chat Events.
 
+use crate::artifact_materializer::{
+    capture_artifact_target_precondition, ArtifactTargetPrecondition,
+};
 use crate::canonical_chat_runtime::{
     provider_state, verify_provider_binding, CanonicalChatEventSink,
 };
@@ -42,6 +45,8 @@ use openlife_core::work_orchestration::{
 };
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 pub(crate) struct CanonicalWorkInput {
@@ -52,6 +57,66 @@ pub(crate) struct CanonicalWorkInput {
     pub messages: Vec<ChatMessage>,
     pub selected_skill_id: Option<String>,
     pub stream: bool,
+}
+
+fn persist_canonical_artifact_draft(
+    database_path: Option<&Path>,
+    artifact_id: &str,
+    version: u64,
+    content: &str,
+) -> Result<PathBuf, String> {
+    let directory = match database_path.and_then(Path::parent) {
+        Some(parent) => parent.join("artifact-drafts"),
+        None if cfg!(test) => std::env::temp_dir()
+            .join("openlife-artifact-drafts-test")
+            .join(std::process::id().to_string()),
+        None => return Err("canonical_artifact_draft_requires_file_backed_store".into()),
+    };
+    std::fs::create_dir_all(&directory)
+        .map_err(|error| format!("create canonical Artifact draft directory failed: {error}"))?;
+    let identity = metadata_safe_text_digest(artifact_id).1;
+    let token = identity.strip_prefix("sha256:").unwrap_or(&identity);
+    let path = directory.join(format!("{token}-v{version}.draft"));
+    if path.exists() {
+        let existing = std::fs::read(&path)
+            .map_err(|error| format!("read canonical Artifact draft failed: {error}"))?;
+        if existing != content.as_bytes() {
+            return Err("canonical_artifact_draft_content_conflict".into());
+        }
+        return Ok(path);
+    }
+    let temporary = directory.join(format!(".{token}-v{version}-{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .map_err(|error| format!("create canonical Artifact draft failed: {error}"))?;
+    file.write_all(content.as_bytes())
+        .map_err(|error| format!("write canonical Artifact draft failed: {error}"))?;
+    file.sync_all()
+        .map_err(|error| format!("sync canonical Artifact draft failed: {error}"))?;
+    drop(file);
+    match std::fs::hard_link(&temporary, &path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::read(&path).map_err(|read_error| {
+                format!("read canonical Artifact draft failed: {read_error}")
+            })?;
+            if existing != content.as_bytes() {
+                let _ = std::fs::remove_file(&temporary);
+                return Err("canonical_artifact_draft_content_conflict".into());
+            }
+        }
+        Err(error) => {
+            let _ = std::fs::remove_file(&temporary);
+            return Err(format!("commit canonical Artifact draft failed: {error}"));
+        }
+    }
+    std::fs::File::open(&directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| format!("sync canonical Artifact draft directory failed: {error}"))?;
+    let _ = std::fs::remove_file(&temporary);
+    Ok(path)
 }
 
 #[derive(Debug)]
@@ -884,17 +949,43 @@ async fn stage_canonical_work_artifacts_for_review(
             Some("csv") => "text/csv; charset=utf-8",
             _ => "text/plain; charset=utf-8",
         };
-        let prepared = store
+        let (prepared, database_path) = {
+            let store = store.lock().await;
+            let prepared = store
+                .prepare_general_artifact(GeneralArtifactDraftInput {
+                    task_id: &input.task_id,
+                    run_id: &input.run_id,
+                    target_reference: target,
+                    content_digest: &content_digest,
+                    media_type,
+                })
+                .map_err(|error| format!("prepare canonical Work Artifact failed: {error}"))?;
+            (prepared, store.db_path().map(Path::to_path_buf))
+        };
+        let draft_reference = persist_canonical_artifact_draft(
+            database_path.as_deref(),
+            &prepared.artifact_id,
+            prepared.version,
+            content,
+        )?;
+        let safe_paths = state.config.lock().await.system.safe_paths.clone();
+        let target_precondition = capture_artifact_target_precondition(target, &safe_paths)?;
+        let (expected_target_absent, expected_target_digest) = match target_precondition {
+            ArtifactTargetPrecondition::Absent => (true, None),
+            ArtifactTargetPrecondition::ContentDigest(digest) => (false, Some(digest)),
+        };
+        store
             .lock()
             .await
-            .prepare_general_artifact(GeneralArtifactDraftInput {
-                task_id: &input.task_id,
-                run_id: &input.run_id,
-                target_reference: target,
-                content_digest: &content_digest,
-                media_type,
-            })
-            .map_err(|error| format!("prepare canonical Work Artifact failed: {error}"))?;
+            .bind_general_artifact_version_source(
+                &prepared.artifact_id,
+                prepared.version,
+                target,
+                &draft_reference.to_string_lossy(),
+                expected_target_absent,
+                expected_target_digest.as_deref(),
+            )
+            .map_err(|error| format!("bind canonical Work Artifact source failed: {error}"))?;
         let object = expanded_outcome
             .governed_input
             .as_object_mut()
@@ -1867,7 +1958,9 @@ async fn replay_completed(
         let pending = snapshot
             .artifacts
             .iter()
-            .filter_map(|artifact| artifact.artifact.proposal_id.as_deref())
+            .filter_map(|artifact| artifact.review_checkpoint.as_ref())
+            .filter(|checkpoint| checkpoint.status == "waiting")
+            .map(|checkpoint| checkpoint.proposal_id.as_str())
             .map(|proposal_id| format!("proposal:{proposal_id}"))
             .collect();
         return Ok(output(
@@ -2198,7 +2291,12 @@ mod tests {
             .iter()
             .filter(|attempt| attempt.executor_kind == "provider")
             .all(|attempt| attempt.status == CanonicalTaskItemStatus::Completed));
-        let proposal_id = waiting.artifacts[0].artifact.proposal_id.clone().unwrap();
+        let proposal_id = waiting.artifacts[0]
+            .review_checkpoint
+            .as_ref()
+            .unwrap()
+            .proposal_id
+            .clone();
         assert!(waiting.artifacts[0]
             .artifact
             .materialized_reference
@@ -2530,7 +2628,12 @@ mod tests {
             1
         );
         assert!(waiting.final_result.is_none());
-        let proposal_id = waiting.artifacts[0].artifact.proposal_id.clone().unwrap();
+        let proposal_id = waiting.artifacts[0]
+            .review_checkpoint
+            .as_ref()
+            .unwrap()
+            .proposal_id
+            .clone();
         let replay = run_canonical_work(replay_request, &state, &mut |_, _| {})
             .await
             .unwrap();
@@ -2815,7 +2918,12 @@ mod tests {
                 .count(),
             2
         );
-        let proposal_id = waiting.artifacts[0].artifact.proposal_id.clone().unwrap();
+        let proposal_id = waiting.artifacts[0]
+            .review_checkpoint
+            .as_ref()
+            .unwrap()
+            .proposal_id
+            .clone();
         let artifact_path = waiting.artifacts[0].artifact.materialized_reference.clone();
         assert!(artifact_path.is_none());
 
