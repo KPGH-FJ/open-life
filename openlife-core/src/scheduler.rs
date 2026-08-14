@@ -8,7 +8,7 @@ use crate::llm::{
     ProviderPolicyProvenanceRef, ProviderPolicyReceiptEvidence, StreamResult,
 };
 use crate::network_client::NetworkPolicyDecision;
-use crate::ollama::prepare_ollama_chat_target;
+use crate::ollama::{prepare_ollama_chat_target, resolve_ollama_model};
 use crate::tasks::{ScheduledTaskClaim, TaskStore};
 use anyhow::Result;
 use futures::Stream;
@@ -2065,7 +2065,10 @@ fn provider_stream_error_digest(error: &str) -> String {
         .1
 }
 
-/// Inference scheduler: prefers local Ollama when available, otherwise falls back to OpenRouter.
+/// Inference scheduler bound to the user-selected local or cloud route.
+///
+/// A selected local route fails closed when its exact Ollama model is unavailable;
+/// it never widens the transmission boundary by silently switching to cloud.
 #[derive(Clone)]
 pub struct InferenceScheduler {
     pub local_model: String,
@@ -2749,15 +2752,13 @@ impl InferenceScheduler {
             let model = target.model.clone();
             prepared_ollama_target = Some(target);
             ("ollama".to_string(), model)
-        } else if self.prefer_local && !tools_required {
-            if let Some(target) = prepare_ollama_chat_target(&self.local_model).await {
-                let model = target.model.clone();
-                prepared_ollama_target = Some(target);
-                ("ollama".to_string(), model)
-            } else {
-                let decision = self.model_router.route_chat(tools_route_marker, false)?;
-                (decision.provider, decision.model)
-            }
+        } else if self.prefer_local {
+            let target = prepare_ollama_chat_target(&self.local_model)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("selected local provider is unavailable"))?;
+            let model = target.model.clone();
+            prepared_ollama_target = Some(target);
+            ("ollama".to_string(), model)
         } else {
             let decision = self
                 .model_router
@@ -3447,10 +3448,37 @@ impl InferenceScheduler {
     /// Preview the routing decision for a chat request without actually calling the LLM.
     /// Returns a ModelRouteTrace describing which backend would be chosen and why.
     pub async fn preview_chat_route(&self, tools_prompt: Option<&str>) -> ModelRouteTrace {
-        match self
-            .model_router
-            .route_chat(tools_prompt, self.prefer_local)
-        {
+        if self.prefer_local {
+            return match resolve_ollama_model(&self.local_model).await {
+                Some(model) => ModelRouteTrace {
+                    provider: "ollama".into(),
+                    model,
+                    route_type: "local".into(),
+                    prefer_local: true,
+                    local_model: self.local_model.clone(),
+                    reason: "user_selected_local_model_available".into(),
+                    privacy_level: crate::agent::types::RedactionLevel::None,
+                    latency_ms: None,
+                    retry_count: 0,
+                    fallback_reason: None,
+                    provider_health_is_estimated: Some(false),
+                },
+                None => ModelRouteTrace {
+                    provider: "none".into(),
+                    model: String::new(),
+                    route_type: "blocked".into(),
+                    prefer_local: true,
+                    local_model: self.local_model.clone(),
+                    reason: "selected_local_provider_unavailable".into(),
+                    privacy_level: crate::agent::types::RedactionLevel::Strict,
+                    latency_ms: None,
+                    retry_count: 0,
+                    fallback_reason: None,
+                    provider_health_is_estimated: Some(false),
+                },
+            };
+        }
+        match self.model_router.route_chat(tools_prompt, false) {
             Ok(decision) => decision.to_trace(),
             Err(error) => ModelRouteTrace {
                 provider: "none".into(),
@@ -4621,7 +4649,7 @@ mod tests {
     async fn provider_route_fails_closed_without_an_available_provider() {
         let scheduler = InferenceScheduler::new(
             "qwen2.5".into(),
-            true,
+            false,
             "openai".into(),
             "https://api.openai.com/v1".into(),
             "".into(),
@@ -4641,7 +4669,7 @@ mod tests {
     async fn provider_route_uses_the_available_configured_cloud_adapter() {
         let scheduler = InferenceScheduler::new(
             "qwen2.5".into(),
-            true,
+            false,
             "openai".into(),
             "https://api.openai.com/v1".into(),
             "sk-test".into(),
@@ -4655,6 +4683,72 @@ mod tests {
         assert_eq!(trace.provider, "openai");
         assert_eq!(trace.model, "gpt-4o-mini");
         assert_eq!(trace.route_type, "cloud");
+    }
+
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
+    #[tokio::test(flavor = "current_thread")]
+    async fn selected_local_model_is_the_canonical_available_route() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", format!("http://{address}"));
+        std::env::remove_var("OLLAMA_HOST");
+        let server = tokio::spawn(serve_one_json_response(
+            listener,
+            r#"{"models":[{"name":"openlife-selected-local:latest","size":1}]}"#,
+        ));
+        let scheduler = InferenceScheduler::new(
+            "openlife-selected-local".into(),
+            true,
+            "openai".into(),
+            "https://api.openai.com/v1".into(),
+            "".into(),
+            "gpt-4o-mini".into(),
+            "text-embedding-3-small".into(),
+            false,
+        );
+
+        let trace = scheduler.preview_chat_route(None).await;
+        std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
+        server.await.unwrap();
+
+        assert_eq!(trace.provider, "ollama");
+        assert_eq!(trace.model, "openlife-selected-local:latest");
+        assert_eq!(trace.route_type, "local");
+        assert_eq!(trace.reason, "user_selected_local_model_available");
+        assert_eq!(trace.fallback_reason, None);
+    }
+
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
+    #[tokio::test(flavor = "current_thread")]
+    async fn unavailable_selected_local_model_never_falls_back_to_configured_cloud() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
+        std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", "http://127.0.0.1:9");
+        std::env::remove_var("OLLAMA_HOST");
+        let scheduler = InferenceScheduler::new(
+            "openlife-selected-local-unavailable".into(),
+            true,
+            "openai".into(),
+            "https://api.openai.com/v1".into(),
+            "cloud-key-must-not-be-used".into(),
+            "gpt-4o-mini".into(),
+            "text-embedding-3-small".into(),
+            false,
+        );
+
+        let trace = scheduler.preview_chat_route(None).await;
+        std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
+
+        assert_eq!(trace.provider, "none");
+        assert_eq!(trace.route_type, "blocked");
+        assert_eq!(trace.reason, "selected_local_provider_unavailable");
+        assert_eq!(trace.fallback_reason, None);
     }
 
     #[expect(
