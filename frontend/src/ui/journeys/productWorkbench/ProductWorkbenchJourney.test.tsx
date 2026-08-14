@@ -134,5 +134,8 @@ describe("OpenLife product shell", () => {
     expect(screen.getByRole("button", { name: /^产品诊断/ })).toBeInTheDocument();
     expect(screen.queryByText("通知")).not.toBeInTheDocument();
     expect(screen.queryByText("账户")).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /^产品诊断/ }));
+    expect(screen.getByRole("heading", { name: "产品诊断", level: 1 })).toBeInTheDocument();
   });
 });

@@ -561,7 +561,8 @@ export function ProductWorkbenchJourney({
     requestFocus(`settings-${id}`);
     if (settingsPrivacyDataSource) {
       void settingsPrivacy.ensureLoaded();
-      setAnnouncement(`已进入“${settingsCopy[id].title}”；产品事实只取自后端配置与边界读模型。`);
+      const label = settingsNavigation.find(item => item.id === id)?.label ?? id;
+      setAnnouncement(`已进入“${label}”；产品事实只取自后端配置与边界读模型。`);
     }
   }
 
