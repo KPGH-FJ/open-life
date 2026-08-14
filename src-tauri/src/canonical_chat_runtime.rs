@@ -763,6 +763,8 @@ mod tests {
             .unwrap()
             .len();
         let mut events = Vec::new();
+        let started = std::time::Instant::now();
+        let mut first_chunk_elapsed = None;
         let output = run_canonical_chat(
             CanonicalChatInput {
                 turn_id: turn_id.clone(),
@@ -775,10 +777,25 @@ mod tests {
                 stream: true,
             },
             &state,
-            &mut |kind, payload| events.push((kind.to_string(), payload)),
+            &mut |kind, payload| {
+                if kind == "stream-message-chunk" && first_chunk_elapsed.is_none() {
+                    first_chunk_elapsed = Some(started.elapsed());
+                }
+                events.push((kind.to_string(), payload));
+            },
         )
         .await
         .unwrap();
+        let terminal_elapsed = started.elapsed();
+        assert!(
+            first_chunk_elapsed
+                .is_some_and(|elapsed| { elapsed < std::time::Duration::from_secs(3) }),
+            "controlled canonical Chat first visible chunk exceeded 3s: {first_chunk_elapsed:?}"
+        );
+        assert!(
+            terminal_elapsed < std::time::Duration::from_secs(3),
+            "controlled canonical Chat terminalization exceeded 3s: {terminal_elapsed:?}"
+        );
         assert_eq!(output.result.reply, "canonical reply");
         let snapshot = state
             .conversation_store

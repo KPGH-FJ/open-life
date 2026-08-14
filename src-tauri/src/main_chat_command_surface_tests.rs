@@ -41,7 +41,7 @@ fn bind_detached_finalization_metadata(run: &mut openlife_core::agent::AgentRun)
 }
 
 #[test]
-fn shipped_handler_keeps_main_chat_receipt_commands_registered() {
+fn shipped_handler_keeps_only_current_main_chat_entrypoints_registered() {
     let source = include_str!("lib.rs");
     let shipped_handler = source
         .split("tauri::generate_handler![")
@@ -53,7 +53,7 @@ fn shipped_handler_keeps_main_chat_receipt_commands_registered() {
         .filter(|token| !token.is_empty())
         .collect::<std::collections::BTreeSet<_>>();
 
-    for command in ["send_message", "start_stream_message", "get_agent_run"] {
+    for command in ["send_message", "start_stream_message"] {
         assert!(
             registered.contains(command),
             "shipped handler lost D010 product command {command}"

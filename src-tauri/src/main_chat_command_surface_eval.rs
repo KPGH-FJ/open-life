@@ -1,7 +1,6 @@
 use crate::AppState;
 use openlife_core::agent::main_chat_agent_v1::{
     ExecutionTranscriptEntryKind, MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence,
-    MainChatAgentExecutionV1AcceptanceLiveEvidence,
 };
 use openlife_core::llm::ChatMessage;
 use serde::Serialize;
@@ -2587,41 +2586,6 @@ fn context_entry_sources_contain(
         })
 }
 
-fn context_entry_sources_contain_prefix(
-    metadata: &serde_json::Value,
-    source_kind: &str,
-    source_id_prefix: &str,
-) -> bool {
-    metadata
-        .get("sources")
-        .and_then(serde_json::Value::as_array)
-        .is_some_and(|sources| {
-            sources.iter().any(|source| {
-                source.get("sourceKind").and_then(serde_json::Value::as_str) == Some(source_kind)
-                    && source
-                        .get("sourceId")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|source_id| source_id.starts_with(source_id_prefix))
-            })
-        })
-}
-
-fn context_entry_source_count(metadata: &serde_json::Value, source_kind: &str) -> usize {
-    metadata
-        .get("sources")
-        .and_then(serde_json::Value::as_array)
-        .map(|sources| {
-            sources
-                .iter()
-                .filter(|source| {
-                    source.get("sourceKind").and_then(serde_json::Value::as_str)
-                        == Some(source_kind)
-                })
-                .count()
-        })
-        .unwrap_or_default()
-}
-
 fn context_entry_source_prefix_count(
     metadata: &serde_json::Value,
     source_kind: &str,
@@ -3157,16 +3121,6 @@ impl MainChatCommandSurfaceEvalReport {
             kernel_mcp_tool_case_count: usize_to_u32_saturating(self.kernel_mcp_tool_case_count),
             final_completion_ready: self.final_completion_ready,
         }
-    }
-
-    pub(crate) fn acceptance_evidence_with_live_provider(
-        &self,
-        live_provider: &MainChatAgentExecutionV1AcceptanceLiveEvidence,
-    ) -> MainChatAgentExecutionV1AcceptanceCommandSurfaceEvidence {
-        crate::main_chat_final_gate::command_surface_evidence_with_live_provider(
-            self.acceptance_evidence(),
-            live_provider,
-        )
     }
 }
 

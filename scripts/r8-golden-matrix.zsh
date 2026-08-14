@@ -27,6 +27,12 @@ run_row task_recovery_retry \
   cargo test -p openlife-core --locked recovery_interrupts_open_general_run_and_retry_adds_a_new_run
 run_row conversation_restart_scope \
   cargo test -p openlife-core --locked restart_marks_only_incomplete_turns_interrupted
+run_row conversation_schema_migration \
+  cargo test -p openlife-core --locked v1_store_migrates_projects_and_repeated_steering_without_losing_history
+run_row task_runtime_schema_migration \
+  cargo test -p openlife-core --locked v1_runtime_migrates_without_rewriting_legacy_execution_facts
+run_row fresh_profile_restart_credentials \
+  cargo test -p openlife-tauri --locked reconstruction_restart_reuses_exact_internal_credentials_without_writes
 run_row personal_intelligence_ports \
   cargo test -p openlife-tauri --locked personal_intelligence_ports::tests
 run_row product_diagnostics_budget \

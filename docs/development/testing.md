@@ -60,13 +60,15 @@ The required external-live report case is gated separately:
 
 ```sh
 scripts/live-eval.zsh cargo test -p openlife-tauri --locked \
-  roadshow_cc01_external_live_resource_web_report_waits_for_review_then_materializes_once \
+  reconstruction_external_live_document_web_report_waits_for_review_then_materializes_once \
   -- --ignored --nocapture
 ```
 
-It uses the configured provider and real Web access. Never paste provider
-payloads, credentials, resource bodies, or generated report content into plans
-or test summaries. A failed or unavailable live adapter remains blocked.
+It uses the configured provider and real Web access through the canonical Work
+owner, then proves Review-gated single Artifact materialization without growing
+the retired TaskSession or AgentRun owners. Never paste provider payloads,
+credentials, resource bodies, or generated report content into plans or test
+summaries. A failed or unavailable live adapter remains blocked.
 
 Native review must use an exact current Tauri bundle and a purpose-specific
 data profile. If that profile requires macOS Keychain recovery, stop for

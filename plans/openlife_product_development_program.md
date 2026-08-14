@@ -562,5 +562,33 @@ keeping a second diagnostic or compatibility product API.
 - Settings now includes a real Product Diagnostics category backed by a narrow
   canonical ViewModel; the old SystemDiagnostics implementation remains an
   internal LifeStateProjection dependency only and is not a product API.
-- Exact-native, external-live, performance, migration, and final full-gate
-  evidence remain open and are not claimed by this progress record.
+- The controlled golden matrix passes, including canonical Chat/Work,
+  steering/restart, review/Undo, personal-intelligence ports, frontend product
+  surfaces, and a 750 ms controlled diagnostics budget for 200 Conversations
+  and Tasks.
+- The exact signed release bundle passes bundle-id, signing-authority, and
+  strict resource-seal verification. Its isolated native profile exposes one
+  unresolved evidence blocker: the current self-signed executable cannot read
+  the existing AgentRun receipt Keychain ACL noninteractively, so protected
+  TaskRuntime stores remain unavailable until explicit ACL recovery.
+- Canonical external-live Work passes with a real provider and real Web read:
+  document + Web evidence enter one Task, wait for Review, materialize once,
+  and do not grow retired TaskSession/AgentRun owners. This trial also found
+  and fixed DeepSeek V4 structured-output exhaustion by disabling thinking
+  only for DeepSeek JSON-mode requests; ordinary Chat keeps model defaults.
+- Profile migration coverage now includes exact Conversation v1 and
+  TaskRuntime v1-to-current migrations plus fresh-profile credential restart;
+  no retired execution owner is imported as canonical truth.
+- Final controlled gates pass: Rust format, Clippy with warnings denied, the
+  full locked Rust suite, frontend format/typecheck/unit/build/browser-shell,
+  production absence guards, and the executable R8 golden matrix. The retired
+  broad live-provider suite entry and stale public-handler expectations were
+  deleted rather than retained as acceptance machinery.
+- The exact bundle was rebuilt from this final source with bundle id
+  `ai.openlife.desktop`, the named local signing authority, and a verified
+  strict resource seal. A fresh isolated launch still cannot open the existing
+  protected execution credentials: ordinary stores initialize, but canonical
+  TaskRuntime and protected receipt/event stores remain absent. Native UI
+  golden-path credit is therefore not claimed. The explicit Settings
+  credential-access recovery and clean restart must succeed before Settings,
+  Chat, Work, Results, and needs-attention can close R8.

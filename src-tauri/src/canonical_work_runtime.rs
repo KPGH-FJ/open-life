@@ -1210,6 +1210,179 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires OPENLIFE_MAIN_CHAT_LIVE_PROVIDER_EVAL=1, live Web access, and a real provider API key"]
+    async fn reconstruction_external_live_document_web_report_waits_for_review_then_materializes_once(
+    ) {
+        let state = crate::main_chat_command_surface_tests::
+            isolated_command_surface_state_with_resource_runtime();
+        let safe_root = tempfile::tempdir().unwrap();
+        {
+            let mut config = state.config.lock().await;
+            config.system.safe_paths = vec![safe_root
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()];
+            config.system.network_policy.enabled = true;
+            config
+                .system
+                .network_policy
+                .tool_overrides
+                .insert("web.search".into(), "allow".into());
+        }
+        crate::main_chat_acceptance_test_support::configure_live_provider_eval_state(&state).await;
+        crate::main_chat_command_surface_tests::grant_command_surface_web_search_once(&state).await;
+
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "R8 external live Work")
+            .unwrap();
+        let mut request = input(&conversation_id);
+        request.messages[0].content =
+            "读取附件并使用 web.search 查询公开网页，生成一份带引用的 Markdown 报告 external-live.md，等待我确认后保存。"
+                .into();
+        crate::main_chat_command_surface_tests::import_frozen_resources_to_command_surface_state(
+            &state,
+            &request.turn_id,
+            vec![openlife_core::resource_gateway::ResourceImportSource {
+                filename: "external-live-evidence.md".into(),
+                declared_mime: "text/markdown".into(),
+                bytes: b"# OpenLife evidence\nCanonical Work owns this local document evidence.\n"
+                    .to_vec(),
+            }],
+        );
+        let task_id = request.task_id.clone();
+        let legacy_sessions_before = state
+            .main_chat_agent_session_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_sessions(None, 100, 0)
+            .unwrap()
+            .len();
+        let legacy_runs_before = state
+            .agent_run_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_runs(100, 0)
+            .unwrap()
+            .len();
+
+        let output = tokio::time::timeout(
+            std::time::Duration::from_secs(240),
+            run_canonical_work(request, &state, &mut |_, _| {}),
+        )
+        .await
+        .expect("canonical external-live Work timeout")
+        .expect("canonical external-live Work result");
+        assert!(output.result.reply.contains("审核"));
+        assert!(output.result.tool_invoked);
+        assert_eq!(output.result.tool_calls.len(), 2);
+
+        let waiting = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(waiting.task.status, CanonicalTaskStatus::WaitingReview);
+        assert_eq!(waiting.runs.len(), 1);
+        assert_eq!(waiting.runs[0].status, CanonicalTaskStatus::WaitingReview);
+        assert_eq!(waiting.artifacts.len(), 1);
+        assert_eq!(
+            waiting
+                .items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::ToolCall)
+                .count(),
+            2
+        );
+        assert_eq!(
+            waiting
+                .items
+                .iter()
+                .filter(|item| item.kind == CanonicalTaskItemKind::Observation)
+                .count(),
+            2
+        );
+        assert!(waiting
+            .attempts
+            .iter()
+            .filter(|attempt| attempt.executor_kind == "provider")
+            .all(|attempt| attempt.status == CanonicalTaskItemStatus::Completed));
+        let proposal_id = waiting.artifacts[0].artifact.proposal_id.clone().unwrap();
+        assert!(waiting.artifacts[0]
+            .artifact
+            .materialized_reference
+            .is_none());
+
+        let accepted = crate::commands::proposal::accept_proposal_with_state(proposal_id, &state)
+            .await
+            .unwrap();
+        assert_eq!(accepted["effect_status"], "confirmed");
+        assert_eq!(
+            accepted["canonical_task_runtime_projection_status"],
+            "confirmed"
+        );
+        let completed = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.task.status, CanonicalTaskStatus::Completed);
+        assert_eq!(completed.runs[0].status, CanonicalTaskStatus::Completed);
+        assert!(completed.final_result.is_some());
+        let materialized = completed.artifacts[0]
+            .artifact
+            .materialized_reference
+            .as_ref()
+            .unwrap();
+        let content = std::fs::read_to_string(materialized).unwrap();
+        assert!(content.contains("cite_"));
+        assert!(content.contains("webref_"));
+        assert_eq!(
+            state
+                .main_chat_agent_session_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list_sessions(None, 100, 0)
+                .unwrap()
+                .len(),
+            legacy_sessions_before
+        );
+        assert_eq!(
+            state
+                .agent_run_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list_runs(100, 0)
+                .unwrap()
+                .len(),
+            legacy_runs_before
+        );
+    }
+
+    #[tokio::test]
     async fn work_owns_task_run_attempt_and_final_result_without_legacy_growth() {
         let state = canonical_state("canonical Work result").await;
         let conversation_id = uuid::Uuid::new_v4().to_string();

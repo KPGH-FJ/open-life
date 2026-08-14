@@ -1790,6 +1790,13 @@ where
     });
     if structured_json_output && provider == "deepseek" {
         body["response_format"] = json!({ "type": "json_object" });
+        // DeepSeek V4 enables thinking by default and counts reasoning tokens
+        // against `max_tokens`. Artifact/evidence requests need the bounded
+        // budget for the validated JSON result itself; otherwise a long
+        // governed context can exhaust the budget before `content` begins.
+        // Keep ordinary Chat on the selected model's default mode and narrow
+        // this provider-specific control to structured output only.
+        body["thinking"] = json!({ "type": "disabled" });
     }
 
     let mut headers = HeaderMap::new();
@@ -2283,6 +2290,7 @@ mod tests {
         let body = request.split("\r\n\r\n").nth(1).expect("HTTP request body");
         let body: serde_json::Value = serde_json::from_str(body).expect("JSON request body");
         assert_eq!(body["response_format"]["type"], "json_object");
+        assert_eq!(body["thinking"]["type"], "disabled");
     }
 
     #[test]

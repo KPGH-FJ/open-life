@@ -1085,7 +1085,7 @@ fn main_chat_live_provider_completed_report_builder_is_not_hidden_in_test_module
 }
 
 #[test]
-fn main_chat_live_provider_harness_execution_is_not_concentrated_in_lib_rs() {
+fn compatibility_live_provider_harness_keeps_only_the_focused_test_executor() {
     let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
     let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
     let module_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1093,27 +1093,21 @@ fn main_chat_live_provider_harness_execution_is_not_concentrated_in_lib_rs() {
 
     assert!(
         source.contains("pub(crate) mod main_chat_live_provider_harness;"),
-        "live-provider harness execution must live in a focused non-test module"
+        "compatibility live-provider harness must remain isolated from the release composition root"
     );
     assert!(
         module_path.is_file(),
-        "live-provider harness execution module file must exist outside #[cfg(test)]"
+        "compatibility live-provider harness module must remain explicit while its tests exist"
     );
     let module_source =
         std::fs::read_to_string(&module_path).expect("read live-provider harness module");
     assert!(
-        module_source.contains("run_main_chat_live_provider_eval_harness_suite_from_state"),
-        "live-provider harness suite must be reusable by the real final acceptance runner"
-    );
-    assert!(
         module_source.contains("send_message_with_operation_state("),
-        "live-provider harness execution must use the ordinary Main Chat send path"
+        "the retained compatibility executor must use the isolated Main Chat test path"
     );
     assert!(
-        !source.contains(
-            "\npub(crate) async fn run_main_chat_live_provider_eval_harness_suite_from_state("
-        ),
-        "live-provider harness suite must not remain concentrated in src/lib.rs"
+        !module_source.contains("run_main_chat_live_provider_eval_harness_suite_from_state"),
+        "the retired broad live-provider acceptance suite must remain deleted"
     );
     assert!(
         !source.contains("\npub(crate) async fn run_main_chat_live_provider_eval_harness("),
@@ -1122,7 +1116,7 @@ fn main_chat_live_provider_harness_execution_is_not_concentrated_in_lib_rs() {
 }
 
 #[test]
-fn isolated_main_chat_eval_state_factory_is_not_hidden_in_test_module() {
+fn isolated_main_chat_eval_state_factory_remains_available_to_focused_tests() {
     let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
     let source = std::fs::read_to_string(&lib_rs_path).expect("read src/lib.rs");
     let module_path =
@@ -1130,28 +1124,20 @@ fn isolated_main_chat_eval_state_factory_is_not_hidden_in_test_module() {
 
     assert!(
         source.contains("pub(crate) mod main_chat_eval_state;"),
-        "isolated Main Chat eval state factory must live in a non-test module"
+        "isolated Main Chat eval state factory must remain available to focused tests"
     );
     assert!(
         module_path.is_file(),
-        "isolated Main Chat eval state module file must exist outside #[cfg(test)]"
+        "isolated Main Chat eval state module file must remain available while compatibility tests exist"
     );
     let module_source = std::fs::read_to_string(&module_path).expect("read eval state module");
     assert!(
         module_source.contains("build_isolated_main_chat_eval_state"),
-        "production/test code must share an isolated state factory for command-surface evidence"
+        "focused compatibility tests must share one isolated state factory"
     );
     assert!(
         !module_source.contains("#[cfg(test)]\npub(crate) fn build_isolated_main_chat_eval_state("),
-        "the isolated eval state factory itself must not be hidden behind #[cfg(test)]"
-    );
-    let harness_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src/main_chat_live_provider_harness.rs");
-    let harness_source =
-        std::fs::read_to_string(&harness_path).expect("read live-provider harness module");
-    assert!(
-        harness_source.contains("main_chat_eval_state::build_isolated_main_chat_eval_state()"),
-        "the real non-default live-provider gate must consume the shared eval state factory"
+        "the shared test-state factory must not be duplicated behind an inner cfg gate"
     );
 }
 

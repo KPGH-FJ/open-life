@@ -926,7 +926,6 @@ mod tests {
         assert!(proposal.contains("!proposal_requires_native_confirmation"));
         assert_eq!(capability["windows"], serde_json::json!(["main"]));
         for shipped_command in [
-            "delete_agent_run,",
             "accept_proposal,",
             "export_all_data,",
             "import_all_data,",
