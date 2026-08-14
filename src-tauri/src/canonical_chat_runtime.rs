@@ -124,6 +124,7 @@ pub(crate) struct CanonicalWorkProviderLifecycle {
     pub(crate) provider_model_id: String,
     invocation_ordinal: u64,
     active_attempt_id: Option<String>,
+    next_invocation_is_plan: bool,
 }
 
 impl CanonicalWorkProviderLifecycle {
@@ -144,6 +145,23 @@ impl CanonicalWorkProviderLifecycle {
             provider_model_id,
             invocation_ordinal: 0,
             active_attempt_id: None,
+            next_invocation_is_plan: false,
+        }
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn prepare_plan_invocation(&mut self) -> Result<(), String> {
+        if self.active_attempt_id.is_some() || self.next_invocation_is_plan {
+            return Err("canonical_work_plan_invocation_already_prepared".into());
+        }
+        self.next_invocation_is_plan = true;
+        Ok(())
+    }
+
+    #[cfg(not(test))]
+    pub(crate) fn clear_unobserved_plan_invocation(&mut self) {
+        if self.active_attempt_id.is_none() {
+            self.next_invocation_is_plan = false;
         }
     }
 
@@ -155,6 +173,19 @@ impl CanonicalWorkProviderLifecycle {
             .invocation_ordinal
             .checked_add(1)
             .ok_or_else(|| "canonical_work_provider_invocation_overflow".to_string())?;
+        let usage = self
+            .store
+            .work_run_budget_usage(&self.run_id)
+            .map_err(|error| error.to_string())?;
+        let budget = self
+            .store
+            .work_run_budget_policy(&self.run_id)
+            .map_err(|error| error.to_string())?;
+        if self.next_invocation_is_plan {
+            budget.admit_plan(usage)?;
+        } else {
+            budget.admit_provider(usage)?;
+        }
         let item_id = format!("item:provider:{}:{}", self.run_id, self.invocation_ordinal);
         let attempt_id = uuid::Uuid::new_v4().to_string();
         let request_digest =
@@ -169,7 +200,11 @@ impl CanonicalWorkProviderLifecycle {
                 &self.run_id,
                 &item_id,
                 openlife_core::task_runtime::CanonicalTaskItemKind::ProviderGeneration,
-                "work_provider_generation",
+                if self.next_invocation_is_plan {
+                    "work_plan_generation"
+                } else {
+                    "work_provider_generation"
+                },
                 &request_digest,
             )
             .map_err(|error| error.to_string())?;
@@ -186,6 +221,7 @@ impl CanonicalWorkProviderLifecycle {
             })
             .map_err(|error| error.to_string())?;
         self.active_attempt_id = Some(attempt_id);
+        self.next_invocation_is_plan = false;
         Ok(())
     }
 

@@ -63,44 +63,57 @@ opened and reopened the canonical Conversation and TaskRuntime stores from an
 isolated profile. Controlled repository gates and the exact-native restart
 check passed before advancing.
 
-## Current stage: H1 - Unified Work Orchestration
+## Completed: H1 - Unified Work Orchestration
+
+General Work now creates one bounded structured plan inside its existing Run.
+The complete plan and immutable budget policy are persisted in
+`task_runtime.db`; budget use is reconstructed from canonical Items and
+ItemAttempts after restart. Policy limits eligible step kinds, the plan drives
+the canonical read adapters, and a mechanical CompletionEvaluator prevents a
+FinalResult when a required step, receipt, verification, Artifact, or review
+checkpoint is missing. Invalid model plans receive one bounded repair attempt
+and then fail closed. Controlled document, Web, selected Skill, builtin MCP,
+registered MCP, retry, cancellation, artifact-review, and failure tests remain
+green on the same Task/Run owner.
+
+## Current stage: H2 - Unified Capability Loop
 
 ### In scope
 
-1. Introduce one structured Planner that turns a Work goal and constraints into
-   typed Items without creating another durable lifecycle.
-2. Introduce one ItemScheduler and ItemExecutor over canonical Run state.
-3. Make provider and tool attempts consume one explicit Run budget owned by
-   the runtime, with bounded retries and visible exhaustion semantics.
-4. Introduce one CompletionEvaluator that requires completed required Items,
-   valid receipts, and the requested result or review checkpoint.
-5. Keep planning, execution, observations, replanning, and completion inside
-   the same `Task -> Run -> Item -> ItemAttempt` owner.
-6. Delete any strategy projection or special-case execution owner replaced by
-   the unified path in this stage.
+1. Replace keyword-selected Work tools with one model-driven, manifest-bounded
+   capability selection contract inside the structured plan/Run.
+2. Route local document, workspace file, Web search/fetch, selected Skill, and
+   registered read-only MCP through one ItemScheduler and ItemExecutor.
+3. Preserve exact task/project/resource/provider scope and ToolGateway receipts
+   for every adapter attempt; the model cannot mint a tool, permission, or
+   argument outside the manifest and PolicyDecision.
+4. Support bounded observation-driven continuation and replanning in the same
+   Run without restoring ReAct or PlanExecute as product owners.
+5. Delete the replaced keyword selectors, legacy ReAct product path,
+   strategy projection, and any release consumer that still treats them as a
+   separate execution lifecycle.
 
 ### Out of scope
 
 - new connectors, Computer Use, arbitrary shell, email/calendar send, or
   scheduling expansion;
-- broad capability expansion reserved for H2;
+- write/effect lifecycle expansion reserved for H3;
 - broader Memory or LifeModel learning; and
 - migration of retired task execution/test data.
 
 ### Acceptance
 
-- A general Work request creates one canonical plan and executes its required
-  Items through the same Run; no parallel task-session or plan-session owner is
-  created.
-- Planner output is schema-validated, bounded, and recoverably persisted before
-  execution; invalid plans fail or replan without inventing completion.
-- Provider and tool calls consume the same persisted Run budget and each call
-  has a canonical ItemAttempt receipt.
-- Completion is impossible while a required Item is pending, failed, unknown,
-  or waiting for review.
-- Cancellation, retry, and steering preserve Task identity and create only the
-  expected Run/Item transitions.
-- Focused orchestration tests and full repository gates pass before H1 is
+- Ordinary natural-language Work selects eligible capabilities without
+  requiring product-specific keywords such as `web.search` or `mcp`.
+- Every selected capability is present in the policy-bounded manifest and every
+  execution is a canonical ItemAttempt with a ToolGateway/provider receipt.
+- Document + Web, selected Skill, registered MCP, and workspace-file scenarios
+  complete or fail closed through the same adaptive loop.
+- A failed/unknown observation cannot be hidden by later successful work;
+  bounded replanning never widens scope or resets the Run budget.
+- No release Work branch enters the retired ReAct/PlanExecute/task-session
+  lifecycle, and replaced selectors and frontend/backend consumers are gone.
+- Focused capability-loop tests and full repository gates pass before H2 is
   marked complete.
 
 ## Checks

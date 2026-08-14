@@ -72,6 +72,19 @@ the same Run before ArtifactDraft. The canonical store records identities and
 bounded digests, not prompt or response bodies. An Artifact exists before its
 Proposal; Review is a checkpoint relation; approval starts a materializer
 ItemAttempt; and confirmed materialization updates the same ArtifactVersion.
+
+Each Work Run also owns one schema-validated structured plan in
+`canonical_work_plans`. The stored plan contains only bounded step ids, typed
+capability phases, dependencies, completion requirements, and an immutable Run
+budget snapshot; it never stores user text, URLs, file names, secrets, or tool
+payloads. Model output may propose this structure, but Policy bounds the
+eligible step kinds and the runtime revalidates every adapter invocation. The
+same canonical Item/ItemAttempt rows reconstruct consumed budget after restart.
+`WorkItemScheduler`, the canonical capability executor, and
+`WorkCompletionEvaluator` operate inside this Run rather than creating a plan
+session, queue, or second lifecycle owner. A FinalResult cannot be committed
+while any canonical non-final Item is non-terminal or while a required plan
+step lacks successful evidence.
 While Review is pending, the exact assistant Conversation Item identity is
 stored as a deferred result relation. Approval can therefore complete the same
 FinalResult after restart without inventing a second Task owner.

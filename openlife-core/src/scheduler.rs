@@ -2917,8 +2917,26 @@ impl InferenceScheduler {
             Some(
                 ProviderPayloadPurpose::MainChatArtifactDraft
                     | ProviderPayloadPurpose::MainChatEvidenceCheck
+                    | ProviderPayloadPurpose::MainChatWorkPlan
             )
         );
+
+        if self.scripted_generation_response.is_some()
+            && (payload_purpose == Some(ProviderPayloadPurpose::MainChatWorkPlan)
+                || system_prompt
+                    .as_deref()
+                    .is_some_and(|prompt| prompt.contains("openlife.work-plan.v1")))
+        {
+            // The scripted provider is a test fixture for the execution
+            // response, not a second queue of planner responses. Keep its
+            // planner surface typed and deterministic so product-path tests
+            // still exercise plan admission without teaching fixtures to
+            // masquerade as a real adaptive model.
+            return Ok(
+                r#"{"schemaVersion":"openlife.work-plan.v1","steps":[{"id":"analyze","kind":"analyze","required":true,"dependsOn":[]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["analyze"]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#
+                    .to_string(),
+            );
+        }
 
         if let Some(ref response) = self.scripted_generation_response {
             return Ok(response.clone());
@@ -2940,6 +2958,9 @@ impl InferenceScheduler {
                             Some(crate::ollama::main_chat_evidence_check_json_schema())
                         }
                         Some(ProviderPayloadPurpose::MainChatArtifactDraft) => {
+                            Some(serde_json::Value::String("json".into()))
+                        }
+                        Some(ProviderPayloadPurpose::MainChatWorkPlan) => {
                             Some(serde_json::Value::String("json".into()))
                         }
                         _ => None,

@@ -46,6 +46,7 @@ use openlife_core::scheduler::{
 use openlife_core::task_runtime::{
     BeginItemAttemptInput, CanonicalTaskItemKind, CanonicalTaskItemStatus,
 };
+use openlife_core::work_orchestration::{StructuredWorkPlan, WorkPlanStepKind};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
@@ -906,6 +907,18 @@ async fn canonical_work_tool_identity(
         .canonical_task_runtime_store
         .as_ref()
         .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let (usage, budget) = {
+        let store = store.lock().await;
+        (
+            store
+                .work_run_budget_usage(run_id)
+                .map_err(|error| error.to_string())?,
+            store
+                .work_run_budget_policy(run_id)
+                .map_err(|error| error.to_string())?,
+        )
+    };
+    budget.admit_tool(usage)?;
     let (input_bytes, request_digest) =
         openlife_core::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
             "runId": run_id,
@@ -4382,7 +4395,7 @@ pub trait MainChatModelClient: Send + Sync {
     fn route_metadata(&self) -> MainChatRouteMetadata;
 }
 
-fn emit_provider_receipt<S>(
+pub(crate) fn emit_provider_receipt<S>(
     receipt: &ProviderInvocationReceipt,
     event_sink: &mut S,
 ) -> Result<(), String>
@@ -4495,7 +4508,7 @@ where
     event_sink.emit_provider_started(request_id, provider, model, started_at, policy_evidence)
 }
 
-fn emit_main_chat_model_progress<S>(
+pub(crate) fn emit_main_chat_model_progress<S>(
     progress: MainChatModelProgress,
     session_id: &str,
     event_sink: &mut S,
@@ -5923,6 +5936,7 @@ pub struct MainChatKernel<C = SchedulerMainChatModelClient> {
     conversation_store:
         Option<Arc<tokio::sync::Mutex<openlife_core::conversation::ConversationStore>>>,
     replayed_read_observations: Vec<MainChatReplayedReadObservation>,
+    structured_work_plan: Option<StructuredWorkPlan>,
 }
 
 impl MainChatKernel<SchedulerMainChatModelClient> {
@@ -6027,11 +6041,17 @@ where
             canonical_task_store: None,
             conversation_store: None,
             replayed_read_observations: Vec::new(),
+            structured_work_plan: None,
         }
     }
 
     pub fn with_context_config(mut self, context_config: MainChatKernelContextConfig) -> Self {
         self.context_config = context_config;
+        self
+    }
+
+    pub(crate) fn with_structured_work_plan(mut self, plan: StructuredWorkPlan) -> Self {
+        self.structured_work_plan = Some(plan);
         self
     }
 
@@ -6184,6 +6204,8 @@ where
         let read_tool_decisions =
             if input.runtime_fact_direct_answer || context_request.is_source_bound() {
                 Vec::new()
+            } else if let Some(plan) = self.structured_work_plan.as_ref() {
+                plan_work_read_tools(&input, plan, input.model_supplied_tool_arguments.is_some())
             } else {
                 plan_kernel_read_tools(&input, input.model_supplied_tool_arguments.is_some())
             };
@@ -6856,6 +6878,7 @@ where
             canonical_task_store: self.canonical_task_store.clone(),
             conversation_store: self.conversation_store.clone(),
             replayed_read_observations: Vec::new(),
+            structured_work_plan: self.structured_work_plan.clone(),
         }
     }
 
@@ -13696,6 +13719,90 @@ fn plan_kernel_read_tools(
         {
             decisions.push(decision);
         }
+    }
+    decisions
+}
+
+/// Convert the already policy-bounded structured Work plan into exact read
+/// adapter invocations. The plan selects a capability phase; this function
+/// supplies only task-bound arguments and rechecks the PolicyDecision. It does
+/// not inspect prompt keywords to decide whether a capability should run.
+fn plan_work_read_tools(
+    input: &MainChatTurnInput,
+    plan: &StructuredWorkPlan,
+    model_arguments_ignored: bool,
+) -> Vec<MainChatKernelReadToolDecision> {
+    if !policy_authorizes_kernel_read_lane(input) {
+        return Vec::new();
+    }
+    let Some(user_text) = latest_user_text(&input.messages) else {
+        return Vec::new();
+    };
+    let mut decisions = Vec::new();
+    for step in &plan.steps {
+        let decision = match step.kind {
+            WorkPlanStepKind::ReadLocalDocument => {
+                if input
+                    .policy_decision
+                    .allows(AllowedCapability::ImportedResourceRead)
+                {
+                    kernel_document_read_tool_decision(input, user_text, model_arguments_ignored)
+                } else {
+                    enforce_kernel_read_capability(
+                        input,
+                        AllowedCapability::WorkspaceFileRead,
+                        MainChatKernelReadToolDecision {
+                            tool_name: "file.read".into(),
+                            queue_action_type: "file.read".into(),
+                            executor_action_type: "mcp_tool".into(),
+                            requested_target: "file.read".into(),
+                            target: "file.read".into(),
+                            governed_input: serde_json::json!({
+                                "rawUserText": user_text,
+                                "governedInputSource": "structured_work_plan_workspace_scope",
+                            }),
+                            reason:
+                                "structured Work plan requires a workspace-scoped document read"
+                                    .into(),
+                            model_arguments_ignored,
+                            fixture_backed_read: false,
+                            selection_metadata: None,
+                        },
+                    )
+                }
+            }
+            WorkPlanStepKind::ResearchWeb => {
+                let has_url = user_text
+                    .split_whitespace()
+                    .map(trim_main_chat_tool_token)
+                    .any(|token| token.starts_with("http://") || token.starts_with("https://"));
+                if has_url && input.policy_decision.allows(AllowedCapability::WebFetch) {
+                    kernel_web_fetch_read_tool_decision(user_text, model_arguments_ignored)
+                } else {
+                    enforce_kernel_read_capability(
+                        input,
+                        AllowedCapability::WebSearch,
+                        kernel_web_search_read_tool_decision(
+                            user_text,
+                            "structured_work_plan_user_goal",
+                            "structured Work plan requires governed Web evidence",
+                            model_arguments_ignored,
+                        ),
+                    )
+                }
+            }
+            WorkPlanStepKind::ReadMcp => enforce_kernel_read_capability(
+                input,
+                AllowedCapability::McpReadOnly,
+                kernel_mcp_read_tool_decision(user_text, model_arguments_ignored),
+            ),
+            WorkPlanStepKind::Analyze
+            | WorkPlanStepKind::UseSelectedSkill
+            | WorkPlanStepKind::DraftArtifact
+            | WorkPlanStepKind::Verify
+            | WorkPlanStepKind::DeliverResult => continue,
+        };
+        decisions.push(decision);
     }
     decisions
 }

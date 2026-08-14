@@ -7,6 +7,10 @@
 use crate::canonical_chat_runtime::{
     provider_state, verify_provider_binding, CanonicalChatEventSink,
 };
+#[cfg(not(test))]
+use crate::main_chat_kernel::{
+    emit_main_chat_model_progress, emit_provider_receipt, MainChatModelClient, MainChatModelRequest,
+};
 use crate::main_chat_kernel::{
     expand_generated_artifact_outcomes, prepare_kernel_write_proposal,
     KernelWriteProposalPreparation, MainChatEventSink, MainChatKernel, MainChatKernelContextConfig,
@@ -15,18 +19,28 @@ use crate::main_chat_kernel::{
 use crate::main_chat_turn_runtime::ProviderInvocationState;
 use crate::state::AppState;
 use crate::{SendMessageResult, ToolCallResult};
-use openlife_core::agent::main_chat_agent_v1::AgentIngress;
+use openlife_core::agent::main_chat_agent_v1::{
+    AgentIngress, AllowedCapability, ContextSourceCandidate, ContextSourceKind, PolicyDecision,
+};
 use openlife_core::agent::metadata_safe::metadata_safe_text_digest;
 use openlife_core::agent::{ReasoningTrace, ReviewWorkflow};
 use openlife_core::conversation::{BeginChatTurn, ConversationItemKind, TurnStatus};
 use openlife_core::llm::ChatMessage;
+#[cfg(not(test))]
+use openlife_core::llm::ProviderPayloadPurpose;
 #[cfg(test)]
 use openlife_core::task_runtime::CanonicalTaskItemKind;
 use openlife_core::task_runtime::{
     BeginGeneralTaskRunInput, CanonicalAttentionKind, CanonicalTaskItemStatus, CanonicalTaskStatus,
     CompleteGeneralTaskInput, DeferGeneralTaskResultInput, GeneralArtifactDraftInput,
 };
+use openlife_core::work_orchestration::{
+    StructuredWorkPlan, WorkCompletionContract, WorkCompletionEvaluator, WorkCompletionEvidence,
+    WorkItemExecutor, WorkItemScheduler, WorkPlanStepKind, WorkResultKind,
+    WORK_PLAN_SCHEMA_VERSION,
+};
 use serde_json::Value;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 pub(crate) struct CanonicalWorkInput {
@@ -311,9 +325,10 @@ async fn run_canonical_work_with_resource_scope(
         )
         .map_err(|error| format!("canonical Work policy admission failed: {error}"))?;
     let (_, instruction_digest) = metadata_safe_text_digest(&current_user.content);
-    let plan_digest = (ingress.policy_decision.route_kind
-        == openlife_core::agent::main_chat_agent_v1::PolicyRouteKind::PlanDraft)
-        .then_some(instruction_digest.as_str());
+    // The model-authored structured plan is admitted only after the canonical
+    // Run exists, so initial admission never treats an intent classification
+    // digest as an execution plan.
+    let plan_digest = None;
     let project_scope = {
         let conversation = conversation_store
             .lock()
@@ -336,7 +351,7 @@ async fn run_canonical_work_with_resource_scope(
             None => None,
         }
     };
-    task_store
+    let begun_run = task_store
         .lock()
         .await
         .begin_general_task_run(BeginGeneralTaskRunInput {
@@ -395,17 +410,6 @@ async fn run_canonical_work_with_resource_scope(
     )
     .await;
     debug_assert!(!personal_context.life_model_contract_version.is_empty());
-    let kernel = MainChatKernel::new(client).with_context_config(MainChatKernelContextConfig {
-        extra_candidates: personal_context.memory.candidates,
-        life_model_context: Some(personal_context.life_model),
-        authorized_memory_routing: Some(
-            ingress
-                .policy_decision
-                .authorized_memory_routing(&ingress.intent_frame.memory_routing),
-        ),
-        stream_provider_tokens: input.stream,
-        ..MainChatKernelContextConfig::default()
-    });
     let mut sink = CanonicalChatEventSink {
         buffered: Default::default(),
         conversation_id: &input.conversation_id,
@@ -438,6 +442,52 @@ async fn run_canonical_work_with_resource_scope(
             "model": provider.model_id,
         }),
     );
+    let work_plan = match generate_structured_work_plan(
+        &client,
+        &input,
+        &authorization,
+        &ingress.policy_decision,
+        &instruction_digest,
+        &mut sink,
+    )
+    .await
+    {
+        Ok(plan) => plan,
+        Err(error) => {
+            let (task_status, attempt_status, _) =
+                provider_non_success_terminal(provider_state(sink.events())).unwrap_or((
+                    CanonicalTaskStatus::Blocked,
+                    CanonicalTaskItemStatus::Blocked,
+                    "work_plan_invalid",
+                ));
+            terminalize_failure(state, &input, task_status, attempt_status, &error).await?;
+            return Err(error);
+        }
+    };
+    persist_structured_work_plan(state, &input, begun_run.plan_revision, &work_plan).await?;
+    let plan_context = work_plan.canonical_json()?;
+    let mut extra_candidates = personal_context.memory.candidates;
+    extra_candidates.push(ContextSourceCandidate::new(
+        ContextSourceKind::StrategyContract,
+        format!("work-plan:{}", input.run_id),
+        plan_context,
+        "policy-bounded structured Work plan",
+        "private",
+        160,
+    ));
+    let kernel = MainChatKernel::new(client)
+        .with_context_config(MainChatKernelContextConfig {
+            extra_candidates,
+            life_model_context: Some(personal_context.life_model),
+            authorized_memory_routing: Some(
+                ingress
+                    .policy_decision
+                    .authorized_memory_routing(&ingress.intent_frame.memory_routing),
+            ),
+            stream_provider_tokens: input.stream,
+            ..MainChatKernelContextConfig::default()
+        })
+        .with_structured_work_plan(work_plan.clone());
     let kernel_result = {
         let future = kernel.run_canonical_work(
             MainChatTurnInput {
@@ -551,6 +601,19 @@ async fn run_canonical_work_with_resource_scope(
     }
     project_selected_skill_observation(state, &input, kernel_result.context_metadata.as_ref())
         .await?;
+    let plan_evidence =
+        evaluate_work_plan_execution(&work_plan, &kernel_result, provider_state(sink.events()));
+    if let Err(code) = plan_evidence {
+        terminalize_failure(
+            state,
+            &input,
+            CanonicalTaskStatus::Blocked,
+            CanonicalTaskItemStatus::Blocked,
+            &code,
+        )
+        .await?;
+        return Err(code);
+    }
     if let Some(write_outcome) = kernel_result
         .write_outcome
         .as_ref()
@@ -797,6 +860,369 @@ async fn stage_canonical_work_artifacts_for_review(
         proposal_ids.push(review.proposal_id().to_string());
     }
     Ok(proposal_ids)
+}
+
+fn allowed_work_plan_kinds(
+    policy: &PolicyDecision,
+    selected_skill_id: Option<&str>,
+) -> HashSet<WorkPlanStepKind> {
+    let mut allowed = HashSet::from([WorkPlanStepKind::Verify, WorkPlanStepKind::DeliverResult]);
+    if policy.allows(AllowedCapability::ProviderGeneration) {
+        allowed.insert(WorkPlanStepKind::Analyze);
+    }
+    if policy.allows(AllowedCapability::ImportedResourceRead)
+        || policy.allows(AllowedCapability::WorkspaceFileRead)
+    {
+        allowed.insert(WorkPlanStepKind::ReadLocalDocument);
+    }
+    if policy.allows(AllowedCapability::WebSearch) || policy.allows(AllowedCapability::WebFetch) {
+        allowed.insert(WorkPlanStepKind::ResearchWeb);
+    }
+    if policy.allows(AllowedCapability::McpReadOnly) {
+        allowed.insert(WorkPlanStepKind::ReadMcp);
+    }
+    if policy.allows(AllowedCapability::FileWriteProposal) {
+        allowed.insert(WorkPlanStepKind::DraftArtifact);
+    }
+    if selected_skill_id.is_some() {
+        allowed.insert(WorkPlanStepKind::UseSelectedSkill);
+    }
+    allowed
+}
+
+fn deterministic_policy_plan(
+    allowed: &HashSet<WorkPlanStepKind>,
+    user_text: &str,
+) -> StructuredWorkPlan {
+    let lower = user_text.to_ascii_lowercase();
+    let explicit_mcp = lower.contains("mcp");
+    let explicit_web = lower.contains("web")
+        || lower.contains("http://")
+        || lower.contains("https://")
+        || lower.contains("搜索")
+        || lower.contains("最新")
+        || lower.contains("实时");
+    let read_kind_count = [
+        WorkPlanStepKind::ReadLocalDocument,
+        WorkPlanStepKind::ResearchWeb,
+        WorkPlanStepKind::ReadMcp,
+    ]
+    .into_iter()
+    .filter(|kind| allowed.contains(kind))
+    .count();
+    let mut steps = Vec::new();
+    for (id, kind) in [
+        ("read_document", WorkPlanStepKind::ReadLocalDocument),
+        ("research", WorkPlanStepKind::ResearchWeb),
+        ("use_skill", WorkPlanStepKind::UseSelectedSkill),
+        ("read_mcp", WorkPlanStepKind::ReadMcp),
+        ("draft", WorkPlanStepKind::DraftArtifact),
+    ] {
+        let selected = match kind {
+            // Imported resources are already bound to this exact Work Turn;
+            // when Policy authorized that lane they remain required evidence
+            // even when the same task also requests Web or MCP reads.
+            WorkPlanStepKind::ReadLocalDocument => allowed.contains(&kind),
+            WorkPlanStepKind::ResearchWeb => {
+                allowed.contains(&kind) && (explicit_web || read_kind_count == 1)
+            }
+            WorkPlanStepKind::ReadMcp => {
+                allowed.contains(&kind) && (explicit_mcp || read_kind_count == 1)
+            }
+            _ => allowed.contains(&kind),
+        };
+        if selected {
+            steps.push(openlife_core::work_orchestration::WorkPlanStep {
+                id: id.into(),
+                kind,
+                required: true,
+                depends_on: steps
+                    .last()
+                    .map(|step: &openlife_core::work_orchestration::WorkPlanStep| step.id.clone())
+                    .into_iter()
+                    .collect(),
+            });
+        }
+    }
+    let requires_verification = steps.iter().any(|step| {
+        matches!(
+            step.kind,
+            WorkPlanStepKind::ReadLocalDocument
+                | WorkPlanStepKind::ResearchWeb
+                | WorkPlanStepKind::ReadMcp
+                | WorkPlanStepKind::DraftArtifact
+        )
+    });
+    if requires_verification {
+        steps.push(openlife_core::work_orchestration::WorkPlanStep {
+            id: "verify".into(),
+            kind: WorkPlanStepKind::Verify,
+            required: true,
+            depends_on: steps
+                .last()
+                .map(|step| step.id.clone())
+                .into_iter()
+                .collect(),
+        });
+    }
+    steps.push(openlife_core::work_orchestration::WorkPlanStep {
+        id: "deliver".into(),
+        kind: WorkPlanStepKind::DeliverResult,
+        required: true,
+        depends_on: steps
+            .last()
+            .map(|step| step.id.clone())
+            .into_iter()
+            .collect(),
+    });
+    StructuredWorkPlan {
+        schema_version: WORK_PLAN_SCHEMA_VERSION.into(),
+        steps,
+        completion: WorkCompletionContract {
+            result_kind: if allowed.contains(&WorkPlanStepKind::DraftArtifact) {
+                WorkResultKind::Artifact
+            } else {
+                WorkResultKind::Answer
+            },
+            requires_verification,
+        },
+    }
+}
+
+#[cfg(not(test))]
+fn work_plan_system_prompt(allowed: &HashSet<WorkPlanStepKind>) -> String {
+    let mut kinds = allowed.iter().map(|kind| kind.as_str()).collect::<Vec<_>>();
+    kinds.sort_unstable();
+    format!(
+        "You are the planning phase of OpenLife Work. Return exactly one JSON object and no prose. Never include user text, filenames, URLs, secrets, or inferred permissions in the plan. Use schemaVersion '{WORK_PLAN_SCHEMA_VERSION}'. steps must contain 1-{max} dependency-ordered objects with exactly id, kind, required, dependsOn. Allowed kind values for this policy decision are: {kinds}. The final step must be one required deliver_result. Add a required verify step when completion.requiresVerification is true. completion has exactly resultKind ('answer' or 'artifact') and requiresVerification (boolean). Use artifact only when draft_artifact is allowed and required. Prefer the smallest plan that can produce the requested outcome.",
+        max = openlife_core::work_orchestration::MAX_WORK_PLAN_STEPS,
+        kinds = kinds.join(", ")
+    )
+}
+
+async fn generate_structured_work_plan(
+    client: &SchedulerMainChatModelClient,
+    input: &CanonicalWorkInput,
+    authorization: &MainChatProviderAuthorization,
+    policy: &PolicyDecision,
+    instruction_digest: &str,
+    sink: &mut CanonicalChatEventSink<'_>,
+) -> Result<StructuredWorkPlan, String> {
+    let allowed = allowed_work_plan_kinds(policy, input.selected_skill_id.as_deref());
+    let current_user = input
+        .messages
+        .last()
+        .filter(|message| message.role == "user")
+        .cloned()
+        .ok_or_else(|| "work_plan_current_user_missing".to_string())?;
+    if !policy.allows(AllowedCapability::ProviderGeneration) {
+        let plan = deterministic_policy_plan(&allowed, &current_user.content);
+        plan.validate(&allowed)?;
+        return Ok(plan);
+    }
+    #[cfg(test)]
+    {
+        let _ = (client, authorization, instruction_digest, sink);
+        let plan = deterministic_policy_plan(&allowed, &current_user.content);
+        plan.validate(&allowed)?;
+        return Ok(plan);
+    }
+    #[cfg(not(test))]
+    {
+        let base_prompt = work_plan_system_prompt(&allowed);
+        let mut last_error = "work_plan_generation_failed".to_string();
+        for attempt in 0..2 {
+            sink.work_provider_lifecycle
+                .as_mut()
+                .ok_or_else(|| "canonical_work_provider_lifecycle_missing".to_string())?
+                .prepare_plan_invocation()?;
+            let system_prompt = if attempt == 0 {
+                base_prompt.clone()
+            } else {
+                format!(
+                    "{base_prompt}\nThe prior output was rejected with code {last_error}. Repair the complete JSON once. Do not repeat or discuss the rejected output."
+                )
+            };
+            let request = MainChatModelRequest {
+                session_id: input.conversation_id.clone(),
+                messages: vec![current_user.clone()],
+                provider_authorization: authorization.clone(),
+                system_prompt,
+                supplemental_context_blocks: Vec::new(),
+                context_snapshot_ref: instruction_digest.to_string(),
+                selected_context_refs: Vec::new(),
+                raw_life_model_included: false,
+                raw_unbounded_memory_included: false,
+                selected_skill_id: input.selected_skill_id.clone(),
+                payload_purpose: ProviderPayloadPurpose::MainChatWorkPlan,
+                stream_provider_tokens: false,
+                additional_resource_context_allowed: false,
+                required_resource_selection_digest: None,
+            };
+            let progress_session_id = input.conversation_id.clone();
+            let result = {
+                let mut emit_progress =
+                    |progress| emit_main_chat_model_progress(progress, &progress_session_id, sink);
+                client
+                    .generate_direct_answer(request, &mut emit_progress)
+                    .await
+            };
+            if let Some(receipt) = match &result {
+                Ok(generation) => generation.provider_receipt.as_ref(),
+                Err(failure) => failure.provider_receipt.as_ref(),
+            } {
+                emit_provider_receipt(receipt, sink)?;
+            }
+            sink.work_provider_lifecycle
+                .as_mut()
+                .ok_or_else(|| "canonical_work_provider_lifecycle_missing".to_string())?
+                .clear_unobserved_plan_invocation();
+            match result {
+                Ok(generation) => {
+                    match StructuredWorkPlan::parse_and_validate(&generation.content, &allowed) {
+                        Ok(plan) => return Ok(plan),
+                        Err(error) => last_error = error,
+                    }
+                }
+                Err(failure) => {
+                    last_error = failure
+                        .blocker_code
+                        .unwrap_or_else(|| "work_plan_provider_failed".into());
+                }
+            }
+        }
+        Err(last_error)
+    }
+}
+
+async fn persist_structured_work_plan(
+    state: &Arc<AppState>,
+    input: &CanonicalWorkInput,
+    plan_revision: u64,
+    plan: &StructuredWorkPlan,
+) -> Result<(), String> {
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    store
+        .lock()
+        .await
+        .persist_work_plan(
+            &input.task_id,
+            &input.run_id,
+            plan_revision,
+            plan,
+            openlife_core::work_orchestration::WorkRunBudgetPolicy::default(),
+        )
+        .map_err(|error| error.to_string())?;
+    let budget_policy = store
+        .lock()
+        .await
+        .work_run_budget_policy(&input.run_id)
+        .map_err(|error| error.to_string())?;
+    for step in &plan.steps {
+        let payload_digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
+            &serde_json::to_value(step).map_err(|_| "work_plan_step_serialization_failed")?,
+        )
+        .1;
+        let item_id = format!("item:plan-step:{}:{}", input.run_id, step.id);
+        let summary_code = format!("work_plan_step_declared:{}", step.kind.as_str());
+        let usage = store
+            .lock()
+            .await
+            .work_run_budget_usage(&input.run_id)
+            .map_err(|error| error.to_string())?;
+        budget_policy.admit_item(usage)?;
+        store
+            .lock()
+            .await
+            .append_completed_plan_item(
+                &input.task_id,
+                &input.run_id,
+                &item_id,
+                &summary_code,
+                &payload_digest,
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
+fn evaluate_work_plan_execution(
+    plan: &StructuredWorkPlan,
+    result: &crate::main_chat_kernel::MainChatTurnResult,
+    provider_state: ProviderInvocationState,
+) -> Result<(), String> {
+    let tool_succeeded = |names: &[&str]| {
+        result
+            .tool_calls
+            .iter()
+            .any(|call| names.contains(&call.name.as_str()) && call.status.as_str() == "succeeded")
+    };
+    let deliverable_present = result
+        .assistant_message
+        .as_ref()
+        .is_some_and(|message| !message.content.trim().is_empty())
+        || result.write_outcome.is_some()
+        || result.memory_governance.is_some();
+    // Kernel blockers may describe bounded limitations while still returning
+    // a valid answer. Verification is mechanical: every dispatched tool has a
+    // successful receipt and a deliverable exists. Fatal/unknown adapter
+    // states already have non-success statuses and cannot pass this check.
+    let verification_complete = deliverable_present
+        && result
+            .tool_calls
+            .iter()
+            .all(|call| call.status.as_str() == "succeeded");
+    let completed_step_ids = WorkItemScheduler::schedule(plan)
+        .into_iter()
+        .filter(|step| match step.kind {
+            WorkPlanStepKind::Analyze => provider_state == ProviderInvocationState::Completed,
+            WorkPlanStepKind::ReadLocalDocument => tool_succeeded(&["document.read", "file.read"]),
+            WorkPlanStepKind::ResearchWeb => tool_succeeded(&["web.search", "web.fetch"]),
+            WorkPlanStepKind::UseSelectedSkill => result
+                .context_metadata
+                .as_ref()
+                .is_some_and(|metadata| metadata.selected_skill_instruction_loaded),
+            WorkPlanStepKind::ReadMcp => tool_succeeded(&["mcp.read_only"]),
+            WorkPlanStepKind::DraftArtifact => result.write_outcome.is_some(),
+            WorkPlanStepKind::Verify => verification_complete,
+            WorkPlanStepKind::DeliverResult => deliverable_present,
+        })
+        .map(|step| step.id.clone())
+        .collect::<HashSet<_>>();
+    if let Some(step) = plan
+        .steps
+        .iter()
+        .find(|step| step.required && !completed_step_ids.contains(&step.id))
+    {
+        return Err(format!(
+            "work_plan_required_step_incomplete:{}:{}",
+            step.id,
+            step.kind.as_str()
+        ));
+    }
+    let required_steps_complete =
+        WorkItemExecutor::required_steps_complete(plan, &completed_step_ids);
+    let pending_or_unknown_items = result.tool_calls.iter().any(|call| {
+        matches!(
+            call.status.as_str(),
+            "running" | "waiting" | "effect_unknown"
+        )
+    }) || matches!(
+        provider_state,
+        ProviderInvocationState::Started | ProviderInvocationState::RemoteUnknown
+    );
+    WorkCompletionEvaluator::evaluate(WorkCompletionEvidence {
+        required_steps_complete,
+        pending_or_unknown_items,
+        final_result_present: deliverable_present,
+        artifact_required: plan.completion.result_kind == WorkResultKind::Artifact,
+        artifact_ready_or_waiting_review: result.write_outcome.is_some(),
+        verification_required: plan.completion.requires_verification,
+        verification_complete,
+    })
 }
 
 async fn project_selected_skill_observation(
