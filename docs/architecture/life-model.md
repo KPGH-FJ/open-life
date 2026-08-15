@@ -56,13 +56,8 @@ product owners. None of them is jointly the canonical LifeModel.
 
 `openlife-core/src/life_model.rs` defines the legacy LifeModel structure:
 metadata, identity, goals, capabilities, state, relationships, preferences, and
-evolution rules. The retired HS compatibility projection builder and decoder are
-no longer part of the source tree. A small `legacy_hs_audit` DTO remains solely
-to decode and minimize historical AgentRun selection-audit and behavior-check
-metadata; it has no selector, provider capability, write path, or runtime
-authority. New AgentRun constructors leave both historical fields empty. Its
-exit condition is the removal or explicit migration of AgentRun rows that still
-contain `hs_selection_audit_json` or `behavior_checks_json`.
+evolution rules. These fields are migration input only and do not form a
+second release-time personalization owner.
 
 New empty legacy skeletons no longer invent a focus, health state, mood, stress,
 fulfilment, or energy value. Existing YAML values continue to load exactly as
@@ -99,7 +94,7 @@ corrupt cutover relation fails closed.
 Before cutover, `LegacyLifeModelMigrationPreviewV2` reads the exact YAML bytes
 that produced the compatibility model and classifies every non-empty source
 leaf. Long-term user fields are review-required candidates; current state,
-tasks, Agent Memory, and Agent Runtime fields remain with their own owners;
+tasks, Agent Memory, and execution fields remain with their own canonical owners;
 scores and ambiguous fields are not silently reshaped. Unknown fields,
 non-finite numbers, oversized sources, and unsupported YAML constructs make the
 preview unavailable without changing data. The product shows this classification
@@ -133,17 +128,10 @@ patch source, conflict handling, and conversion from proposals to patch inputs.
 `openlife-core/src/life_model/patch_store.rs` persists patches and conflicts in
 SQLite.
 
-The former `openlife-core/src/agent/proposal_engine.rs` module is deleted. It
-was a shipped second proposal authority: `AppState` and bootstrap owned it,
-ordinary Main Chat finalization and AgentRun replay invoked it, and it could
-construct proposals from raw run output without PolicyRouter authorization.
-Those caller-shaped proposals were subsequently submitted to ReviewWorkflow,
-but ReviewWorkflow had no observation-bound policy proof to validate. The
-engine, its product consumers, and its public exports were therefore deleted
-together. Main Chat proposals must now carry current PolicyRouter admission
-into ReviewWorkflow. ToolPermission, PlanExecute, learning candidates, and
-other proposal producers remain separate domains and must carry their own
-policy and source evidence.
+Main Chat proposals must carry current Policy admission into ReviewWorkflow.
+ToolPermission, canonical Plan Items, learning candidates, and other proposal
+producers remain separate domains and must carry their own policy and source
+evidence; no raw execution output can create a proposal by itself.
 
 The shipped legacy Builder and Calibration command modules are retired. A fresh
 profile now uses the `/life-model` v2 schema-aware establishment panel. It asks
@@ -202,9 +190,8 @@ failure, or backup failure is a definite pre-effect failure; ambiguous database
 commit failures remain unknown and are not automatically retried. After a v2
 owner exists, shipped legacy read and proposal-write paths reject normal product
 use. The original YAML and verified backup are evidence only and are not queried
-by the normal product ViewModel. Main Chat, scheduled execution, generic
-AgentRuntime, and the development A2A reasoning bridge no longer read legacy
-YAML for personalization. The uncalled release Proactive command is retired.
+by the normal product ViewModel. Canonical Chat, Work, and scheduled execution
+do not read legacy YAML for personalization.
 None of these paths receives Main Chat v2 capability credit merely because the
 v2 owner exists.
 
@@ -216,9 +203,9 @@ digests, stable item IDs, source references, confirmation times, selection
 reasons, and an exact content digest. It contains no raw model and grants no
 permission.
 
-Both Main Chat send and stream enter `OpenLifeTurnRuntime` and use the same
-packet builder. The packet is a distinct ContextCompiler source; it is not an
-HS summary or Agent Memory. Confirmed goals and boundaries can add bounded
+Canonical Chat and Work load this packet through `LifeModelContextPort` in
+`src-tauri/src/personal_intelligence_ports.rs`. The packet is a distinct
+ContextCompiler source; it is not an HS summary or Agent Memory. Confirmed goals and boundaries can add bounded
 planning hints, eligible Memory results can receive a capped rerank bonus, and
 confirmed collaboration preferences can affect communication style or order
 already-legal equivalent tool candidates. Scope, lifecycle, privacy, Policy,
@@ -230,6 +217,14 @@ selected item IDs, confirmation times, reasons and affected surfaces. It exposes
 no hidden reasoning. An explicit current instruction can disable LifeModel use;
 irrelevant, unavailable, invalid or tampered models contribute no facts, and
 ordinary Agent work continues without personalization.
+
+An explicit stable preference in canonical Work goes through
+`PersonalIntelligenceSuggestionPort`. That boundary can capture a typed
+LifeModel learning candidate, but it does not create a Proposal or mutate the
+canonical version. Existing candidate maturation, typed-diff Review, and
+`LifeModelWriteGateway` materialization remain the only durable path. The
+successful capture appears as a canonical Observation Item without giving
+LifeModel any Task, permission, Artifact, or terminal-state authority.
 
 `src-tauri/src/life_model_materializer_guard.rs` limits allowed caller
 contexts. Governed manual override, restore/import, source-data compatibility,

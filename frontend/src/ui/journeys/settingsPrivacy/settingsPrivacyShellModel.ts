@@ -4,7 +4,7 @@ import type {
   WorkbenchEvidenceReference,
   WorkbenchInspectorModel,
 } from "@/ui/shell";
-import { boundaryPresentation, toWorkbenchEvidence } from "@/ui/journeys/readOnly";
+import { boundaryPresentation, toWorkbenchEvidence } from "@/ui/journeys/productWorkbench";
 import type { SettingsPrivacyJourneyController } from "./useSettingsPrivacyJourney";
 import {
   endpointHost,
@@ -29,7 +29,39 @@ export function settingsPrivacyContext(
   controller: SettingsPrivacyJourneyController,
   surface: SettingsPrivacySurfaceId
 ): WorkbenchContextSummary {
-  const title = surface === "model-provider" ? "模型与供应商" : "隐私与网络";
+  const title =
+    surface === "model-provider"
+      ? "模型与供应商"
+      : surface === "privacy-network"
+        ? "隐私与网络"
+        : "产品诊断";
+  if (surface === "diagnostics") {
+    const diagnostics = controller.snapshot?.productDiagnostics;
+    if (controller.loading) {
+      return { eyebrow: "设置", title, status: { label: "正在读取", status: "neutral" } };
+    }
+    if (!diagnostics) {
+      return { eyebrow: "设置", title, status: { label: "诊断不可用", status: "error" } };
+    }
+    return {
+      eyebrow: "设置",
+      title,
+      status: {
+        label:
+          diagnostics.status === "ready"
+            ? "产品链路正常"
+            : diagnostics.status === "degraded"
+              ? "部分能力降级"
+              : "产品链路受阻",
+        status:
+          diagnostics.status === "ready"
+            ? "neutral"
+            : diagnostics.status === "degraded"
+              ? "waiting"
+              : "error",
+      },
+    };
+  }
   if (controller.loading) {
     return { eyebrow: "设置", title, status: { label: "正在读取", status: "neutral" } };
   }
@@ -132,7 +164,7 @@ function nextAction(controller: SettingsPrivacyJourneyController): string {
   if (outcome?.result.validation_status === "consent_required") {
     return outcome.reviewItem
       ? "按需打开精确待决定项；批准只授权一次请求，之后仍需重新测试。"
-      : "先重新读取审核中心；找不到精确待决定项时不进行猜测跳转。";
+      : "先重新读取需处理事项；找不到精确待决定项时不进行猜测跳转。";
   }
   if (controller.state.phase === "dirty") return "可先测试草稿，也可以明确保存；测试不会自动保存。";
   if (controller.state.phase === "tested") return "确认字段后明确保存；保存后仍需等待边界刷新。";
@@ -149,6 +181,34 @@ export function settingsPrivacyInspector(
   surface: SettingsPrivacySurfaceId,
   selectedEvidence: string
 ): WorkbenchInspectorModel {
+  if (surface === "diagnostics") {
+    const diagnostics = controller.snapshot?.productDiagnostics;
+    return {
+      title: "产品诊断依据",
+      conclusion: diagnostics
+        ? `后端 canonical 产品诊断当前为 ${diagnostics.status}；该结论只读取当前产品 owner。`
+        : "后端没有提供 canonical 产品诊断。",
+      risk: diagnostics?.blockerCodes.length
+        ? `存在 ${diagnostics.blockerCodes.length} 个后端阻断代码；不能把部分计数可见理解为产品完全可用。`
+        : diagnostics
+          ? "当前未报告阻断代码；精确原生与外部 live 证据仍属于独立验收层。"
+          : "缺失诊断时，页面保持未知。",
+      nextAction: "重新读取诊断；需要原生或外部证明时运行对应验收，而不是从网页状态推断。",
+      evidence: [],
+      evidenceFeedback: selectedEvidence
+        ? `已选择 ${selectedEvidence}；产品诊断当前只展示 metadata-safe 状态。`
+        : "产品诊断不暴露凭据、消息正文或内部执行轨迹。",
+      technicalDetails: diagnostics
+        ? [
+            { label: "generatedAt", value: diagnostics.generatedAt },
+            { label: "persistenceMode", value: diagnostics.persistenceMode },
+            { label: "binaryKind", value: diagnostics.runtimeBuild.binaryKind },
+            { label: "bundleIdentifier", value: diagnostics.runtimeBuild.bundleIdentifier },
+            { label: "blockerCodes", value: diagnostics.blockerCodes.join(", ") || "none" },
+          ]
+        : [{ label: "availability", value: "unknown" }],
+    };
+  }
   const boundaryEnvelope = controller.effectiveBoundaryEnvelope;
   const boundary = boundaryPresentation(boundaryEnvelope);
   const result = controller.lastTestOutcome?.result;

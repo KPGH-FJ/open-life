@@ -10,12 +10,31 @@ use std::path::PathBuf;
 #[cfg(test)]
 use std::sync::Mutex;
 
-const RELEASE_APP_DIR_NAME: &str = "ai.openlife.app";
-const DEV_APP_DIR_NAME: &str = "ai.openlife.app.dev";
-const QA_APP_DIR_NAME: &str = "ai.openlife.app.qa";
+const RELEASE_APP_DIR_NAME: &str = "ai.openlife.desktop";
+const DEV_APP_DIR_NAME: &str = "ai.openlife.desktop.dev";
+const QA_APP_DIR_NAME: &str = "ai.openlife.desktop.qa";
 
 pub fn openlife_profile() -> String {
-    normalize_openlife_profile(std::env::var("OPENLIFE_PROFILE").ok().as_deref()).to_string()
+    profile_from_values(
+        option_env!("OPENLIFE_BUILD_PROFILE"),
+        std::env::var("OPENLIFE_PROFILE").ok().as_deref(),
+        cfg!(debug_assertions),
+    )
+    .to_string()
+}
+
+fn profile_from_values(
+    compiled_profile: Option<&str>,
+    runtime_profile: Option<&str>,
+    debug_build: bool,
+) -> &'static str {
+    if let Some(profile) = compiled_profile {
+        return normalize_openlife_profile(Some(profile));
+    }
+    if debug_build {
+        return normalize_openlife_profile(runtime_profile.or(Some("dev")));
+    }
+    "release"
 }
 
 pub fn normalize_openlife_profile(value: Option<&str>) -> &'static str {
@@ -234,6 +253,20 @@ pub(crate) fn save_privacy_policy_to_path(
 mod tests {
     use super::*;
     use openlife_core::privacy::{PrivacyAction, PrivacyType};
+
+    #[test]
+    fn compiled_profile_owns_release_and_qa_identity() {
+        assert_eq!(
+            profile_from_values(Some("qa"), Some("release"), false),
+            "qa"
+        );
+        assert_eq!(
+            profile_from_values(Some("release"), Some("qa"), false),
+            "release"
+        );
+        assert_eq!(profile_from_values(None, Some("dev"), true), "dev");
+        assert_eq!(profile_from_values(None, Some("qa"), false), "release");
+    }
 
     #[test]
     fn privacy_policy_persists_to_disk() {

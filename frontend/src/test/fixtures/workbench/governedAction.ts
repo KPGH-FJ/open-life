@@ -19,7 +19,7 @@ import type {
   WorkspaceConversationDataSource,
 } from "@/ui/journeys/governedAction";
 import type { DurableTruthDataSource } from "@/ui/journeys/durableTruth";
-import type { ReadOnlySpineDataSource } from "@/ui/journeys/readOnly";
+import type { ProductBoundaryDataSource } from "@/ui/journeys/productWorkbench";
 import type { SettingsPrivacyDataSource } from "@/ui/journeys/settingsPrivacy";
 import {
   buildDurableFixtureSnapshot,
@@ -36,7 +36,7 @@ import {
   type ProviderTestFixtureStage,
 } from "./settingsPrivacy";
 
-export type WorkbenchJourneyDataSource = ReadOnlySpineDataSource &
+export type WorkbenchJourneyDataSource = ProductBoundaryDataSource &
   GovernedActionDataSource &
   DurableTruthDataSource &
   SettingsPrivacyDataSource &
@@ -192,27 +192,6 @@ function permissionItem(stage: FixtureStage, incomplete: boolean): ReviewItem {
       { id: taskId, kind: "task", label: "客户访谈整理任务" },
       { id: "workspace/interview-notes", kind: "external_resource", label: "访谈记录目录" },
     ],
-    taskResumeRelation: {
-      taskSessionId: taskId,
-      resumeRequiresMaterialization: false,
-      canRequestResume: status === "approved",
-      resumeActionId: status === "approved" ? `${taskId}:resume` : undefined,
-      blockedReason: status === "approved" ? undefined : "权限决定尚未批准，任务不能继续。",
-    },
-  };
-}
-
-function resumeControl(): TaskControl {
-  return {
-    id: `${taskId}:resume`,
-    label: "继续任务",
-    kind: "resume",
-    effect: "task_resume_request",
-    enabled: true,
-    requiresConfirmation: true,
-    targetTaskId: taskId,
-    targetActionId: "action-read-interview-notes",
-    completionProofAfterDispatch: false,
   };
 }
 
@@ -222,14 +201,38 @@ function activeTask(stage: FixtureStage): TaskViewModelItem {
   const running = stage === "running";
   return {
     canonicalTaskId: taskId,
-    taskSessionId: taskId,
     relatedRunIds: ["run-interview-notes-01"],
     conversationId: "conversation-research-plan",
     title: "整理三次客户访谈，归纳下周要验证的问题",
-    strategy: "react",
     lifecycleStatus: running ? "running" : rejected ? "blocked" : "waiting_permission",
     terminalDeliveryStatus: rejected ? "blocked" : "not_terminal",
     finalDeliveryEvidencePresent: false,
+    items: [],
+    workPlan: {
+      revision: 1,
+      steps: [
+        {
+          id: "read-notes",
+          kind: "read_workspace_file",
+          required: true,
+          dependsOn: [],
+        },
+        {
+          id: "deliver",
+          kind: "deliver_result",
+          required: true,
+          dependsOn: ["read-notes"],
+        },
+      ],
+      completion: { resultKind: "answer", requiresVerification: false },
+      budgetPolicy: {
+        maxPlanAttempts: 2,
+        maxProviderAttempts: 6,
+        maxToolAttempts: 8,
+        maxTotalItems: 32,
+      },
+    },
+    artifacts: [],
     pendingBlockers: pending
       ? ["读取本地访谈记录前需要你的决定；当前尚未访问文件。"]
       : rejected
@@ -238,8 +241,8 @@ function activeTask(stage: FixtureStage): TaskViewModelItem {
     pendingReviewItemRefs: pending
       ? [{ id: reviewItemId, kind: "review_item", label: "读取访谈记录的权限请求" }]
       : [],
-    allowedControls: stage === "approved" ? [resumeControl()] : [],
-    nextRecommendedControl: stage === "approved" ? "resume" : pending ? "open_review_item" : "none",
+    allowedControls: [],
+    nextRecommendedControl: pending ? "open_review_item" : "none",
     latestResultPreview: {
       status: rejected ? "blocked" : "not_terminal",
       label: running ? "正在读取并比较访谈记录" : "任务停在文件读取之前",
@@ -260,9 +263,11 @@ function activeTask(stage: FixtureStage): TaskViewModelItem {
 function taskSummary(items: TaskViewModelItem[]): TasksViewModel["summary"] {
   return {
     total: items.length,
+    needsAttentionCount: items.filter(item => item.needsAttention).length,
     activeCount: items.filter(item =>
-      ["running", "waiting_permission", "blocked"].includes(item.lifecycleStatus)
+      ["running", "waiting_review", "waiting_permission", "blocked"].includes(item.lifecycleStatus)
     ).length,
+    waitingReviewCount: items.filter(item => item.lifecycleStatus === "waiting_review").length,
     waitingPermissionCount: items.filter(item => item.lifecycleStatus === "waiting_permission")
       .length,
     blockedCount: items.filter(item => item.lifecycleStatus === "blocked").length,
@@ -340,6 +345,8 @@ function buildSnapshot(
   const task = activeTask(stage);
   const reviewItems = empty ? [] : [item, durableItem, ...(providerItem ? [providerItem] : [])];
   const workspace: WorkspaceViewModel = {
+    selectedConversationId: empty ? undefined : task.conversationId,
+    tasks: empty ? [] : [task],
     ...(empty ? {} : { activeTask: task }),
     recentTaskRefs: empty ? [] : [{ id: taskId, kind: "task", label: task.title }],
     pendingReviewItems: !empty && (stage === "pending" || stage === "deferred") ? [item] : [],
@@ -518,13 +525,6 @@ export function workbenchJourneyFixtureDataSource(
   async function applyTaskControl(control: TaskControl): Promise<void> {
     if (readStatus(id) !== "ready") throw new Error("fixture_workspace_read_model_not_ready");
     if (control.targetTaskId !== taskId) throw new Error("fixture_task_control_target_mismatch");
-    if (control.kind === "resume") {
-      if (stage !== "approved" || control.effect !== "task_resume_request") {
-        throw new Error("fixture_resume_control_mismatch");
-      }
-      stage = "running";
-      return;
-    }
     throw new Error(`fixture_task_control_unsupported:${control.kind}`);
   }
   return {
@@ -567,18 +567,29 @@ export function workbenchJourneyFixtureDataSource(
     async restoreMemory() {},
     async rollbackMemory() {},
     async privacyEraseMemory() {},
-    async listSessions() {
+    async loadConversation(conversationId) {
       if (readStatus(id) === "error") throw new Error("fixture_conversation_store_unavailable");
-      return sessions.map(session => ({ ...session }));
-    },
-    async loadHistory(sessionId) {
-      if (readStatus(id) === "error") throw new Error("fixture_conversation_store_unavailable");
-      const history = histories.get(sessionId);
-      if (!history) throw new Error("fixture_conversation_session_missing");
-      return history.map(message => ({ ...message }));
-    },
-    async loadLifeModelInfluence() {
-      return null;
+      const conversations = sessions.map(session => ({ ...session }));
+      const selectedConversationId =
+        conversationId && histories.has(conversationId)
+          ? conversationId
+          : (conversations[0]?.session_id ?? null);
+      return {
+        status: conversations.length > 0 ? "ready" : "empty",
+        conversations,
+        projects: [],
+        selectedProjectId: null,
+        selectedConversationId,
+        messages: selectedConversationId
+          ? (histories.get(selectedConversationId) ?? []).map(message => ({ ...message }))
+          : [],
+        latestTurn: null,
+        providerStatus: "ready",
+        providerProfiles: [],
+        selectedProviderProfileId: null,
+        providerErrorCode: null,
+        workStatus: "ready",
+      };
     },
     async createSession(sessionId, title) {
       if (readStatus(id) !== "ready") throw new Error("fixture_workspace_read_model_not_ready");
@@ -641,24 +652,24 @@ export function workbenchJourneyFixtureDataSource(
       events.onStart({
         session_id: sessionId,
         operation_id: options.operationId,
-        task_session_id: options.operationId,
-        run_id: options.operationId,
+        conversation_id: sessionId,
+        turn_id: options.operationId,
         reasoning_trace: {},
         tool_calls: [],
       });
       events.onChunk({
         session_id: sessionId,
         operation_id: options.operationId,
-        task_session_id: options.operationId,
-        run_id: options.operationId,
+        conversation_id: sessionId,
+        turn_id: options.operationId,
         chunk: reply,
       });
       histories.set(sessionId, [...messages, { role: "assistant", content: reply }]);
       return {
         session_id: sessionId,
         operation_id: options.operationId,
-        task_session_id: options.operationId,
-        run_id: options.operationId,
+        conversation_id: sessionId,
+        turn_id: options.operationId,
         reply,
         status: "completed",
         blockers: [],
@@ -666,18 +677,8 @@ export function workbenchJourneyFixtureDataSource(
         tool_calls: [],
       } as Awaited<ReturnType<WorkspaceConversationDataSource["streamTurn"]>>;
     },
-    async cancelTask() {
-      return {
-        session: null,
-        actions: [],
-        transcript: [],
-        pendingApprovalCount: 0,
-        activeToolCount: 0,
-        canResume: false,
-        canCancel: false,
-        canRetry: false,
-        cancellationPending: true,
-      };
+    async cancelChatTurn() {
+      return { status: "cancelled" };
     },
     async dispatchReviewAction(reviewAction) {
       if (readStatus(id) !== "ready") {
@@ -697,17 +698,15 @@ export function workbenchJourneyFixtureDataSource(
         else if (reviewAction.kind === "reject") durableStage = "rejected";
         else if (reviewAction.kind === "later") durableStage = "deferred";
         else throw new Error("fixture_durable_review_action_unsupported");
-      } else if (reviewAction.kind === "approve") stage = "approved";
+      } else if (reviewAction.kind === "approve") stage = "running";
       else if (reviewAction.kind === "reject") stage = "rejected";
       else if (reviewAction.kind === "later") stage = "deferred";
       else throw new Error("fixture_review_action_unsupported");
     },
     async editLifeModelLearningProposal() {},
-    async resumeTask(control) {
-      await applyTaskControl(control);
-    },
     async dispatchTaskControl(control) {
       await applyTaskControl(control);
     },
+    async requestArtifactUndo() {},
   };
 }

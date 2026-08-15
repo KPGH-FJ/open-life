@@ -1,15 +1,14 @@
 import {
   acceptProposal,
-  cancelMainChatAgentTask,
+  cancelWorkTask,
   editLifeModelLearningProposal,
   getReviewCenterViewModel,
   getTasksViewModel,
   getWorkspaceViewModel,
   postponeProposal,
-  refreshMainChatAgentTaskContext,
   rejectProposal,
-  resumeMainChatAgentTask,
-  retryMainChatAgentAction,
+  requestArtifactUndo,
+  retryWorkTask,
   type ReviewAction,
   type ReviewCenterViewModel,
   type TaskControl,
@@ -18,7 +17,7 @@ import {
   type WorkspaceViewModel,
 } from "@/tauri";
 import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
-import { buildReadModelErrorEnvelope } from "@/ui/journeys/readOnly/readOnlySpineDataSource";
+import { buildReadModelErrorEnvelope } from "@/ui/journeys/productWorkbench/productBoundaryDataSource";
 
 export type GovernedActionDiagnostic = {
   id: "workspace_view_model" | "review_center_view_model" | "tasks_view_model";
@@ -34,11 +33,11 @@ export type GovernedActionSnapshot = {
 };
 
 export interface GovernedActionDataSource {
-  load(): Promise<GovernedActionSnapshot>;
+  load(conversationId?: string | null): Promise<GovernedActionSnapshot>;
   dispatchReviewAction(action: ReviewAction): Promise<void>;
   editLifeModelLearningProposal(proposalId: string, statement: string): Promise<void>;
-  resumeTask(control: TaskControl): Promise<void>;
   dispatchTaskControl(control: TaskControl): Promise<void>;
+  requestArtifactUndo(artifactId: string): Promise<void>;
 }
 
 export function buildGovernedActionErrorSnapshot(error: unknown): GovernedActionSnapshot {
@@ -81,9 +80,11 @@ function settledEnvelope<T>(
       );
 }
 
-async function loadGovernedActionSnapshot(): Promise<GovernedActionSnapshot> {
+async function loadGovernedActionSnapshot(
+  conversationId?: string | null
+): Promise<GovernedActionSnapshot> {
   const [workspaceResult, reviewResult, tasksResult] = await Promise.allSettled([
-    getWorkspaceViewModel(),
+    getWorkspaceViewModel(conversationId),
     getReviewCenterViewModel(),
     getTasksViewModel(),
   ]);
@@ -143,32 +144,24 @@ async function dispatchReviewAction(action: ReviewAction): Promise<void> {
       throw new Error("review_apply_command_unavailable");
     case "revoke":
       throw new Error("review_revoke_command_unavailable");
-    case "resume":
-      throw new Error("review_resume_requires_task_control_contract");
     case "view_evidence":
       throw new Error("review_evidence_requires_navigation_handler");
   }
 }
 
-async function resumeTask(control: TaskControl): Promise<void> {
-  await resumeMainChatAgentTask(control.targetTaskId);
-}
-
 async function dispatchTaskControl(control: TaskControl): Promise<void> {
   switch (control.kind) {
     case "resume":
-      await resumeMainChatAgentTask(control.targetTaskId);
-      return;
+      throw new Error("canonical_task_resume_requires_retry_or_review_checkpoint");
     case "cancel":
-      await cancelMainChatAgentTask(control.targetTaskId);
+      await cancelWorkTask(control.targetTaskId);
       return;
     case "retry":
       if (!control.targetActionId) throw new Error("task_retry_target_action_missing");
-      await retryMainChatAgentAction(control.targetTaskId, control.targetActionId);
+      await retryWorkTask(control.targetTaskId, control.targetActionId);
       return;
     case "refresh_context":
-      await refreshMainChatAgentTaskContext(control.targetTaskId);
-      return;
+      throw new Error("canonical_task_refresh_context_unavailable");
     case "open_trace":
     case "open_run":
     case "open_review_item":
@@ -198,6 +191,15 @@ export const tauriGovernedActionDataSource: GovernedActionDataSource = {
       throw new Error("lifemodel_learning_edit_receipt_unverified");
     }
   },
-  resumeTask,
   dispatchTaskControl,
+  async requestArtifactUndo(artifactId) {
+    const receipt = await requestArtifactUndo(artifactId);
+    if (
+      receipt.artifactId !== artifactId ||
+      !receipt.proposalId ||
+      receipt.status !== "waiting_review"
+    ) {
+      throw new Error("artifact_undo_receipt_unverified");
+    }
+  },
 };

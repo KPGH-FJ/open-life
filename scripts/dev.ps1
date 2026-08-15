@@ -49,13 +49,6 @@ if ($env:OPENLIFE_DATA_DIR -and $env:OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_D
     exit 1
 }
 $env:OPENLIFE_PROFILE = $OpenLifeProfile
-if (-not $env:A2A_PORT) {
-    if ($OpenLifeProfile -eq "dev") {
-        $env:A2A_PORT = "8766"
-    } else {
-        $env:A2A_PORT = "8765"
-    }
-}
 $VitePort = if ($env:PORT) { $env:PORT } else { "5173" }
 $env:OPENLIFE_DEV_URL = "http://127.0.0.1:$VitePort"
 $env:OPENLIFE_FRONTEND_DIST = Join-Path $RepoRoot "target/openlife-dev/frontend-dist-placeholder"
@@ -117,7 +110,6 @@ Write-Host "OpenLife - 开发模式启动" -ForegroundColor Blue
 Write-Host "[INFO] Profile: $OpenLifeProfile" -ForegroundColor Blue
 Write-Host "[INFO] Vite: $($env:OPENLIFE_DEV_URL)" -ForegroundColor Blue
 Write-Host "[INFO] Dev frontendDist placeholder: $($env:OPENLIFE_FRONTEND_DIST)" -ForegroundColor Blue
-Write-Host "[INFO] A2A: 127.0.0.1:$($env:A2A_PORT)" -ForegroundColor Blue
 Write-Host ""
 Write-Host "╔══════════════════════════════════════════════════════════════╗" -ForegroundColor Green
 Write-Host "║  🚀 正在启动 OpenLife 开发服务器...                           ║" -ForegroundColor Green
@@ -144,15 +136,6 @@ if (-not (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
     Write-Host "[ERROR] cargo 不可用" -ForegroundColor Red
     exit 1
 }
-if ($env:OPENLIFE_DEV_AUTOSTART_A2A -eq "1") {
-    if ($env:OPENLIFE_ENABLE_DEV_A2A -ne "1" -or -not $env:OPENLIFE_A2A_PAIRED_TOKEN -or $env:OPENLIFE_A2A_PAIRED_TOKEN.Length -lt 32) {
-        Write-Host "[ERROR] A2A autostart requires OPENLIFE_ENABLE_DEV_A2A=1 and a 32+ character OPENLIFE_A2A_PAIRED_TOKEN" -ForegroundColor Red
-        exit 1
-    }
-    Write-Host "[INFO] 构建显式启用的开发 A2A sidecar..." -ForegroundColor Blue
-    cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
-}
-
 Push-Location $RepoRoot
 $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
 $globalTauri = Get-Command "tauri" -ErrorAction SilentlyContinue

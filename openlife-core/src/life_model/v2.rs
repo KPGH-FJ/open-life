@@ -115,7 +115,7 @@ pub enum LegacyLifeModelMigrationOwnerV2 {
     StateStore,
     Tasks,
     AgentMemory,
-    AgentRuntime,
+    ToolCapability,
     MigrationMetadata,
     LegacyCompatibilityProjection,
     Unassigned,
@@ -1299,7 +1299,7 @@ fn classify_legacy_path(path: &str) -> Option<LegacyFieldClassification> {
         | "capabilities.tools[].proficiency"
         | "capabilities.tools[].description" => legacy_classification(
             Disposition::ExternalOwner,
-            Owner::AgentRuntime,
+            Owner::ToolCapability,
             None,
             "agent_tool_capability_is_not_user_lifemodel",
             false,
@@ -3355,7 +3355,7 @@ evolution_rules: [Always preserve user authority.]
         );
         assert_eq!(
             item("capabilities.tools[0].name").target_owner,
-            LegacyLifeModelMigrationOwnerV2::AgentRuntime
+            LegacyLifeModelMigrationOwnerV2::ToolCapability
         );
         assert_eq!(
             item("capabilities.skills[0].proficiency").disposition,

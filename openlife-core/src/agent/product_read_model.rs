@@ -120,7 +120,6 @@ pub enum ReviewActionKind {
     Later,
     Revoke,
     Apply,
-    Resume,
     ViewEvidence,
 }
 
@@ -129,7 +128,6 @@ pub enum ReviewActionKind {
 pub enum ReviewActionEffect {
     DecisionOnly,
     MaterializationRequest,
-    TaskResumeRequest,
     EvidenceOnly,
 }
 
@@ -140,7 +138,6 @@ impl ReviewActionKind {
                 ReviewActionEffect::DecisionOnly
             }
             Self::Apply => ReviewActionEffect::MaterializationRequest,
-            Self::Resume => ReviewActionEffect::TaskResumeRequest,
             Self::ViewEvidence => ReviewActionEffect::EvidenceOnly,
         }
     }
@@ -546,10 +543,6 @@ mod tests {
             (
                 ReviewActionKind::Apply,
                 ReviewActionEffect::MaterializationRequest,
-            ),
-            (
-                ReviewActionKind::Resume,
-                ReviewActionEffect::TaskResumeRequest,
             ),
             (
                 ReviewActionKind::ViewEvidence,

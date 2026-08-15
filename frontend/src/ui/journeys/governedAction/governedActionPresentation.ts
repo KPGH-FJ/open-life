@@ -2,7 +2,6 @@ import type {
   EvidenceRef,
   ProviderPrivacyBoundarySummary,
   ReviewItem,
-  TaskControl,
   ViewModelEnvelope,
 } from "@/tauri";
 import type {
@@ -13,7 +12,7 @@ import type {
 import {
   taskLifecyclePresentation,
   toWorkbenchEvidence,
-} from "@/ui/journeys/readOnly/readOnlySpinePresentation";
+} from "@/ui/journeys/productWorkbench/workbenchPresentation";
 import type { GovernedActionSnapshot } from "./governedActionDataSource";
 
 function uniqueEvidence(refs: readonly EvidenceRef[]): WorkbenchEvidenceReference[] {
@@ -114,42 +113,42 @@ export function reviewContext(
   if (!snapshot || snapshot.reviewEnvelope.status === "loading") {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "正在读取", status: "neutral" },
     };
   }
   if (snapshot.reviewEnvelope.status === "error") {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "状态不可用", status: "error" },
     };
   }
   if (snapshot.reviewEnvelope.status === "stale") {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "状态已陈旧", status: "stale" },
     };
   }
   if (snapshot.reviewEnvelope.status === "empty") {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "暂无待处理项", status: "neutral" },
     };
   }
   if (!item) {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "暂无待处理项", status: "neutral" },
     };
   }
   if (["pending", "edited", "deferred"].includes(item.status)) {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "等待你的决定", status: "waiting" },
     };
   }
@@ -168,7 +167,7 @@ export function reviewContext(
                 : { label: "已批准，尚未应用", status: "neutral" as const };
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: {
         label: item.type === "tool_permission" ? "已允许一次，尚未继续任务" : materialization.label,
         status: item.type === "tool_permission" ? "neutral" : materialization.status,
@@ -179,29 +178,15 @@ export function reviewContext(
   if (item.status === "rejected") {
     return {
       eyebrow: "建议与权限",
-      title: "审核中心",
+      title: "需处理",
       status: { label: "已拒绝", status: "neutral" },
     };
   }
   return {
     eyebrow: "建议与权限",
-    title: "审核中心",
+    title: "需处理",
     status: { label: "决定状态未知", status: "unknown" },
   };
-}
-
-export function findExactResumeControl(snapshot: GovernedActionSnapshot): TaskControl | null {
-  if (snapshot.workspaceEnvelope.status !== "ready") return null;
-  const task = snapshot.workspaceEnvelope.data?.activeTask;
-  if (!task?.taskSessionId || task.canonicalTaskId !== task.taskSessionId) return null;
-  return (
-    task.allowedControls.find(
-      control =>
-        control.kind === "resume" &&
-        control.effect === "task_resume_request" &&
-        control.targetTaskId === task.taskSessionId
-    ) ?? null
-  );
 }
 
 export function workspaceInspector(
@@ -239,11 +224,13 @@ export function workspaceInspector(
         ? "WorkspaceViewModel 未能建立，当前没有可执行产品结论。"
         : task?.lifecycleStatus === "waiting_permission"
           ? "任务暂停在一个明确动作之前；被请求的动作尚未执行。"
-          : task?.lifecycleStatus === "running"
-            ? "刷新后的任务读模型确认同一任务正在处理。"
-            : task
-              ? `后端将当前任务标记为 ${task.lifecycleStatus}。`
-              : "后端没有提供当前活动任务。",
+          : task?.lifecycleStatus === "waiting_review"
+            ? "报告产物已经生成，但任务要等你审核后才能确认交付。"
+            : task?.lifecycleStatus === "running"
+              ? "刷新后的任务读模型确认同一任务正在处理。"
+              : task
+                ? `后端将当前任务标记为 ${task.lifecycleStatus}。`
+                : "后端没有提供当前活动任务。",
     risk: permissionItem
       ? permissionItem.decisionContext.permission?.status === "ready"
         ? "批准只创建一次精确授权；任务恢复和后续结果仍需独立刷新。"
@@ -253,10 +240,8 @@ export function workspaceInspector(
         ? "错误或陈旧状态不能授权审核决定或任务恢复。"
         : "当前没有等待决定的精确权限项。",
     nextAction: permissionItem
-      ? "进入审核中心核对访问范围并作出决定。"
-      : findExactResumeControl(snapshot)?.enabled
-        ? "请求继续任务，然后再次刷新同一任务状态。"
-        : "查看当前活动与来源；没有后端允许的动作时保持只读。",
+      ? "进入需处理事项核对访问范围并作出决定。"
+      : "查看当前活动与来源；没有后端允许的动作时保持只读。",
     evidence,
     evidenceFeedback: selectedEvidence
       ? `已选择 ${selectedEvidence}；这里只展示引用元数据，不展开敏感正文。`
@@ -266,7 +251,6 @@ export function workspaceInspector(
     technicalDetails: [
       { label: "workspaceStatus", value: snapshot.workspaceEnvelope.status },
       { label: "activeTaskId", value: task?.canonicalTaskId ?? "none" },
-      { label: "taskSessionId", value: task?.taskSessionId ?? "none" },
       { label: "lifecycle", value: task?.lifecycleStatus ?? "none" },
       {
         label: "reviewItemIds",
@@ -334,11 +318,9 @@ export function reviewInspector(
         ? `风险级别由后端标记为 ${item.risk}；不能从页面文本重新分级。`
         : "没有可用于决定的上下文。",
     nextAction: item
-      ? item.status === "approved" && item.taskResumeRelation?.canRequestResume
-        ? "返回工作区，刷新并核对同一任务的恢复控制。"
-        : ["pending", "edited", "deferred"].includes(item.status)
-          ? "比较范围、影响与来源，再选择拒绝、稍后或批准。"
-          : "查看刷新后的状态与证据；不要从命令回调推断完成。"
+      ? ["pending", "edited", "deferred"].includes(item.status)
+        ? "比较范围、影响与来源，再选择拒绝、稍后或批准。"
+        : "查看刷新后的状态与证据；不要从命令回调推断完成。"
       : "选择一个审核项。",
     evidence,
     evidenceFeedback: selectedEvidence
@@ -352,7 +334,6 @@ export function reviewInspector(
       { label: "decision", value: item?.status ?? "none" },
       { label: "materialization", value: item?.materializationStatus ?? "none" },
       { label: "proposalId", value: item?.source.proposalId ?? "none" },
-      { label: "taskSessionId", value: item?.taskResumeRelation?.taskSessionId ?? "none" },
       { label: "scopeKind", value: permission?.scopeKind ?? "none" },
       { label: "scopeDigest", value: permission?.scopeDigest ?? "none" },
       { label: "requestDigest", value: permission?.requestDigest ?? "none" },

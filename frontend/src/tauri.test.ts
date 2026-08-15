@@ -4,11 +4,7 @@ import {
   acceptProposal,
   draftEditMemoryProposal,
   editProposal,
-  getStateHistory,
-  listMainChatAgentEvents,
-  getMainChatAgentStateSnapshot,
   restoreArchivedMemory,
-  saveChatMessage,
   startStreamMessage,
   importAllData,
   abandonGovernedDataImportRecovery,
@@ -19,7 +15,6 @@ import {
   redactInvokeArgs,
   saveConfig,
   sendMessageV2,
-  executeToolCall,
   pickAndImportResources,
   cancelResourceImport,
   getResourceImportStatus,
@@ -30,7 +25,7 @@ vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),
 }));
 
-describe("tauri command argument aliases", () => {
+describe("canonical Tauri command arguments", () => {
   beforeEach(() => {
     vi.mocked(invoke).mockResolvedValue(undefined);
   });
@@ -248,9 +243,7 @@ describe("tauri command argument aliases", () => {
 
     expect(invoke).toHaveBeenCalledWith("abandon_governed_data_import_recovery", {
       operationId,
-      operation_id: operationId,
       confirmationEvidence: evidence,
-      confirmation_evidence: evidence,
     });
   });
 
@@ -280,41 +273,8 @@ describe("tauri command argument aliases", () => {
     expect(invoke).toHaveBeenCalledWith("get_governed_data_import_status", undefined);
   });
 
-  it("redacts tool arguments and file or email content from dev invoke logs", async () => {
-    vi.mocked(invoke).mockResolvedValue({
-      name: "email.propose_draft",
-      arguments: {},
-      success: true,
-    });
-
-    await executeToolCall("email.propose_draft", {
-      to: "person@example.com",
-      body: "邮件正文原文",
-      file_content: "文件内容原文",
-      token: "tool-token-secret",
-    });
-
-    const redacted = redactedLogForLastInvoke();
-    expect(redacted).not.toContain("person@example.com");
-    expect(redacted).not.toContain("邮件正文原文");
-    expect(redacted).not.toContain("文件内容原文");
-    expect(redacted).not.toContain("tool-token-secret");
-    expect(redacted).toContain("arguments");
-    expect(redacted).toContain('"redacted":true');
-  });
-
-  it("adds camelCase aliases for snake_case command arguments", async () => {
-    await getStateHistory("专注度", 7);
+  it("sends canonical camelCase command arguments", async () => {
     await restoreArchivedMemory({ ownerKind: "knowledge_note", ownerId: "note-1" });
-
-    expect(invoke).toHaveBeenCalledWith(
-      "get_state_history",
-      expect.objectContaining({
-        dimensionName: "专注度",
-        dimension_name: "专注度",
-        limit: 7,
-      })
-    );
     expect(invoke).toHaveBeenCalledWith(
       "restore_archived_chunks",
       expect.objectContaining({
@@ -323,41 +283,21 @@ describe("tauri command argument aliases", () => {
     );
   });
 
-  it("keeps existing explicit aliases for high-traffic chat commands", async () => {
+  it("sends one typed argument envelope for the canonical Chat stream command", async () => {
     await startStreamMessage("session-1", [{ role: "user", content: "你好" }], {
       operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
     });
-    await saveChatMessage(
-      "session-1",
-      { role: "assistant", content: "你好" },
-      "c7414f1e-35dc-4aec-b2f0-f704313003aa"
-    );
 
-    expect(invoke).toHaveBeenCalledWith(
-      "start_stream_message",
-      expect.objectContaining({
+    expect(invoke).toHaveBeenCalledWith("start_stream_message", {
+      args: {
         operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
-        operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
         sessionId: "session-1",
-        session_id: "session-1",
-        args: expect.objectContaining({
-          operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
-          operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003a1",
-          sessionId: "session-1",
-          session_id: "session-1",
-        }),
-      })
-    );
-    expect(invoke).toHaveBeenCalledWith(
-      "save_chat_message",
-      expect.objectContaining({
-        sessionId: "session-1",
-        session_id: "session-1",
-        message: { role: "assistant", content: "你好" },
-        operationId: "c7414f1e-35dc-4aec-b2f0-f704313003aa",
-        operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003aa",
-      })
-    );
+        messages: [{ role: "user", content: "你好" }],
+        mode: "chat",
+        taskId: undefined,
+        runId: undefined,
+      },
+    });
   });
 
   it("passes exact durable identities to the governed resource commands", async () => {
@@ -373,29 +313,22 @@ describe("tauri command argument aliases", () => {
 
     expect(invoke).toHaveBeenCalledWith("pick_and_import_resources", {
       importOperationId,
-      import_operation_id: importOperationId,
       turnOperationId,
-      turn_operation_id: turnOperationId,
     });
     expect(invoke).toHaveBeenCalledWith("cancel_resource_import", {
       operationId: importOperationId,
-      operation_id: importOperationId,
     });
     expect(invoke).toHaveBeenCalledWith("get_resource_import_status", {
       operationId: importOperationId,
-      operation_id: importOperationId,
     });
     expect(invoke).toHaveBeenCalledWith("detach_resource_from_turn", {
       operationId: detachOperationId,
-      operation_id: detachOperationId,
       turnOperationId,
-      turn_operation_id: turnOperationId,
       resourceId,
-      resource_id: resourceId,
     });
   });
 
-  it("passes selected skill id aliases through chat command wrappers", async () => {
+  it("passes the selected skill through canonical chat command wrappers", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reply: "ok",
       reasoning_trace: {},
@@ -415,53 +348,15 @@ describe("tauri command argument aliases", () => {
       "send_message",
       expect.objectContaining({
         operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a2",
-        operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003a2",
         selectedSkillId: "summarize",
-        selected_skill_id: "summarize",
       })
     );
-    expect(invoke).toHaveBeenCalledWith(
-      "start_stream_message",
-      expect.objectContaining({
+    expect(invoke).toHaveBeenCalledWith("start_stream_message", {
+      args: expect.objectContaining({
         operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a3",
-        operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003a3",
         selectedSkillId: "summarize",
-        selected_skill_id: "summarize",
-        args: expect.objectContaining({
-          operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a3",
-          operation_id: "c7414f1e-35dc-4aec-b2f0-f704313003a3",
-          selectedSkillId: "summarize",
-          selected_skill_id: "summarize",
-        }),
-      })
-    );
-  });
-
-  it("adds aliases for durable Main Chat event replay commands", async () => {
-    vi.mocked(invoke)
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce({ task: { taskId: "mainchat-task-1" } });
-
-    await listMainChatAgentEvents("mainchat-task-1", 7, 50);
-    await getMainChatAgentStateSnapshot("mainchat-task-1");
-
-    expect(invoke).toHaveBeenCalledWith(
-      "list_main_chat_agent_events",
-      expect.objectContaining({
-        taskSessionId: "mainchat-task-1",
-        task_session_id: "mainchat-task-1",
-        afterSequence: 7,
-        after_sequence: 7,
-        limit: 50,
-      })
-    );
-    expect(invoke).toHaveBeenCalledWith(
-      "get_main_chat_agent_state_snapshot",
-      expect.objectContaining({
-        taskSessionId: "mainchat-task-1",
-        task_session_id: "mainchat-task-1",
-      })
-    );
+      }),
+    });
   });
 
   it("sends the governed import request envelope", async () => {
@@ -509,45 +404,24 @@ describe("tauri command argument aliases", () => {
         createPreChangeSnapshot: true,
         importTargets: ["life_model", "messages", "vectors", "state_store"],
       },
-      import_request: {
-        operationId: "11111111-1111-4111-8111-111111111111",
-        purpose: "manual_restore",
-        explicitUserIntent: true,
-        createPreChangeSnapshot: true,
-        importTargets: ["life_model", "messages", "vectors", "state_store"],
-      },
     });
   });
 
-  it("normalizes proposal command arguments", async () => {
+  it("sends proposal commands without compatibility aliases", async () => {
     await acceptProposal("proposal-1");
     await editProposal("proposal-1", { name: "新值" });
     await draftEditMemoryProposal("proposal-memory-1", { content: "draft" });
 
-    expect(invoke).toHaveBeenCalledWith(
-      "accept_proposal",
-      expect.objectContaining({
-        proposalId: "proposal-1",
-        proposal_id: "proposal-1",
-      })
-    );
-    expect(invoke).toHaveBeenCalledWith(
-      "edit_proposal",
-      expect.objectContaining({
-        proposalId: "proposal-1",
-        proposal_id: "proposal-1",
-        newAfter: { name: "新值" },
-        new_after: { name: "新值" },
-      })
-    );
-    expect(invoke).toHaveBeenCalledWith(
-      "draft_edit_memory_proposal",
-      expect.objectContaining({
-        proposalId: "proposal-memory-1",
-        proposal_id: "proposal-memory-1",
-        newAfter: { content: "draft" },
-        new_after: { content: "draft" },
-      })
-    );
+    expect(invoke).toHaveBeenCalledWith("accept_proposal", {
+      proposalId: "proposal-1",
+    });
+    expect(invoke).toHaveBeenCalledWith("edit_proposal", {
+      proposalId: "proposal-1",
+      newAfter: { name: "新值" },
+    });
+    expect(invoke).toHaveBeenCalledWith("draft_edit_memory_proposal", {
+      proposalId: "proposal-memory-1",
+      newAfter: { content: "draft" },
+    });
   });
 });

@@ -8,7 +8,7 @@ import {
   FoundationTextField,
   FoundationToggle,
 } from "@/ui/foundation";
-import { boundaryPresentation } from "@/ui/journeys/readOnly";
+import { boundaryPresentation } from "@/ui/journeys/productWorkbench";
 import {
   credentialState,
   endpointHost,
@@ -53,6 +53,10 @@ export function SettingsPrivacyView({
     );
   }
 
+  if (surface === "diagnostics") {
+    return <ProductDiagnosticsPanel controller={controller} />;
+  }
+
   if (!draft) {
     const safeModeActive = controller.snapshot?.safeMode?.active === true;
     return (
@@ -81,6 +85,8 @@ export function SettingsPrivacyView({
   const searchProvider = draft.system?.search_provider ?? "duckduckgo";
   const searchCredential = searchCredentialState(draft);
   const artifactOutputDirectory = draft.system?.safe_paths?.[0];
+  const runtimeProfile = controller.snapshot?.productDiagnostics?.runtimeBuild.profile ?? null;
+  const localProfileCredentialStore = runtimeProfile === "dev" || runtimeProfile === "qa";
 
   return (
     <div
@@ -134,6 +140,16 @@ export function SettingsPrivacyView({
       {surface === "model-provider" ? (
         <fieldset className="ol-settings-form" disabled={busy}>
           <legend className="ol-sr-only">模型与供应商配置</legend>
+
+          {localProfileCredentialStore && (
+            <FoundationNotice title="开发凭据与正式产品隔离">
+              <p>
+                当前是 {runtimeProfile === "qa" ? "QA" : "DEV"}{" "}
+                构建。内部凭据及你在此构建中明确保存的 Provider 凭据只写入当前 profile 的本地 0600
+                文件，不使用正式产品 Keychain，也不会从正式 profile 自动复制。
+              </p>
+            </FoundationNotice>
+          )}
 
           <section className="ol-settings-section" aria-labelledby="ol-settings-local-title">
             <div className="ol-settings-section-heading">
@@ -329,10 +345,6 @@ export function SettingsPrivacyView({
             <summary>高级配置摘要</summary>
             <dl>
               <div>
-                <dt>运行模式</dt>
-                <dd>{draft.runtime_mode ?? "后端未返回"}</dd>
-              </div>
-              <div>
                 <dt>Embedding</dt>
                 <dd>{draft.llm.embedding_enabled === false ? "关闭" : "由当前配置决定"}</dd>
               </div>
@@ -524,6 +536,188 @@ export function SettingsPrivacyView({
   );
 }
 
+function displayCount(value: number | null | undefined): string {
+  return value == null ? "未知" : String(value);
+}
+
+function ProductDiagnosticsPanel({ controller }: { controller: SettingsPrivacyJourneyController }) {
+  const diagnostics = controller.snapshot?.productDiagnostics ?? null;
+  if (!diagnostics) {
+    return (
+      <div
+        className="ol-settings-page ol-settings-page--centered"
+        data-settings-surface="diagnostics"
+      >
+        <FoundationNotice title="产品诊断不可用" tone="error">
+          <p>后端没有返回 canonical 产品诊断；页面不会从日志或非产品状态推断健康状态。</p>
+        </FoundationNotice>
+        <FoundationActionButton
+          label="重新读取"
+          icon={<RefreshCw size={18} strokeWidth={1.75} aria-hidden="true" />}
+          loading={controller.loading}
+          loadingLabel="正在读取"
+          onClick={() => void controller.load(true)}
+        />
+      </div>
+    );
+  }
+  const statusLabel =
+    diagnostics.status === "ready"
+      ? "产品链路正常"
+      : diagnostics.status === "degraded"
+        ? "部分能力降级"
+        : "产品链路受阻";
+  const statusTone =
+    diagnostics.status === "ready"
+      ? "neutral"
+      : diagnostics.status === "degraded"
+        ? "waiting"
+        : "error";
+  return (
+    <div className="ol-settings-page" data-settings-surface="diagnostics">
+      <section className="ol-settings-boundary" aria-labelledby="ol-product-diagnostics-title">
+        <div className="ol-settings-section-heading">
+          <span>Canonical 后端事实</span>
+          <h2 id="ol-product-diagnostics-title">产品诊断</h2>
+        </div>
+        <div className="ol-settings-boundary__summary">
+          <FoundationStatusLabel label={statusLabel} status={statusTone} />
+          <p>生成于 {diagnostics.generatedAt}；不包含凭据、消息正文或旧运行轨迹。</p>
+        </div>
+      </section>
+
+      <section className="ol-settings-section" aria-labelledby="ol-diagnostics-runtime-title">
+        <div className="ol-settings-section-heading">
+          <span>当前精确构建</span>
+          <h2 id="ol-diagnostics-runtime-title">运行环境</h2>
+        </div>
+        <dl className="ol-settings-fact-list">
+          <div>
+            <dt>版本</dt>
+            <dd>{diagnostics.appVersion}</dd>
+          </div>
+          <div>
+            <dt>构建</dt>
+            <dd>{diagnostics.runtimeBuild.gitSha}</dd>
+          </div>
+          <div>
+            <dt>二进制</dt>
+            <dd>{diagnostics.runtimeBuild.binaryKind}</dd>
+          </div>
+          <div>
+            <dt>Bundle ID</dt>
+            <dd>{diagnostics.runtimeBuild.bundleIdentifier}</dd>
+          </div>
+          <div>
+            <dt>凭据存储</dt>
+            <dd>
+              {diagnostics.runtimeBuild.profile === "release"
+                ? "系统 Keychain"
+                : "隔离的本地 profile 文件（0600）"}
+            </dd>
+          </div>
+          <div>
+            <dt>持久化</dt>
+            <dd>{diagnostics.persistenceMode}</dd>
+          </div>
+          <div>
+            <dt>Canonical 写入</dt>
+            <dd>{diagnostics.canonicalWritesAllowed ? "允许" : "关闭"}</dd>
+          </div>
+          <div>
+            <dt>模型派发</dt>
+            <dd>{diagnostics.providerDispatchAllowed ? "允许" : "关闭"}</dd>
+          </div>
+          <div>
+            <dt>工具派发</dt>
+            <dd>{diagnostics.toolDispatchAllowed ? "允许" : "关闭"}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="ol-settings-section" aria-labelledby="ol-diagnostics-content-title">
+        <div className="ol-settings-section-heading">
+          <span>只统计 canonical 产品对象</span>
+          <h2 id="ol-diagnostics-content-title">内容与工作</h2>
+        </div>
+        <dl className="ol-settings-fact-list">
+          <div>
+            <dt>Projects</dt>
+            <dd>{displayCount(diagnostics.counts.projectCount)}</dd>
+          </div>
+          <div>
+            <dt>Conversations</dt>
+            <dd>{displayCount(diagnostics.counts.conversationCount)}</dd>
+          </div>
+          <div>
+            <dt>Tasks</dt>
+            <dd>{displayCount(diagnostics.counts.taskCount)}</dd>
+          </div>
+          <div>
+            <dt>执行中</dt>
+            <dd>{displayCount(diagnostics.counts.activeTaskCount)}</dd>
+          </div>
+          <div>
+            <dt>需处理</dt>
+            <dd>{displayCount(diagnostics.counts.waitingTaskCount)}</dd>
+          </div>
+          <div>
+            <dt>已完成</dt>
+            <dd>{displayCount(diagnostics.counts.completedTaskCount)}</dd>
+          </div>
+          <div>
+            <dt>失败或取消</dt>
+            <dd>{displayCount(diagnostics.counts.failedTaskCount)}</dd>
+          </div>
+          <div>
+            <dt>未解决提醒</dt>
+            <dd>{displayCount(diagnostics.counts.unresolvedAttentionCount)}</dd>
+          </div>
+        </dl>
+      </section>
+
+      <section className="ol-settings-section" aria-labelledby="ol-diagnostics-store-title">
+        <div className="ol-settings-section-heading">
+          <span>单一 owner 健康状态</span>
+          <h2 id="ol-diagnostics-store-title">产品存储</h2>
+        </div>
+        <dl className="ol-settings-fact-list">
+          {diagnostics.stores.map(store => (
+            <div key={store.store}>
+              <dt>{store.store}</dt>
+              <dd>
+                {store.status}
+                {store.reasonCode ? ` · ${store.reasonCode}` : ""}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </section>
+
+      {diagnostics.blockerCodes.length > 0 && (
+        <FoundationNotice
+          title="当前阻断代码"
+          tone={diagnostics.status === "blocked" ? "error" : undefined}
+        >
+          <ul className="ol-settings-diagnostic-list">
+            {diagnostics.blockerCodes.map(code => (
+              <li key={code}>{code}</li>
+            ))}
+          </ul>
+        </FoundationNotice>
+      )}
+
+      <FoundationActionButton
+        label="重新读取诊断"
+        icon={<RefreshCw size={18} strokeWidth={1.75} aria-hidden="true" />}
+        loading={controller.loading}
+        loadingLabel="正在读取"
+        onClick={() => void controller.load(true)}
+      />
+    </div>
+  );
+}
+
 function SafeModeNotice({ controller }: { controller: SettingsPrivacyJourneyController }) {
   if (controller.protectionState === "normal" || controller.protectionState === "loading") {
     return null;
@@ -571,10 +765,14 @@ function CredentialInitializationPanel({
       </div>
       {restartRequired ? (
         <FoundationNotice
-          title={accessRecovery ? "访问恢复完成，需要重启" : "初始化完成，需要重启"}
+          title={accessRecovery ? "已请求访问，等待重启验证" : "初始化完成，需要重启"}
           live
         >
-          <p>当前进程仍保持受限；完全退出并重新启动 OpenLife 后才会重新读取这些凭据。</p>
+          <p>
+            {accessRecovery
+              ? "当前只证明了本次交互读取；完全退出并重新启动 OpenLife 后，非交互读取成功才算持续访问已经恢复。"
+              : "当前进程仍保持受限；完全退出并重新启动 OpenLife 后才会重新读取这些凭据。"}
+          </p>
         </FoundationNotice>
       ) : phase === "blocked" ? (
         <FoundationNotice title="初始化未完成" tone="error" live>
@@ -603,7 +801,9 @@ function CredentialInitializationPanel({
         disabled={restartRequired || cleanupUnknown}
         disabledReason={
           restartRequired
-            ? "初始化已完成；必须重启后重新读取状态。"
+            ? accessRecovery
+              ? "本次交互读取已完成；必须重启并通过非交互读取验证。"
+              : "初始化已完成；必须重启后重新读取状态。"
             : cleanupUnknown
               ? "后端无法证明补偿完成；必须先重启并重新检查状态。"
               : undefined
@@ -651,7 +851,7 @@ function SettingsTestResult({
             variant="secondary"
             disabled={!reviewItem}
             disabledReason={
-              reviewItem ? undefined : "当前无法从审核中心确认对应的待决定项；不会跳转到猜测目标。"
+              reviewItem ? undefined : "当前无法从需处理事项确认对应决定；不会跳转到猜测目标。"
             }
             onClick={() => reviewItem && onOpenReview(reviewItem)}
           />

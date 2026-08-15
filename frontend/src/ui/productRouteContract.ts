@@ -1,10 +1,10 @@
-import type { ReadOnlyProductSurfaceId, ReadOnlySpineRouteState } from "@/ui/journeys/readOnly";
+import type {
+  PublicProductSurfaceId,
+  ProductWorkbenchRouteState,
+} from "@/ui/journeys/productWorkbench";
 
-export const PRODUCT_ROUTE_PATHS: Readonly<Record<ReadOnlyProductSurfaceId, string>> = {
-  today: "/today",
+export const PRODUCT_ROUTE_PATHS: Readonly<Record<PublicProductSurfaceId, string>> = {
   workspace: "/workspace",
-  tasks: "/tasks",
-  review: "/review",
   "life-model": "/life-model",
 };
 
@@ -18,22 +18,24 @@ const RETIRED_PRODUCT_PATHS = new Set([
   "/builder",
   "/versions",
   "/mcp",
-  "/a2a",
   "/calibration",
   "/metrics",
+  "/today",
+  "/tasks",
+  "/review",
 ]);
 
-export type ProductionRouteResolution = ReadOnlySpineRouteState & {
+export type ProductionRouteResolution = ProductWorkbenchRouteState & {
   path: string;
 };
 
-export function productPath(surface: ReadOnlyProductSurfaceId): string {
+export function productPath(surface: PublicProductSurfaceId): string {
   return PRODUCT_ROUTE_PATHS[surface];
 }
 
 export function resolveProductionRoute(
   pathname: string,
-  settingsReturnSurface: ReadOnlyProductSurfaceId = "today"
+  settingsReturnSurface: PublicProductSurfaceId = "workspace"
 ): ProductionRouteResolution | null {
   if (pathname === SETTINGS_ROUTE_PATH) {
     return { mode: "settings", surface: settingsReturnSurface, path: SETTINGS_ROUTE_PATH };
@@ -42,7 +44,7 @@ export function resolveProductionRoute(
   if (!entry) return null;
   return {
     mode: "product",
-    surface: entry[0] as ReadOnlyProductSurfaceId,
+    surface: entry[0] as PublicProductSurfaceId,
     path: entry[1],
   };
 }

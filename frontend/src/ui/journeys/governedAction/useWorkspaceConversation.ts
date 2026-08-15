@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  ProviderProfileViewModel,
   ChatSession,
   ImportedResourceReceipt,
   MainChatSkillSummary,
@@ -10,6 +11,7 @@ import type {
   MarkdownMemoryScope,
   MarkdownMemoryViewModel,
   ProductAction,
+  ProjectRecord,
   StreamMessageChunkPayload,
   StreamMessageStartPayload,
 } from "@/tauri";
@@ -20,11 +22,21 @@ import type { WorkspaceConversationDataSource } from "./workspaceConversationDat
 type Announce = (message: string) => void;
 
 export type WorkspaceConversationLoadStatus = "idle" | "loading" | "ready" | "error";
+export type WorkspaceConversationMode = "chat" | "work";
+export type WorkspaceConversationProviderState = {
+  status: "unknown" | "ready" | "unavailable";
+  profiles: ProviderProfileViewModel[];
+  selectedProfileId: string | null;
+  errorCode: string | null;
+};
+export type WorkspaceConversationWorkStatus = "unknown" | "reconstructing" | "ready";
 export type WorkspaceSessionMutationState =
   | { phase: "idle" }
   | { phase: "renaming"; sessionId: string }
   | { phase: "deleting"; sessionId: string }
-  | { phase: "failed"; action: "rename" | "delete"; reason: string };
+  | { phase: "creating_project" }
+  | { phase: "assigning_project"; projectId: string | null }
+  | { phase: "failed"; action: "rename" | "delete" | "project"; reason: string };
 
 export type WorkspaceResourceMutationState =
   | { phase: "idle" }
@@ -50,8 +62,15 @@ export type WorkspaceTurnState =
   | { phase: "idle" }
   | { phase: "creating_session" }
   | { phase: "sending"; sessionId: string }
-  | { phase: "streaming"; sessionId: string; taskSessionId: string; cancelError?: string }
-  | { phase: "cancelling"; sessionId: string; taskSessionId: string }
+  | {
+      phase: "streaming";
+      sessionId: string;
+      turnId: string;
+      taskId?: string;
+      runId?: string;
+      cancelError?: string;
+    }
+  | { phase: "cancelling"; sessionId: string; turnId: string; taskId?: string }
   | { phase: "refreshing"; sessionId: string; status: MainChatTurnStatus }
   | {
       phase: "resolved";
@@ -59,6 +78,11 @@ export type WorkspaceTurnState =
       status: MainChatTurnStatus;
       blockers: string[];
       lifeModelInfluence?: MainChatLifeModelProductReceipt;
+      sourceBoundBasis?: {
+        factCount: number;
+        sourceTypes: string[];
+        checkStatus: string;
+      };
     }
   | { phase: "failed"; stage: "create" | "send" | "refresh"; reason: string };
 
@@ -69,6 +93,44 @@ function sessionTitle(input: string): string {
 
 function resolvedTurnStatus(status: MainChatTurnStatus | undefined): MainChatTurnStatus {
   return status ?? "failed";
+}
+
+function sourceBoundBasisFromTrace(
+  generation: Record<string, unknown> | undefined
+): { factCount: number; sourceTypes: string[]; checkStatus: string } | undefined {
+  if (generation?.sourceBound !== true) return undefined;
+  const sourceTypes = Array.isArray(generation.sourceBoundSourceTypes)
+    ? generation.sourceBoundSourceTypes.filter(
+        (value): value is string => typeof value === "string" && value.length > 0
+      )
+    : [];
+  return {
+    factCount:
+      typeof generation.sourceBoundFactCount === "number" ? generation.sourceBoundFactCount : 0,
+    sourceTypes,
+    checkStatus:
+      typeof generation.sourceBoundCheckStatus === "string"
+        ? generation.sourceBoundCheckStatus
+        : "unknown",
+  };
+}
+
+function streamIdentityMatches(
+  payload: {
+    session_id: string;
+    operation_id: string;
+    conversation_id?: string;
+    turn_id?: string;
+    task_id?: string;
+  },
+  mode: WorkspaceConversationMode,
+  sessionId: string,
+  operationId: string
+): boolean {
+  if (payload.session_id !== sessionId || payload.operation_id !== operationId) return false;
+  return mode === "chat"
+    ? payload.conversation_id === sessionId && payload.turn_id === operationId
+    : payload.conversation_id === sessionId && payload.turn_id === operationId;
 }
 
 function turnAnnouncement(status: MainChatTurnStatus): string {
@@ -92,6 +154,8 @@ function turnAnnouncement(status: MainChatTurnStatus): string {
 
 export type WorkspaceConversationController = {
   sessions: ChatSession[];
+  projects: ProjectRecord[];
+  selectedProjectId: string | null;
   selectedSessionId: string | null;
   messages: ChatMessage[];
   draft: string;
@@ -99,7 +163,10 @@ export type WorkspaceConversationController = {
   loadError: string | null;
   turnState: WorkspaceTurnState;
   streamingReply: string;
-  activeTaskSessionId: string | null;
+  activeTaskId: string | null;
+  mode: WorkspaceConversationMode;
+  provider: WorkspaceConversationProviderState;
+  workStatus: WorkspaceConversationWorkStatus;
   sessionMutation: WorkspaceSessionMutationState;
   pendingResources: ImportedResourceReceipt[];
   pendingResourceTurnOperationId: string | null;
@@ -114,7 +181,10 @@ export type WorkspaceConversationController = {
   reload: () => Promise<boolean>;
   selectSession: (sessionId: string) => void;
   startNewConversation: () => void;
+  createProject: (name: string) => Promise<boolean>;
+  assignProject: (projectId: string | null) => Promise<boolean>;
   setDraft: (value: string) => void;
+  setMode: (mode: WorkspaceConversationMode) => void;
   attachResources: () => Promise<boolean>;
   detachResource: (resourceId: string) => Promise<boolean>;
   selectSkill: (skillId: string | null) => Promise<boolean>;
@@ -133,6 +203,7 @@ export type WorkspaceConversationController = {
   }) => Promise<boolean>;
   sendAction: (disabledReason?: string) => ProductAction;
   send: (disabledReason?: string) => Promise<void>;
+  steer: () => Promise<void>;
   cancel: () => Promise<void>;
   renameSelected: (title: string) => Promise<boolean>;
   deleteSelected: () => Promise<boolean>;
@@ -145,6 +216,8 @@ export function useWorkspaceConversation(
   preferredSessionId?: string | null
 ): WorkspaceConversationController {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
+  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
@@ -152,7 +225,15 @@ export function useWorkspaceConversation(
   const [loadError, setLoadError] = useState<string | null>(null);
   const [turnState, setTurnState] = useState<WorkspaceTurnState>({ phase: "idle" });
   const [streamingReply, setStreamingReply] = useState("");
-  const [activeTaskSessionId, setActiveTaskSessionId] = useState<string | null>(null);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
+  const [mode, setModeState] = useState<WorkspaceConversationMode>("chat");
+  const [provider, setProvider] = useState<WorkspaceConversationProviderState>({
+    status: "unknown",
+    profiles: [],
+    selectedProfileId: null,
+    errorCode: null,
+  });
+  const [workStatus, setWorkStatus] = useState<WorkspaceConversationWorkStatus>("unknown");
   const [sessionMutation, setSessionMutation] = useState<WorkspaceSessionMutationState>({
     phase: "idle",
   });
@@ -188,6 +269,8 @@ export function useWorkspaceConversation(
     loadedRef.current = false;
     explicitConversationChoiceRef.current = false;
     setSessions([]);
+    setProjects([]);
+    setSelectedProjectId(null);
     setSelectedSessionId(null);
     setMessages([]);
     setDraft("");
@@ -195,7 +278,15 @@ export function useWorkspaceConversation(
     setLoadError(null);
     setTurnState({ phase: "idle" });
     setStreamingReply("");
-    setActiveTaskSessionId(null);
+    setActiveTaskId(null);
+    setModeState("chat");
+    setProvider({
+      status: "unknown",
+      profiles: [],
+      selectedProfileId: null,
+      errorCode: null,
+    });
+    setWorkStatus("unknown");
     setSessionMutation({ phase: "idle" });
     setPendingResources([]);
     setPendingResourceTurnOperationId(null);
@@ -242,9 +333,12 @@ export function useWorkspaceConversation(
   }, [dataSource]);
 
   useEffect(() => {
-    if (!dataSource?.loadMarkdownMemory) return;
+    if (!dataSource?.loadMarkdownMemory || mode !== "work" || workStatus !== "ready") {
+      setMarkdownMemory({ phase: "loading", model: null });
+      return;
+    }
     void reloadMarkdownMemory();
-  }, [dataSource, reloadMarkdownMemory]);
+  }, [dataSource, mode, reloadMarkdownMemory, workStatus]);
 
   const selectMarkdownMemoryRoot = useCallback(
     async (scope: MarkdownMemoryScope): Promise<boolean> => {
@@ -345,7 +439,7 @@ export function useWorkspaceConversation(
 
   useEffect(() => {
     let active = true;
-    if (!dataSource?.listSkills || !dataSource.listToolCandidates || loadStatus !== "ready") {
+    if (!dataSource?.listSkills || loadStatus !== "ready") {
       setSkills([]);
       setSelectedSkillId(null);
       setToolCandidates(null);
@@ -356,9 +450,13 @@ export function useWorkspaceConversation(
     }
 
     setCapabilityState({ phase: "loading" });
+    const shouldLoadWorkTools =
+      mode === "work" && workStatus === "ready" && Boolean(dataSource.listToolCandidates);
     void Promise.all([
       dataSource.listSkills(selectedSessionId ?? undefined),
-      dataSource.listToolCandidates(activeTaskSessionId ?? undefined),
+      shouldLoadWorkTools
+        ? dataSource.listToolCandidates!(activeTaskId ?? undefined)
+        : Promise.resolve(null),
     ])
       .then(([nextSkills, nextTools]) => {
         if (!active) return;
@@ -378,35 +476,35 @@ export function useWorkspaceConversation(
     return () => {
       active = false;
     };
-  }, [activeTaskSessionId, dataSource, loadStatus, selectedSessionId]);
+  }, [activeTaskId, dataSource, loadStatus, mode, selectedSessionId, workStatus]);
 
   const loadHistory = useCallback(
     async (sessionId: string, requestId: number): Promise<void> => {
       if (!dataSource) throw new Error("workspace_conversation_data_source_unavailable");
-      const history = await dataSource.loadHistory(sessionId);
-      let influence = null;
-      let influenceError: string | null = null;
-      try {
-        influence = await dataSource.loadLifeModelInfluence(sessionId);
-      } catch (error) {
-        influenceError = errorText(error);
+      const canonical = await dataSource.loadConversation(sessionId);
+      if (canonical.selectedConversationId !== sessionId) {
+        throw new Error("conversation_view_model_selection_mismatch");
       }
+      setProjects(canonical.projects);
+      setSelectedProjectId(canonical.selectedProjectId);
+      const history = canonical.messages;
       if (requestId !== requestRef.current) return;
       setSelectedSessionId(sessionId);
       setMessages(history);
-      setTurnState(
-        influenceError
-          ? { phase: "failed", stage: "refresh", reason: influenceError }
-          : influence
-            ? {
-                phase: "resolved",
-                sessionId,
-                status: influence.status,
-                blockers: [],
-                lifeModelInfluence: influence.lifeModelInfluence,
-              }
-            : { phase: "idle" }
-      );
+      if (
+        canonical.latestTurn?.status === "failed" ||
+        canonical.latestTurn?.status === "cancelled" ||
+        canonical.latestTurn?.status === "interrupted"
+      ) {
+        setTurnState({
+          phase: "resolved",
+          sessionId,
+          status: canonical.latestTurn.status,
+          blockers: canonical.latestTurn.errorCode ? [canonical.latestTurn.errorCode] : [],
+        });
+      } else {
+        setTurnState({ phase: "idle" });
+      }
     },
     [dataSource]
   );
@@ -417,20 +515,53 @@ export function useWorkspaceConversation(
     setLoadError(null);
     try {
       if (!dataSource) throw new Error("workspace_conversation_data_source_unavailable");
-      const nextSessions = await dataSource.listSessions();
+      const canonical = await dataSource.loadConversation(
+        selectedSessionId ?? preferredSessionId ?? undefined
+      );
+      const nextSessions = canonical.conversations;
+      setProjects(canonical.projects);
+      setSelectedProjectId(canonical.selectedProjectId);
+      setProvider({
+        status: canonical.providerStatus,
+        profiles: canonical.providerProfiles,
+        selectedProfileId: canonical.selectedProviderProfileId,
+        errorCode: canonical.providerErrorCode,
+      });
+      setWorkStatus(canonical.workStatus);
       if (requestId !== requestRef.current) return false;
       setSessions(nextSessions);
       const currentStillExists =
         selectedSessionId && nextSessions.some(item => item.session_id === selectedSessionId);
       const preferredStillExists =
         preferredSessionId && nextSessions.some(item => item.session_id === preferredSessionId);
-      const nextSessionId = currentStillExists
-        ? selectedSessionId
-        : preferredStillExists
-          ? preferredSessionId
-          : (nextSessions[0]?.session_id ?? null);
+      const nextSessionId = canonical.selectedConversationId
+        ? canonical.selectedConversationId
+        : currentStillExists
+          ? selectedSessionId
+          : preferredStillExists
+            ? preferredSessionId
+            : (nextSessions[0]?.session_id ?? null);
       if (nextSessionId) {
-        await loadHistory(nextSessionId, requestId);
+        if (canonical.selectedConversationId === nextSessionId) {
+          setSelectedSessionId(nextSessionId);
+          setMessages(canonical.messages);
+          setSelectedProjectId(canonical.selectedProjectId);
+          const turn = canonical.latestTurn;
+          setTurnState(
+            !turn || turn.status === "completed"
+              ? { phase: "idle" }
+              : turn.status === "running"
+                ? { phase: "idle" }
+                : {
+                    phase: "resolved",
+                    sessionId: nextSessionId,
+                    status: turn.status,
+                    blockers: turn.errorCode ? [turn.errorCode] : [],
+                  }
+          );
+        } else {
+          await loadHistory(nextSessionId, requestId);
+        }
       } else {
         setSelectedSessionId(null);
         setMessages([]);
@@ -466,7 +597,7 @@ export function useWorkspaceConversation(
     setLoadError(null);
     setTurnState({ phase: "idle" });
     setStreamingReply("");
-    setActiveTaskSessionId(null);
+    setActiveTaskId(null);
     void loadHistory(preferredSessionId, requestId)
       .then(() => {
         if (requestId === requestRef.current) setLoadStatus("ready");
@@ -545,18 +676,26 @@ export function useWorkspaceConversation(
 
   const selectSession = useCallback(
     (sessionId: string) => {
-      if (!sessionId || sessionId === selectedSessionId || busy) return;
+      const canDetachBackgroundWork = mode === "work" && turnState.phase === "streaming";
+      if (!sessionId || sessionId === selectedSessionId || (busy && !canDetachBackgroundWork)) {
+        return;
+      }
       if (pendingResources.length > 0) {
         announce("当前有文件绑定到下一次发送；请先发送或逐个移除文件。");
         return;
       }
       explicitConversationChoiceRef.current = true;
+      if (canDetachBackgroundWork) {
+        operationRef.current += 1;
+        cancelRequestRef.current += 1;
+        announce("任务会在后台继续；已切换到另一段对话，可在需要处理中查看后续状态。");
+      }
       const requestId = ++requestRef.current;
       setLoadStatus("loading");
       setLoadError(null);
       setTurnState({ phase: "idle" });
       setStreamingReply("");
-      setActiveTaskSessionId(null);
+      setActiveTaskId(null);
       void loadHistory(sessionId, requestId)
         .then(() => {
           if (requestId === requestRef.current) setLoadStatus("ready");
@@ -568,16 +707,22 @@ export function useWorkspaceConversation(
           setMessages([]);
         });
     },
-    [announce, busy, loadHistory, pendingResources.length, selectedSessionId]
+    [announce, busy, loadHistory, mode, pendingResources.length, selectedSessionId, turnState.phase]
   );
 
   const startNewConversation = useCallback(() => {
-    if (busy) return;
+    const canDetachBackgroundWork = mode === "work" && turnState.phase === "streaming";
+    if (busy && !canDetachBackgroundWork) return;
     if (pendingResources.length > 0) {
       announce("当前有文件绑定到下一次发送；请先发送或逐个移除文件。");
       return;
     }
     explicitConversationChoiceRef.current = true;
+    if (canDetachBackgroundWork) {
+      operationRef.current += 1;
+      cancelRequestRef.current += 1;
+      announce("任务会在后台继续；已打开新对话，可在需要处理中查看后续状态。");
+    }
     requestRef.current += 1;
     setSelectedSessionId(null);
     setMessages([]);
@@ -586,9 +731,11 @@ export function useWorkspaceConversation(
     setLoadStatus("ready");
     setTurnState({ phase: "idle" });
     setStreamingReply("");
-    setActiveTaskSessionId(null);
-    announce("已打开新对话草稿；发送前不会创建会话或写入记录。");
-  }, [announce, busy, pendingResources.length]);
+    setActiveTaskId(null);
+    if (!canDetachBackgroundWork) {
+      announce("已打开新对话草稿；发送前不会创建会话或写入记录。");
+    }
+  }, [announce, busy, mode, pendingResources.length, turnState.phase]);
 
   const updateDraft = useCallback((value: string) => {
     if (value.trim()) explicitConversationChoiceRef.current = true;
@@ -631,6 +778,7 @@ export function useWorkspaceConversation(
         throw new Error("resource_import_duplicate_receipt");
       }
       setPendingResources(current => [...current, ...receipt.resources]);
+      setModeState("work");
       setResourceMutation({ phase: "idle" });
       announce(`已添加 ${receipt.resources.length} 个文件；它们只绑定到下一次发送。`);
       return true;
@@ -690,7 +838,11 @@ export function useWorkspaceConversation(
               ? "上一轮仍在发送或核对。"
               : !trimmedDraft
                 ? "先输入要发送的内容。"
-                : undefined);
+                : mode === "work" && workStatus !== "ready"
+                  ? "Work 正在按新任务架构重建，当前尚不可交办。"
+                  : mode === "chat" && provider.status === "unavailable"
+                    ? "当前选择的模型不可用；请先在设置中完成模型配置。"
+                    : undefined);
       return {
         id: selectedSessionId
           ? `workspace.continue:${selectedSessionId}`
@@ -702,7 +854,23 @@ export function useWorkspaceConversation(
         targetRef: selectedSessionId ?? "new-conversation",
       };
     },
-    [busy, dataSource, draft, loadStatus, selectedSessionId]
+    [busy, dataSource, draft, loadStatus, mode, provider.status, selectedSessionId, workStatus]
+  );
+
+  const setMode = useCallback(
+    (nextMode: WorkspaceConversationMode) => {
+      if (busy) {
+        announce("当前轮次结束前不能切换 Chat / Work。");
+        return;
+      }
+      if (nextMode === "chat" && pendingResources.length > 0) {
+        announce("已添加的文件属于 Work 范围；移除文件后才能切回 Chat。");
+        return;
+      }
+      setModeState(nextMode);
+      announce(nextMode === "chat" ? "已切换为 Chat。" : "已切换为 Work。");
+    },
+    [announce, busy, pendingResources.length]
   );
 
   const send = useCallback(
@@ -716,6 +884,8 @@ export function useWorkspaceConversation(
       const operationId = ++operationRef.current;
       const turnOperationId =
         pendingResources.length > 0 ? pendingResourceTurnOperationId : crypto.randomUUID();
+      const workTaskId = mode === "work" ? crypto.randomUUID() : undefined;
+      const workRunId = mode === "work" ? crypto.randomUUID() : undefined;
       if (!turnOperationId) {
         announce("文件已经显示为待发送，但缺少精确回合标识；当前不会发送。");
         return;
@@ -730,6 +900,9 @@ export function useWorkspaceConversation(
           setTurnState({ phase: "creating_session" });
           sessionId = crypto.randomUUID();
           await dataSource.createSession(sessionId, sessionTitle(text));
+          if (selectedProjectId && dataSource.assignProject) {
+            await dataSource.assignProject(sessionId, selectedProjectId);
+          }
           sessionCreated = true;
           if (operationId !== operationRef.current) return;
           const timestamp = new Date().toISOString();
@@ -752,21 +925,25 @@ export function useWorkspaceConversation(
         setDraft("");
         setTurnState({ phase: "sending", sessionId });
         setStreamingReply("");
-        setActiveTaskSessionId(null);
+        setActiveTaskId(null);
         announce("正在发送；命令返回后仍会重新读取会话和工作区状态。");
 
         const result = await dataSource.streamTurn(
           turnSessionId,
           requestMessages,
-          { operationId: turnOperationId, selectedSkillId: selectedSkillId ?? undefined },
+          {
+            operationId: turnOperationId,
+            selectedSkillId: selectedSkillId ?? undefined,
+            mode,
+            taskId: workTaskId,
+            runId: workRunId,
+          },
           {
             onStart: (payload: StreamMessageStartPayload) => {
               if (operationId !== operationRef.current) return;
               if (
                 pendingResources.length > 0 &&
-                (payload.session_id !== turnSessionId ||
-                  payload.operation_id !== turnOperationId ||
-                  payload.task_session_id !== turnOperationId)
+                !streamIdentityMatches(payload, mode, turnSessionId, turnOperationId)
               ) {
                 resourceStreamIdentityMismatch = true;
                 return;
@@ -777,21 +954,22 @@ export function useWorkspaceConversation(
                 setPendingResourceTurnOperationId(null);
                 setResourceMutation({ phase: "idle" });
               }
-              setActiveTaskSessionId(payload.task_session_id);
+              const activeTaskId = payload.task_id ?? null;
+              setActiveTaskId(activeTaskId);
               setTurnState({
                 phase: "streaming",
                 sessionId: turnSessionId,
-                taskSessionId: payload.task_session_id,
+                turnId: payload.turn_id ?? turnOperationId,
+                taskId: activeTaskId ?? undefined,
+                runId: payload.run_id,
               });
-              announce("OpenLife 正在回复；现在可以取消这一项任务。");
+              announce("OpenLife 正在回复；现在可以取消这一轮对话。");
             },
             onChunk: (payload: StreamMessageChunkPayload) => {
               if (operationId !== operationRef.current) return;
               if (
                 pendingResources.length > 0 &&
-                (payload.session_id !== turnSessionId ||
-                  payload.operation_id !== turnOperationId ||
-                  payload.task_session_id !== turnOperationId)
+                !streamIdentityMatches(payload, mode, turnSessionId, turnOperationId)
               ) {
                 resourceStreamIdentityMismatch = true;
                 return;
@@ -804,9 +982,7 @@ export function useWorkspaceConversation(
         if (
           pendingResources.length > 0 &&
           (resourceStreamIdentityMismatch ||
-            result.session_id !== turnSessionId ||
-            result.operation_id !== turnOperationId ||
-            result.task_session_id !== turnOperationId)
+            !streamIdentityMatches(result, mode, turnSessionId, turnOperationId))
         ) {
           throw new Error("resource_turn_terminal_identity_mismatch");
         }
@@ -816,13 +992,13 @@ export function useWorkspaceConversation(
           setResourceMutation({ phase: "idle" });
         }
         cancelRequestRef.current += 1;
-        const status = resolvedTurnStatus(result.status ?? result.turn_terminal?.status);
-        setActiveTaskSessionId(result.task_session_id);
+        const status = resolvedTurnStatus(result.status);
+        setActiveTaskId(result.task_id ?? null);
         setTurnState({ phase: "refreshing", sessionId, status });
 
         let refreshedHistory: ChatMessage[];
         try {
-          refreshedHistory = await dataSource.loadHistory(sessionId);
+          refreshedHistory = (await dataSource.loadConversation(sessionId)).messages;
         } catch (error) {
           if (operationId !== operationRef.current) return;
           setTurnState({ phase: "failed", stage: "refresh", reason: errorText(error) });
@@ -833,13 +1009,14 @@ export function useWorkspaceConversation(
         if (operationId !== operationRef.current) return;
         setMessages(refreshedHistory);
         setStreamingReply("");
-        setActiveTaskSessionId(null);
+        setActiveTaskId(null);
         setTurnState({
           phase: "resolved",
           sessionId,
           status,
-          blockers: result.blockers ?? result.turn_terminal?.blockers ?? [],
+          blockers: result.blockers ?? [],
           lifeModelInfluence: result.life_model_influence,
+          sourceBoundBasis: sourceBoundBasisFromTrace(result.reasoning_trace?.generation_result),
         });
         await onAfterTurn();
         announce(turnAnnouncement(status));
@@ -854,17 +1031,25 @@ export function useWorkspaceConversation(
         });
         announce(
           sessionCreated || selectedSessionId
-            ? "消息发送失败；当前不会显示成功结论。"
+            ? mode === "work"
+              ? "这项工作未完成；请在结果或需处理中核对后端记录的任务状态。"
+              : "消息发送失败；当前不会显示成功结论。"
             : "新会话未能建立；没有发送消息。"
         );
         try {
           if (sessionId) {
-            const refreshedHistory = await dataSource.loadHistory(sessionId);
+            const refreshedHistory = (await dataSource.loadConversation(sessionId)).messages;
             if (operationId === operationRef.current) setMessages(refreshedHistory);
           }
         } catch {
           // The explicit failed state already communicates that persistence is unverified.
         }
+        // A failed stream may still have durably created or terminalized a
+        // canonical Work Task (for example, a blocked tool attempt). Refresh
+        // the backend-owned Workspace projection on both success and failure
+        // so Results / Needs Attention never disappear behind the composer
+        // error state.
+        if (operationId === operationRef.current) await onAfterTurn();
       }
     },
     [
@@ -872,37 +1057,81 @@ export function useWorkspaceConversation(
       dataSource,
       draft,
       messages,
+      mode,
+      provider,
+      workStatus,
       onAfterTurn,
       pendingResourceTurnOperationId,
       pendingResources,
       selectedSessionId,
       selectedSkillId,
+      selectedProjectId,
       sendAction,
     ]
   );
 
   const cancel = useCallback(async (): Promise<void> => {
-    if (!dataSource || turnState.phase !== "streaming" || !turnState.taskSessionId.trim()) {
-      announce("当前没有可以取消的运行中任务。");
+    if (!dataSource || turnState.phase !== "streaming" || !turnState.turnId.trim()) {
+      announce("当前没有可以取消的运行中对话。");
       return;
     }
-    const { sessionId, taskSessionId } = turnState;
+    const { sessionId, turnId, taskId } = turnState;
     const cancelRequestId = ++cancelRequestRef.current;
-    setTurnState({ phase: "cancelling", sessionId, taskSessionId });
+    setTurnState({ phase: "cancelling", sessionId, turnId, taskId });
     announce("正在请求取消；只有后端终态返回后才会显示已取消。");
     try {
-      await dataSource.cancelTask(taskSessionId);
+      if (mode === "work" && taskId && dataSource.cancelWorkTask) {
+        await dataSource.cancelWorkTask(taskId);
+      } else if (dataSource.cancelChatTurn) {
+        await dataSource.cancelChatTurn(sessionId, turnId);
+      } else {
+        throw new Error("canonical_turn_cancel_unavailable");
+      }
     } catch (error) {
       if (cancelRequestId !== cancelRequestRef.current) return;
       setTurnState({
         phase: "streaming",
         sessionId,
-        taskSessionId,
+        turnId,
+        taskId,
+        runId: turnState.runId,
         cancelError: errorText(error),
       });
       announce("取消请求失败；当前不会把任务显示为已取消。");
     }
-  }, [announce, dataSource, turnState]);
+  }, [announce, dataSource, mode, turnState]);
+
+  const steer = useCallback(async (): Promise<void> => {
+    const text = draft.trim();
+    if (
+      !dataSource?.steerTask ||
+      turnState.phase !== "streaming" ||
+      !selectedSessionId ||
+      !activeTaskId ||
+      !turnState.runId ||
+      !text
+    ) {
+      announce("当前任务尚未到可接收调整的运行状态。");
+      return;
+    }
+    try {
+      const result = await dataSource.steerTask({
+        steeringId: crypto.randomUUID(),
+        taskId: activeTaskId,
+        runId: turnState.runId,
+        sessionId: selectedSessionId,
+        content: text,
+      });
+      setDraft("");
+      announce(
+        result.scopeExpansionBlocked
+          ? "这条调整会扩大权限范围，已记录为阻断项；当前任务不会获得新权限。"
+          : "调整已绑定到当前任务，将在下一次安全的 provider checkpoint 应用。"
+      );
+    } catch (error) {
+      announce(`任务调整未被后端接受：${errorText(error)}`);
+    }
+  }, [activeTaskId, announce, dataSource, draft, selectedSessionId, turnState]);
 
   const renameSelected = useCallback(
     async (title: string): Promise<boolean> => {
@@ -957,9 +1186,59 @@ export function useWorkspaceConversation(
     }
   }, [announce, busy, dataSource, pendingResources.length, reload, selectedSessionId]);
 
+  const createProject = useCallback(
+    async (name: string): Promise<boolean> => {
+      const normalized = name.replace(/\s+/g, " ").trim();
+      if (!dataSource?.createProject || !normalized || busy) {
+        announce("当前不能创建 Project。");
+        return false;
+      }
+      setSessionMutation({ phase: "creating_project" });
+      try {
+        const project = await dataSource.createProject(crypto.randomUUID(), normalized);
+        if (selectedSessionId && dataSource.assignProject) {
+          await dataSource.assignProject(selectedSessionId, project.id);
+        }
+        if (!(await reload())) throw new Error("project_refresh_failed_after_create");
+        setSessionMutation({ phase: "idle" });
+        announce(selectedSessionId ? "Project 已创建并绑定到当前对话。" : "Project 已创建。");
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
+        announce("Project 创建或绑定未得到后端确认。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload, selectedSessionId]
+  );
+
+  const assignProject = useCallback(
+    async (projectId: string | null): Promise<boolean> => {
+      if (!dataSource?.assignProject || !selectedSessionId || busy) {
+        announce("当前不能改变这段对话的 Project。");
+        return false;
+      }
+      setSessionMutation({ phase: "assigning_project", projectId });
+      try {
+        await dataSource.assignProject(selectedSessionId, projectId);
+        if (!(await reload())) throw new Error("project_refresh_failed_after_assign");
+        setSessionMutation({ phase: "idle" });
+        announce(projectId ? "当前对话已绑定到 Project。" : "当前对话已移出 Project。");
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
+        announce("Project 绑定未得到后端确认。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload, selectedSessionId]
+  );
+
   return useMemo(
     () => ({
       sessions,
+      projects,
+      selectedProjectId,
       selectedSessionId,
       messages,
       draft,
@@ -967,7 +1246,10 @@ export function useWorkspaceConversation(
       loadError,
       turnState,
       streamingReply,
-      activeTaskSessionId,
+      activeTaskId,
+      mode,
+      provider,
+      workStatus,
       sessionMutation,
       pendingResources,
       pendingResourceTurnOperationId,
@@ -982,7 +1264,10 @@ export function useWorkspaceConversation(
       reload,
       selectSession,
       startNewConversation,
+      createProject,
+      assignProject,
       setDraft: updateDraft,
+      setMode,
       attachResources,
       detachResource,
       selectSkill,
@@ -992,6 +1277,7 @@ export function useWorkspaceConversation(
       proposeMarkdownMemoryDeactivation,
       sendAction,
       send,
+      steer,
       cancel,
       renameSelected,
       deleteSelected,
@@ -1000,6 +1286,7 @@ export function useWorkspaceConversation(
       busy,
       cancel,
       capabilityState,
+      createProject,
       markdownMemory,
       deleteSelected,
       detachResource,
@@ -1009,8 +1296,10 @@ export function useWorkspaceConversation(
       loadError,
       loadStatus,
       messages,
+      mode,
       pendingResources,
       pendingResourceTurnOperationId,
+      projects,
       renameSelected,
       reloadMarkdownMemory,
       reload,
@@ -1018,16 +1307,20 @@ export function useWorkspaceConversation(
       selectSkill,
       selectMarkdownMemoryRoot,
       selectSession,
+      selectedProjectId,
+      setMode,
       selectedSessionId,
       selectedSkillId,
       sessionMutation,
       send,
+      steer,
       sendAction,
       sessions,
       skills,
       startNewConversation,
+      assignProject,
       streamingReply,
-      activeTaskSessionId,
+      activeTaskId,
       turnState,
       toolCandidates,
       updateDraft,

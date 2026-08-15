@@ -1,5 +1,7 @@
 use crate::errors::AppError;
-use crate::main_chat_preprocess::{filter_canonical_retrievable_memory_results, merge_memory_hits};
+use crate::memory_retrieval_filter::{
+    filter_canonical_retrievable_memory_results, merge_memory_hits,
+};
 use crate::persistence_coordinator::{
     CanonicalCommitPermit, CanonicalWriteAdmission, GovernedDataImportRecoveryAdmission,
     GovernedDataImportRecoveryOwner, PersistenceGateError,
@@ -546,14 +548,9 @@ pub(crate) struct CanonicalOutboxReconciliationReport {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 // The suffix distinguishes canonical store ownership from similarly named
 // projections and compatibility views.
-#[expect(
-    clippy::enum_variant_names,
-    reason = "owner=backend-contracts; expires=2026-10-01; preserve serialized or recovery vocabulary"
-)]
 enum CanonicalOutboxOwner {
     MemoryStore,
     MemoryLifecycleStore,
-    AgentRunStore,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -656,24 +653,7 @@ enum ProjectionCandidateOutcome {
     Deferred,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum AgentRunProjectionFinalizeError {
-    HeadAdvanced(CanonicalProjectionHeadAdvanced),
-    Failed(String),
-}
-
-#[cfg(test)]
-#[derive(Clone)]
-struct AgentRunApplyMarkBarrier {
-    applied: Arc<tokio::sync::Notify>,
-    resume: Arc<tokio::sync::Notify>,
-}
-
-#[cfg(test)]
-static AGENT_RUN_APPLY_MARK_BARRIERS: LazyLock<
-    StdMutex<HashMap<String, AgentRunApplyMarkBarrier>>,
-> = LazyLock::new(|| StdMutex::new(HashMap::new()));
-
+#[derive(Debug, Clone)]
 struct SelectedProjectionDeliveries {
     candidates: Vec<OwnedProjectionDelivery>,
     backlog_may_remain: bool,
@@ -1066,23 +1046,6 @@ async fn reconcile_blocking_canonical_outbox_event_with_state(
     .await
 }
 
-/// AgentRun delete/restore commands commit one blocking canonical event and
-/// must reconcile that event only. Historical optional backlog is left to the
-/// single background consumer instead of extending the user's foreground
-/// confirmation path.
-pub(crate) async fn reconcile_agent_run_blocking_outbox_event_with_state(
-    state: &Arc<AppState>,
-    event_id: &str,
-) -> Result<CanonicalOutboxReconciliationReport, String> {
-    notify_canonical_outbox_background_worker(state);
-    reconcile_blocking_canonical_outbox_event_with_state(
-        state,
-        CanonicalOutboxOwner::AgentRunStore,
-        event_id,
-    )
-    .await
-}
-
 async fn reconcile_selected_canonical_outboxes_with_state(
     state: &Arc<AppState>,
     selection: CanonicalOutboxSelection,
@@ -1164,119 +1127,41 @@ async fn reconcile_projection_candidate(
         return reconcile_memory_retrieval_projection_candidate(state, candidate, commit_lane)
             .await;
     }
-    if candidate.owner != CanonicalOutboxOwner::AgentRunStore
-        || candidate.delivery.aggregate_kind != "agent_run"
-    {
-        return match apply_projection_delivery(state, &candidate.delivery, commit_lane).await {
-            Ok(ProjectionApplicationOutcome::Applied) => match mark_owned_projection_applied(
-                state,
-                candidate.owner,
-                &candidate.delivery,
-                commit_lane,
-            )
-            .await
-            {
-                Ok(()) => Ok(ProjectionCandidateOutcome::Applied),
-                Err(ProjectionReconciliationError::Deferred(_)) => {
-                    Ok(ProjectionCandidateOutcome::Deferred)
-                }
-                Err(error) => Err(error.to_string()),
-            },
-            Ok(ProjectionApplicationOutcome::CompensatedToCanonicalHead { .. }) => {
-                Err("non-AgentRun projection attempted causal compensation".into())
-            }
+    match apply_projection_delivery(state, &candidate.delivery, commit_lane).await {
+        Ok(ProjectionApplicationOutcome::Applied) => match mark_owned_projection_applied(
+            state,
+            candidate.owner,
+            &candidate.delivery,
+            commit_lane,
+        )
+        .await
+        {
+            Ok(()) => Ok(ProjectionCandidateOutcome::Applied),
             Err(ProjectionReconciliationError::Deferred(_)) => {
                 Ok(ProjectionCandidateOutcome::Deferred)
             }
-            Err(error) => {
-                match mark_owned_projection_degraded(
-                    state,
-                    candidate.owner,
-                    &candidate.delivery,
-                    &error.to_string(),
-                    commit_lane,
-                )
-                .await
-                {
-                    Ok(()) => Ok(ProjectionCandidateOutcome::Degraded),
-                    Err(ProjectionReconciliationError::Deferred(_)) => {
-                        Ok(ProjectionCandidateOutcome::Deferred)
-                    }
-                    Err(error) => Err(error.to_string()),
-                }
-            }
-        };
-    }
-
-    let causal_lock = state
-        .persistence_coordinator
-        .agent_run_causal_lock(&candidate.delivery.aggregate_id);
-    // Canonical head read, target CAS and durable delivery finalization are
-    // one process-local critical section. Durable revision checks below remain
-    // authoritative across another process or a restart.
-    let _causal_guard = causal_lock.lock().await;
-    const MAX_HEAD_ADVANCE_RETRIES: usize = 4;
-    for attempt in 0..MAX_HEAD_ADVANCE_RETRIES {
-        let application =
-            match apply_projection_delivery(state, &candidate.delivery, commit_lane).await {
-                Ok(application) => application,
-                Err(ProjectionReconciliationError::Deferred(_)) => {
-                    return Ok(ProjectionCandidateOutcome::Deferred)
-                }
-                Err(error) => {
-                    return match mark_owned_projection_degraded(
-                        state,
-                        candidate.owner,
-                        &candidate.delivery,
-                        &error.to_string(),
-                        commit_lane,
-                    )
-                    .await
-                    {
-                        Ok(()) => Ok(ProjectionCandidateOutcome::Degraded),
-                        Err(ProjectionReconciliationError::Deferred(_)) => {
-                            Ok(ProjectionCandidateOutcome::Deferred)
-                        }
-                        Err(error) => Err(error.to_string()),
-                    };
-                }
-            };
-        #[cfg(test)]
-        wait_at_agent_run_apply_mark_barrier_for_test(&candidate.delivery.aggregate_id).await;
-        let finalized = match application {
-            ProjectionApplicationOutcome::Applied => {
-                mark_agent_run_projection_applied_if_head(state, &candidate.delivery).await
-            }
-            ProjectionApplicationOutcome::CompensatedToCanonicalHead {
-                head_event_id,
-                head_revision,
-            } => {
-                mark_owned_projection_compensated_to_head(
-                    state,
-                    candidate.owner,
-                    &candidate.delivery,
-                    &head_event_id,
-                    head_revision,
-                )
-                .await
-            }
-        };
-        match finalized {
-            Ok(()) => return Ok(ProjectionCandidateOutcome::Applied),
-            Err(AgentRunProjectionFinalizeError::HeadAdvanced(_))
-                if attempt + 1 < MAX_HEAD_ADVANCE_RETRIES =>
-            {
-                continue;
-            }
-            Err(AgentRunProjectionFinalizeError::HeadAdvanced(advanced)) => {
-                return Err(format!(
-                    "AgentRun projection head kept advancing after {MAX_HEAD_ADVANCE_RETRIES} attempts: {advanced}"
-                ));
-            }
-            Err(AgentRunProjectionFinalizeError::Failed(error)) => return Err(error),
+            Err(error) => Err(error.to_string()),
+        },
+        Ok(ProjectionApplicationOutcome::CompensatedToCanonicalHead { .. }) => {
+            Err("non-retrieval projection attempted causal compensation".into())
         }
+        Err(ProjectionReconciliationError::Deferred(_)) => Ok(ProjectionCandidateOutcome::Deferred),
+        Err(error) => match mark_owned_projection_degraded(
+            state,
+            candidate.owner,
+            &candidate.delivery,
+            &error.to_string(),
+            commit_lane,
+        )
+        .await
+        {
+            Ok(()) => Ok(ProjectionCandidateOutcome::Degraded),
+            Err(ProjectionReconciliationError::Deferred(_)) => {
+                Ok(ProjectionCandidateOutcome::Deferred)
+            }
+            Err(error) => Err(error.to_string()),
+        },
     }
-    Err("AgentRun causal projection retry loop exhausted".into())
 }
 
 async fn reconcile_memory_retrieval_projection_candidate(
@@ -1378,9 +1263,6 @@ async fn load_memory_retrieval_projection_head(
                 }
             }
         }
-        CanonicalOutboxOwner::AgentRunStore => {
-            Err("AgentRunStore cannot own a Memory retrieval projection".into())
-        }
     }
 }
 
@@ -1442,39 +1324,8 @@ async fn finalize_memory_retrieval_projection(
                 ),
             }
         }
-        CanonicalOutboxOwner::AgentRunStore => Err(anyhow::anyhow!(
-            "AgentRunStore cannot finalize Memory retrieval"
-        )),
     };
     result.map_err(ProjectionReconciliationError::from_anyhow)
-}
-
-#[cfg(test)]
-fn install_agent_run_apply_mark_barrier_for_test(
-    run_id: &str,
-) -> (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>) {
-    let barrier = AgentRunApplyMarkBarrier {
-        applied: Arc::new(tokio::sync::Notify::new()),
-        resume: Arc::new(tokio::sync::Notify::new()),
-    };
-    let handles = (Arc::clone(&barrier.applied), Arc::clone(&barrier.resume));
-    AGENT_RUN_APPLY_MARK_BARRIERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .insert(run_id.to_string(), barrier);
-    handles
-}
-
-#[cfg(test)]
-async fn wait_at_agent_run_apply_mark_barrier_for_test(run_id: &str) {
-    let barrier = AGENT_RUN_APPLY_MARK_BARRIERS
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .remove(run_id);
-    if let Some(barrier) = barrier {
-        barrier.applied.notify_one();
-        barrier.resume.notified().await;
-    }
 }
 
 async fn select_projection_deliveries(
@@ -1493,7 +1344,6 @@ async fn select_projection_deliveries(
             for owner in [
                 CanonicalOutboxOwner::MemoryStore,
                 CanonicalOutboxOwner::MemoryLifecycleStore,
-                CanonicalOutboxOwner::AgentRunStore,
             ] {
                 let mut deliveries =
                     load_owner_replayable_deliveries(state, owner, bounded_limit).await?;
@@ -1585,20 +1435,6 @@ async fn load_owner_replayable_deliveries(
                 .map_err(|error| error.to_string()),
             None => Ok(Vec::new()),
         },
-        CanonicalOutboxOwner::AgentRunStore => {
-            let store = state
-                .agent_run_store
-                .as_ref()
-                .ok_or_else(|| "AgentRun store not available".to_string())?
-                .lock()
-                .await;
-            crate::terminal_owner_write_gateway::register_agent_run_store_result(
-                state,
-                store
-                    .list_replayable_projection_deliveries(limit)
-                    .map_err(|error| error.to_string()),
-            )
-        }
     }
 }
 
@@ -1622,20 +1458,6 @@ async fn load_owner_event_deliveries(
             .await
             .list_replayable_projection_deliveries_for_event(event_id)
             .map_err(|error| error.to_string()),
-        CanonicalOutboxOwner::AgentRunStore => {
-            let store = state
-                .agent_run_store
-                .as_ref()
-                .ok_or_else(|| "AgentRun store not available".to_string())?
-                .lock()
-                .await;
-            crate::terminal_owner_write_gateway::register_agent_run_store_result(
-                state,
-                store
-                    .list_replayable_projection_deliveries_for_event(event_id)
-                    .map_err(|error| error.to_string()),
-            )
-        }
     }
 }
 
@@ -1682,23 +1504,6 @@ async fn mark_owned_projection_applied(
             .await
             .mark_projection_applied(&delivery.event_id, &delivery.projection_target)
             .map_err(ProjectionReconciliationError::failed),
-        CanonicalOutboxOwner::AgentRunStore => {
-            let store = state
-                .agent_run_store
-                .as_ref()
-                .ok_or_else(|| {
-                    "AgentRun store unavailable during outbox reconciliation".to_string()
-                })?
-                .lock()
-                .await;
-            crate::terminal_owner_write_gateway::register_agent_run_store_result(
-                state,
-                store
-                    .mark_projection_applied(&delivery.event_id, &delivery.projection_target)
-                    .map_err(|error| error.to_string()),
-            )
-            .map_err(ProjectionReconciliationError::failed)
-        }
     }
 }
 
@@ -1732,99 +1537,7 @@ async fn mark_owned_projection_degraded(
             .await
             .mark_projection_degraded(&delivery.event_id, &delivery.projection_target, error)
             .map_err(ProjectionReconciliationError::failed),
-        CanonicalOutboxOwner::AgentRunStore => {
-            let store = state
-                .agent_run_store
-                .as_ref()
-                .ok_or_else(|| {
-                    "AgentRun store unavailable during outbox reconciliation".to_string()
-                })?
-                .lock()
-                .await;
-            crate::terminal_owner_write_gateway::register_agent_run_store_result(
-                state,
-                store
-                    .mark_projection_degraded(
-                        &delivery.event_id,
-                        &delivery.projection_target,
-                        error,
-                    )
-                    .map_err(|error| error.to_string()),
-            )
-            .map_err(ProjectionReconciliationError::failed)
-        }
     }
-}
-
-async fn mark_owned_projection_compensated_to_head(
-    state: &Arc<AppState>,
-    owner: CanonicalOutboxOwner,
-    stale_delivery: &ProjectionDelivery,
-    head_event_id: &str,
-    head_revision: u64,
-) -> Result<(), AgentRunProjectionFinalizeError> {
-    if owner != CanonicalOutboxOwner::AgentRunStore {
-        return Err(AgentRunProjectionFinalizeError::Failed(
-            "only AgentRun projections support causal compensation".into(),
-        ));
-    }
-    let result = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| {
-            AgentRunProjectionFinalizeError::Failed(
-                "AgentRun store unavailable during causal compensation".into(),
-            )
-        })?
-        .lock()
-        .await
-        .mark_projection_compensated_to_head(
-            &stale_delivery.event_id,
-            head_event_id,
-            head_revision,
-            &stale_delivery.projection_target,
-        );
-    if let Err(error) = &result {
-        crate::terminal_owner_write_gateway::register_agent_run_store_error(state, error);
-    }
-    map_agent_run_projection_finalize_result(result)
-}
-
-async fn mark_agent_run_projection_applied_if_head(
-    state: &Arc<AppState>,
-    delivery: &ProjectionDelivery,
-) -> Result<(), AgentRunProjectionFinalizeError> {
-    let result = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| {
-            AgentRunProjectionFinalizeError::Failed(
-                "AgentRun store unavailable during causal finalization".into(),
-            )
-        })?
-        .lock()
-        .await
-        .mark_projection_applied_if_canonical_head(
-            &delivery.event_id,
-            delivery.aggregate_revision,
-            &delivery.projection_target,
-        );
-    if let Err(error) = &result {
-        crate::terminal_owner_write_gateway::register_agent_run_store_error(state, error);
-    }
-    map_agent_run_projection_finalize_result(result)
-}
-
-fn map_agent_run_projection_finalize_result(
-    result: anyhow::Result<()>,
-) -> Result<(), AgentRunProjectionFinalizeError> {
-    result.map_err(|error| {
-        error
-            .downcast_ref::<CanonicalProjectionHeadAdvanced>()
-            .cloned()
-            .map(AgentRunProjectionFinalizeError::HeadAdvanced)
-            .unwrap_or_else(|| AgentRunProjectionFinalizeError::Failed(error.to_string()))
-    })
 }
 
 async fn apply_projection_delivery(
@@ -1857,9 +1570,6 @@ async fn apply_projection_delivery(
         "memory_retrieval" => Err(ProjectionReconciliationError::failed(
             "canonical Memory retrieval projection requires its exact outbox owner",
         )),
-        "agent_run" => apply_agent_run_projection(state, delivery)
-            .await
-            .map_err(ProjectionReconciliationError::failed),
         other => Err(ProjectionReconciliationError::failed(format!(
             "unsupported canonical outbox aggregate: {other}:{}",
             delivery.mutation_kind
@@ -2060,7 +1770,7 @@ async fn apply_memory_lifecycle_projection(
     } else {
         record.scope_owner_ref.as_deref().unwrap_or_else(|| {
             record
-                .source_task_session_id
+                .source_task_id
                 .as_deref()
                 .unwrap_or(openlife_core::memory::MEMORY_LIFECYCLE_GLOBAL_SESSION_ID)
         })
@@ -2146,222 +1856,23 @@ async fn apply_conversation_deletion_projection(
     let tombstone_id = delivery.tombstone_id.as_deref().ok_or_else(|| {
         ProjectionReconciliationError::failed("conversation deletion outbox missing tombstone id")
     })?;
-    let store = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| ProjectionReconciliationError::failed("AgentRun store unavailable"))?
-        .lock()
-        .await;
-    let projection_refs = crate::terminal_owner_write_gateway::register_agent_run_store_result(
+    if delivery.projection_target != "vector_store" {
+        return Err(ProjectionReconciliationError::failed(format!(
+            "unsupported conversation projection target: {}",
+            delivery.projection_target
+        )));
+    }
+    let _commit_permit = acquire_canonical_projection_commit_permit(
         state,
-        store
-            .projection_refs_for_session(&delivery.aggregate_id)
-            .map_err(|error| error.to_string()),
+        GovernedDataImportRecoveryOwner::VectorStore,
+        commit_lane,
     )
-    .map_err(ProjectionReconciliationError::failed)?;
-    drop(store);
-    let run_ids = projection_refs
-        .iter()
-        .map(|(run_id, _)| run_id.clone())
-        .collect::<Vec<_>>();
-    let mut task_ids = projection_refs
-        .iter()
-        .map(|(_, task_id)| task_id.clone())
-        .collect::<Vec<_>>();
-    if !task_ids
-        .iter()
-        .any(|task_id| task_id == &delivery.aggregate_id)
-    {
-        task_ids.push(delivery.aggregate_id.clone());
-    }
-    match delivery.projection_target.as_str() {
-        "vector_store" => {
-            let _commit_permit = acquire_canonical_projection_commit_permit(
-                state,
-                GovernedDataImportRecoveryOwner::VectorStore,
-                commit_lane,
-            )
-            .await?;
-            let store = state.vector_store.lock().await.clone();
-            store
-                .project_conversation_tombstone(tombstone_id, &delivery.aggregate_id)
-                .map_err(ProjectionReconciliationError::failed)?;
-        }
-        "agent_run_store" => {
-            let store = state
-                .agent_run_store
-                .as_ref()
-                .ok_or_else(|| ProjectionReconciliationError::failed("AgentRun store unavailable"))?
-                .lock()
-                .await;
-            crate::terminal_owner_write_gateway::register_agent_run_store_result(
-                state,
-                store
-                    .project_conversation_tombstone(tombstone_id, &delivery.aggregate_id)
-                    .map_err(|error| error.to_string()),
-            )
-            .map_err(ProjectionReconciliationError::failed)?;
-        }
-        "turn_event_store" => {
-            let store = state
-                .main_chat_agent_event_store
-                .as_ref()
-                .ok_or_else(|| ProjectionReconciliationError::failed("TurnEventStore unavailable"))?
-                .lock()
-                .await;
-            store
-                .project_conversation_tombstone(&delivery.event_id, tombstone_id, &task_ids)
-                .map_err(ProjectionReconciliationError::failed)?;
-        }
-        "action_queue_store" => {
-            let store = state
-                .main_chat_action_queue_store
-                .as_ref()
-                .ok_or_else(|| {
-                    ProjectionReconciliationError::failed("ActionQueueStore unavailable")
-                })?
-                .lock()
-                .await;
-            for task_id in &task_ids {
-                store
-                    .project_session_tombstone(&delivery.event_id, tombstone_id, task_id)
-                    .map_err(ProjectionReconciliationError::failed)?;
-            }
-        }
-        "life_event_store" => {
-            let store = state
-                .life_event_store
-                .as_ref()
-                .ok_or_else(|| ProjectionReconciliationError::failed("LifeEventStore unavailable"))?
-                .lock()
-                .await;
-            store
-                .project_source_tombstone(
-                    &delivery.event_id,
-                    tombstone_id,
-                    openlife_core::agent::LifeEventSourceType::AgentRun,
-                    &run_ids,
-                )
-                .map_err(ProjectionReconciliationError::failed)?;
-        }
-        other => {
-            return Err(ProjectionReconciliationError::failed(format!(
-                "unsupported conversation projection target: {other}"
-            )))
-        }
-    }
+    .await?;
+    let store = state.vector_store.lock().await.clone();
+    store
+        .project_conversation_tombstone(tombstone_id, &delivery.aggregate_id)
+        .map_err(ProjectionReconciliationError::failed)?;
     Ok(())
-}
-
-async fn apply_agent_run_projection(
-    state: &Arc<AppState>,
-    delivery: &ProjectionDelivery,
-) -> Result<ProjectionApplicationOutcome, String> {
-    let (run, canonical_head, known_tombstone_ids) = {
-        let store = state
-            .agent_run_store
-            .as_ref()
-            .ok_or_else(|| "AgentRun store unavailable".to_string())?
-            .lock()
-            .await;
-        let run = crate::terminal_owner_write_gateway::register_agent_run_store_result(
-            state,
-            store
-                .get_run_including_deleted(&delivery.aggregate_id)
-                .map_err(|error| error.to_string()),
-        )?
-        .ok_or_else(|| "canonical AgentRun missing during projection".to_string())?;
-        let head = crate::terminal_owner_write_gateway::register_agent_run_store_result(
-            state,
-            store
-                .canonical_projection_head(&delivery.aggregate_id)
-                .map_err(|error| error.to_string()),
-        )?
-        .ok_or_else(|| "canonical AgentRun projection head missing".to_string())?;
-        let tombstone_ids = crate::terminal_owner_write_gateway::register_agent_run_store_result(
-            state,
-            store
-                .canonical_tombstone_ids(&delivery.aggregate_id)
-                .map_err(|error| error.to_string()),
-        )?;
-        (run, head, tombstone_ids)
-    };
-    let deleting = canonical_head.mutation_kind == "deleted";
-    let restoring = canonical_head.mutation_kind == "restored";
-    if !deleting && !restoring {
-        return Err(format!(
-            "unsupported AgentRun mutation: {}",
-            canonical_head.mutation_kind
-        ));
-    }
-    if deleting != run.deleted_at.is_some() {
-        return Err("AgentRun row and canonical projection head disagree".into());
-    }
-    if deleting && canonical_head.tombstone_id.is_none() {
-        return Err("AgentRun deletion head is missing tombstone id".into());
-    }
-    match delivery.projection_target.as_str() {
-        "turn_event_store" => {
-            let store = state
-                .main_chat_agent_event_store
-                .as_ref()
-                .ok_or_else(|| "TurnEventStore unavailable".to_string())?
-                .lock()
-                .await;
-            store
-                .project_agent_run_canonical_head(
-                    &canonical_head.event_id,
-                    canonical_head.aggregate_revision,
-                    &delivery.aggregate_id,
-                    canonical_head.tombstone_id.as_deref(),
-                    &known_tombstone_ids,
-                )
-                .map_err(|error| error.to_string())?;
-        }
-        "action_queue_store" => {
-            let store = state
-                .main_chat_action_queue_store
-                .as_ref()
-                .ok_or_else(|| "ActionQueueStore unavailable".to_string())?
-                .lock()
-                .await;
-            store
-                .project_agent_run_canonical_head(
-                    &canonical_head.event_id,
-                    canonical_head.aggregate_revision,
-                    &run.task_id,
-                    canonical_head.tombstone_id.as_deref(),
-                    &known_tombstone_ids,
-                )
-                .map_err(|error| error.to_string())?;
-        }
-        "life_event_store" => {
-            let store = state
-                .life_event_store
-                .as_ref()
-                .ok_or_else(|| "LifeEventStore unavailable".to_string())?
-                .lock()
-                .await;
-            store
-                .project_agent_run_canonical_head(
-                    &canonical_head.event_id,
-                    canonical_head.aggregate_revision,
-                    &delivery.aggregate_id,
-                    canonical_head.tombstone_id.as_deref(),
-                    &known_tombstone_ids,
-                )
-                .map_err(|error| error.to_string())?;
-        }
-        other => return Err(format!("unsupported AgentRun projection target: {other}")),
-    }
-    if delivery.event_id == canonical_head.event_id {
-        Ok(ProjectionApplicationOutcome::Applied)
-    } else {
-        Ok(ProjectionApplicationOutcome::CompensatedToCanonicalHead {
-            head_event_id: canonical_head.event_id,
-            head_revision: canonical_head.aggregate_revision,
-        })
-    }
 }
 
 async fn ensure_memory_outbox_event_applied(
@@ -3086,7 +2597,6 @@ async fn set_memory_retrieval_dispositions_with_state(
                     .projection_summary(&receipt.event_id)
                     .map_err(AppError::from)?
                     .state(),
-                CanonicalOutboxOwner::AgentRunStore => unreachable!(),
             }
         } else {
             ProjectionDeliveryState::Applied
@@ -3844,7 +3354,7 @@ pub(crate) async fn materialize_memory_proposal_with_state(
 )]
 pub(crate) async fn commit_explicit_user_memory_for_turn_with_state(
     state: &Arc<AppState>,
-    source_task_session_id: String,
+    source_task_id: String,
     source_run_id: String,
     source_message_id: String,
     fact: CanonicalMemoryFactDescriptor,
@@ -3856,7 +3366,7 @@ pub(crate) async fn commit_explicit_user_memory_for_turn_with_state(
     require_persistence_write_string(state)?;
     commit_explicit_user_memory_inner(
         state,
-        source_task_session_id,
+        source_task_id,
         source_run_id,
         source_message_id,
         openlife_core::agent::metadata_safe::metadata_safe_text_digest(source_user_message).1,
@@ -3876,7 +3386,7 @@ pub(crate) async fn commit_explicit_user_memory_for_turn_with_state(
 )]
 async fn commit_explicit_user_memory_inner(
     state: &Arc<AppState>,
-    source_task_session_id: String,
+    source_task_id: String,
     source_run_id: String,
     source_message_id: String,
     source_message_digest: String,
@@ -3892,11 +3402,11 @@ async fn commit_explicit_user_memory_inner(
     let store = lifecycle_store.lock().await;
     let result = {
         let commit_permit = execution_epoch
-            .begin_canonical_commit("memory", format!("explicit:{source_task_session_id}"))
+            .begin_canonical_commit("memory", format!("explicit:{source_task_id}"))
             .map_err(|rejection| format!("explicit memory commit rejected: {rejection:?}"))?;
         let result = store.commit_explicit_user_memory(
             ExplicitMemoryWriteInput {
-                source_task_session_id,
+                source_task_id,
                 source_run_id,
                 source_message_id,
                 source_message_digest,
@@ -4308,7 +3818,7 @@ fn memory_lifecycle_store_missing() -> String {
 fn proposal_memory_evidence_refs(proposal: &AgentProposal) -> Vec<String> {
     let mut refs = Vec::new();
     if let Some(run_id) = proposal.run_id.as_ref() {
-        refs.push(format!("agent_run:{run_id}"));
+        refs.push(format!("work_run:{run_id}"));
     }
     if let Some(evidence_id) = proposal
         .after
@@ -4576,73 +4086,6 @@ mod tests {
             .persistence_coordinator = Arc::clone(&coordinator);
         coordinator
     }
-
-    #[tokio::test]
-    async fn agent_run_outbox_read_failure_degrades_before_projection_semantics() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("agent-run-outbox-read-failure.db");
-        let store = openlife_core::agent::AgentRunStore::new(&path).unwrap();
-        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        Arc::get_mut(&mut state)
-            .expect("test state must have one outer owner")
-            .agent_run_store = Some(Arc::new(tokio::sync::Mutex::new(store)));
-        let coordinator = install_release_like_persistence_coordinator(&mut state);
-
-        let fault = rusqlite::Connection::open(&path).unwrap();
-        fault
-            .execute_batch("DROP TABLE canonical_outbox_deliveries;")
-            .unwrap();
-        drop(fault);
-        let error =
-            load_owner_replayable_deliveries(&state, CanonicalOutboxOwner::AgentRunStore, 10)
-                .await
-                .expect_err("AgentRun outbox DB failure must remain an error");
-        assert!(error.to_ascii_lowercase().contains("no such table"));
-        assert_eq!(
-            coordinator.snapshot().mode,
-            crate::persistence_coordinator::PersistenceRuntimeMode::UnavailableDegraded
-        );
-        assert!(coordinator.require_effects_allowed().is_err());
-    }
-
-    #[tokio::test]
-    async fn conversation_deletion_projection_rejects_missing_agent_run_owner() {
-        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        Arc::get_mut(&mut state)
-            .expect("test state must have one outer owner")
-            .agent_run_store = None;
-        let now = chrono::Utc::now();
-        let delivery = ProjectionDelivery {
-            event_id: uuid::Uuid::new_v4().to_string(),
-            aggregate_kind: "conversation".into(),
-            aggregate_id: "missing-agent-run-owner-session".into(),
-            mutation_kind: "deleted".into(),
-            aggregate_revision: 1,
-            payload_digest: format!("sha256:{}", "a".repeat(64)),
-            tombstone_id: Some(uuid::Uuid::new_v4().to_string()),
-            projection_target: "vector_store".into(),
-            state: ProjectionDeliveryState::Pending,
-            attempt_count: 0,
-            last_error_digest: None,
-            terminal_disposition: None,
-            superseded_by_event_id: None,
-            created_at: now,
-            updated_at: now,
-        };
-        let error = apply_conversation_deletion_projection(
-            &state,
-            &delivery,
-            CanonicalProjectionCommitLane::Normal,
-        )
-        .await
-        .expect_err("missing AgentRun owner cannot be interpreted as an empty reference set");
-        assert!(matches!(
-            error,
-            ProjectionReconciliationError::Failed(ref reason)
-                if reason == "AgentRun store unavailable"
-        ));
-    }
-
     #[tokio::test]
     async fn memory_and_vector_gateways_reject_admitted_writes_after_generation_invalidation() {
         let memory_state = crate::test_utils::test_app_state();
@@ -5276,7 +4719,7 @@ mod tests {
             let deliveries = memory
                 .list_replayable_projection_deliveries_for_event(&deletion.event_id)
                 .unwrap();
-            assert_eq!(deliveries.len(), 5);
+            assert_eq!(deliveries.len(), 1);
             for delivery in deliveries
                 .iter()
                 .filter(|delivery| delivery.projection_target != "vector_store")
@@ -6324,7 +5767,7 @@ mod tests {
 
     async fn commit_test_explicit_memory(
         state: &Arc<AppState>,
-        task_session_id: &str,
+        task_id: &str,
         source_run_id: &str,
         source_message_id: &str,
         fact: CanonicalMemoryFactDescriptor,
@@ -6343,10 +5786,10 @@ mod tests {
                 .cancellation_registry
                 .clone()
         };
-        let registration = registry.register(task_session_id);
+        let registration = registry.register(task_id);
         commit_explicit_user_memory_for_turn_with_state(
             state,
-            task_session_id.to_string(),
+            task_id.to_string(),
             source_run_id.to_string(),
             source_message_id.to_string(),
             fact,
@@ -6438,7 +5881,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_memory_gateway_rejects_proof_bound_to_a_different_message_id() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let task_session_id = "memory-proof-message-mismatch";
+        let task_id = "memory-proof-message-mismatch";
         let registry = {
             state
                 .main_chat_runtime_state
@@ -6447,7 +5890,7 @@ mod tests {
                 .cancellation_registry
                 .clone()
         };
-        let registration = registry.register(task_session_id);
+        let registration = registry.register(task_id);
         let source_user_message = "Remember this proof-bound fact.".to_string();
         let (_policy, candidate, fact, proof) =
             crate::main_chat_kernel::test_policy_memory_admission_context(
@@ -6457,7 +5900,7 @@ mod tests {
 
         let error = commit_explicit_user_memory_for_turn_with_state(
             &state,
-            task_session_id.into(),
+            task_id.into(),
             "run-proof-message-mismatch".into(),
             "message-spoofed".into(),
             fact,
@@ -6484,7 +5927,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_winning_epoch_rejects_explicit_memory_before_canonical_commit() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let task_session_id = "memory-cancel-wins";
+        let task_id = "memory-cancel-wins";
         let registry = {
             state
                 .main_chat_runtime_state
@@ -6493,8 +5936,8 @@ mod tests {
                 .cancellation_registry
                 .clone()
         };
-        let registration = registry.register(task_session_id);
-        registry.request_cancel(task_session_id);
+        let registration = registry.register(task_id);
+        registry.request_cancel(task_id);
         let source_user_message = "Remember this only if the canonical commit wins.".to_string();
         let (_policy, candidate, fact, proof) =
             crate::main_chat_kernel::test_policy_memory_admission_context(
@@ -6504,7 +5947,7 @@ mod tests {
 
         let error = commit_explicit_user_memory_for_turn_with_state(
             &state,
-            task_session_id.into(),
+            task_id.into(),
             "run-memory-cancel".into(),
             "message-memory-cancel".into(),
             fact,
@@ -6538,7 +5981,7 @@ mod tests {
     #[tokio::test]
     async fn explicit_memory_commit_winning_epoch_remains_committed_after_cancel() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let task_session_id = "memory-commit-wins";
+        let task_id = "memory-commit-wins";
         let registry = {
             state
                 .main_chat_runtime_state
@@ -6547,7 +5990,7 @@ mod tests {
                 .cancellation_registry
                 .clone()
         };
-        let registration = registry.register(task_session_id);
+        let registration = registry.register(task_id);
         let source_user_message =
             "Remember that canonical commit won before cancellation.".to_string();
         let (_policy, candidate, fact, proof) =
@@ -6557,7 +6000,7 @@ mod tests {
             );
         let receipt = commit_explicit_user_memory_for_turn_with_state(
             &state,
-            task_session_id.into(),
+            task_id.into(),
             "run-memory-commit".into(),
             "message-memory-commit".into(),
             fact,
@@ -6568,7 +6011,7 @@ mod tests {
         )
         .await
         .expect("explicit Memory commit wins");
-        registry.request_cancel(task_session_id);
+        registry.request_cancel(task_id);
 
         let persisted = state
             .memory_lifecycle_store
@@ -6668,7 +6111,7 @@ mod tests {
                 .projection_summary(&startup_delete.event_id)
                 .unwrap()
                 .pending,
-            5
+            1
         );
 
         // Exercise the real pre-seal startup contract, not only the isolated
@@ -6697,8 +6140,8 @@ mod tests {
         .await
         .expect("startup BlockingOnly must not await optional embedding")
         .unwrap();
-        assert_eq!(startup.examined, 5);
-        assert_eq!(startup.applied, 5);
+        assert_eq!(startup.examined, 1);
+        assert_eq!(startup.applied, 1);
         assert_eq!(startup.blocking_degraded, 0);
         assert!(!startup.blocking_backlog_may_remain);
         assert_eq!(
@@ -6735,527 +6178,6 @@ mod tests {
             .admit_startup_reconciliation_writes(&[GovernedDataImportRecoveryOwner::MemoryStore,])
             .is_err());
     }
-
-    #[tokio::test]
-    async fn agent_run_projection_ahead_of_canonical_is_durable_degraded_not_applied() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let run = openlife_core::agent::AgentRun::new_chat_run(
-            "agent-run-ahead-divergence",
-            "metadata safe input",
-        );
-        let deleted = {
-            let store = state.agent_run_store.as_ref().unwrap().lock().await;
-            store.create_run(&run).unwrap();
-            store
-                .delete_run_with_tombstone(&run.id, Some("canonical delete"))
-                .unwrap()
-        };
-        let tombstone_id = deleted.tombstone_id.clone().unwrap();
-        state
-            .main_chat_agent_event_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .project_agent_run_canonical_head(
-                "impossible-future-event",
-                deleted.aggregate_revision + 1,
-                &run.id,
-                Some(&tombstone_id),
-                std::slice::from_ref(&tombstone_id),
-            )
-            .unwrap();
-
-        let report =
-            reconcile_agent_run_blocking_outbox_event_with_state(&state, &deleted.event_id)
-                .await
-                .unwrap();
-        assert_eq!(report.applied, 2);
-        assert_eq!(report.degraded, 1);
-        assert_eq!(report.blocking_degraded, 1);
-        let summary = state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .projection_summary(&deleted.event_id)
-            .unwrap();
-        assert_eq!(summary.applied, 2);
-        assert_eq!(summary.degraded, 1);
-        assert_eq!(summary.state(), ProjectionDeliveryState::Degraded);
-        assert_eq!(
-            state
-                .main_chat_agent_event_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .agent_run_projection_head_for_test(&run.id)
-                .unwrap(),
-            Some((2, true, Some(tombstone_id)))
-        );
-    }
-
-    #[tokio::test]
-    async fn agent_run_restart_limit_one_actually_reconciles_only_current_canonical_head() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("agent-run-restart-reconcile.db");
-        let run = openlife_core::agent::AgentRun::new_chat_run(
-            "agent-run-restart-reconcile",
-            "metadata safe input",
-        );
-        let (restored_stale, deleted_current) = {
-            let store = openlife_core::agent::AgentRunStore::new(&path).unwrap();
-            store.create_run(&run).unwrap();
-            let deleted_first = store
-                .delete_run_with_tombstone(&run.id, Some("first delete"))
-                .unwrap();
-            for target in ["turn_event_store", "action_queue_store", "life_event_store"] {
-                store
-                    .mark_projection_applied(&deleted_first.event_id, target)
-                    .unwrap();
-            }
-            let restored_stale = store.restore_run_with_receipt(&run.id).unwrap();
-            let deleted_current = store
-                .delete_run_with_tombstone(&run.id, Some("current delete"))
-                .unwrap();
-            (restored_stale, deleted_current)
-        };
-
-        let reopened = openlife_core::agent::AgentRunStore::new(&path).unwrap();
-        let next_before_reconcile = reopened.list_replayable_projection_deliveries(1).unwrap();
-        assert_eq!(next_before_reconcile.len(), 1);
-        assert_eq!(next_before_reconcile[0].event_id, deleted_current.event_id);
-        assert_eq!(next_before_reconcile[0].aggregate_revision, 3);
-        let selected_target = next_before_reconcile[0].projection_target.clone();
-
-        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        Arc::get_mut(&mut state)
-            .expect("restart fixture must have one outer state owner")
-            .agent_run_store = Some(Arc::new(tokio::sync::Mutex::new(reopened)));
-        let report = reconcile_canonical_outboxes_with_state(&state, 1)
-            .await
-            .unwrap();
-        assert_eq!(report.examined, 1);
-        assert_eq!(report.applied, 1);
-        assert_eq!(report.degraded, 0);
-
-        let store = state.agent_run_store.as_ref().unwrap().lock().await;
-        let stale_summary = store.projection_summary(&restored_stale.event_id).unwrap();
-        assert_eq!(stale_summary.superseded, 3);
-        assert_eq!(stale_summary.pending, 0);
-        let current_summary = store.projection_summary(&deleted_current.event_id).unwrap();
-        assert_eq!(current_summary.applied, 1);
-        assert_eq!(current_summary.pending, 2);
-        assert!(store.get_live_run(&run.id).unwrap().is_none());
-        drop(store);
-
-        let expected_tombstone = deleted_current.tombstone_id.clone();
-        let projected_head = match selected_target.as_str() {
-            "turn_event_store" => state
-                .main_chat_agent_event_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .agent_run_projection_head_for_test(&run.id)
-                .unwrap(),
-            "action_queue_store" => state
-                .main_chat_action_queue_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .agent_run_projection_head_for_test(&run.task_id)
-                .unwrap(),
-            "life_event_store" => state
-                .life_event_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .agent_run_projection_head_for_test(&run.id)
-                .unwrap(),
-            other => panic!("unexpected restart projection target {other}"),
-        };
-        assert_eq!(projected_head, Some((3, true, expected_tombstone)));
-    }
-
-    #[tokio::test]
-    async fn agent_run_causal_head_prevents_pending_restore_from_overriding_newer_delete() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let run = openlife_core::agent::AgentRun::new_chat_run(
-            "agent-run-restore-fence-session",
-            "metadata safe input",
-        );
-        {
-            let store = state.agent_run_store.as_ref().unwrap().lock().await;
-            store.create_run(&run).unwrap();
-        }
-        {
-            let store = state
-                .main_chat_agent_event_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await;
-            crate::main_chat_event_stream::append_main_chat_agent_runtime_event_batch_in_store(
-                &store,
-                &run.task_id,
-                &run.id,
-                vec![
-                    crate::main_chat_event_stream::MainChatAgentRuntimeEventInput::new(
-                        "failed",
-                        "turn",
-                        format!("seed-terminal:{}", run.id),
-                        "agent_run_causal_projection_test",
-                        serde_json::json!({
-                            "status": "failed",
-                            "kind": "metadata_safe_seed",
-                        }),
-                    ),
-                ],
-            )
-            .unwrap();
-        }
-        let seeded_action = {
-            use openlife_core::agent::main_chat_agent_v1::{ExecutionAction, ExecutionPolicy};
-            let action = ExecutionAction::new("memory.search", "metadata safe seeded action");
-            state
-                .main_chat_action_queue_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .enqueue(
-                    &run.task_id,
-                    action.clone(),
-                    ExecutionPolicy.classify(&action),
-                )
-                .unwrap()
-        };
-        let seeded_life_event = {
-            use openlife_core::agent::{
-                LifeDomain, LifeEventDraft, LifeEventPrivacyLevel, RiskLevel,
-            };
-            let agent_run_store = state.agent_run_store.as_ref().unwrap().lock().await;
-            let life_event_store = state.life_event_store.as_ref().unwrap().lock().await;
-            life_event_store
-                .create_canonical_agent_run_event_for_test(
-                    &agent_run_store,
-                    &run.id,
-                    None,
-                    LifeEventDraft::new(
-                        "agent_run_projection_seed",
-                        "Metadata safe causal projection seed.",
-                    )
-                    .with_source_run_id(&run.id),
-                    LifeDomain::Other,
-                    RiskLevel::Low,
-                    LifeEventPrivacyLevel::Internal,
-                )
-                .unwrap()
-        };
-        assert_eq!(
-            state
-                .main_chat_agent_event_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .list(&run.task_id, 0, 10)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(state
-            .main_chat_action_queue_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .load(&seeded_action.id)
-            .unwrap()
-            .is_some());
-        assert_eq!(
-            state
-                .life_event_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .query_events(None, None)
-                .unwrap()[0]
-                .id,
-            seeded_life_event.id
-        );
-        let deleted_first = {
-            let store = state.agent_run_store.as_ref().unwrap().lock().await;
-            store
-                .delete_run_with_tombstone(&run.id, Some("user delete"))
-                .unwrap()
-        };
-        let first_delete_report =
-            reconcile_agent_run_blocking_outbox_event_with_state(&state, &deleted_first.event_id)
-                .await
-                .unwrap();
-        assert_eq!(first_delete_report.applied, 3);
-        assert!(state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .get_live_run(&run.id)
-            .unwrap()
-            .is_none());
-        assert!(state
-            .main_chat_agent_event_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .list(&run.task_id, 0, 10)
-            .unwrap()
-            .is_empty());
-        assert!(state
-            .main_chat_action_queue_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .list_for_session(&run.task_id)
-            .unwrap()
-            .is_empty());
-        assert!(state
-            .life_event_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .query_events(None, None)
-            .unwrap()
-            .is_empty());
-
-        let restored_pending = state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .restore_run_with_receipt(&run.id)
-            .unwrap();
-        // R1 is loaded before D2 commits. The in-memory copies cannot be
-        // withdrawn, so every target must resolve the DB canonical head again.
-        let loaded_restore = state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .list_replayable_projection_deliveries_for_event(&restored_pending.event_id)
-            .unwrap();
-        assert_eq!(loaded_restore.len(), 3);
-
-        let deleted_current = state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .delete_run_with_tombstone(&run.id, Some("newer user delete"))
-            .unwrap();
-        assert_eq!(deleted_first.aggregate_revision, 1);
-        assert_eq!(restored_pending.aggregate_revision, 2);
-        assert_eq!(deleted_current.aggregate_revision, 3);
-        assert_ne!(deleted_current.tombstone_id, deleted_first.tombstone_id);
-        assert!(state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .list_replayable_projection_deliveries_for_event(&restored_pending.event_id)
-            .unwrap()
-            .is_empty());
-
-        let (applied, resume) = install_agent_run_apply_mark_barrier_for_test(&run.id);
-        let first_stale = OwnedProjectionDelivery {
-            owner: CanonicalOutboxOwner::AgentRunStore,
-            delivery: loaded_restore[0].clone(),
-        };
-        let state_for_reconcile = Arc::clone(&state);
-        let reconcile_task = tokio::spawn(async move {
-            reconcile_projection_candidate(
-                &state_for_reconcile,
-                &first_stale,
-                CanonicalProjectionCommitLane::Normal,
-            )
-            .await
-        });
-        applied.notified().await;
-        let same_causal_lock = state.persistence_coordinator.agent_run_causal_lock(&run.id);
-        assert!(same_causal_lock.try_lock().is_err());
-
-        // R2 is the fourth canonical mutation. It must not commit in the gap
-        // between target CAS and delivery terminal CAS because that whole gap
-        // is protected by the same aggregate lock.
-        let state_for_fourth_mutation = Arc::clone(&state);
-        let run_id_for_fourth_mutation = run.id.clone();
-        let mut fourth_mutation = tokio::spawn(async move {
-            crate::commands::agent::restore_agent_run_with_state(
-                &run_id_for_fourth_mutation,
-                &state_for_fourth_mutation,
-            )
-            .await
-        });
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), &mut fourth_mutation,)
-                .await
-                .is_err()
-        );
-        let head_before_finalize = state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .canonical_projection_head(&run.id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(head_before_finalize.event_id, deleted_current.event_id);
-        assert_eq!(head_before_finalize.aggregate_revision, 3);
-
-        resume.notify_one();
-        assert_eq!(
-            reconcile_task.await.unwrap().unwrap(),
-            ProjectionCandidateOutcome::Applied
-        );
-        let restored_current = fourth_mutation.await.unwrap().unwrap();
-        assert_eq!(restored_current.id, run.id);
-        let restored_head = state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .canonical_projection_head(&run.id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(restored_head.aggregate_revision, 4);
-        assert_eq!(restored_head.mutation_kind, "restored");
-
-        for stale_restore in loaded_restore.iter().skip(1) {
-            assert_eq!(
-                reconcile_projection_candidate(
-                    &state,
-                    &OwnedProjectionDelivery {
-                        owner: CanonicalOutboxOwner::AgentRunStore,
-                        delivery: stale_restore.clone(),
-                    },
-                    CanonicalProjectionCommitLane::Normal,
-                )
-                .await
-                .unwrap(),
-                ProjectionCandidateOutcome::Applied
-            );
-        }
-
-        let store = state.agent_run_store.as_ref().unwrap().lock().await;
-        let stale_summary = store
-            .projection_summary(&restored_pending.event_id)
-            .unwrap();
-        assert_eq!(stale_summary.pending, 0);
-        assert_eq!(stale_summary.degraded, 0);
-        assert_eq!(stale_summary.compensated, 3);
-        assert_eq!(stale_summary.state(), ProjectionDeliveryState::Compensated);
-        let current_summary = store.projection_summary(&deleted_current.event_id).unwrap();
-        assert_eq!(current_summary.applied, 1);
-        assert_eq!(current_summary.superseded, 2);
-        assert_eq!(current_summary.pending, 0);
-        let restored_summary = store.projection_summary(&restored_head.event_id).unwrap();
-        assert_eq!(restored_summary.applied, 3);
-        drop(store);
-
-        assert_eq!(
-            state
-                .main_chat_agent_event_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .agent_run_projection_head_for_test(&run.id)
-                .unwrap(),
-            Some((4, false, None))
-        );
-        assert_eq!(
-            state
-                .main_chat_action_queue_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .agent_run_projection_head_for_test(&run.task_id)
-                .unwrap(),
-            Some((4, false, None))
-        );
-        assert_eq!(
-            state
-                .life_event_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .agent_run_projection_head_for_test(&run.id)
-                .unwrap(),
-            Some((4, false, None))
-        );
-
-        assert!(state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .get_live_run(&run.id)
-            .unwrap()
-            .is_some());
-        assert_eq!(
-            state
-                .main_chat_agent_event_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .list(&run.task_id, 0, 10)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(state
-            .main_chat_action_queue_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .load(&seeded_action.id)
-            .unwrap()
-            .is_some());
-        assert_eq!(
-            state
-                .life_event_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .query_events(None, None)
-                .unwrap()[0]
-                .id,
-            seeded_life_event.id
-        );
-    }
-
     #[tokio::test]
     async fn explicit_memory_foreground_stays_pending_and_background_recovers_same_outbox() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
@@ -7460,13 +6382,13 @@ mod tests {
                 .projection_summary(&receipt.event_id)
                 .unwrap()
                 .pending,
-            5
+            1
         );
 
         let report = reconcile_canonical_outboxes_with_state(&state, 200)
             .await
             .unwrap();
-        assert_eq!(report.applied, 5);
+        assert_eq!(report.applied, 1);
         assert_eq!(report.degraded, 0);
         assert!(!state
             .vector_store
@@ -7545,7 +6467,7 @@ mod tests {
             .projection_summary(&receipt.event_id)
             .unwrap();
         assert_eq!(summary.state(), ProjectionDeliveryState::Degraded);
-        assert_eq!(summary.applied, 4);
+        assert_eq!(summary.applied, 0);
         assert_eq!(summary.degraded, 1);
 
         state

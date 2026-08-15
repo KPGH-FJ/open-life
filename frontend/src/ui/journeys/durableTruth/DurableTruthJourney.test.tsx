@@ -7,13 +7,13 @@ import {
   buildDurableFixtureSnapshot,
   durableReviewItem,
 } from "@/test/fixtures/workbench/durableTruth";
-import { ReadOnlySpineJourney } from "@/ui/journeys/readOnly";
+import { ProductWorkbenchJourney } from "@/ui/journeys/productWorkbench";
 import { useDurableTruthJourney } from "./useDurableTruthJourney";
 
 function renderJourney(fixtureId: Parameters<typeof workbenchJourneyFixtureDataSource>[0]) {
   const dataSource = workbenchJourneyFixtureDataSource(fixtureId);
   render(
-    <ReadOnlySpineJourney
+    <ProductWorkbenchJourney
       dataSource={dataSource}
       governedActionDataSource={dataSource}
       durableTruthDataSource={dataSource}
@@ -91,7 +91,7 @@ describe("Workbench durable truth journey", () => {
     });
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         durableTruthDataSource={dataSource}
@@ -211,7 +211,7 @@ describe("Workbench durable truth journey", () => {
     const exportVersion = vi.spyOn(dataSource, "draftLifeModelExport");
     vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         durableTruthDataSource={dataSource}
@@ -346,7 +346,7 @@ describe("Workbench durable truth journey", () => {
     }
     vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         durableTruthDataSource={dataSource}
@@ -410,7 +410,7 @@ describe("Workbench durable truth journey", () => {
     vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
     const draft = vi.spyOn(dataSource, "draftLegacyLifeModelMigration");
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         durableTruthDataSource={dataSource}
@@ -562,7 +562,7 @@ describe("Workbench durable truth journey", () => {
     };
     vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         durableTruthDataSource={dataSource}
@@ -589,7 +589,7 @@ describe("Workbench durable truth journey", () => {
     };
     vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         durableTruthDataSource={dataSource}
@@ -627,7 +627,7 @@ describe("Workbench durable truth journey", () => {
     }
     vi.spyOn(dataSource, "loadDurableTruth").mockResolvedValue(snapshot);
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         durableTruthDataSource={dataSource}
@@ -713,7 +713,7 @@ describe("Workbench durable truth journey", () => {
       (() => {
         const dataSource = workbenchJourneyFixtureDataSource("fixture-durable-applied");
         return (
-          <ReadOnlySpineJourney
+          <ProductWorkbenchJourney
             dataSource={dataSource}
             governedActionDataSource={dataSource}
             durableTruthDataSource={dataSource}
@@ -734,7 +734,7 @@ describe("Workbench durable truth journey", () => {
       (() => {
         const dataSource = workbenchJourneyFixtureDataSource("fixture-stale");
         return (
-          <ReadOnlySpineJourney
+          <ProductWorkbenchJourney
             dataSource={dataSource}
             governedActionDataSource={dataSource}
             durableTruthDataSource={dataSource}
@@ -757,7 +757,9 @@ describe("Workbench durable truth journey", () => {
     await screen.findByRole("heading", { name: "长期理解尚未建立" });
     await user.click(screen.getByRole("button", { name: "查看并决定" }));
     await screen.findByRole("heading", { name: "把上午作为优先深度工作时段", level: 2 });
-    await user.click(screen.getByRole("button", { name: /读取本地客户访谈记录\s+等待决定/ }));
+    expect(
+      screen.queryByRole("button", { name: /读取本地客户访谈记录\s+等待决定/ })
+    ).not.toBeInTheDocument();
 
     expect(screen.getByRole("button", { name: "返回个人智能" })).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "返回个人智能" }));

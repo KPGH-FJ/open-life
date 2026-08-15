@@ -2,7 +2,6 @@ use crate::agent::conversation_context::{
     compact_conversation_context, CanonicalConversationMessage, ConversationContextConfig,
     ConversationContextProjection,
 };
-use crate::agent::{AgentRun, AgentRunStore};
 use crate::life_model::LifeModel;
 use crate::llm::ChatMessage;
 use crate::persistence_outbox::{
@@ -449,20 +448,12 @@ pub struct CanonicalConversationMessageProof {
 }
 
 impl CanonicalConversationMessageProof {
-    pub(crate) fn message_id(&self) -> i64 {
-        self.message_id
-    }
-
     pub(crate) fn session_id(&self) -> &str {
         &self.session_id
     }
 
     pub(crate) fn role(&self) -> &str {
         &self.role
-    }
-
-    pub(crate) fn canonical_store_identity(&self) -> &str {
-        &self.canonical_store_identity
     }
 
     pub(crate) fn canonical_ref(&self) -> &str {
@@ -608,6 +599,7 @@ impl MemoryStore {
         })
     }
 
+    #[cfg(test)]
     pub(crate) fn canonical_store_identity(&self) -> &str {
         &self.canonical_store_identity
     }
@@ -1068,241 +1060,6 @@ impl MemoryStore {
         self.save_message_idempotent_internal(session_id, msg, operation_id)
     }
 
-    /// Revalidates a previously issued conversation proof and commits the
-    /// referencing AgentRun while the canonical Memory connection remains
-    /// fenced. The lock order is always MemoryStore -> AgentRunStore and the
-    /// closure contains no external await, so a conversation delete cannot
-    /// enter the proof-check/AgentRun-insert window.
-    pub fn create_agent_run_from_active_conversation_message(
-        &self,
-        agent_run_store: &AgentRunStore,
-        run: &AgentRun,
-        proof: &CanonicalConversationMessageProof,
-    ) -> Result<()> {
-        self.create_agent_run_from_active_conversation_message_internal(
-            agent_run_store,
-            run,
-            proof,
-            || {},
-        )
-    }
-
-    /// Issue a typed Review target only while both canonical owners still
-    /// agree on the exact current user message. MemoryStore re-reads the body
-    /// and digest under its mutation fence; AgentRunStore then binds the live
-    /// run revision and status without exposing either body to the caller.
-    pub fn issue_agent_run_terminal_relation_target_intent(
-        &self,
-        agent_run_store: &AgentRunStore,
-        origin: &crate::agent::TerminalOwnerReviewOriginProof,
-    ) -> Result<crate::agent::store::AgentRunTerminalRelationTargetIntentAdmission> {
-        origin.validate()?;
-        if origin.canonical_store_identity() != self.canonical_store_identity.as_ref() {
-            anyhow::bail!("agent_run_terminal_relation_target_memory_store_mismatch");
-        }
-        let canonical_ref = origin.canonical_user_message_ref();
-        let Some(reference) = canonical_ref.strip_prefix("conversation://") else {
-            anyhow::bail!("agent_run_terminal_relation_target_message_ref_invalid");
-        };
-        let Some((expected_session_id, message_id)) = reference.rsplit_once("/message/") else {
-            anyhow::bail!("agent_run_terminal_relation_target_message_ref_invalid");
-        };
-        let message_id = message_id
-            .parse::<i64>()
-            .context("agent_run_terminal_relation_target_message_ref_invalid")?;
-
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
-        // Keep the same lock order as canonical AgentRun creation:
-        // MemoryStore -> AgentRunStore. No external await occurs in the fence.
-        let conversation_fence = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if persistence_outbox::has_active_tombstone(
-            &conversation_fence,
-            "conversation",
-            expected_session_id,
-        )? {
-            anyhow::bail!("agent_run_terminal_relation_target_message_tombstoned");
-        }
-        let current = conversation_fence
-            .query_row(
-                "SELECT session_id, role, content FROM messages WHERE id = ?1",
-                [message_id],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()?
-            .context("agent_run_terminal_relation_target_message_missing")?;
-        let current_ref = format!("conversation://{}/message/{message_id}", current.0);
-        let current_digest = conversation_content_digest(&current.2);
-        if current.0 != expected_session_id
-            || current.1 != "user"
-            || current_ref != canonical_ref
-            || current_digest != origin.canonical_user_message_digest()
-        {
-            anyhow::bail!("agent_run_terminal_relation_target_message_owner_mismatch");
-        }
-        let message_proof = CanonicalConversationMessageProof {
-            message_id,
-            session_id: current.0,
-            role: current.1,
-            canonical_store_identity: Arc::clone(&self.canonical_store_identity),
-            canonical_ref: current_ref,
-            content_digest: current_digest,
-        };
-        let target = agent_run_store.issue_terminal_relation_target_intent(
-            origin,
-            &message_proof,
-            &current.2,
-        )?;
-        conversation_fence.commit()?;
-        Ok(target)
-    }
-
-    /// Restores an AgentRun only while its canonical parent Conversation is
-    /// still active. The MemoryStore connection is the existing Conversation
-    /// mutation fence: holding it across the AgentRun transaction linearizes
-    /// restore against canonical Conversation deletion without adding a
-    /// second session lock.
-    ///
-    /// Lock order is deliberately identical to AgentRun creation:
-    /// MemoryStore connection -> AgentRunStore connection. Callers must obtain
-    /// any cross-owner commit permit before entering this synchronous helper.
-    pub fn restore_agent_run_with_parent_conversation_fence(
-        &self,
-        agent_run_store: &AgentRunStore,
-        run_id: &str,
-    ) -> Result<CanonicalMutationReceipt> {
-        self.restore_agent_run_with_parent_conversation_fence_internal(
-            agent_run_store,
-            run_id,
-            || {},
-        )
-    }
-
-    fn restore_agent_run_with_parent_conversation_fence_internal(
-        &self,
-        agent_run_store: &AgentRunStore,
-        run_id: &str,
-        before_agent_run_restore: impl FnOnce(),
-    ) -> Result<CanonicalMutationReceipt> {
-        let parent_conversation_id = agent_run_store
-            .lifecycle_parent_conversation_id(run_id)?
-            .context("agent_run_restore_missing")?;
-        let bound_memory_store_identity = agent_run_store
-            .bound_canonical_memory_store_identity()?
-            .context("agent_run_canonical_memory_store_not_bound")?;
-        if bound_memory_store_identity != self.canonical_store_identity.as_ref() {
-            anyhow::bail!("agent_run_canonical_memory_store_identity_conflict");
-        }
-
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
-        // BEGIN IMMEDIATE also excludes a separately opened connection to the
-        // same canonical Memory database. This transaction intentionally owns
-        // no mutation; dropping it after the AgentRun commit releases the
-        // cross-store linearization fence.
-        let conversation_fence = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if let Some(session_id) = parent_conversation_id.as_deref() {
-            if persistence_outbox::has_active_tombstone(
-                &conversation_fence,
-                "conversation",
-                session_id,
-            )? {
-                anyhow::bail!("agent_run_restore_blocked_by_conversation_tombstone");
-            }
-        }
-
-        before_agent_run_restore();
-        let receipt = agent_run_store.restore_run_with_receipt(run_id)?;
-        drop(conversation_fence);
-        Ok(receipt)
-    }
-
-    /// Production core seam for the non-interruptive, low-risk LifeEvent lane.
-    /// Authorization is derived only from the exact active canonical user
-    /// message, the deterministic candidate router, and the exact AgentRun
-    /// execution owner. Caller strings are lookup keys, never authority.
-    pub fn create_low_risk_life_event_from_active_user_message(
-        &self,
-        agent_run_store: &AgentRunStore,
-        life_event_store: &crate::agent::LifeEventStore,
-        message_proof: &CanonicalConversationMessageProof,
-        candidate_id: &str,
-        run_id: &str,
-        operation_id: &str,
-    ) -> Result<crate::agent::LifeEvent> {
-        if message_proof.canonical_store_identity() != self.canonical_store_identity.as_ref()
-            || message_proof.role() != "user"
-        {
-            anyhow::bail!("life_event_create_current_user_message_owner_mismatch");
-        }
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if persistence_outbox::has_active_tombstone(
-            &tx,
-            "conversation",
-            message_proof.session_id(),
-        )? {
-            anyhow::bail!("life_event_create_current_user_message_tombstoned");
-        }
-        let current = tx
-            .query_row(
-                "SELECT session_id, role, content FROM messages WHERE id = ?1",
-                [message_proof.message_id()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()?
-            .context("life_event_create_current_user_message_missing")?;
-        let (session_id, role, content) = current;
-        let canonical_ref = format!(
-            "conversation://{session_id}/message/{}",
-            message_proof.message_id()
-        );
-        if session_id != message_proof.session_id()
-            || role != "user"
-            || canonical_ref != message_proof.canonical_ref()
-            || conversation_content_digest(&content) != message_proof.content_digest()
-        {
-            anyhow::bail!("life_event_create_current_user_message_proof_stale");
-        }
-        let policy_proof =
-            crate::agent::main_chat_memory_candidate::issue_deterministic_life_event_policy_proof(
-                message_proof,
-                &content,
-                candidate_id,
-            )?;
-        let event = agent_run_store.create_low_risk_life_event_from_authorities(
-            life_event_store,
-            message_proof,
-            policy_proof,
-            run_id,
-            operation_id,
-        )?;
-        tx.commit()?;
-        Ok(event)
-    }
-
-    /// Resolve a task/session reference back to its one canonical body. This
-    /// is used only to hydrate transient runtime state after restart; callers
-    /// receive no body when the conversation is tombstoned or the reference no
     /// longer names the exact row.
     pub fn load_active_conversation_message_by_ref(
         &self,
@@ -1548,63 +1305,6 @@ impl MemoryStore {
             )?;
         }
         Ok(projection)
-    }
-
-    fn create_agent_run_from_active_conversation_message_internal(
-        &self,
-        agent_run_store: &AgentRunStore,
-        run: &AgentRun,
-        proof: &CanonicalConversationMessageProof,
-        before_agent_run_insert: impl FnOnce(),
-    ) -> Result<()> {
-        if proof.canonical_store_identity() != self.canonical_store_identity.as_ref()
-            || proof.role() != "user"
-        {
-            anyhow::bail!("canonical_conversation_message_proof_store_mismatch");
-        }
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        ensure_conversation_write_allowed(&tx, proof.session_id())?;
-        let current = tx
-            .query_row(
-                "SELECT session_id, role, content
-                 FROM messages WHERE id = ?1",
-                [proof.message_id()],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((session_id, role, content)) = current else {
-            anyhow::bail!("canonical_conversation_message_proof_stale");
-        };
-        let canonical_ref = format!(
-            "conversation://{}/message/{}",
-            session_id,
-            proof.message_id()
-        );
-        if session_id != proof.session_id()
-            || role != proof.role()
-            || canonical_ref != proof.canonical_ref()
-            || conversation_content_digest(&content) != proof.content_digest()
-        {
-            anyhow::bail!("canonical_conversation_message_proof_stale");
-        }
-
-        // Test barriers may pause here to prove that a concurrent delete is
-        // excluded until the AgentRun insert completes. Production passes a
-        // no-op closure and performs no external work while holding the fence.
-        before_agent_run_insert();
-        agent_run_store.create_run_with_input_proof(run, proof)?;
-        tx.commit()?;
-        Ok(())
     }
 
     fn save_message_idempotent_internal(
@@ -2501,13 +2201,7 @@ impl MemoryStore {
             "conversation",
             session_id,
             reason,
-            &[
-                "vector_store",
-                "agent_run_store",
-                "turn_event_store",
-                "action_queue_store",
-                "life_event_store",
-            ],
+            &["vector_store"],
         )?;
         tx.commit()?;
         Ok(receipt)
@@ -4906,7 +4600,7 @@ mod tests {
                 &assistant_message,
                 "proof-role-operation",
             )
-            .expect_err("assistant output cannot authorize an AgentRun input reference");
+            .expect_err("assistant output cannot authorize a Work-run input reference");
         assert!(error
             .to_string()
             .contains("canonical_user_message_proof_requires_role_user"));
@@ -5982,217 +5676,14 @@ mod tests {
             .unwrap()
             .is_empty());
         let deliveries = store.list_replayable_projection_deliveries(10).unwrap();
-        assert_eq!(deliveries.len(), 5);
+        assert_eq!(deliveries.len(), 1);
         let serialized = serde_json::to_string(&deliveries).unwrap();
         assert!(!serialized.contains("PRIVATE_OUTBOX_SENTINEL"));
         assert!(!serialized.contains("PRIVATE_REASON_SENTINEL"));
         assert_eq!(
             store.projection_summary(&receipt.event_id).unwrap().pending,
-            5
+            1
         );
-    }
-
-    #[test]
-    fn stale_conversation_proof_cannot_create_an_agent_run_after_delete() {
-        let memory = MemoryStore::new_in_memory().unwrap();
-        memory
-            .create_chat_session("stale-proof-session", "Stale proof")
-            .unwrap();
-        let message = ChatMessage {
-            role: "user".into(),
-            content: "canonical body that will be deleted".into(),
-        };
-        let commit = memory
-            .save_message_idempotent_with_proof(
-                "stale-proof-session",
-                &message,
-                "stale-proof-operation",
-            )
-            .unwrap();
-        let agent_runs = AgentRunStore::new_in_memory().unwrap();
-        agent_runs.bind_canonical_memory_store(&memory).unwrap();
-        let mut run = AgentRun::new_chat_run("stale-proof-session", &message.content);
-        run.input_ref = Some(commit.receipt().canonical_ref.clone());
-        memory
-            .delete_chat_session_with_tombstone("stale-proof-session", Some("test_delete"))
-            .unwrap();
-
-        let error = memory
-            .create_agent_run_from_active_conversation_message(&agent_runs, &run, commit.proof())
-            .expect_err("a deleted canonical row must invalidate the old proof")
-            .to_string();
-        assert!(
-            error.contains("canonical_tombstoned") || error.contains("proof_stale"),
-            "{error}"
-        );
-        assert!(agent_runs.get_run(&run.id).unwrap().is_none());
-    }
-
-    #[test]
-    fn memory_to_agent_run_fence_excludes_delete_without_deadlock_and_outbox_hides_run() {
-        let memory = Arc::new(MemoryStore::new_in_memory().unwrap());
-        memory
-            .create_chat_session("fence-interleave-session", "Fence interleave")
-            .unwrap();
-        let message = ChatMessage {
-            role: "user".into(),
-            content: "body owned only by canonical conversation".into(),
-        };
-        let commit = memory
-            .save_message_idempotent_with_proof(
-                "fence-interleave-session",
-                &message,
-                "fence-interleave-operation",
-            )
-            .unwrap();
-        let agent_runs = Arc::new(AgentRunStore::new_in_memory().unwrap());
-        agent_runs.bind_canonical_memory_store(&memory).unwrap();
-        let mut run = AgentRun::new_chat_run("fence-interleave-session", &message.content);
-        run.input_ref = Some(commit.receipt().canonical_ref.clone());
-        let run_id = run.id.clone();
-
-        let entered = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
-        let memory_for_insert = Arc::clone(&memory);
-        let runs_for_insert = Arc::clone(&agent_runs);
-        let entered_for_insert = Arc::clone(&entered);
-        let release_for_insert = Arc::clone(&release);
-        let insert = std::thread::spawn(move || {
-            memory_for_insert.create_agent_run_from_active_conversation_message_internal(
-                &runs_for_insert,
-                &run,
-                commit.proof(),
-                || {
-                    entered_for_insert.wait();
-                    release_for_insert.wait();
-                },
-            )
-        });
-        entered.wait();
-
-        let (delete_started_tx, delete_started_rx) = std::sync::mpsc::channel();
-        let (delete_done_tx, delete_done_rx) = std::sync::mpsc::channel();
-        let memory_for_delete = Arc::clone(&memory);
-        let delete = std::thread::spawn(move || {
-            delete_started_tx.send(()).unwrap();
-            let result = memory_for_delete.delete_chat_session_with_tombstone(
-                "fence-interleave-session",
-                Some("concurrent_delete"),
-            );
-            delete_done_tx.send(result).unwrap();
-        });
-        delete_started_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap();
-        assert!(
-            delete_done_rx
-                .recv_timeout(std::time::Duration::from_millis(50))
-                .is_err(),
-            "delete must not enter the proof-check/AgentRun-insert window"
-        );
-        release.wait();
-        insert.join().unwrap().unwrap();
-        let tombstone = delete_done_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("delete must complete after the fence releases")
-            .unwrap();
-        delete.join().unwrap();
-
-        // Startup/foreground reconciliation consumes this same durable outbox
-        // fact. Model it directly here and prove the final product state has no
-        // live AgentRun pointing at the deleted canonical body.
-        agent_runs
-            .project_conversation_tombstone(&tombstone.event_id, "fence-interleave-session")
-            .unwrap();
-        assert!(agent_runs.get_run(&run_id).unwrap().is_none());
-    }
-
-    #[test]
-    fn agent_run_restore_fence_linearizes_before_conversation_delete_and_projection_hides_run() {
-        let memory = Arc::new(MemoryStore::new_in_memory().unwrap());
-        let session_id = "restore-first-parent-delete-session";
-        memory
-            .create_chat_session(session_id, "Restore first")
-            .unwrap();
-        let agent_runs = Arc::new(AgentRunStore::new_in_memory().unwrap());
-        agent_runs.bind_canonical_memory_store(&memory).unwrap();
-        let run = AgentRun::new_chat_run(session_id, "metadata safe input");
-        let run_id = run.id.clone();
-        agent_runs.create_run(&run).unwrap();
-        agent_runs
-            .delete_run_with_tombstone(&run_id, Some("precondition delete"))
-            .unwrap();
-
-        let restore_entered = Arc::new(std::sync::Barrier::new(2));
-        let release_restore = Arc::new(std::sync::Barrier::new(2));
-        let memory_for_restore = Arc::clone(&memory);
-        let runs_for_restore = Arc::clone(&agent_runs);
-        let run_for_restore = run_id.clone();
-        let entered_for_restore = Arc::clone(&restore_entered);
-        let release_for_restore = Arc::clone(&release_restore);
-        let restore = std::thread::spawn(move || {
-            memory_for_restore.restore_agent_run_with_parent_conversation_fence_internal(
-                &runs_for_restore,
-                &run_for_restore,
-                || {
-                    entered_for_restore.wait();
-                    release_for_restore.wait();
-                },
-            )
-        });
-        restore_entered.wait();
-
-        let (delete_started_tx, delete_started_rx) = std::sync::mpsc::channel();
-        let (delete_done_tx, delete_done_rx) = std::sync::mpsc::channel();
-        let memory_for_delete = Arc::clone(&memory);
-        let delete = std::thread::spawn(move || {
-            delete_started_tx.send(()).unwrap();
-            let result = memory_for_delete
-                .delete_chat_session_with_tombstone(session_id, Some("canonical parent delete"));
-            delete_done_tx.send(result).unwrap();
-        });
-        delete_started_rx
-            .recv_timeout(std::time::Duration::from_secs(1))
-            .unwrap();
-        assert!(
-            delete_done_rx
-                .recv_timeout(std::time::Duration::from_millis(50))
-                .is_err(),
-            "Conversation delete must wait for the existing MemoryStore restore fence"
-        );
-
-        release_restore.wait();
-        let restored = restore.join().unwrap().unwrap();
-        let deleted_parent = delete_done_rx
-            .recv_timeout(std::time::Duration::from_secs(2))
-            .expect("Conversation delete must finish after restore releases its fence")
-            .unwrap();
-        delete.join().unwrap();
-        assert_eq!(restored.aggregate_revision, 2);
-        assert_eq!(
-            memory
-                .projection_summary(&deleted_parent.event_id)
-                .unwrap()
-                .pending,
-            5
-        );
-        assert!(agent_runs.get_live_run(&run_id).unwrap().is_some());
-
-        agent_runs
-            .project_conversation_tombstone(
-                deleted_parent.tombstone_id.as_deref().unwrap(),
-                session_id,
-            )
-            .unwrap();
-        assert!(
-            agent_runs.get_live_run(&run_id).unwrap().is_none(),
-            "the later canonical parent delete must win final product visibility"
-        );
-        assert!(agent_runs
-            .restore_run_with_receipt(&run_id)
-            .unwrap_err()
-            .to_string()
-            .contains("agent_run_restore_blocked_by_conversation_tombstone"));
     }
 
     #[test]
@@ -6326,7 +5817,7 @@ mod tests {
         );
         assert_eq!(
             store.projection_summary(&receipt.event_id).unwrap().pending,
-            5
+            1
         );
     }
 

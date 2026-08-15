@@ -157,7 +157,6 @@ function actionLabel(action: ReviewAction, item: ReviewItem): string {
     edit: "修改",
     apply: "应用变更",
     revoke: "撤销",
-    resume: "继续任务",
     view_evidence: item.type === "tool_permission" ? "查看访问范围" : "查看依据",
   };
   return labels[action.kind] ?? action.label;
@@ -270,6 +269,8 @@ export function ReviewGovernedView({
   onBackWorkspace,
   backLabel = "返回工作区",
   onOpenInspector,
+  visibleItems,
+  embedded = false,
 }: {
   snapshot: GovernedActionSnapshot | null;
   selectedItem: ReviewItem | null;
@@ -284,12 +285,15 @@ export function ReviewGovernedView({
   onBackWorkspace: () => void;
   backLabel?: string;
   onOpenInspector: () => void;
+  visibleItems?: readonly ReviewItem[];
+  embedded?: boolean;
 }) {
   const [learningDraft, setLearningDraft] = useState("");
   const [learningEditBusy, setLearningEditBusy] = useState(false);
   const envelope = snapshot?.reviewEnvelope;
-  const items =
-    envelope && (envelope.status === "ready" || envelope.status === "stale")
+  const items = visibleItems
+    ? [...visibleItems]
+    : envelope && (envelope.status === "ready" || envelope.status === "stale")
       ? (envelope.data?.items ?? [])
       : [];
   const queueSections = reviewQueueSections(items);
@@ -320,7 +324,7 @@ export function ReviewGovernedView({
   if (!snapshot || !envelope || envelope.status === "loading") {
     return (
       <div className="ol-governed-page ol-governed-page--centered" aria-busy="true">
-        <FoundationNotice title="正在读取审核中心" tone="neutral">
+        <FoundationNotice title="正在读取需处理事项" tone="neutral">
           <p>读取完成前不开放决定动作。</p>
         </FoundationNotice>
       </div>
@@ -372,7 +376,7 @@ export function ReviewGovernedView({
   }
 
   return (
-    <div className="ol-review-layout">
+    <div className={`ol-review-layout${embedded ? " ol-review-layout--embedded" : ""}`}>
       <aside className="ol-review-queue" aria-label="审核项列表">
         <header>
           <span>需要逐项决定</span>

@@ -5,8 +5,10 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{DateTime, Utc};
 use openlife_core::llm::ProviderPolicyReceiptEvidence;
+use openlife_core::tool_execution_receipt::ToolExecutionReceiptRegistration;
+#[cfg(test)]
 use openlife_core::tool_execution_receipt::{
-    ToolEffectStatus, ToolExecutionReceipt, ToolExecutionReceiptRegistration, ToolTransportStatus,
+    ToolEffectStatus, ToolExecutionReceipt, ToolTransportStatus,
 };
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -38,6 +40,7 @@ struct MainChatProviderAttemptState {
     status: MainChatProviderAttemptStateStatus,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainChatProviderAttemptStatus {
     Completed,
@@ -45,16 +48,7 @@ pub(crate) enum MainChatProviderAttemptStatus {
     RemoteUnknown,
 }
 
-impl MainChatProviderAttemptStatus {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::RemoteUnknown => "remote_unknown",
-        }
-    }
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MainChatProviderAttemptSnapshot {
     pub(crate) request_id: String,
@@ -68,6 +62,7 @@ pub(crate) struct MainChatProviderAttemptSnapshot {
     pub(crate) error_digest: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MainChatProviderCancellationSnapshot {
     pub(crate) observed_at: DateTime<Utc>,
@@ -79,12 +74,6 @@ pub(crate) enum MainChatProviderAttemptRecordDisposition {
     Recorded,
     Duplicate,
     IgnoredAfterCancel,
-}
-
-impl MainChatProviderAttemptRecordDisposition {
-    pub(crate) fn should_emit(self) -> bool {
-        self == Self::Recorded
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,7 +135,7 @@ pub(crate) struct RegisteredMainChatCancellation {
     pub(crate) token: CancellationToken,
     execution_epoch: MainChatExecutionEpoch,
     registry: MainChatCancellationRegistry,
-    task_session_id: String,
+    cancellation_id: String,
     registration_id: u64,
 }
 
@@ -162,6 +151,7 @@ pub(crate) struct MainChatCancelOutcome {
 #[derive(Debug, Clone)]
 pub(crate) struct MainChatCancellationRequest {
     pub(crate) outcome: MainChatCancelOutcome,
+    #[allow(dead_code)]
     pub(crate) execution_epoch: Option<MainChatExecutionEpoch>,
 }
 
@@ -181,7 +171,6 @@ impl std::fmt::Display for MainChatCancellationRegistrationError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainChatCanonicalCommitOutcome {
     RejectedAfterCancel,
-    RejectedAfterTerminalizationDegraded,
     Committed,
     Failed,
     NotModified,
@@ -195,6 +184,7 @@ pub(crate) struct MainChatCanonicalCommitFact {
     pub(crate) outcome: MainChatCanonicalCommitOutcome,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct MainChatExecutionEpochSnapshot {
     pub(crate) execution_id: String,
@@ -204,6 +194,7 @@ pub(crate) struct MainChatExecutionEpochSnapshot {
     pub(crate) tool_receipts: Vec<ToolExecutionReceipt>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainChatCancellationTerminalDisposition {
     Cancelled,
@@ -211,33 +202,7 @@ pub(crate) enum MainChatCancellationTerminalDisposition {
     InterruptedWithUnknownEffect,
 }
 
-impl MainChatCancellationTerminalDisposition {
-    pub(crate) fn status(self) -> &'static str {
-        match self {
-            Self::Cancelled => "cancelled",
-            Self::InterruptedAfterCommittedEffect | Self::InterruptedWithUnknownEffect => {
-                "interrupted"
-            }
-        }
-    }
-
-    pub(crate) fn reason_code(self) -> &'static str {
-        match self {
-            Self::Cancelled => "cancel_without_canonical_effect",
-            Self::InterruptedAfterCommittedEffect => "cancel_after_canonical_commit",
-            Self::InterruptedWithUnknownEffect => "cancel_with_canonical_commit_unknown",
-        }
-    }
-
-    pub(crate) fn canonical_commit_state(self) -> &'static str {
-        match self {
-            Self::Cancelled => "none",
-            Self::InterruptedAfterCommittedEffect => "committed",
-            Self::InterruptedWithUnknownEffect => "unknown",
-        }
-    }
-}
-
+#[cfg(test)]
 impl MainChatExecutionEpochSnapshot {
     pub(crate) fn cancellation_terminal_disposition(
         &self,
@@ -272,19 +237,11 @@ impl MainChatExecutionEpochSnapshot {
             .filter(|fact| fact.outcome == MainChatCanonicalCommitOutcome::Committed)
             .count()
     }
-
-    pub(crate) fn unknown_fact_count(&self) -> usize {
-        self.commit_facts
-            .iter()
-            .filter(|fact| fact.outcome == MainChatCanonicalCommitOutcome::Unknown)
-            .count()
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MainChatCanonicalCommitRejection {
     CancelRequested,
-    TerminalizationDegraded,
     InvalidDomain,
     InvalidObjectReference,
 }
@@ -301,8 +258,6 @@ struct InflightCanonicalCommit {
 #[derive(Debug, Default)]
 struct MainChatExecutionEpochState {
     cancel_requested: bool,
-    terminalization_degraded: bool,
-    terminal_owner_generation: Option<u64>,
     next_commit_id: u64,
     inflight_commits: HashMap<u64, InflightCanonicalCommit>,
     commit_facts: Vec<MainChatCanonicalCommitFact>,
@@ -311,7 +266,6 @@ struct MainChatExecutionEpochState {
 
 #[derive(Debug)]
 struct MainChatExecutionEpochInner {
-    execution_id: String,
     state: Mutex<MainChatExecutionEpochState>,
     inflight_commits_finished: Notify,
 }
@@ -322,46 +276,13 @@ pub(crate) struct MainChatExecutionEpoch {
 }
 
 impl MainChatExecutionEpoch {
-    fn new(execution_id: String) -> Self {
+    fn new(_execution_id: String) -> Self {
         Self {
             inner: Arc::new(MainChatExecutionEpochInner {
-                execution_id,
                 state: Mutex::new(MainChatExecutionEpochState::default()),
                 inflight_commits_finished: Notify::new(),
             }),
         }
-    }
-
-    pub(crate) fn execution_id(&self) -> &str {
-        &self.inner.execution_id
-    }
-
-    pub(crate) fn bind_terminal_owner_generation(&self, generation: u64) -> Result<(), String> {
-        if generation == 0 {
-            return Err("main_chat_terminal_owner_generation_invalid".into());
-        }
-        let mut state = self
-            .inner
-            .state
-            .lock()
-            .map_err(|_| "main_chat execution epoch mutex poisoned".to_string())?;
-        match state.terminal_owner_generation {
-            None => {
-                state.terminal_owner_generation = Some(generation);
-                Ok(())
-            }
-            Some(existing) if existing == generation => Ok(()),
-            Some(_) => Err("main_chat_terminal_owner_generation_rebind_forbidden".into()),
-        }
-    }
-
-    pub(crate) fn terminal_owner_generation(&self) -> Result<u64, String> {
-        self.inner
-            .state
-            .lock()
-            .map_err(|_| "main_chat execution epoch mutex poisoned".to_string())?
-            .terminal_owner_generation
-            .ok_or_else(|| "main_chat_terminal_owner_generation_unbound".to_string())
     }
 
     fn request_cancel(&self) {
@@ -370,14 +291,6 @@ impl MainChatExecutionEpoch {
             .lock()
             .expect("main chat execution epoch mutex poisoned")
             .cancel_requested = true;
-    }
-
-    fn fence_terminalization_degraded(&self) {
-        self.inner
-            .state
-            .lock()
-            .expect("main chat execution epoch mutex poisoned")
-            .terminalization_degraded = true;
     }
 
     pub(crate) fn begin_canonical_commit(
@@ -401,15 +314,6 @@ impl MainChatExecutionEpoch {
             });
             return Err(MainChatCanonicalCommitRejection::CancelRequested);
         }
-        if state.terminalization_degraded {
-            state.commit_facts.push(MainChatCanonicalCommitFact {
-                domain,
-                object_ref,
-                outcome: MainChatCanonicalCommitOutcome::RejectedAfterTerminalizationDegraded,
-            });
-            return Err(MainChatCanonicalCommitRejection::TerminalizationDegraded);
-        }
-
         state.next_commit_id = state
             .next_commit_id
             .checked_add(1)
@@ -428,6 +332,7 @@ impl MainChatExecutionEpoch {
         })
     }
 
+    #[cfg(test)]
     pub(crate) async fn wait_for_inflight_commits(&self) -> MainChatExecutionEpochSnapshot {
         loop {
             let notified = self.inner.inflight_commits_finished.notified();
@@ -443,6 +348,7 @@ impl MainChatExecutionEpoch {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot(&self) -> MainChatExecutionEpochSnapshot {
         let state = self
             .inner
@@ -450,7 +356,7 @@ impl MainChatExecutionEpoch {
             .lock()
             .expect("main chat execution epoch mutex poisoned");
         MainChatExecutionEpochSnapshot {
-            execution_id: self.inner.execution_id.clone(),
+            execution_id: "test_execution".into(),
             cancel_requested: state.cancel_requested,
             inflight_commit_count: state.inflight_commits.len(),
             commit_facts: state.commit_facts.clone(),
@@ -487,6 +393,7 @@ impl MainChatExecutionEpoch {
     /// receipts are preserved exactly; unfinished dispatched work becomes a
     /// local abort with an unknown effect, while never-dispatched work remains
     /// effect-not-attempted and cannot be mistaken for a remote call.
+    #[cfg(test)]
     pub(crate) fn settle_tool_receipts_after_local_abort(&self) -> MainChatExecutionEpochSnapshot {
         let registrations = {
             self.inner
@@ -506,6 +413,7 @@ impl MainChatExecutionEpoch {
     /// failure. Preserve completed adapter facts; close never-dispatched work as
     /// failed/not-attempted, dispatched work without a response as remote
     /// unknown, and response-observed work as failed.
+    #[cfg(test)]
     pub(crate) fn settle_tool_receipts_after_runtime_failure(
         &self,
     ) -> MainChatExecutionEpochSnapshot {
@@ -641,9 +549,6 @@ impl openlife_core::agent::CanonicalWriteAdmission for MainChatExecutionEpoch {
             .map_err(|rejection| {
                 let reason_code = match rejection {
                     MainChatCanonicalCommitRejection::CancelRequested => "cancel_requested",
-                    MainChatCanonicalCommitRejection::TerminalizationDegraded => {
-                        "terminalization_degraded"
-                    }
                     MainChatCanonicalCommitRejection::InvalidDomain => "invalid_domain",
                     MainChatCanonicalCommitRejection::InvalidObjectReference => {
                         "invalid_object_reference"
@@ -741,7 +646,7 @@ impl MainChatCancellationRegistry {
     /// or provider-attempt facts owned by the already-running execution.
     pub(crate) fn try_register(
         &self,
-        task_session_id: &str,
+        cancellation_id: &str,
     ) -> Result<RegisteredMainChatCancellation, MainChatCancellationRegistrationError> {
         let token = CancellationToken::new();
         let execution_id = uuid::Uuid::new_v4().to_string();
@@ -750,7 +655,7 @@ impl MainChatCancellationRegistry {
             .state
             .lock()
             .expect("main chat cancellation registry mutex poisoned");
-        let cancel_observed_at = match state.entries.get(task_session_id) {
+        let cancel_observed_at = match state.entries.get(cancellation_id) {
             Some(TurnCancellationEntry::CancelledBeforeRegistration { observed_at }) => {
                 Some(*observed_at)
             }
@@ -769,13 +674,13 @@ impl MainChatCancellationRegistry {
         // execution it was created to stop. The newly registered execution
         // remains present until its guard drops, so terminalization can still
         // observe the same epoch and provider-attempt facts.
-        state.entries.remove(task_session_id);
+        state.entries.remove(cancellation_id);
         if cancel_observed_at.is_some() {
             execution_epoch.request_cancel();
             token.cancel();
         }
         state.entries.insert(
-            task_session_id.to_string(),
+            cancellation_id.to_string(),
             TurnCancellationEntry::Active(ActiveTurnCancellation {
                 token: token.clone(),
                 provider_attempts: Vec::new(),
@@ -791,20 +696,20 @@ impl MainChatCancellationRegistry {
             token,
             execution_epoch,
             registry: self.clone(),
-            task_session_id: task_session_id.to_string(),
+            cancellation_id: cancellation_id.to_string(),
             registration_id,
         })
     }
 
     #[cfg(test)]
-    pub(crate) fn register(&self, task_session_id: &str) -> RegisteredMainChatCancellation {
-        self.try_register(task_session_id)
+    pub(crate) fn register(&self, cancellation_id: &str) -> RegisteredMainChatCancellation {
+        self.try_register(cancellation_id)
             .expect("test registration must acquire the single execution owner")
     }
 
     pub(crate) fn record_provider_started(
         &self,
-        task_session_id: &str,
+        cancellation_id: &str,
         request_id: &str,
         provider: &str,
         model: &str,
@@ -821,7 +726,7 @@ impl MainChatCancellationRegistry {
             .state
             .lock()
             .expect("main chat cancellation registry mutex poisoned");
-        let Some(TurnCancellationEntry::Active(active)) = state.entries.get_mut(task_session_id)
+        let Some(TurnCancellationEntry::Active(active)) = state.entries.get_mut(cancellation_id)
         else {
             return Err(MainChatProviderAttemptError::NoActiveTurn);
         };
@@ -875,7 +780,7 @@ impl MainChatCancellationRegistry {
     /// cancel-first observation rejects the adapter before `.send()`.
     pub(crate) fn admit_provider_start(
         &self,
-        task_session_id: &str,
+        cancellation_id: &str,
         request_id: &str,
         provider: &str,
         model: &str,
@@ -883,7 +788,7 @@ impl MainChatCancellationRegistry {
         policy_evidence: &ProviderPolicyReceiptEvidence,
     ) -> Result<MainChatProviderAttemptRecordDisposition, MainChatProviderAttemptError> {
         match self.record_provider_started(
-            task_session_id,
+            cancellation_id,
             request_id,
             provider,
             model,
@@ -899,7 +804,7 @@ impl MainChatCancellationRegistry {
                     .lock()
                     .expect("main chat cancellation registry mutex poisoned");
                 let Some(TurnCancellationEntry::Active(active)) =
-                    state.entries.get_mut(task_session_id)
+                    state.entries.get_mut(cancellation_id)
                 else {
                     return Err(MainChatProviderAttemptError::NoActiveTurn);
                 };
@@ -921,14 +826,14 @@ impl MainChatCancellationRegistry {
 
     pub(crate) fn record_provider_completed(
         &self,
-        task_session_id: &str,
+        cancellation_id: &str,
         request_id: &str,
         provider: &str,
         model: &str,
         finished_at: DateTime<Utc>,
     ) -> Result<MainChatProviderAttemptRecordDisposition, MainChatProviderAttemptError> {
         self.record_provider_terminal(
-            task_session_id,
+            cancellation_id,
             request_id,
             provider,
             model,
@@ -938,7 +843,7 @@ impl MainChatCancellationRegistry {
 
     pub(crate) fn record_provider_failed(
         &self,
-        task_session_id: &str,
+        cancellation_id: &str,
         request_id: &str,
         provider: &str,
         model: &str,
@@ -946,7 +851,7 @@ impl MainChatCancellationRegistry {
         error_digest: &str,
     ) -> Result<MainChatProviderAttemptRecordDisposition, MainChatProviderAttemptError> {
         self.record_provider_terminal(
-            task_session_id,
+            cancellation_id,
             request_id,
             provider,
             model,
@@ -959,7 +864,7 @@ impl MainChatCancellationRegistry {
 
     fn record_provider_terminal(
         &self,
-        task_session_id: &str,
+        cancellation_id: &str,
         request_id: &str,
         provider: &str,
         model: &str,
@@ -970,7 +875,7 @@ impl MainChatCancellationRegistry {
             .state
             .lock()
             .expect("main chat cancellation registry mutex poisoned");
-        let Some(TurnCancellationEntry::Active(active)) = state.entries.get_mut(task_session_id)
+        let Some(TurnCancellationEntry::Active(active)) = state.entries.get_mut(cancellation_id)
         else {
             return Err(MainChatProviderAttemptError::NoActiveTurn);
         };
@@ -1028,24 +933,26 @@ impl MainChatCancellationRegistry {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot_provider_attempts_for_cancel(
         &self,
-        task_session_id: &str,
+        cancellation_id: &str,
         observed_at: DateTime<Utc>,
     ) -> Result<MainChatProviderCancellationSnapshot, MainChatProviderAttemptError> {
-        self.snapshot_provider_attempts_for_terminalization(task_session_id, observed_at)
+        self.snapshot_provider_attempts_for_terminalization(cancellation_id, observed_at)
     }
 
+    #[cfg(test)]
     pub(crate) fn snapshot_provider_attempts_for_terminalization(
         &self,
-        task_session_id: &str,
+        cancellation_id: &str,
         observed_at: DateTime<Utc>,
     ) -> Result<MainChatProviderCancellationSnapshot, MainChatProviderAttemptError> {
         let state = self
             .state
             .lock()
             .expect("main chat cancellation registry mutex poisoned");
-        let Some(TurnCancellationEntry::Active(active)) = state.entries.get(task_session_id) else {
+        let Some(TurnCancellationEntry::Active(active)) = state.entries.get(cancellation_id) else {
             return Err(MainChatProviderAttemptError::NoActiveTurn);
         };
         if let Some(error) = active.provider_attempt_error {
@@ -1099,12 +1006,12 @@ impl MainChatCancellationRegistry {
         })
     }
 
-    pub(crate) fn request_cancel(&self, task_session_id: &str) -> MainChatCancellationRequest {
+    pub(crate) fn request_cancel(&self, cancellation_id: &str) -> MainChatCancellationRequest {
         let mut state = self
             .state
             .lock()
             .expect("main chat cancellation registry mutex poisoned");
-        match state.entries.get_mut(task_session_id) {
+        match state.entries.get_mut(cancellation_id) {
             Some(TurnCancellationEntry::Active(active)) => {
                 // The epoch must observe cancellation before the token wakes runtime
                 // terminalization; otherwise a late canonical commit could slip in.
@@ -1124,7 +1031,7 @@ impl MainChatCancellationRegistry {
             }
             None => {
                 state.entries.insert(
-                    task_session_id.to_string(),
+                    cancellation_id.to_string(),
                     TurnCancellationEntry::CancelledBeforeRegistration {
                         observed_at: Utc::now(),
                     },
@@ -1137,48 +1044,36 @@ impl MainChatCancellationRegistry {
         }
     }
 
-    pub(crate) fn is_cancellation_requested(&self, task_session_id: &str) -> bool {
-        let state = self
-            .state
-            .lock()
-            .expect("main chat cancellation registry mutex poisoned");
-        match state.entries.get(task_session_id) {
-            Some(TurnCancellationEntry::CancelledBeforeRegistration { .. }) => true,
-            Some(TurnCancellationEntry::Active(active)) => active.cancel_observed_at.is_some(),
-            None => false,
-        }
-    }
-
     #[cfg(test)]
-    pub(crate) fn cancel(&self, task_session_id: &str) -> MainChatCancelOutcome {
-        self.request_cancel(task_session_id).outcome
+    pub(crate) fn cancel(&self, cancellation_id: &str) -> MainChatCancelOutcome {
+        self.request_cancel(cancellation_id).outcome
     }
 
-    fn remove_registration(&self, task_session_id: &str, registration_id: u64) {
+    fn remove_registration(&self, cancellation_id: &str, registration_id: u64) {
         let mut state = self
             .state
             .lock()
             .expect("main chat cancellation registry mutex poisoned");
         let owns_current_registration = matches!(
-            state.entries.get(task_session_id),
+            state.entries.get(cancellation_id),
             Some(TurnCancellationEntry::Active(ActiveTurnCancellation {
                 registration_id: current_registration_id,
                 ..
             })) if *current_registration_id == registration_id
         );
         if owns_current_registration {
-            state.entries.remove(task_session_id);
+            state.entries.remove(cancellation_id);
         }
     }
 
     #[cfg(test)]
-    pub(crate) fn has_active_registration(&self, task_session_id: &str) -> bool {
+    pub(crate) fn has_active_registration(&self, cancellation_id: &str) -> bool {
         matches!(
             self.state
                 .lock()
                 .expect("inspect main chat cancellation registry")
                 .entries
-                .get(task_session_id),
+                .get(cancellation_id),
             Some(TurnCancellationEntry::Active(_))
         )
     }
@@ -1198,21 +1093,13 @@ impl MainChatCancellationRegistry {
 impl Drop for RegisteredMainChatCancellation {
     fn drop(&mut self) {
         self.registry
-            .remove_registration(&self.task_session_id, self.registration_id);
+            .remove_registration(&self.cancellation_id, self.registration_id);
     }
 }
 
 impl RegisteredMainChatCancellation {
-    pub(crate) fn execution_id(&self) -> &str {
-        self.execution_epoch.execution_id()
-    }
-
     pub(crate) fn execution_epoch(&self) -> MainChatExecutionEpoch {
         self.execution_epoch.clone()
-    }
-
-    pub(crate) fn fence_terminalization_degraded(&self) {
-        self.execution_epoch.fence_terminalization_degraded();
     }
 }
 
@@ -2153,21 +2040,6 @@ mod tests {
             MainChatCanonicalCommitRejection::InvalidObjectReference
         );
         assert!(epoch.snapshot().commit_facts.is_empty());
-    }
-
-    #[test]
-    fn every_registration_gets_a_distinct_uuid_execution_id() {
-        let registry = MainChatCancellationRegistry::default();
-        let first = registry.register("task-execution-id-first");
-        let second = registry.register("task-execution-id-second");
-
-        assert_ne!(first.execution_id(), second.execution_id());
-        assert!(uuid::Uuid::parse_str(first.execution_id()).is_ok());
-        assert!(uuid::Uuid::parse_str(second.execution_id()).is_ok());
-        assert_eq!(
-            first.execution_id(),
-            first.execution_epoch().snapshot().execution_id
-        );
     }
 
     #[test]

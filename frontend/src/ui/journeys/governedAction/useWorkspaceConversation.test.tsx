@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { MainChatAgentTaskState, StreamMessageDonePayload } from "@/tauri";
+import type { ChatSession, ConversationViewModel, StreamMessageDonePayload } from "@/tauri";
 import type { ChatMessage } from "@/types";
 import type { WorkspaceConversationDataSource } from "./workspaceConversationDataSource";
 import { useWorkspaceConversation } from "./useWorkspaceConversation";
@@ -14,7 +14,7 @@ function turnResult(status: StreamMessageDonePayload["status"]): StreamMessageDo
   return {
     session_id: "conversation-1",
     operation_id: "operation-1",
-    task_session_id: "task-1",
+    task_id: "task-1",
     run_id: "run-1",
     reply: "我会先拆分步骤。",
     status,
@@ -24,18 +24,51 @@ function turnResult(status: StreamMessageDonePayload["status"]): StreamMessageDo
   } as StreamMessageDonePayload;
 }
 
-function source(overrides: Partial<WorkspaceConversationDataSource> = {}) {
-  const dataSource: WorkspaceConversationDataSource = {
-    listSessions: vi.fn().mockResolvedValue([
+type WorkspaceConversationTestSource = WorkspaceConversationDataSource & {
+  listSessions(): Promise<ChatSession[]>;
+  loadHistory(sessionId: string): Promise<ChatMessage[]>;
+};
+
+function source(overrides: Partial<WorkspaceConversationTestSource> = {}) {
+  const listSessions =
+    overrides.listSessions ??
+    vi.fn().mockResolvedValue([
       {
         session_id: "conversation-1",
         title: "访谈整理",
         created_at: "2026-07-21T00:00:00Z",
         updated_at: "2026-07-21T00:01:00Z",
       },
-    ]),
-    loadHistory: vi.fn().mockResolvedValue(existingMessages),
-    loadLifeModelInfluence: vi.fn().mockResolvedValue(null),
+    ]);
+  const loadHistory = overrides.loadHistory ?? vi.fn().mockResolvedValue(existingMessages);
+  const loadConversation =
+    overrides.loadConversation ??
+    vi.fn(async (conversationId?: string): Promise<ConversationViewModel> => {
+      const conversations = await listSessions();
+      const selectedConversationId =
+        conversationId &&
+        conversations.some((item: ChatSession) => item.session_id === conversationId)
+          ? conversationId
+          : (conversations[0]?.session_id ?? null);
+      return {
+        status: conversations.length > 0 ? "ready" : "empty",
+        conversations,
+        projects: [],
+        selectedProjectId: null,
+        selectedConversationId,
+        messages: selectedConversationId ? await loadHistory(selectedConversationId) : [],
+        latestTurn: null,
+        providerStatus: "ready",
+        providerProfiles: [],
+        selectedProviderProfileId: null,
+        providerErrorCode: null,
+        workStatus: "ready",
+      };
+    });
+  const dataSource: WorkspaceConversationTestSource = {
+    loadConversation,
+    listSessions,
+    loadHistory,
     createSession: vi.fn().mockResolvedValue(undefined),
     renameSession: vi.fn().mockResolvedValue(undefined),
     deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -70,7 +103,8 @@ function source(overrides: Partial<WorkspaceConversationDataSource> = {}) {
       })
     ),
     streamTurn: vi.fn().mockResolvedValue(turnResult("completed")),
-    cancelTask: vi.fn().mockResolvedValue({} as MainChatAgentTaskState),
+    cancelChatTurn: vi.fn().mockResolvedValue({ status: "cancelled" }),
+    cancelWorkTask: vi.fn().mockResolvedValue({ status: "cancelled" }),
     ...overrides,
   };
   return dataSource;
@@ -125,87 +159,6 @@ describe("workspace conversation journey", () => {
     });
   });
 
-  it("restores the durable Life Model influence receipt after switching conversations", async () => {
-    const receipt = {
-      status: "applied_context_building",
-      sourceId: "lifemodel.v2.runtime",
-      modelVersion: 3,
-      selectedItems: [
-        {
-          itemRef: "collaboration_preferences:communication-direct",
-          statement: "沟通保持简洁直接",
-          sourceRefs: ["message:user:send-stream-parity"],
-          confirmedAt: "2026-08-09T00:00:00Z",
-          reasonCode: "task intent matches collaboration_preferences",
-        },
-      ],
-      appliedSurfaces: ["context_building", "communication_style"],
-      currentInstructionPriorityPreserved: true,
-      policyPriorityPreserved: true,
-      permissionGranted: false,
-      durableWriteAuthorized: false,
-    };
-    const dataSource = source({
-      listSessions: vi.fn().mockResolvedValue([
-        {
-          session_id: "conversation-1",
-          title: "有个性化说明",
-          created_at: "2026-07-21T00:00:00Z",
-          updated_at: "2026-07-21T00:02:00Z",
-        },
-        {
-          session_id: "conversation-2",
-          title: "普通对话",
-          created_at: "2026-07-21T00:00:00Z",
-          updated_at: "2026-07-21T00:01:00Z",
-        },
-      ]),
-      loadLifeModelInfluence: vi.fn(async sessionId =>
-        sessionId === "conversation-1"
-          ? { status: "completed" as const, lifeModelInfluence: receipt }
-          : null
-      ),
-    });
-    const { result } = renderHook(() =>
-      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
-    );
-
-    await act(async () => expect(await result.current.reload()).toBe(true));
-    expect(result.current.turnState).toMatchObject({
-      phase: "resolved",
-      lifeModelInfluence: receipt,
-    });
-
-    act(() => result.current.selectSession("conversation-2"));
-    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-2"));
-    expect(result.current.turnState).toEqual({ phase: "idle" });
-
-    act(() => result.current.selectSession("conversation-1"));
-    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-1"));
-    expect(result.current.turnState).toMatchObject({
-      phase: "resolved",
-      lifeModelInfluence: receipt,
-    });
-  });
-
-  it("keeps canonical chat history visible when the influence receipt cannot be verified", async () => {
-    const dataSource = source({
-      loadLifeModelInfluence: vi.fn().mockRejectedValue(new Error("canonical_state_unknown")),
-    });
-    const { result } = renderHook(() =>
-      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
-    );
-
-    await act(async () => expect(await result.current.reload()).toBe(true));
-
-    expect(result.current.messages).toEqual(existingMessages);
-    expect(result.current.loadStatus).toBe("ready");
-    expect(result.current.turnState).toMatchObject({
-      phase: "failed",
-      stage: "refresh",
-    });
-  });
-
   it("keeps Markdown Memory changes pending until the backend returns a Review receipt", async () => {
     const loadMarkdownMemory = vi.fn().mockResolvedValue({
       roots: [
@@ -238,6 +191,10 @@ describe("workspace conversation journey", () => {
     const { result } = renderHook(() =>
       useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
     );
+    await act(async () => {
+      await result.current.reload();
+      result.current.setMode("work");
+    });
     await waitFor(() => expect(result.current.markdownMemory.phase).toBe("ready"));
 
     await act(async () =>
@@ -295,8 +252,9 @@ describe("workspace conversation journey", () => {
         events.onStart({
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: options.operationId,
-          run_id: options.operationId,
+          task_id: options.operationId,
+          conversation_id: sessionId,
+          turn_id: options.operationId,
           reasoning_trace: {},
           tool_calls: [],
         });
@@ -304,8 +262,9 @@ describe("workspace conversation journey", () => {
           ...turnResult("completed"),
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: options.operationId,
-          run_id: options.operationId,
+          task_id: options.operationId,
+          conversation_id: sessionId,
+          turn_id: options.operationId,
         };
       }
     );
@@ -327,7 +286,13 @@ describe("workspace conversation journey", () => {
     expect(streamTurn).toHaveBeenCalledWith(
       "conversation-1",
       expect.any(Array),
-      { operationId: exactTurnOperationId },
+      {
+        operationId: exactTurnOperationId,
+        mode: "work",
+        selectedSkillId: undefined,
+        taskId: expect.any(String),
+        runId: expect.any(String),
+      },
       expect.any(Object)
     );
     expect(result.current.pendingResources).toEqual([]);
@@ -421,13 +386,34 @@ describe("workspace conversation journey", () => {
     expect(result.current.pendingResources).toHaveLength(1);
   });
 
+  it("directs failed Work to its durable Results or Needs Attention state", async () => {
+    const announce = vi.fn();
+    const onAfterTurn = vi.fn().mockResolvedValue(undefined);
+    const dataSource = source({
+      streamTurn: vi.fn().mockRejectedValue(new Error("read_tool_blocked")),
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, announce, onAfterTurn)
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.setMode("work"));
+    act(() => result.current.setDraft("查询官网标题"));
+
+    await act(async () => result.current.send());
+
+    expect(announce).toHaveBeenCalledWith(
+      "这项工作未完成；请在结果或需处理中核对后端记录的任务状态。"
+    );
+    expect(onAfterTurn).toHaveBeenCalledTimes(1);
+  });
+
   it("fails closed when an attachment turn returns a foreign terminal identity", async () => {
     const dataSource = source({
       streamTurn: vi.fn().mockResolvedValue({
         ...turnResult("completed"),
         session_id: "conversation-1",
         operation_id: "foreign-operation",
-        task_session_id: "foreign-task",
+        task_id: "foreign-task",
       }),
     });
     const { result } = renderHook(() =>
@@ -458,7 +444,7 @@ describe("workspace conversation journey", () => {
         events.onStart({
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: "foreign-task",
+          task_id: "foreign-task",
           run_id: "foreign-run",
           reasoning_trace: {},
           tool_calls: [],
@@ -467,7 +453,7 @@ describe("workspace conversation journey", () => {
           ...turnResult("completed"),
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: options.operationId,
+          task_id: options.operationId,
           run_id: options.operationId,
         };
       }
@@ -501,7 +487,7 @@ describe("workspace conversation journey", () => {
         events.onStart({
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: options.operationId,
+          task_id: options.operationId,
           run_id: options.operationId,
           reasoning_trace: {},
           tool_calls: [],
@@ -509,7 +495,7 @@ describe("workspace conversation journey", () => {
         events.onChunk({
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: "foreign-task",
+          task_id: "foreign-task",
           run_id: "foreign-run",
           chunk: "不应显示的内容",
         });
@@ -517,7 +503,7 @@ describe("workspace conversation journey", () => {
           ...turnResult("completed"),
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: options.operationId,
+          task_id: options.operationId,
           run_id: options.operationId,
         };
       }
@@ -772,7 +758,7 @@ describe("workspace conversation journey", () => {
         events.onStart({
           session_id: "conversation-1",
           operation_id: "operation-1",
-          task_session_id: "task-1",
+          task_id: "task-1",
           run_id: "run-1",
           reasoning_trace: {},
           tool_calls: [],
@@ -780,7 +766,7 @@ describe("workspace conversation journey", () => {
         events.onChunk({
           session_id: "conversation-1",
           operation_id: "operation-1",
-          task_session_id: "task-1",
+          task_id: "task-1",
           run_id: "run-1",
           chunk: "正在整理",
         });
@@ -800,13 +786,13 @@ describe("workspace conversation journey", () => {
 
     await waitFor(() => expect(result.current.turnState.phase).toBe("streaming"));
     expect(result.current.streamingReply).toBe("正在整理");
-    expect(result.current.activeTaskSessionId).toBe("task-1");
+    expect(result.current.activeTaskId).toBe("task-1");
 
     await act(async () => finishTurn(turnResult("completed")));
     await waitFor(() => expect(result.current.turnState.phase).toBe("resolved"));
   });
 
-  it("cancels the exact active task and waits for the stream terminal state", async () => {
+  it("binds an in-flight adjustment to the exact session task and run", async () => {
     let finishTurn!: (value: StreamMessageDonePayload) => void;
     const streamTurn = vi.fn(
       async (
@@ -817,9 +803,11 @@ describe("workspace conversation journey", () => {
       ) => {
         events.onStart({
           session_id: "conversation-1",
-          operation_id: "operation-2",
-          task_session_id: "task-2",
-          run_id: "run-2",
+          operation_id: "operation-steer",
+          conversation_id: "conversation-1",
+          turn_id: "operation-steer",
+          task_id: "task-steer",
+          run_id: "run-steer",
           reasoning_trace: {},
           tool_calls: [],
         });
@@ -828,24 +816,198 @@ describe("workspace conversation journey", () => {
         });
       }
     );
-    const cancelTask = vi.fn().mockResolvedValue({} as MainChatAgentTaskState);
-    const dataSource = source({ streamTurn, cancelTask });
+    const steerTask = vi.fn().mockResolvedValue({
+      steering: { steeringId: "steering-1", status: "pending" },
+      scopeExpansionBlocked: false,
+    });
+    const dataSource = source({ streamTurn, steerTask });
     const { result } = renderHook(() =>
       useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
     );
     await act(async () => result.current.reload());
+    act(() => result.current.setDraft("生成访谈报告"));
+    act(() => void result.current.send());
+    await waitFor(() => expect(result.current.activeTaskId).toBe("task-steer"));
+
+    act(() => result.current.setDraft("把风险结论放在最前面"));
+    await act(async () => result.current.steer());
+
+    expect(steerTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        taskId: "task-steer",
+        runId: "run-steer",
+        sessionId: "conversation-1",
+        content: "把风险结论放在最前面",
+      })
+    );
+    expect(result.current.draft).toBe("");
+    await act(async () => finishTurn(turnResult("completed")));
+  });
+
+  it("lets canonical Work continue in the background while another conversation opens", async () => {
+    let finishTurn!: (value: StreamMessageDonePayload) => void;
+    const announce = vi.fn();
+    const streamTurn = vi.fn(
+      async (
+        _sessionId,
+        _messages,
+        options,
+        events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
+      ) => {
+        events.onStart({
+          session_id: "conversation-1",
+          operation_id: options.operationId,
+          conversation_id: "conversation-1",
+          turn_id: options.operationId,
+          task_id: options.taskId,
+          run_id: options.runId,
+          reasoning_trace: {},
+          tool_calls: [],
+        });
+        return new Promise<StreamMessageDonePayload>(resolve => {
+          finishTurn = resolve;
+        });
+      }
+    );
+    const loadHistory = vi.fn(async (sessionId: string) =>
+      sessionId === "conversation-1"
+        ? existingMessages
+        : [{ role: "user" as const, content: "另一项工作" }]
+    );
+    const dataSource = source({
+      listSessions: vi.fn().mockResolvedValue([
+        {
+          session_id: "conversation-1",
+          title: "访谈整理",
+          created_at: "2026-07-21T00:00:00Z",
+          updated_at: "2026-07-21T00:01:00Z",
+        },
+        {
+          session_id: "conversation-2",
+          title: "另一项工作",
+          created_at: "2026-07-21T00:02:00Z",
+          updated_at: "2026-07-21T00:03:00Z",
+        },
+      ]),
+      loadHistory,
+      streamTurn,
+    });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.setMode("work"));
+    act(() => result.current.setDraft("生成完整报告"));
+    act(() => void result.current.send());
+    await waitFor(() => expect(result.current.turnState.phase).toBe("streaming"));
+
+    act(() => result.current.selectSession("conversation-2"));
+    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-2"));
+    expect(result.current.turnState.phase).toBe("idle");
+    expect(loadHistory).toHaveBeenCalledWith("conversation-2");
+    expect(announce).toHaveBeenCalledWith(
+      "任务会在后台继续；已切换到另一段对话，可在需要处理中查看后续状态。"
+    );
+
+    await act(async () => finishTurn(turnResult("completed")));
+    expect(result.current.selectedSessionId).toBe("conversation-2");
+  });
+
+  it("cancels the exact active task and waits for the stream terminal state", async () => {
+    let finishTurn!: (value: StreamMessageDonePayload) => void;
+    let emittedTaskId = "";
+    const streamTurn = vi.fn(
+      async (
+        _sessionId,
+        _messages,
+        options,
+        events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
+      ) => {
+        emittedTaskId = options.taskId ?? "";
+        events.onStart({
+          session_id: "conversation-1",
+          operation_id: options.operationId,
+          conversation_id: "conversation-1",
+          turn_id: options.operationId,
+          task_id: emittedTaskId,
+          run_id: options.runId,
+          reasoning_trace: {},
+          tool_calls: [],
+        });
+        return new Promise<StreamMessageDonePayload>(resolve => {
+          finishTurn = resolve;
+        });
+      }
+    );
+    const cancelWorkTask = vi.fn().mockResolvedValue({ status: "cancelled" });
+    const dataSource = source({ streamTurn, cancelWorkTask });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.setMode("work"));
     act(() => result.current.setDraft("继续"));
     act(() => void result.current.send());
-    await waitFor(() => expect(result.current.activeTaskSessionId).toBe("task-2"));
+    await waitFor(() => expect(result.current.activeTaskId).toBe(emittedTaskId));
 
     await act(async () => result.current.cancel());
 
-    expect(cancelTask).toHaveBeenCalledWith("task-2");
+    expect(cancelWorkTask).toHaveBeenCalledWith(emittedTaskId);
     expect(result.current.turnState.phase).toBe("cancelling");
 
     await act(async () => finishTurn(turnResult("cancelled")));
     await waitFor(() =>
       expect(result.current.turnState).toMatchObject({ phase: "resolved", status: "cancelled" })
+    );
+  });
+
+  it("cancels canonical Chat by exact Conversation and Turn without a Task", async () => {
+    let finishTurn!: (value: StreamMessageDonePayload) => void;
+    const streamTurn = vi.fn(
+      async (
+        _sessionId,
+        _messages,
+        options,
+        events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
+      ) => {
+        events.onStart({
+          session_id: "conversation-1",
+          operation_id: options.operationId,
+          conversation_id: "conversation-1",
+          turn_id: options.operationId,
+          reasoning_trace: {},
+          tool_calls: [],
+        });
+        return new Promise<StreamMessageDonePayload>(resolve => {
+          finishTurn = resolve;
+        });
+      }
+    );
+    const cancelChatTurn = vi.fn().mockResolvedValue({ status: "cancelled" });
+    const dataSource = source({ streamTurn, cancelChatTurn });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.setDraft("停止这一轮"));
+    act(() => void result.current.send());
+    await waitFor(() => expect(result.current.turnState.phase).toBe("streaming"));
+    const turnId =
+      result.current.turnState.phase === "streaming" ? result.current.turnState.turnId : "";
+
+    await act(async () => result.current.cancel());
+
+    expect(cancelChatTurn).toHaveBeenCalledWith("conversation-1", turnId);
+    expect(result.current.turnState.phase).toBe("cancelling");
+    await act(async () =>
+      finishTurn({
+        ...turnResult("cancelled"),
+        conversation_id: "conversation-1",
+        turn_id: turnId,
+        operation_id: turnId,
+        task_id: undefined,
+        run_id: undefined,
+      })
     );
   });
 
@@ -856,14 +1018,16 @@ describe("workspace conversation journey", () => {
       async (
         _sessionId,
         _messages,
-        _options,
+        options,
         events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
       ) => {
         events.onStart({
           session_id: "conversation-1",
-          operation_id: "operation-race",
-          task_session_id: "task-race",
-          run_id: "run-race",
+          operation_id: options.operationId,
+          conversation_id: "conversation-1",
+          turn_id: options.operationId,
+          task_id: options.taskId,
+          run_id: options.runId,
           reasoning_trace: {},
           tool_calls: [],
         });
@@ -872,21 +1036,22 @@ describe("workspace conversation journey", () => {
         });
       }
     );
-    const cancelTask = vi.fn(
+    const cancelWorkTask = vi.fn(
       () =>
-        new Promise<MainChatAgentTaskState>((_resolve, reject) => {
+        new Promise<unknown>((_resolve, reject) => {
           rejectCancel = reject;
         })
     );
     const announce = vi.fn();
-    const dataSource = source({ streamTurn, cancelTask });
+    const dataSource = source({ streamTurn, cancelWorkTask });
     const { result } = renderHook(() =>
       useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
     );
     await act(async () => result.current.reload());
+    act(() => result.current.setMode("work"));
     act(() => result.current.setDraft("继续"));
     act(() => void result.current.send());
-    await waitFor(() => expect(result.current.activeTaskSessionId).toBe("task-race"));
+    await waitFor(() => expect(result.current.activeTaskId).not.toBeNull());
 
     let cancelPromise!: Promise<void>;
     act(() => {
@@ -930,6 +1095,55 @@ describe("workspace conversation journey", () => {
     expect(dataSource.renameSession).toHaveBeenCalledWith("conversation-1", "新的 名称");
     expect(listSessions).toHaveBeenCalledTimes(2);
     expect(result.current.sessionMutation.phase).toBe("idle");
+  });
+
+  it("creates and assigns a Project only after the canonical view confirms it", async () => {
+    const project = {
+      id: "project-1",
+      name: "访谈研究",
+      revision: 1,
+      createdAt: "2026-08-14T00:00:00Z",
+      updatedAt: "2026-08-14T00:00:00Z",
+    };
+    const canonical = (assigned: boolean) => ({
+      status: "ready" as const,
+      conversations: [
+        {
+          session_id: "conversation-1",
+          title: "访谈整理",
+          created_at: "2026-07-21T00:00:00Z",
+          updated_at: "2026-07-21T00:01:00Z",
+        },
+      ],
+      projects: assigned ? [project] : [],
+      selectedProjectId: assigned ? project.id : null,
+      selectedConversationId: "conversation-1",
+      messages: existingMessages,
+      latestTurn: null,
+      providerStatus: "ready" as const,
+      providerProfiles: [],
+      selectedProviderProfileId: null,
+      providerErrorCode: null,
+      workStatus: "ready" as const,
+    });
+    const loadConversation = vi
+      .fn()
+      .mockResolvedValueOnce(canonical(false))
+      .mockResolvedValueOnce(canonical(true));
+    const createProject = vi.fn().mockResolvedValue(project);
+    const assignProject = vi.fn().mockResolvedValue(undefined);
+    const dataSource = source({ loadConversation, createProject, assignProject });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+
+    await act(async () => expect(await result.current.createProject("  访谈   研究 ")).toBe(true));
+
+    expect(createProject).toHaveBeenCalledWith(expect.any(String), "访谈 研究");
+    expect(assignProject).toHaveBeenCalledWith("conversation-1", "project-1");
+    expect(result.current.projects).toEqual([project]);
+    expect(result.current.selectedProjectId).toBe("project-1");
   });
 
   it("does not rename or delete a conversation while a resource is bound to the pending turn", async () => {

@@ -95,6 +95,36 @@ describe("durable truth lifecycle presentation", () => {
     });
   });
 
+  it("does not present historical Agent Memory refs as a missing LifeModel review", () => {
+    const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
+    if (!snapshot.lifeModelEnvelope.data) throw new Error("fixture LifeModel missing");
+    snapshot.lifeModelEnvelope.data = {
+      ...snapshot.lifeModelEnvelope.data,
+      pendingUpdateCounts: {
+        ...snapshot.lifeModelEnvelope.data.pendingUpdateCounts,
+        candidate: 0,
+        pendingReview: 0,
+        approvedNotApplied: 0,
+        failedMaterialization: 0,
+      },
+      candidateChanges: [],
+      relatedReviewItemRefs: [],
+    };
+    snapshot.reviewEnvelope = {
+      ...snapshot.reviewEnvelope,
+      status: "empty",
+      data: snapshot.reviewEnvelope.data
+        ? { ...snapshot.reviewEnvelope.data, items: [], batches: [] }
+        : null,
+    };
+
+    expect(durableLifecyclePresentation(snapshot, null, "life_model")).toMatchObject({
+      lifecycle: "none",
+      label: "没有待核对变更",
+      status: "neutral",
+    });
+  });
+
   it("does not let one peer owner failure poison the other owner's review truth", () => {
     const snapshot = buildDurableFixtureSnapshot("fixture-ready", "pending");
     snapshot.memoryEnvelope = {

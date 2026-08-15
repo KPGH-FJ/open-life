@@ -5,7 +5,7 @@ import type {
   WorkbenchEvidenceReference,
   WorkbenchInspectorModel,
 } from "@/ui/shell";
-import { toWorkbenchEvidence } from "@/ui/journeys/readOnly/readOnlySpinePresentation";
+import { toWorkbenchEvidence } from "@/ui/journeys/productWorkbench/workbenchPresentation";
 import type { DurableTruthSnapshot } from "./durableTruthDataSource";
 
 export type DurableTruthLifecycle =
@@ -68,7 +68,8 @@ function hasExactLifeModelAppliedProof(snapshot: DurableTruthSnapshot, item: Rev
 
 export function durableLifecyclePresentation(
   snapshot: DurableTruthSnapshot | null,
-  item: ReviewItem | null
+  item: ReviewItem | null,
+  owner: "all" | "life_model" | "memory" = "all"
 ): DurableTruthLifecyclePresentation {
   if (!snapshot) {
     return {
@@ -113,24 +114,29 @@ export function durableLifecyclePresentation(
   if (!item) {
     const lifeModel = snapshot.lifeModelEnvelope.data;
     const memory = snapshot.memoryEnvelope.data;
-    const unresolvedReferences = Boolean(
+    const unresolvedLifeModelReferences = Boolean(
       (lifeModel?.pendingUpdateCounts.candidate ?? 0) > 0 ||
       (lifeModel?.pendingUpdateCounts.pendingReview ?? 0) > 0 ||
       (lifeModel?.pendingUpdateCounts.approvedNotApplied ?? 0) > 0 ||
       (lifeModel?.pendingUpdateCounts.failedMaterialization ?? 0) > 0 ||
       (lifeModel?.candidateChanges.length ?? 0) > 0 ||
-      (lifeModel?.relatedReviewItemRefs.length ?? 0) > 0 ||
+      (lifeModel?.relatedReviewItemRefs.length ?? 0) > 0
+    );
+    const unresolvedMemoryReferences = Boolean(
       (memory?.summary.reviewRequiredCount ?? 0) > 0 ||
       (memory?.summary.pendingMaterializationCount ?? 0) > 0 ||
       (memory?.summary.failedMaterializationCount ?? 0) > 0 ||
       (memory?.reviewItemRefs.length ?? 0) > 0
     );
+    const unresolvedReferences =
+      (owner !== "memory" && unresolvedLifeModelReferences) ||
+      (owner !== "life_model" && unresolvedMemoryReferences);
     if (unresolvedReferences) {
       return {
         lifecycle: "unknown",
         label: "变更状态不完整",
         status: "unknown",
-        detail: "长期状态读模型报告了待处理引用，但审核中心缺少对应审核项。",
+        detail: "长期状态读模型报告了待处理引用，但 Workbench 需处理区缺少对应事项。",
       };
     }
     return {

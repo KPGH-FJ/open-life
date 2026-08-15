@@ -5,7 +5,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-/// Assembles context for an AgentRun from Agent Memory, privacy, and tools.
+/// Assembles context for a canonical Work run from Agent Memory, privacy, and tools.
 /// Canonical LifeModel v2 context is selected by the owning product adapter and
 /// passed as bounded messages instead of being loaded implicitly here.
 pub trait ContextAssembler: Send + Sync {

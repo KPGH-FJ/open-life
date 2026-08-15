@@ -1,4 +1,9 @@
 fn main() {
+    println!("cargo:rerun-if-env-changed=OPENLIFE_BUILD_PROFILE");
+    println!("cargo:rerun-if-env-changed=OPENLIFE_NATIVE_BUILD_NONCE");
+    if let Ok(nonce) = std::env::var("OPENLIFE_NATIVE_BUILD_NONCE") {
+        println!("cargo:rustc-env=OPENLIFE_BUILD_NONCE={nonce}");
+    }
     if let Some(commit) = git_output(&["rev-parse", "--short=12", "HEAD"]) {
         println!("cargo:rustc-env=OPENLIFE_BUILD_COMMIT={}", commit);
     }

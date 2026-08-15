@@ -1,8 +1,8 @@
-pub mod a2a;
 pub mod agent;
 pub mod atomic_file;
 pub mod calendar;
 pub mod config;
+pub mod conversation;
 pub mod core_value_signal_extractor;
 pub mod embedding;
 pub mod feedback;
@@ -31,6 +31,7 @@ pub mod scheduler;
 pub mod skills;
 pub mod sqlite_migration;
 pub mod state_store;
+pub mod task_runtime;
 pub mod tasks;
 pub mod tool_execution_receipt;
 pub mod tool_manifest;
@@ -38,6 +39,7 @@ pub mod tool_permissions;
 pub mod vectors;
 pub mod versioning;
 pub mod web_search;
+pub mod work_orchestration;
 
 #[cfg(test)]
 pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());

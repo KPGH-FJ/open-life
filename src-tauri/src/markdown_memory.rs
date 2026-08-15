@@ -16,8 +16,6 @@ pub(crate) const MARKDOWN_MEMORY_TOPIC_DIRECTORY: &str = "memories";
 pub(crate) const MAX_MARKDOWN_MEMORY_FILES_PER_SCOPE: usize = 16;
 pub(crate) const MAX_MARKDOWN_MEMORY_FILE_CHARS: usize = 32 * 1024;
 pub(crate) const MAX_MARKDOWN_MEMORY_VIEW_CHARS: usize = 64 * 1024;
-pub(crate) const MAX_MARKDOWN_MEMORY_CONTEXT_CHARS: usize = 4_800;
-pub(crate) const MAX_MARKDOWN_MEMORY_CONTEXT_FILES: usize = 4;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]
@@ -679,6 +677,46 @@ mod tests {
         assert_eq!(proposal.after["directFileWrite"], false);
         assert_eq!(proposal.after["memoryScope"], "project");
         assert_eq!(proposal.after["expected_target_absent"], true);
+    }
+
+    #[tokio::test]
+    async fn selected_memory_root_enables_only_its_bound_review_write() {
+        let root = tempfile::tempdir().unwrap();
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let canonical = root.path().canonicalize().unwrap();
+        state.config.lock().await.system.project_memory_root =
+            Some(canonical.to_string_lossy().into_owned());
+
+        let receipt = draft_markdown_memory_file_proposal_with_state(
+            DraftMarkdownMemoryFileRequest {
+                scope: MarkdownMemoryScope::Project,
+                relative_path: "MEMORY.md".into(),
+                content: "# Project\nKeep exact review ownership.".into(),
+                expected_current_digest: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let envelope =
+            crate::read_models::review_center::get_review_center_view_model_with_state(&state)
+                .await
+                .unwrap();
+        let model = envelope.data.expect("review center model");
+        let item = model
+            .items
+            .iter()
+            .find(|item| item.id == receipt.proposal_id)
+            .expect("markdown memory review item");
+        let approve = item
+            .allowed_actions
+            .iter()
+            .find(|action| action.kind == openlife_core::agent::ReviewActionKind::Approve)
+            .expect("approve action");
+
+        assert!(approve.enabled, "{:?}", approve.disabled_reason);
+        assert!(!root.path().join("MEMORY.md").exists());
     }
 
     #[tokio::test]

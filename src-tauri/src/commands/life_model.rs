@@ -641,6 +641,9 @@ mod tests {
             memory_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
             )),
+            conversation_store: Some(Arc::new(tokio::sync::Mutex::new(
+                openlife_core::conversation::ConversationStore::new_in_memory().unwrap(),
+            ))),
             mcp_registry: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp::McpRegistry::new(),
             )),
@@ -671,22 +674,14 @@ mod tests {
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
             vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
-            a2a_sidecar: Arc::new(tokio::sync::Mutex::new(
-                crate::a2a_sidecar::A2ASidecar::new(crate::a2a_server::configured_a2a_port()),
-            )),
             last_snapshot_date: Arc::new(tokio::sync::Mutex::new(None)),
             mcp_audit_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp_audit::McpAuditStore::new(temp_dir.path().join("mcp_audit.db")),
             )),
-            agent_run_store: Some(Arc::new(tokio::sync::Mutex::new(
-                openlife_core::agent::AgentRunStore::new_in_memory().unwrap(),
-            ))),
+            canonical_task_runtime_store: None,
             evidence_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
             )),
-            life_event_store: Some(Arc::new(tokio::sync::Mutex::new(
-                openlife_core::agent::LifeEventStore::new_in_memory().unwrap(),
-            ))),
             policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
             proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
@@ -697,18 +692,6 @@ mod tests {
             life_model_learning_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::LifeModelLearningStore::new_in_memory().unwrap(),
             ))),
-            plan_execute_session_store: Some(Arc::new(tokio::sync::Mutex::new(
-                openlife_core::agent::PlanExecuteSessionStore::new_in_memory().unwrap(),
-            ))),
-            main_chat_agent_session_store: Some(Arc::new(tokio::sync::Mutex::new(
-                openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStore::new_in_memory()
-                    .unwrap(),
-            ))),
-            main_chat_action_queue_store: Some(Arc::new(tokio::sync::Mutex::new(
-                openlife_core::agent::main_chat_agent_v1::ActionQueueStore::new_in_memory()
-                    .unwrap(),
-            ))),
-            main_chat_agent_event_store: None,
             main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
             patch_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
@@ -730,9 +713,6 @@ mod tests {
             scheduled_task_store: Arc::new(
                 openlife_core::tasks::TaskStore::new_in_memory().unwrap(),
             ),
-            runtime_clock_source: Arc::new(tokio::sync::Mutex::new(
-                crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
-            )),
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
             resource_runtime: None,
             state_store: None,

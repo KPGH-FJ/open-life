@@ -27,7 +27,7 @@ import {
   type ViewModelEnvelope,
 } from "@/tauri";
 import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
-import { buildReadModelErrorEnvelope } from "@/ui/journeys/readOnly/readOnlySpineDataSource";
+import { buildReadModelErrorEnvelope } from "@/ui/journeys/productWorkbench/productBoundaryDataSource";
 
 export type DurableTruthDiagnostic = {
   id: "life_model_view_model" | "memory_view_model" | "review_center_view_model";

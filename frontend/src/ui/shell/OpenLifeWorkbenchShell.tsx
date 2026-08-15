@@ -102,6 +102,7 @@ export function OpenLifeWorkbenchShell({
   children,
 }: OpenLifeWorkbenchShellProps) {
   const contextHeadingRef = useRef<HTMLHeadingElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
   const inspectorHeadingRef = useRef<HTMLHeadingElement>(null);
   const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
   const settingsTriggerRef = useRef<HTMLButtonElement>(null);
@@ -149,7 +150,14 @@ export function OpenLifeWorkbenchShell({
       data-shell-mode={mode}
       data-inspector-open={inspectorOpen ? "true" : "false"}
     >
-      <a className="ol-shell-skip-link" href="#ol-shell-main">
+      <a
+        className="ol-shell-skip-link"
+        href="#ol-shell-main"
+        onClick={event => {
+          event.preventDefault();
+          mainRef.current?.focus();
+        }}
+      >
         跳到主工作区
       </a>
 
@@ -246,6 +254,7 @@ export function OpenLifeWorkbenchShell({
               ref={settingsTriggerRef}
               type="button"
               className="ol-shell-utility-button"
+              aria-label="设置"
               onClick={onOpenSettings}
             >
               <Settings size={19} strokeWidth={1.75} aria-hidden="true" />
@@ -282,6 +291,7 @@ export function OpenLifeWorkbenchShell({
       </header>
 
       <main
+        ref={mainRef}
         id="ol-shell-main"
         className="ol-shell-main"
         aria-labelledby="ol-shell-context-title"

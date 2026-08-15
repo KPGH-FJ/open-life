@@ -114,19 +114,18 @@ impl ActionExecutionResult {
             match issuer.issue_bound_content_receipt(admission, &self.action, &self.observation) {
                 Ok(receipt) => receipt,
                 Err(error) => {
-                    // Notify while the original AgentRunStore error is still
-                    // intact. ToolGateway may later turn this into a typed failed
-                    // result, which must not hide durable-owner degradation.
-                    ctx.observe_durable_store_failure("AgentRunStore", &error);
+                    // Preserve the concrete canonical owner failure before the
+                    // gateway converts it into a typed tool result.
+                    ctx.observe_durable_store_failure("CanonicalTaskRuntimeStore", &error);
                     return Err(error);
                 }
             };
         self.action
-            .react_trace
+            .tool_trace
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("bound_content_receipt_action_trace_missing"))?
             .output_receipt = Some(receipt);
-        self.observation.react_trace = None;
+        self.observation.tool_trace = None;
         Ok(())
     }
 }
@@ -285,7 +284,7 @@ pub struct ToolDispatchAttempt {
 /// Conservative, manifest-derived process-lifetime contract captured before
 /// an adapter is entered. This is not a claim that dispatch happened. It lets
 /// restart reconciliation distinguish a process-bound local read from a
-/// network/MCP/A2A/plugin attempt whose peer may have observed the request
+/// network/MCP/plugin attempt whose peer may have observed the request
 /// before the local process died.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolDispatchProcessRisk {
@@ -312,7 +311,6 @@ pub fn tool_dispatch_process_risk_for_manifest(
     let contract_declares_remote_or_external = matches!(
         &manifest.source,
         crate::tool_manifest::ToolSource::Mcp { .. }
-            | crate::tool_manifest::ToolSource::A2A { .. }
             | crate::tool_manifest::ToolSource::Plugin { .. }
     ) || matches!(
         manifest.action_type.as_str(),
@@ -336,84 +334,6 @@ fn effect_may_survive_local_process(action_effect: ToolActionEffect) -> bool {
             | ToolActionEffect::ProposalOnly
             | ToolActionEffect::Unknown
     )
-}
-
-#[derive(Clone)]
-pub struct A2AOutboundAuthorization {
-    base_url: String,
-    network_policy: crate::config::NetworkPolicy,
-    network_policy_decision: crate::network_client::NetworkPolicyDecision,
-    bearer_token: String,
-    transport: crate::a2a::A2AEndpointTransport,
-    durable_tool_execution_owner: Option<crate::agent::AgentRunA2AToolExecutionOwner>,
-}
-
-impl std::fmt::Debug for A2AOutboundAuthorization {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("A2AOutboundAuthorization")
-            .field("base_url", &"[REDACTED]")
-            .field("network_policy", &"[REDACTED]")
-            .field("network_policy_decision", &"[REDACTED]")
-            .field("bearer_token", &"[REDACTED]")
-            .field("transport", &self.transport)
-            .field(
-                "durable_tool_execution_owner_present",
-                &self.durable_tool_execution_owner.is_some(),
-            )
-            .finish()
-    }
-}
-
-impl A2AOutboundAuthorization {
-    pub fn new(
-        base_url: impl Into<String>,
-        network_policy: crate::config::NetworkPolicy,
-        network_policy_decision: crate::network_client::NetworkPolicyDecision,
-        bearer_token: impl Into<String>,
-        transport: crate::a2a::A2AEndpointTransport,
-    ) -> Result<Self> {
-        let base_url = base_url.into();
-        let endpoint = crate::a2a::A2AClient::task_url(&base_url)?;
-        let observed = crate::network_client::resolve_network_policy_decision(
-            &network_policy,
-            &endpoint,
-            &network_policy_decision.capability,
-        )?;
-        if observed != network_policy_decision
-            || observed.disposition != crate::network_client::NetworkPolicyDisposition::Allow
-            || crate::a2a::A2AEndpointTransport::for_base_url(&base_url)? != transport
-        {
-            anyhow::bail!("a2a_outbound_authorization_binding_mismatch");
-        }
-        let bearer_token = bearer_token.into();
-        if !(32..=4096).contains(&bearer_token.len()) || bearer_token.chars().any(char::is_control)
-        {
-            anyhow::bail!("a2a_outbound_authorization_token_invalid");
-        }
-        Ok(Self {
-            base_url,
-            network_policy,
-            network_policy_decision,
-            bearer_token,
-            transport,
-            durable_tool_execution_owner: None,
-        })
-    }
-
-    pub fn with_durable_tool_execution_owner(
-        mut self,
-        owner: crate::agent::AgentRunA2AToolExecutionOwner,
-    ) -> Self {
-        self.durable_tool_execution_owner = Some(owner);
-        self
-    }
-
-    pub(crate) fn durable_tool_execution_owner(&self) -> Option<&dyn DurableToolExecutionOwner> {
-        self.durable_tool_execution_owner
-            .as_ref()
-            .map(|owner| owner as &dyn DurableToolExecutionOwner)
-    }
 }
 
 #[async_trait]
@@ -566,8 +486,11 @@ pub struct ActionExecutionContext<'a> {
     pub canonical_state: Option<&'a CanonicalStateSnapshot>,
     pub memory_store: Option<&'a crate::memory::MemoryStore>,
     pub memory_lifecycle_retrieval_reader: Option<&'a crate::agent::MemoryLifecycleRetrievalReader>,
+    /// Canonical owner for resources explicitly bound to the current task.
+    /// `document.read` requires this store plus an exact message identity; it
+    /// never scans arbitrary filesystem paths.
+    pub resource_store: Option<&'a crate::resource::ResourceStore>,
     pub proposal_store: Option<&'a crate::agent::ProposalStore>,
-    pub agent_run_store: Option<&'a crate::agent::AgentRunStore>,
     pub(crate) bound_content_receipt_issuer: Option<&'a dyn BoundContentReceiptIssuer>,
     pub network_policy: Option<&'a crate::config::NetworkPolicy>,
     pub web_search_fixture_output: Option<&'a str>,
@@ -578,7 +501,6 @@ pub struct ActionExecutionContext<'a> {
     pub tool_started_transition_observer: Option<&'a dyn ToolStartedTransitionObserver>,
     pub tool_audit_persistence_observer: Option<&'a dyn ToolAuditPersistenceObserver>,
     pub durable_store_failure_observer: Option<&'a dyn DurableStoreFailureObserver>,
-    pub a2a_outbound_authorization: Option<&'a A2AOutboundAuthorization>,
     /// Execution-owner authority that linearizes canonical mutations against
     /// cancellation. Proposal writes fail closed when this authority is absent.
     pub canonical_write_admission: Option<&'a dyn CanonicalWriteAdmission>,
@@ -641,8 +563,8 @@ impl<'a> ActionExecutionContext<'a> {
             canonical_state: None,
             memory_store: None,
             memory_lifecycle_retrieval_reader: None,
+            resource_store: None,
             proposal_store: None,
-            agent_run_store: None,
             bound_content_receipt_issuer: None,
             network_policy: None,
             web_search_fixture_output: None,
@@ -651,7 +573,6 @@ impl<'a> ActionExecutionContext<'a> {
             tool_started_transition_observer: None,
             tool_audit_persistence_observer: None,
             durable_store_failure_observer: None,
-            a2a_outbound_authorization: None,
             canonical_write_admission: None,
             action_bound_tool_permission: None,
             calendar_ics_paths: &[],
@@ -678,6 +599,14 @@ impl<'a> ActionExecutionContext<'a> {
         memory_lifecycle_retrieval_reader: &'a crate::agent::MemoryLifecycleRetrievalReader,
     ) -> Self {
         self.memory_lifecycle_retrieval_reader = Some(memory_lifecycle_retrieval_reader);
+        self
+    }
+
+    pub fn with_resource_store(
+        mut self,
+        resource_store: &'a crate::resource::ResourceStore,
+    ) -> Self {
+        self.resource_store = Some(resource_store);
         self
     }
 
@@ -716,12 +645,11 @@ impl<'a> ActionExecutionContext<'a> {
         self
     }
 
-    pub fn with_agent_run_store(
+    pub fn with_canonical_task_runtime_store(
         mut self,
-        agent_run_store: &'a crate::agent::AgentRunStore,
+        store: &'a crate::task_runtime::CanonicalTaskRuntimeStore,
     ) -> Self {
-        self.agent_run_store = Some(agent_run_store);
-        self.bound_content_receipt_issuer = Some(agent_run_store);
+        self.bound_content_receipt_issuer = Some(store);
         self
     }
 
@@ -790,14 +718,6 @@ impl<'a> ActionExecutionContext<'a> {
         if let Some(observer) = self.durable_store_failure_observer {
             observer.durable_store_failed(store_kind, &raw_error.to_string());
         }
-    }
-
-    pub fn with_a2a_outbound_authorization(
-        mut self,
-        authorization: &'a A2AOutboundAuthorization,
-    ) -> Self {
-        self.a2a_outbound_authorization = Some(authorization);
-        self
     }
 
     pub fn with_canonical_write_admission(
@@ -1221,39 +1141,4 @@ pub(crate) fn receipt_tracker_for_request(
         action_effect,
         idempotency_contract,
     )
-}
-
-#[cfg(test)]
-mod authorization_debug_tests {
-    use super::A2AOutboundAuthorization;
-
-    #[test]
-    fn a2a_outbound_authorization_debug_redacts_bearer_and_endpoint() {
-        let base_url = "https://private-agent.example.test";
-        let token = "super-secret-a2a-bearer-token-0123456789";
-        let policy = crate::config::NetworkPolicy {
-            default_decision: "allow".into(),
-            ..crate::config::NetworkPolicy::default()
-        };
-        let endpoint = crate::a2a::A2AClient::task_url(base_url).unwrap();
-        let decision = crate::network_client::resolve_network_policy_decision(
-            &policy,
-            &endpoint,
-            "a2a.task.send",
-        )
-        .unwrap();
-        let authorization = A2AOutboundAuthorization::new(
-            base_url,
-            policy,
-            decision,
-            token,
-            crate::a2a::A2AEndpointTransport::for_base_url(base_url).unwrap(),
-        )
-        .unwrap();
-
-        let debug = format!("{authorization:?}");
-        assert!(debug.contains("[REDACTED]"));
-        assert!(!debug.contains(token));
-        assert!(!debug.contains(base_url));
-    }
 }

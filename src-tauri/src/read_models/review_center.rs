@@ -33,19 +33,6 @@ pub(crate) async fn get_review_center_view_model_with_state(
     let proposals = proposal_store
         .list_all_proposals(100, 0)
         .map_err(|err| format!("failed to load review proposals: {err}"))?;
-    let terminal_owner_task_session_ids = proposals
-        .iter()
-        .filter_map(|proposal| {
-            proposal_store
-                .terminal_owner_origin_binding(&proposal.id)
-                .transpose()
-                .map(|result| {
-                    result
-                        .map(|binding| (proposal.id.clone(), binding.task_session_id().to_string()))
-                })
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()
-        .map_err(|err| format!("failed to load canonical review origins: {err}"))?;
     let artifact_evidence = proposals
         .iter()
         .map(|proposal| {
@@ -78,25 +65,25 @@ pub(crate) async fn get_review_center_view_model_with_state(
     let safe_paths = config.system.safe_paths.clone();
     drop(config);
 
+    let (safe_path_overrides, mut safe_path_warnings) =
+        proposal_safe_path_overrides(state, &proposals).await;
+
     let (mut materialization_overrides, mut warnings) =
         memory_materialization_overrides(state, &proposals).await;
     materialization_overrides.extend(dispatch_materialization_overrides);
     warnings.append(&mut dispatch_warnings);
-    let safe_mode_reason = if state.startup_warnings.is_empty() {
-        None
-    } else {
-        Some(format!(
-            "Safe Mode is active because startup warnings exist: {}",
-            state.startup_warnings.join("; ")
-        ))
-    };
+    warnings.append(&mut safe_path_warnings);
+    // Review availability is owned by the exact Proposal/Artifact capability
+    // being reviewed. Unrelated startup warnings (including retired execution
+    // stores) must not turn the whole Review Center into Safe Mode.
+    let safe_mode_reason = None;
     let model = build_review_center_view_model(ReviewCenterBuildInput {
         proposals,
-        safe_mode_active: !state.startup_warnings.is_empty(),
+        safe_mode_active: false,
         safe_mode_reason,
         safe_paths,
+        safe_path_overrides,
         materialization_overrides,
-        terminal_owner_task_session_ids,
         artifact_evidence,
     });
 
@@ -109,6 +96,35 @@ pub(crate) async fn get_review_center_view_model_with_state(
     envelope.last_updated_at = Some(chrono::Utc::now().to_rfc3339());
     envelope.warnings.append(&mut warnings);
     Ok(envelope)
+}
+
+async fn proposal_safe_path_overrides(
+    state: &Arc<AppState>,
+    proposals: &[AgentProposal],
+) -> (BTreeMap<String, Vec<String>>, Vec<ViewModelWarning>) {
+    let mut overrides = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for proposal in proposals.iter().filter(|proposal| {
+        proposal
+            .after
+            .get("source")
+            .and_then(serde_json::Value::as_str)
+            == Some("markdown_memory_editor")
+    }) {
+        match crate::commands::proposal::artifact_safe_paths_for_proposal(state, proposal).await {
+            Ok(paths) => {
+                overrides.insert(proposal.id.clone(), paths);
+            }
+            Err(error) => warnings.push(warning(
+                "markdown_memory_review_scope_unavailable",
+                format!(
+                    "Markdown Memory review scope could not be confirmed for proposal {}: {error}",
+                    proposal.id
+                ),
+            )),
+        }
+    }
+    (overrides, warnings)
 }
 
 fn dispatch_materialization_overrides(
@@ -165,7 +181,7 @@ fn dispatch_materialization_overrides(
 
 fn is_dispatch_backed_review_item(proposal: &AgentProposal) -> bool {
     match proposal.proposal_type {
-        ProposalType::ScheduledTask => true,
+        ProposalType::ScheduledTask | ProposalType::MemoryArchive => true,
         ProposalType::LifeModelUpdate => matches!(
             proposal.affected_path.as_str(),
             openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
@@ -301,6 +317,24 @@ mod tests {
         )
     }
 
+    fn memory_stop_recall_proposal() -> AgentProposal {
+        AgentProposal::new(
+            ProposalType::MemoryArchive,
+            "memory.lifecycle.memory:test",
+            json!({
+                "owner": {
+                    "ownerKind": "memory_lifecycle",
+                    "ownerId": "memory:test"
+                },
+                "recallDisposition": "paused"
+            }),
+            "Stop recalling one reviewed Memory.",
+            1.0,
+            RiskLevel::Medium,
+            ProposalSource::Manual,
+        )
+    }
+
     #[test]
     fn confirmed_dispatch_is_applied_only_after_accepted_projection() {
         assert_eq!(
@@ -356,6 +390,33 @@ mod tests {
             RiskLevel::Medium,
             ProposalSource::Manual,
         );
+        store.create_proposal(&proposal).expect("create proposal");
+        let claim = store
+            .claim_dispatch(&proposal.id)
+            .expect("claim dispatch")
+            .expect("claim id");
+        assert!(store
+            .mark_effect_confirmed_projection_pending(&proposal.id, &claim)
+            .expect("persist confirmed effect"));
+        proposal.accept();
+        assert!(store
+            .project_confirmed_effect(&proposal, &claim)
+            .expect("project accepted proposal"));
+
+        let (overrides, warnings) =
+            dispatch_materialization_overrides(&store, std::slice::from_ref(&proposal));
+
+        assert!(warnings.is_empty());
+        assert_eq!(
+            overrides.get(&proposal.id),
+            Some(&ReviewItemMaterializationStatus::Applied)
+        );
+    }
+
+    #[test]
+    fn review_projection_reads_confirmed_memory_retrieval_dispatch_receipt() {
+        let store = ProposalStore::new_in_memory().expect("proposal store");
+        let mut proposal = memory_stop_recall_proposal();
         store.create_proposal(&proposal).expect("create proposal");
         let claim = store
             .claim_dispatch(&proposal.id)

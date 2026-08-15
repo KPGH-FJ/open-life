@@ -86,6 +86,33 @@ impl ResourceCitationSet {
         self.entries.values().cloned().collect()
     }
 
+    /// Stable digest of the selected canonical chunks, deliberately excluding
+    /// request-scoped citation identifiers. A governed `document.read` can
+    /// therefore bind the exact selection that a later provider request must
+    /// reproduce without reusing stale citation authority.
+    pub fn selection_digest(&self) -> String {
+        let mut selected = self
+            .entries
+            .values()
+            .map(|citation| {
+                (
+                    citation.resource_id.as_str(),
+                    citation.chunk_ordinal,
+                    citation.content_digest.as_str(),
+                )
+            })
+            .collect::<Vec<_>>();
+        selected.sort_unstable();
+        let encoded = serde_json::to_vec(&selected).unwrap_or_default();
+        let digest = digest(&SHA256, &encoded);
+        let hex = digest
+            .as_ref()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("sha256:{hex}")
+    }
+
     pub fn validate_model_citation_ids(
         &self,
         request_id: &str,
@@ -687,6 +714,21 @@ mod tests {
             .unwrap();
         assert!(rendered.contains("来源（OpenLife 已核验）"));
         assert!(rendered.contains("comparison"));
+        let first_digest = selected.citation_set.selection_digest();
+        let reissued = select(
+            &store,
+            "message-compare",
+            "请对比 PDF 和 DOCX 中的核心主张、分歧与风险",
+        );
+        assert_eq!(
+            first_digest,
+            reissued.citation_set.selection_digest(),
+            "selection proof must remain stable while request-scoped citation ids change"
+        );
+        assert_ne!(
+            selected.citation_set.issued_ids(),
+            reissued.citation_set.issued_ids()
+        );
         let forged = selected
             .citation_set
             .validate_and_render_model_output(

@@ -12,7 +12,7 @@ describe("desktop shell contract", () => {
     expect(tokens).toContain("--ol-shell-sidebar-width: 232px");
     expect(tokens).toContain("--ol-shell-inspector-width: 344px");
     expect(tokens).toContain("--ol-shell-context-height: 56px");
-    expect(tokens).toContain("--ol-shell-min-width: 1024px");
+    expect(tokens).toContain("--ol-shell-min-width: 0px");
   });
 
   it("keeps literal colors and sub-12px type out of shell consumers", () => {
@@ -25,16 +25,18 @@ describe("desktop shell contract", () => {
     }
   });
 
-  it("does not introduce a mobile shell, bottom navigation, or responsive route authority", () => {
+  it("uses one responsive shell without a second mobile route authority", () => {
     const shellCss = read("src/ui/shell/openlife.shell.css");
 
-    expect(shellCss).not.toMatch(/@media\s*\(max-width/);
+    expect(shellCss).toMatch(/@media\s*\(max-width:\s*860px\)/);
+    expect(shellCss).toMatch(/@media\s*\(max-width:\s*560px\)/);
+    expect(shellCss).not.toMatch(/mobile-route|mobile-shell|drawer-route/);
   });
 
   it("makes the workbench shell the only production shell authority", () => {
     const app = read("src/App.tsx");
 
-    expect(app).toContain("ReadOnlySpineJourney");
+    expect(app).toContain("ProductWorkbenchJourney");
     expect(app).not.toMatch(/src\/dev\//);
     expect(existsSync(join(process.cwd(), "src/components/ProductShell.tsx"))).toBe(false);
     expect(existsSync(join(process.cwd(), "src/productShellContract.ts"))).toBe(false);

@@ -31,6 +31,10 @@ const DEFAULT_OLLAMA_IPV6_BASE_URL: &str = "http://[::1]:11434";
 const OLLAMA_BASE_ENV_KEYS: [&str; 2] = ["OPENLIFE_OLLAMA_BASE_URL", "OLLAMA_HOST"];
 const OLLAMA_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const OLLAMA_CHAT_TIMEOUT: Duration = Duration::from_secs(120);
+// The bounded conversation projection plus Main Chat's system/context prompt
+// must fit without relying on Ollama's smaller process default, which silently
+// drops the oldest messages (including the conversation summary).
+const OLLAMA_CHAT_CONTEXT_TOKENS: usize = 32_768;
 const OLLAMA_STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const OLLAMA_MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
 const OLLAMA_MAX_STREAM_FRAME_BYTES: usize = 256 * 1024;
@@ -653,10 +657,158 @@ where
 
 /// Dispatch to the exact loopback endpoint selected during preparation.
 /// This function deliberately has no environment/cache/discovery fallback.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct OllamaOutputContract {
-    pub(crate) structured_json: bool,
+    pub(crate) structured_format: Option<serde_json::Value>,
     pub(crate) deterministic: bool,
+}
+
+pub(crate) fn main_chat_evidence_check_json_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "verdict": {
+                "type": "string",
+                "enum": ["supported", "unsupported", "conflict"]
+            },
+            "claims": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "draft_id": {
+                            "type": "string",
+                            "pattern": "^D[1-9][0-9]*$"
+                        },
+                        "fact_ids": {
+                            "type": "array",
+                            "items": { "type": "string" }
+                        },
+                        "supported": { "type": "boolean" }
+                    },
+                    "required": ["draft_id", "fact_ids", "supported"],
+                    "additionalProperties": false
+                }
+            },
+            "unsupported_draft_ids": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "pattern": "^D[1-9][0-9]*$"
+                }
+            },
+            "missing_fact_ids": {
+                "type": "array",
+                "items": { "type": "string" }
+            }
+        },
+        "required": [
+            "verdict",
+            "claims",
+            "unsupported_draft_ids",
+            "missing_fact_ids"
+        ],
+        "additionalProperties": false
+    })
+}
+
+/// Provider-side grammar for the model-authored Work plan. This schema is
+/// intentionally broader than the per-turn Policy decision: it guarantees the
+/// complete typed shape and prevents fixed capabilities from carrying a model
+/// minted target, while `StructuredWorkPlan::validate` still narrows kinds and
+/// exact MCP target ids to the current authorized scope.
+pub(crate) fn main_chat_work_plan_json_schema() -> serde_json::Value {
+    let common_properties = json!({
+        "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,31}$"
+        },
+        "required": { "type": "boolean" },
+        "dependsOn": {
+            "type": "array",
+            "maxItems": 8,
+            "items": { "type": "string" }
+        }
+    });
+    let mut fixed_properties = common_properties.clone();
+    fixed_properties
+        .as_object_mut()
+        .expect("schema object")
+        .insert(
+            "kind".into(),
+            json!({
+                "type": "string",
+                "enum": [
+                    "analyze",
+                    "read_imported_document",
+                    "read_workspace_file",
+                    "web_search",
+                    "web_fetch",
+                    "use_selected_skill",
+                    "draft_artifact",
+                    "verify",
+                    "deliver_result"
+                ]
+            }),
+        );
+    let mut mcp_properties = common_properties;
+    let mcp_properties = mcp_properties.as_object_mut().expect("schema object");
+    mcp_properties.insert(
+        "kind".into(),
+        json!({ "type": "string", "const": "read_mcp" }),
+    );
+    mcp_properties.insert("targetId".into(), json!({ "type": "string" }));
+
+    json!({
+        "type": "object",
+        "properties": {
+            "schemaVersion": {
+                "type": "string",
+                "const": "openlife.work-plan.v2"
+            },
+            "steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "items": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": fixed_properties,
+                            "required": ["id", "kind", "required", "dependsOn"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": mcp_properties,
+                            "required": [
+                                "id",
+                                "kind",
+                                "required",
+                                "dependsOn",
+                                "targetId"
+                            ],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
+            },
+            "completion": {
+                "type": "object",
+                "properties": {
+                    "resultKind": {
+                        "type": "string",
+                        "enum": ["answer", "artifact"]
+                    },
+                    "requiresVerification": { "type": "boolean" }
+                },
+                "required": ["resultKind", "requiresVerification"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["schemaVersion", "steps", "completion"],
+        "additionalProperties": false
+    })
 }
 
 pub(crate) async fn chat_with_ollama_raw_at_endpoint_with_start_observer<F>(
@@ -690,7 +842,7 @@ where
     let body = ollama_chat_request_body(
         model,
         req_messages,
-        output_contract.structured_json,
+        output_contract.structured_format,
         output_contract.deterministic,
     );
 
@@ -738,9 +890,10 @@ where
 fn ollama_chat_request_body(
     model: &str,
     req_messages: Vec<serde_json::Value>,
-    structured_json_output: bool,
+    structured_format: Option<serde_json::Value>,
     deterministic_output: bool,
 ) -> serde_json::Value {
+    let structured_json_output = structured_format.is_some();
     let mut body = json!({
         "model": model,
         "messages": req_messages,
@@ -748,10 +901,11 @@ fn ollama_chat_request_body(
         "options": {
             "temperature": if structured_json_output || deterministic_output { 0.0 } else { 0.7 },
             "num_predict": 2048,
+            "num_ctx": OLLAMA_CHAT_CONTEXT_TOKENS,
         }
     });
-    if structured_json_output {
-        body["format"] = serde_json::Value::String("json".into());
+    if let Some(format) = structured_format {
+        body["format"] = format;
     }
     body
 }
@@ -827,6 +981,7 @@ where
         "options": {
             "temperature": 0.7,
             "num_predict": 2048,
+            "num_ctx": OLLAMA_CHAT_CONTEXT_TOKENS,
         }
     });
 
@@ -1562,7 +1717,7 @@ mod tests {
         let body = ollama_chat_request_body(
             "llama3.1:latest",
             vec![json!({"role": "user", "content": "draft artifacts"})],
-            true,
+            Some(serde_json::Value::String("json".into())),
             true,
         );
 
@@ -1572,16 +1727,71 @@ mod tests {
     }
 
     #[test]
+    fn evidence_check_request_uses_typed_json_schema() {
+        let body = ollama_chat_request_body(
+            "llama3.1:latest",
+            vec![json!({"role": "user", "content": "check every sentence"})],
+            Some(main_chat_evidence_check_json_schema()),
+            true,
+        );
+
+        assert_eq!(body["format"]["type"], "object");
+        assert_eq!(
+            body["format"]["required"],
+            json!([
+                "verdict",
+                "claims",
+                "unsupported_draft_ids",
+                "missing_fact_ids"
+            ])
+        );
+        assert_eq!(
+            body["format"]["properties"]["claims"]["items"]["properties"]["draft_id"]["pattern"],
+            "^D[1-9][0-9]*$"
+        );
+        assert_eq!(body["options"]["temperature"], 0.0);
+    }
+
+    #[test]
+    fn work_plan_request_uses_typed_json_schema_without_fixed_targets() {
+        let schema = main_chat_work_plan_json_schema();
+        let body = ollama_chat_request_body(
+            "llama3.1:latest",
+            vec![json!({"role": "user", "content": "plan this work"})],
+            Some(schema),
+            true,
+        );
+
+        assert_eq!(body["format"]["type"], "object");
+        assert_eq!(
+            body["format"]["required"],
+            json!(["schemaVersion", "steps", "completion"])
+        );
+        let alternatives = body["format"]["properties"]["steps"]["items"]["oneOf"]
+            .as_array()
+            .expect("step alternatives");
+        assert_eq!(alternatives.len(), 2);
+        assert!(alternatives[0]["properties"].get("targetId").is_none());
+        assert_eq!(alternatives[1]["properties"]["kind"]["const"], "read_mcp");
+        assert_eq!(
+            alternatives[1]["required"],
+            json!(["id", "kind", "required", "dependsOn", "targetId"])
+        );
+        assert_eq!(body["options"]["temperature"], 0.0);
+    }
+
+    #[test]
     fn ordinary_chat_request_does_not_force_json_mode() {
         let body = ollama_chat_request_body(
             "llama3.1:latest",
             vec![json!({"role": "user", "content": "hello"})],
-            false,
+            None,
             false,
         );
 
         assert!(body.get("format").is_none());
         assert_eq!(body["options"]["temperature"], 0.7);
+        assert_eq!(body["options"]["num_ctx"], 32_768);
     }
 
     #[test]
@@ -1589,7 +1799,7 @@ mod tests {
         let body = ollama_chat_request_body(
             "llama3.1:latest",
             vec![json!({"role": "user", "content": "summarize Web evidence"})],
-            false,
+            None,
             true,
         );
 

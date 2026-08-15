@@ -331,6 +331,7 @@ export function FoundationNavRow({
       type="button"
       className={cx("ol-nav-row", current && "ol-nav-row--current")}
       aria-current={current ? "page" : undefined}
+      aria-label={meta ? `${label} ${meta}` : label}
       onClick={onClick}
     >
       <span className="ol-nav-row__icon" aria-hidden="true">

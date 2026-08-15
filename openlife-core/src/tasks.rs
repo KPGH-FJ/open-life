@@ -822,7 +822,7 @@ impl ScheduledTask {
             reason_code: decision.reason_code().to_string(),
             subject_digest: decision.subject_digest().to_string(),
             schedule_digest: decision.schedule_digest().to_string(),
-            payload_purpose: ProviderPayloadPurpose::AgentLoopStep,
+            payload_purpose: ProviderPayloadPurpose::ScheduledTaskStep,
             payload_contract_digest: digest_ref(SCHEDULED_PROVIDER_PAYLOAD_CONTRACT),
             source_ref_digest: digest_parts(&[
                 "scheduled_provider_grant_source_v2",
@@ -945,7 +945,7 @@ impl ScheduledProviderGrantV2 {
         let data_route = ProviderDataRoute::LocalOnly;
         let subject_digest = digest_content(description);
         let schedule_digest = scheduled_task_schedule_digest(task_id, action_type, due_date);
-        let payload_purpose = ProviderPayloadPurpose::AgentLoopStep;
+        let payload_purpose = ProviderPayloadPurpose::ScheduledTaskStep;
         let payload_contract_digest = digest_ref(SCHEDULED_PROVIDER_PAYLOAD_CONTRACT);
         let source_ref_digest = digest_parts(&[
             "scheduled_provider_grant_source_v2",
@@ -996,7 +996,7 @@ impl ScheduledProviderGrantV2 {
                     &task.action_type,
                     task.due_date.as_deref(),
                 )
-            || self.payload_purpose != ProviderPayloadPurpose::AgentLoopStep
+            || self.payload_purpose != ProviderPayloadPurpose::ScheduledTaskStep
             || self.payload_contract_digest != digest_ref(SCHEDULED_PROVIDER_PAYLOAD_CONTRACT)
             || self.source_ref_digest
                 != digest_parts(&[
@@ -2370,7 +2370,7 @@ impl TaskStore {
                 claimed_at TEXT NOT NULL,
                 execution_started_at TEXT,
                 finished_at TEXT,
-                agent_run_ref_digest TEXT,
+                work_run_ref_digest TEXT,
                 error_digest TEXT,
                 reconciliation_evidence_digest TEXT,
                 reconciliation_issuer TEXT,
@@ -3840,13 +3840,13 @@ impl TaskStore {
     pub fn complete_claim(
         &self,
         claim: &ScheduledTaskClaim,
-        agent_run_id: &str,
+        work_run_id: &str,
         result_ref: &str,
         result_digest: &str,
     ) -> Result<bool> {
         let mut conn = self.lock_writable_connection("complete_claim")?;
         self.validate_claim_authority(claim)?;
-        validate_reference("agent run id", agent_run_id)?;
+        validate_reference("work run id", work_run_id)?;
         validate_scheduled_result_ref(result_ref)?;
         validate_digest("scheduled result digest", result_digest)?;
         let tx = conn.transaction()?;
@@ -3881,11 +3881,11 @@ impl TaskStore {
         }
         let attempt_changed = tx.execute(
             "UPDATE scheduler_attempts
-             SET status = 'completed', finished_at = ?1, agent_run_ref_digest = ?2
+             SET status = 'completed', finished_at = ?1, work_run_ref_digest = ?2
              WHERE attempt_id = ?3 AND task_id = ?4 AND claim_token = ?5 AND status = 'executing'",
             params![
                 now,
-                digest_ref(agent_run_id),
+                digest_ref(work_run_id),
                 claim.attempt_id,
                 claim.task.id,
                 claim.claim_token,
@@ -6542,7 +6542,7 @@ fn migrate_scheduler_attempt_policy_allowed_route(conn: &Connection) -> Result<(
             claimed_at TEXT NOT NULL,
             execution_started_at TEXT,
             finished_at TEXT,
-            agent_run_ref_digest TEXT,
+            work_run_ref_digest TEXT,
             error_digest TEXT,
             reconciliation_evidence_digest TEXT,
             reconciliation_issuer TEXT,
@@ -6554,6 +6554,9 @@ fn migrate_scheduler_attempt_policy_allowed_route(conn: &Connection) -> Result<(
         )",
         [],
     )?;
+    // `agent_run_ref_digest` is the exact column name in the pre-v10 scheduler
+    // schema. It is read only while migrating that historical database into
+    // the current `work_run_ref_digest` field; it is not a runtime owner.
     conn.execute(
         "INSERT INTO scheduler_attempts_v10 (
             attempt_id, task_id, claim_token, attempt_number, status,
@@ -6561,7 +6564,7 @@ fn migrate_scheduler_attempt_policy_allowed_route(conn: &Connection) -> Result<(
             provider_subject_digest, provider_payload_purpose,
             provider_payload_contract_digest, provider_source_ref_digest,
             provider_provenance_state, migration_associated_grant_id, claimed_at,
-            execution_started_at, finished_at, agent_run_ref_digest, error_digest,
+            execution_started_at, finished_at, work_run_ref_digest, error_digest,
             reconciliation_evidence_digest, reconciliation_issuer,
             reconciliation_evidence_kind, reconciliation_evidence_ref, reconciled_at
          ) SELECT attempt_id, task_id, claim_token, attempt_number, status,
@@ -7857,7 +7860,7 @@ fn parse_scheduled_provider_grant_scope(value: String) -> Result<ScheduledProvid
 
 fn parse_provider_payload_purpose(value: String) -> Result<ProviderPayloadPurpose> {
     match value.as_str() {
-        "agent_loop_step" => Ok(ProviderPayloadPurpose::AgentLoopStep),
+        "scheduled_task_step" => Ok(ProviderPayloadPurpose::ScheduledTaskStep),
         _ => anyhow::bail!("unknown scheduled provider payload purpose"),
     }
 }
@@ -8326,7 +8329,7 @@ mod tests {
             subject_scope_digest: ProviderPolicyAuthorization::from_scheduled_claim(claim)
                 .unwrap()
                 .subject_scope_digest(),
-            payload_purpose: Some(ProviderPayloadPurpose::AgentLoopStep),
+            payload_purpose: Some(ProviderPayloadPurpose::ScheduledTaskStep),
             unfiltered_payload_digest: Some(digest_ref("scheduled unfiltered payload")),
             context_manifest_digest: digest_ref("scheduled context manifest"),
             prepared_envelope_digest: Some(digest_ref("scheduled prepared envelope")),
@@ -11147,7 +11150,7 @@ mod tests {
         let authorization = ProviderPolicyAuthorization::from_scheduled_claim(&claim)
             .and_then(|authorization| {
                 authorization.authorize_derived_payload(
-                    ProviderPayloadPurpose::AgentLoopStep,
+                    ProviderPayloadPurpose::ScheduledTaskStep,
                     &claim.task.description,
                     &messages,
                     &[],

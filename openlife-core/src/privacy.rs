@@ -90,26 +90,7 @@ pub fn assess_sensitive_content(message: &str) -> SensitiveContentAssessment {
     if !secret_like_findings(message).is_empty() {
         sensitive_topics.push(SensitiveTopic::Credential);
     }
-    if contains_sensitive_term(
-        &lower,
-        &[
-            "health",
-            "medical",
-            "diagnosis",
-            "prescription",
-            "therapy",
-            "健康",
-            "医疗",
-            "诊断",
-            "处方",
-            "用药",
-            "病历",
-            "心慌",
-            "头疼",
-            "身体",
-            "胃",
-        ],
-    ) {
+    if contains_personal_health_content(&lower) {
         sensitive_topics.push(SensitiveTopic::Health);
     }
     if contains_sensitive_term(
@@ -148,7 +129,7 @@ pub fn assess_sensitive_content(message: &str) -> SensitiveContentAssessment {
     {
         sensitive_topics.push(SensitiveTopic::Finance);
     }
-    if contains_sensitive_term(&lower, &["private", "sensitive", "privacy", "隐私", "敏感"]) {
+    if contains_private_data_context(&lower) {
         sensitive_topics.push(SensitiveTopic::Private);
     }
     sensitive_topics.sort_by_key(|topic| match topic {
@@ -168,6 +149,102 @@ pub fn assess_sensitive_content(message: &str) -> SensitiveContentAssessment {
 
 fn contains_sensitive_term(value: &str, terms: &[&str]) -> bool {
     terms.iter().any(|term| value.contains(term))
+}
+
+fn contains_personal_health_content(value: &str) -> bool {
+    // A health topic is not itself private health data. Public educational
+    // material routinely contains words such as `medical`, `身体`, or `胃` and
+    // must remain usable with the provider the user selected. Tighten the
+    // route only when health language is tied to a person, record, result, or
+    // treatment. This keeps actual medical context fail-closed without making
+    // an entire conversation local-only merely because it discusses health.
+    let health_terms = [
+        "health",
+        "medical",
+        "diagnosis",
+        "prescription",
+        "therapy",
+        "symptom",
+        "健康",
+        "医疗",
+        "诊断",
+        "处方",
+        "用药",
+        "病历",
+        "症状",
+        "心慌",
+        "头疼",
+        "身体",
+        "胃",
+    ];
+    if !contains_sensitive_term(value, &health_terms) {
+        return false;
+    }
+
+    contains_sensitive_term(
+        value,
+        &[
+            "my ",
+            "my\n",
+            "mine",
+            "i have",
+            "i was diagnosed",
+            "patient record",
+            "medical record",
+            "test result",
+            "lab result",
+            "family member",
+            "我的",
+            "我有",
+            "我被诊断",
+            "本人",
+            "患者",
+            "家人",
+            "家属",
+            "他的",
+            "她的",
+            "孩子的",
+            "父母的",
+            "病历",
+            "病例",
+            "检查报告",
+            "检验报告",
+            "体检报告",
+            "诊断结果",
+            "用药记录",
+            "医疗记录",
+        ],
+    )
+}
+
+fn contains_private_data_context(value: &str) -> bool {
+    // `sensitive` and `敏感` are common domain words (for example insulin
+    // sensitivity or 对皮质醇敏感度). They only describe private data when the
+    // surrounding phrase says so; a bare substring must not force LocalOnly.
+    contains_sensitive_term(
+        value,
+        &[
+            "privacy",
+            "private data",
+            "private information",
+            "private conversation",
+            "private document",
+            "private file",
+            "private record",
+            "personal data",
+            "personal information",
+            "sensitive data",
+            "sensitive information",
+            "confidential",
+            "隐私",
+            "私人信息",
+            "个人信息",
+            "个人数据",
+            "敏感数据",
+            "敏感信息",
+            "机密",
+        ],
+    )
 }
 
 impl PrivacyType {
@@ -384,6 +461,19 @@ impl PrivacyEngine {
             if !rule.enabled {
                 continue;
             }
+            // A bare Chinese surname followed by one or two Han characters is
+            // not a reliable name detector: ordinary phrases such as
+            // `官方页面` contain `方页面` and used to stop governed Web reads as
+            // false PII. Keep custom Name patterns fully user-controlled, but
+            // require an explicit name-bearing phrase for the built-in rule.
+            if rule.ptype == PrivacyType::Name && rule.custom_pattern.is_none() {
+                findings.extend(
+                    contextual_chinese_names(message)
+                        .into_iter()
+                        .map(|name| (PrivacyType::Name, name)),
+                );
+                continue;
+            }
             if let Some(re) = self.policy.compiled_pattern(rule) {
                 for mat in re.find_iter(message) {
                     findings.push((rule.ptype.clone(), mat.as_str().to_string()));
@@ -508,6 +598,22 @@ impl PrivacyEngine {
     }
 }
 
+fn contextual_chinese_names(message: &str) -> Vec<String> {
+    let Ok(pattern) = Regex::new(
+        r"(?:我叫|姓名(?:是|为|叫|[:：])?|名字(?:是|为|叫|[:：])?|联系人(?:是|为|叫|[:：])?)\s*(?P<name>[李王张刘陈杨赵黄周吴徐孙胡朱高林何郭马罗梁宋郑谢韩唐冯于董萧程曹袁邓许傅沈曾彭吕苏卢蒋蔡贾丁魏薛叶阎余潘杜戴夏钟汪田任姜范方石姚谭廖邹熊金陆郝孔白崔康毛邱秦江史顾侯邵孟龙万段雷钱汤尹黎易常武乔贺赖龚文][\u4e00-\u9fa5]{1,2})",
+    ) else {
+        return Vec::new();
+    };
+    pattern
+        .captures_iter(message)
+        .filter_map(|captures| {
+            captures
+                .name("name")
+                .map(|value| value.as_str().to_string())
+        })
+        .collect()
+}
+
 fn secret_like_findings(message: &str) -> Vec<String> {
     let patterns = [
         r"(?is)-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----",
@@ -561,6 +667,28 @@ mod tests {
     }
 
     #[test]
+    fn default_name_detection_requires_explicit_name_context() {
+        let engine = PrivacyEngine::new();
+
+        assert!(engine
+            .detect("搜索 Example Domain 官方页面的标题")
+            .iter()
+            .all(|(privacy_type, _)| *privacy_type != PrivacyType::Name));
+        assert!(engine
+            .detect("我叫张三，请帮我整理资料")
+            .iter()
+            .any(|(privacy_type, value)| {
+                *privacy_type == PrivacyType::Name && value == "张三"
+            }));
+        assert!(engine
+            .detect("联系人：王小明")
+            .iter()
+            .any(|(privacy_type, value)| {
+                *privacy_type == PrivacyType::Name && value == "王小明"
+            }));
+    }
+
+    #[test]
     fn sensitive_content_assessment_requires_review_for_id_and_credentials() {
         let id = assess_sensitive_content("身份证号 110101199001011234");
         assert!(id.requires_memory_review());
@@ -583,6 +711,37 @@ mod tests {
 
         let health = assess_sensitive_content("My diagnosis is private; email test@example.com");
         assert!(health.requires_local_only());
+    }
+
+    #[test]
+    fn public_health_education_does_not_force_a_local_provider() {
+        let educational = assess_sensitive_content(
+            "这份皮质醇科普介绍身体的应激反应、胃部影响、常见医疗知识与皮质醇敏感度。",
+        );
+
+        assert!(!educational.requires_local_only());
+        assert!(!educational
+            .sensitive_topics
+            .contains(&SensitiveTopic::Health));
+
+        let personal = assess_sensitive_content("我的身体最近心慌，请结合我的用药记录分析。");
+        assert!(personal.requires_local_only());
+        assert!(personal.sensitive_topics.contains(&SensitiveTopic::Health));
+    }
+
+    #[test]
+    fn domain_sensitivity_is_not_private_data() {
+        let domain_term = assess_sensitive_content("细胞对皮质醇敏感度下降。 ");
+        assert!(!domain_term.requires_local_only());
+        assert!(!domain_term
+            .sensitive_topics
+            .contains(&SensitiveTopic::Private));
+
+        let private_data = assess_sensitive_content("这是敏感数据和个人信息，请勿外传。");
+        assert!(private_data.requires_local_only());
+        assert!(private_data
+            .sensitive_topics
+            .contains(&SensitiveTopic::Private));
     }
 
     #[test]

@@ -28,7 +28,7 @@ of the following are true:
 - the write records the source message id, fact key, sensitivity, and audit
   digest;
 - the product returns an inspectable receipt and a working undo action;
-- the content did not originate from a tool, web page, file, MCP server, A2A
+- the content did not originate from a tool, web page, file, or MCP server
   peer, assistant message, historical transcript, or quoted instruction.
 
 This lane must not directly mutate canonical LifeModel truth. It must not update
@@ -52,7 +52,7 @@ does not permit silent LifeModel learning or relax safety policy.
 
 - deterministic tests that only the current user message can authorize the
   lane;
-- negative prompt-injection tests for web, file, MCP, A2A, tool, and quoted
+- negative prompt-injection tests for web, file, MCP, tool, and quoted
   content;
 - concurrent write and undo tests;
 - product trials showing explicit memory succeeds without proposal fatigue;

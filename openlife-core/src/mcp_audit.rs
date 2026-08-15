@@ -1371,9 +1371,9 @@ fn openlife_default_data_dir() -> std::path::PathBuf {
         .map(|value| value.trim().to_ascii_lowercase())
         .unwrap_or_else(|| "release".to_string());
     let app_dir_name = match profile.as_str() {
-        "dev" => "ai.openlife.app.dev",
-        "qa" => "ai.openlife.app.qa",
-        _ => "ai.openlife.app",
+        "dev" => "ai.openlife.desktop.dev",
+        "qa" => "ai.openlife.desktop.qa",
+        _ => "ai.openlife.desktop",
     };
     dirs::data_dir()
         .map(|d| d.join(app_dir_name))

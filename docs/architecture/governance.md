@@ -31,9 +31,9 @@ document rule set.
 - `openlife-core/src/agent/model_router.rs`
 - `openlife-core/src/agent/review_workflow.rs`
 - `src-tauri/src/main_chat_kernel.rs`
+- `src-tauri/src/canonical_work_runtime.rs`
 - `src-tauri/src/provider_network_consent.rs`
-- `src-tauri/src/main_chat_task_controls.rs`
-- `src-tauri/src/main_chat_task_control_tests.rs`
+- `src-tauri/src/read_models/tasks.rs`
 - `src-tauri/src/commands/mcp.rs`
 - `src-tauri/src/commands/memory.rs`
 - `src-tauri/src/commands/proposal.rs`
@@ -82,10 +82,11 @@ consumed on check, while replay prechecks can use `peek` without consuming the
 permission.
 
 `openlife-core/src/agent/tool_gateway.rs` validates gateway requests before
-execution. Plugin and A2A sources are rejected as executor-unavailable, disabled
-or declarative-only manifests are blocked, and manifest contracts must include
+execution. Plugin sources are rejected as executor-unavailable, disabled or
+declarative-only manifests are blocked, and manifest contracts must include
 known permission, risk, action type, capability, and parameter fields. Gateway
-execution attaches contract evidence to successful observations.
+execution attaches contract evidence to successful observations. Only
+registered built-in and external MCP sources can enter the executor graph.
 
 ## MCP Governance
 
@@ -100,17 +101,14 @@ manifest listing plus audit log commands.
 
 `openlife-core/src/mcp_audit.rs` stores encrypted MCP audit entries with
 key-configuration support, export, cleanup, and key rotation. Audit existence
-does not by itself mean a Main Chat AgentLoop scenario has live provider credit.
+does not by itself mean a canonical Work scenario has live provider credit.
 
 ## Proposal Governance
 
-The dormant `src-tauri/src/main_chat_proposal_support.rs` parallel route is
-deleted. Active Main Chat proposal orchestration lives in
-`src-tauri/src/main_chat_kernel.rs`; tool-governance proposals enter the typed
-ReviewWorkflow gateway owned by ActionExecutor. Provider network-consent
-staging is an active separate callsite and remains under execution-epoch
-admission remediation; it must not be cited as cancellation-safe until that
-gate is complete.
+Main Chat proposal orchestration lives in `src-tauri/src/main_chat_kernel.rs`;
+tool-governance proposals enter the typed ReviewWorkflow gateway owned by
+ActionExecutor. Provider network-consent staging uses the same canonical Work
+execution epoch and never grants completion credit by itself.
 
 `src-tauri/src/commands/proposal.rs` validates proposal payloads before
 application. Accepting ToolPermission proposals records a permission policy.
@@ -119,13 +117,8 @@ Editing Memory proposals is draft-only and preserves provenance.
 
 ## Task Control Governance
 
-`src-tauri/src/main_chat_task_controls.rs` computes task summaries, details,
-run evidence views, continuity diagnostics, and allowed controls. Resume and
-retry are blocked by terminal state, stale context, missing action evidence,
-permission mismatch, unavailable tool/provider state, selected-skill digest
-mismatch, and plan revision mismatch.
-
-The task-control tests in `src-tauri/src/main_chat_task_control_tests.rs`
-enforce that refresh is evidence-backed, non-replayable retry becomes a manual
-blocker, accepted ToolPermission can permit governed replay, and cancel stops
-nonterminal queued actions.
+`src-tauri/src/canonical_work_runtime.rs` owns cancellation, retry, recovery,
+scope revalidation, and Work continuation. `src-tauri/src/read_models/tasks.rs`
+projects the resulting controls and Needs Attention facts. Retry creates a new
+Run for the same Task and is blocked by stale Project scope or non-recoverable
+effect uncertainty; React does not infer controls from messages.

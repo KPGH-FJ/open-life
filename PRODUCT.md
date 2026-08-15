@@ -2,44 +2,76 @@
 
 ## Purpose
 
-OpenLife is a private personal Agent OS. Its purpose is to let a user work with
-AI that can understand bounded personal context, carry out useful tasks, and
-improve that context over time without taking ownership away from the user.
+OpenLife is a local-first personal Agent OS for general knowledge work. It lets
+a user delegate meaningful, potentially multi-step tasks to a capable Agent,
+follow and steer the work, and receive results that can be inspected and
+continued. It is not limited to coding work.
 
-## Current Product Loop
+OpenLife may use bounded Agent Memory and confirmed LifeModel context to improve
+continuity and personalization. Those systems remain optional collaborators of
+the Agent harness rather than owners of task execution, permission, or
+completion.
 
-1. The user starts or continues work in Workspace.
-2. Main Chat selects an answer, planning, read, tool, or governed-action path.
-3. Tasks and execution evidence remain visible in the Workbench.
-4. Proposed durable changes appear in Review Center.
-5. Only an explicit user decision may materialize governed LifeModel or memory
-   changes.
+## Target Product Loop
 
-## Core Surfaces
+1. The user opens or creates a Conversation in the Workbench. Chat provides a
+   direct answer; Work accepts a meaningful outcome and optional files,
+   sources, Project scope, constraints, and desired deliverables.
+2. Chat and Work share one canonical Conversation, Turn, and typed Item spine.
+   Work adds a durable Task and Run with an editable completion contract.
+3. OpenLife plans when useful, uses authorized capabilities adaptively, and
+   lets the user follow progress, steer, answer questions, pause, resume, or
+   approve an important boundary without losing context.
+4. OpenLife returns one canonical FinalResult with relevant Artifacts, changes,
+   sources, limitations, and verification state.
+5. Durable or external effects follow the applicable task scope and risk contract.
+   A Review proposal is used only when a governed change needs asynchronous or
+   durable review; it is not the container for every task or action.
 
-- **Today**: current read model and safe status summary.
-- **Workspace**: conversation and task execution.
-- **Tasks**: task state, blockers, retry, resume, and cancellation.
-- **Review**: approval, rejection, postponement, and evidence.
+## Target Core Surfaces
+
+- **Workbench** (`/workspace`): Projects, Conversations, Chat and Work,
+  progress, steering, inline decisions, results, and a Needs Attention filter.
 - **Personal Intelligence** (`/life-model`): two peer areas with separate
   backend owners: user-owned long-term understanding in LifeModel, and
   user-controlled Agent Memory for work continuity.
-- **Settings**: model configuration, privacy boundaries, and credential state.
+- **Settings**: provider/model profiles, privacy and transmission boundaries,
+  credential recovery, local data controls, and diagnostics.
+
+Task, Run, Item, and Approval remain explicit backend facts. They do not each
+require a separate top-level product page.
 
 ## Non-Negotiable Boundaries
 
 - No silent durable writes.
 - Assistant text is not write authorization.
+- A task grant authorizes ordinary low-risk, recoverable work inside its
+  explicit workspace, resource, provider, and tool scopes. Scope expansion,
+  consequential external actions, and destructive or irreversible effects
+  require a just-in-time decision.
 - External and sensitive actions require a confirmed capability and risk
   contract.
+- The provider and model selected by the user remain bound to the task. OpenLife
+  may retry that route, but it must not silently switch model or provider.
 - Missing, stale, or failed evidence must remain visibly unknown or blocked.
+- Plans, tool activity, streaming text, and proposal acceptance are progress
+  evidence, not proof that the requested result was completed.
 - Product state must come from its backend read model when one exists.
 - Local, scripted, mock, browser-shell, native-Tauri, and external-live evidence
   are different evidence levels.
 
-## Current Development Priority
+## Current Development Baseline
 
-Improve the real product and its user experience. Repository governance should
-remain small and conventional: one active plan, normal source tests, normal CI,
-and concise architecture/decision records. OpenLife must not grow a second
-internal platform for planning or evaluating its own development.
+H0-H6 completed the canonical capable-Agent harness baseline: complete vertical
+product capabilities moved to one Chat/Work spine, and the replaced backend and
+frontend owners were deleted. This is an engineering baseline, not a claim of
+market readiness or complete future capability coverage.
+
+S0-S7, R0-R8, and H0-H6 are retained in Git history. ADR 0018 and ADR 0019
+remain the accepted reconstruction and harness contracts. There is no active
+implementation objective until the next bounded product capability is agreed.
+
+Repository governance remains small and conventional: at most one active plan, normal
+source tests, normal CI, and concise architecture and decision records.
+OpenLife must not grow a second internal platform for planning or evaluating
+its own development.

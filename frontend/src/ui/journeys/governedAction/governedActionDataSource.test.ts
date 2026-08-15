@@ -3,16 +3,15 @@ import type { ReviewAction, TaskControl } from "@/tauri";
 
 const tauriMocks = vi.hoisted(() => ({
   acceptProposal: vi.fn(),
-  cancelMainChatAgentTask: vi.fn(),
+  cancelWorkTask: vi.fn(),
   editLifeModelLearningProposal: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
   getTasksViewModel: vi.fn(),
   getWorkspaceViewModel: vi.fn(),
   postponeProposal: vi.fn(),
-  refreshMainChatAgentTaskContext: vi.fn(),
   rejectProposal: vi.fn(),
-  resumeMainChatAgentTask: vi.fn(),
-  retryMainChatAgentAction: vi.fn(),
+  requestArtifactUndo: vi.fn(),
+  retryWorkTask: vi.fn(),
 }));
 
 vi.mock("@/tauri", () => tauriMocks);
@@ -23,11 +22,9 @@ function action(kind: ReviewAction["kind"]): ReviewAction {
   const effect =
     kind === "apply"
       ? "materialization_request"
-      : kind === "resume"
-        ? "task_resume_request"
-        : kind === "view_evidence"
-          ? "evidence_only"
-          : "decision_only";
+      : kind === "view_evidence"
+        ? "evidence_only"
+        : "decision_only";
   return {
     id: `review-1:${kind}`,
     label: kind,
@@ -90,28 +87,16 @@ describe("governed action Tauri data source", () => {
     });
   });
 
-  it("maps only supported review decisions and task resume to product commands", async () => {
+  it("maps only supported review decisions", async () => {
     tauriMocks.acceptProposal.mockResolvedValue(undefined);
     tauriMocks.rejectProposal.mockResolvedValue(undefined);
     tauriMocks.postponeProposal.mockResolvedValue(undefined);
-    tauriMocks.resumeMainChatAgentTask.mockResolvedValue(undefined);
     await tauriGovernedActionDataSource.dispatchReviewAction(action("approve"));
     await tauriGovernedActionDataSource.dispatchReviewAction(action("reject"));
     await tauriGovernedActionDataSource.dispatchReviewAction(action("later"));
-    await tauriGovernedActionDataSource.resumeTask({
-      id: "task-1:resume",
-      label: "Resume",
-      kind: "resume",
-      effect: "task_resume_request",
-      enabled: true,
-      targetTaskId: "task-1",
-      completionProofAfterDispatch: false,
-    } satisfies TaskControl);
-
     expect(tauriMocks.acceptProposal).toHaveBeenCalledWith("review-1");
     expect(tauriMocks.rejectProposal).toHaveBeenCalledWith("review-1");
     expect(tauriMocks.postponeProposal).toHaveBeenCalledWith("review-1");
-    expect(tauriMocks.resumeMainChatAgentTask).toHaveBeenCalledWith("task-1");
   });
 
   it("uses the schema-aware LifeModel learning editor and verifies its receipt", async () => {
@@ -166,22 +151,13 @@ describe("governed action Tauri data source", () => {
   it("dispatches only exact executable TaskControl contracts", async () => {
     const controls: TaskControl[] = [
       {
-        id: "task-1:resume",
-        label: "Resume",
-        kind: "resume",
-        effect: "task_resume_request",
-        enabled: true,
-        targetTaskId: "task-1",
-        completionProofAfterDispatch: false,
-      },
-      {
         id: "task-1:retry",
         label: "Retry",
         kind: "retry",
         effect: "task_retry_request",
         enabled: true,
         targetTaskId: "task-1",
-        targetActionId: "action-2",
+        targetActionId: "run-2",
         completionProofAfterDispatch: false,
       },
       {
@@ -194,29 +170,42 @@ describe("governed action Tauri data source", () => {
         targetTaskId: "task-1",
         completionProofAfterDispatch: false,
       },
-      {
-        id: "task-1:refresh",
-        label: "Refresh context",
-        kind: "refresh_context",
-        effect: "task_refresh_request",
-        enabled: true,
-        targetTaskId: "task-1",
-        completionProofAfterDispatch: false,
-      },
     ];
 
     for (const control of controls) {
       await tauriGovernedActionDataSource.dispatchTaskControl(control);
     }
 
-    expect(tauriMocks.resumeMainChatAgentTask).toHaveBeenCalledWith("task-1");
-    expect(tauriMocks.retryMainChatAgentAction).toHaveBeenCalledWith("task-1", "action-2");
-    expect(tauriMocks.cancelMainChatAgentTask).toHaveBeenCalledWith("task-1");
-    expect(tauriMocks.refreshMainChatAgentTaskContext).toHaveBeenCalledWith("task-1");
+    expect(tauriMocks.retryWorkTask).toHaveBeenCalledWith("task-1", "run-2");
+    expect(tauriMocks.cancelWorkTask).toHaveBeenCalledWith("task-1");
   });
 
-  it("fails closed instead of inventing edit, apply, revoke, resume, or evidence dispatch", async () => {
-    for (const kind of ["edit", "apply", "revoke", "resume", "view_evidence"] as const) {
+  it("verifies an exact governed Artifact Undo review receipt", async () => {
+    tauriMocks.requestArtifactUndo.mockResolvedValue({
+      artifactId: "artifact-1",
+      proposalId: "proposal-undo-1",
+      status: "waiting_review",
+    });
+
+    await tauriGovernedActionDataSource.requestArtifactUndo("artifact-1");
+
+    expect(tauriMocks.requestArtifactUndo).toHaveBeenCalledWith("artifact-1");
+  });
+
+  it("fails closed on an unbound Artifact Undo review receipt", async () => {
+    tauriMocks.requestArtifactUndo.mockResolvedValue({
+      artifactId: "artifact-other",
+      proposalId: "proposal-undo-1",
+      status: "waiting_review",
+    });
+
+    await expect(tauriGovernedActionDataSource.requestArtifactUndo("artifact-1")).rejects.toThrow(
+      "artifact_undo_receipt_unverified"
+    );
+  });
+
+  it("fails closed instead of inventing edit, apply, revoke, or evidence dispatch", async () => {
+    for (const kind of ["edit", "apply", "revoke", "view_evidence"] as const) {
       await expect(
         tauriGovernedActionDataSource.dispatchReviewAction(action(kind))
       ).rejects.toThrow();

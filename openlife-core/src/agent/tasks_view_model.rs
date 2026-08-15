@@ -1,10 +1,12 @@
-use crate::agent::main_chat_agent_v1::{AgentTaskSessionStatus, MainChatAgentStrategy};
 use crate::agent::product_read_model::{
     BackendEntityKind, BackendEntityRef, EvidenceRef, EvidenceSensitivity, EvidenceSource,
     ProviderPrivacyBoundarySummary,
 };
 use crate::agent::review_item::{ReviewItem, ReviewItemDecisionStatus};
-use crate::agent::types::{AgentRun, AgentRunStatus};
+use crate::task_runtime::{
+    CanonicalArtifactStatus, CanonicalTaskItemKind, CanonicalTaskItemStatus,
+};
+use crate::work_orchestration::{WorkCompletionContract, WorkPlanStepKind, WorkRunBudgetPolicy};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -13,6 +15,7 @@ use std::collections::{BTreeMap, BTreeSet};
 #[serde(rename_all = "snake_case")]
 pub enum TaskLifecycleStatus {
     Running,
+    WaitingReview,
     WaitingPermission,
     Blocked,
     Failed,
@@ -28,6 +31,7 @@ impl TaskLifecycleStatus {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Running => "running",
+            Self::WaitingReview => "waiting_review",
             Self::WaitingPermission => "waiting_permission",
             Self::Blocked => "blocked",
             Self::Failed => "failed",
@@ -55,7 +59,7 @@ impl TaskLifecycleStatus {
     fn is_active(self) -> bool {
         matches!(
             self,
-            Self::Running | Self::WaitingPermission | Self::Blocked
+            Self::Running | Self::WaitingReview | Self::WaitingPermission | Self::Blocked
         )
     }
 }
@@ -216,21 +220,154 @@ pub struct TaskLatestResultPreview {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct TaskItemViewModel {
+    pub id: String,
+    pub run_id: String,
+    pub sequence: u64,
+    pub kind: CanonicalTaskItemKind,
+    pub status: CanonicalTaskItemStatus,
+    pub summary_code: String,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskWorkPlanStepViewModel {
+    pub id: String,
+    pub kind: WorkPlanStepKind,
+    pub required: bool,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskWorkPlanViewModel {
+    pub revision: u64,
+    pub steps: Vec<TaskWorkPlanStepViewModel>,
+    pub completion: WorkCompletionContract,
+    pub budget_policy: WorkRunBudgetPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactViewModel {
+    pub artifact_id: String,
+    pub version: u64,
+    pub status: CanonicalArtifactStatus,
+    pub media_type: String,
+    pub content_digest: String,
+    pub target_reference_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub materialized_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_content_digest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_ref: Option<BackendEntityRef>,
+    pub source_item_ref: BackendEntityRef,
+    #[serde(default)]
+    pub evidence_refs: Vec<EvidenceRef>,
+    pub change: TaskArtifactChangeViewModel,
+    pub preview: TaskArtifactPreviewViewModel,
+    pub verification: TaskArtifactVerificationViewModel,
+    pub undo: TaskArtifactUndoViewModel,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactUndoViewModel {
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_ref: Option<BackendEntityRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskArtifactChangeKind {
+    Create,
+    Replace,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactChangeViewModel {
+    pub kind: TaskArtifactChangeKind,
+    pub status: CanonicalArtifactStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_reference: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_prior_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskArtifactPreviewStatus {
+    Available,
+    Truncated,
+    Unavailable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactPreviewViewModel {
+    pub status: TaskArtifactPreviewStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskArtifactVerificationStatus {
+    Pending,
+    Verified,
+    Failed,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactVerificationViewModel {
+    pub status: TaskArtifactVerificationStatus,
+    pub expected_content_digest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_content_digest: Option<String>,
+    pub verification_item_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TaskViewModelItem {
     pub canonical_task_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub task_session_id: Option<String>,
     #[serde(default)]
     pub related_run_ids: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     pub title: String,
-    pub strategy: String,
     pub lifecycle_status: TaskLifecycleStatus,
     pub terminal_delivery_status: TaskTerminalDeliveryStatus,
     pub final_delivery_evidence_present: bool,
     #[serde(default)]
+    pub items: Vec<TaskItemViewModel>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub work_plan: Option<TaskWorkPlanViewModel>,
+    #[serde(default)]
+    pub artifacts: Vec<TaskArtifactViewModel>,
+    #[serde(default)]
     pub pending_blockers: Vec<String>,
+    #[serde(default)]
+    pub needs_attention: bool,
+    #[serde(default)]
+    pub attention_reason_codes: Vec<String>,
     #[serde(default)]
     pub pending_review_item_refs: Vec<BackendEntityRef>,
     #[serde(default)]
@@ -248,7 +385,9 @@ pub struct TaskViewModelItem {
 #[serde(rename_all = "camelCase")]
 pub struct TasksViewModelSummary {
     pub total: usize,
+    pub needs_attention_count: usize,
     pub active_count: usize,
+    pub waiting_review_count: usize,
     pub waiting_permission_count: usize,
     pub blocked_count: usize,
     pub pending_review_count: usize,
@@ -295,21 +434,25 @@ pub enum WorkspaceActivityKind {
 impl WorkspaceActivityKind {
     pub fn from_product_code(value: &str) -> Self {
         match value {
-            "user_input" => Self::UserInput,
+            "user_input" | "instruction" => Self::UserInput,
             "route_decision" => Self::RouteDecision,
             "plan" => Self::Plan,
-            "action" => Self::Action,
-            "observation" => Self::Observation,
-            "follow_up" => Self::FollowUp,
+            "action" | "tool_call" | "provider_generation" => Self::Action,
+            "observation" | "verification" => Self::Observation,
+            "follow_up" | "steering" => Self::FollowUp,
             "permission_request" => Self::PermissionRequest,
-            "proposal_request" => Self::ProposalRequest,
+            "proposal_request" | "review_checkpoint" => Self::ProposalRequest,
             "error" => Self::Error,
             "retry" => Self::Retry,
             "final_result" => Self::FinalResult,
             "reflection" => Self::Reflection,
             "fallback" => Self::Fallback,
             "blocker" => Self::Blocker,
-            value if value.starts_with("turn_") || value.contains("lifecycle") => {
+            value
+                if value.starts_with("turn_")
+                    || value.contains("lifecycle")
+                    || matches!(value, "artifact_draft" | "artifact_materialized") =>
+            {
                 Self::DurableLifecycle
             }
             _ => Self::Unknown,
@@ -422,6 +565,10 @@ impl WorkspaceActivityItem {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceViewModel {
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub selected_conversation_id: Option<String>,
+    #[serde(default)]
+    pub tasks: Vec<TaskViewModelItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub active_task: Option<TaskViewModelItem>,
     #[serde(default)]
     pub recent_task_refs: Vec<BackendEntityRef>,
@@ -439,15 +586,22 @@ pub struct WorkspaceViewModel {
 
 #[derive(Debug, Clone, Default)]
 pub struct TaskViewModelTaskInput {
-    pub task_session_id: String,
+    pub task_id: String,
+    pub canonical_task_id: Option<String>,
     pub conversation_id: Option<String>,
     pub title: String,
-    pub strategy: Option<MainChatAgentStrategy>,
-    pub session_status: Option<AgentTaskSessionStatus>,
     pub related_run_ids: Vec<String>,
     pub final_delivery_present: bool,
     pub final_delivery_status: Option<String>,
+    pub canonical_lifecycle_status: Option<TaskLifecycleStatus>,
+    pub canonical_terminal_delivery_status: Option<TaskTerminalDeliveryStatus>,
+    pub canonical_final_delivery_evidence_present: Option<bool>,
+    pub canonical_items: Vec<TaskItemViewModel>,
+    pub work_plan: Option<TaskWorkPlanViewModel>,
+    pub canonical_artifacts: Vec<TaskArtifactViewModel>,
     pub pending_blockers: Vec<String>,
+    pub needs_attention: bool,
+    pub attention_reason_codes: Vec<String>,
     pub pending_review_item_refs: Vec<BackendEntityRef>,
     pub review_projection_authoritative: bool,
     pub allowed_control_ids: Vec<String>,
@@ -458,15 +612,9 @@ pub struct TaskViewModelTaskInput {
     pub updated_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone)]
-pub struct TaskViewModelRunInput {
-    pub run: AgentRun,
-}
-
 #[derive(Debug, Clone, Default)]
 pub struct TasksViewModelBuildInput {
     pub task_inputs: Vec<TaskViewModelTaskInput>,
-    pub run_inputs: Vec<TaskViewModelRunInput>,
     pub source_refs: Vec<EvidenceRef>,
     pub contract_limitations: Vec<String>,
 }
@@ -474,6 +622,7 @@ pub struct TasksViewModelBuildInput {
 #[derive(Debug, Clone)]
 pub struct WorkspaceViewModelBuildInput {
     pub tasks: TasksViewModel,
+    pub selected_conversation_id: Option<String>,
     pub review_items: Vec<ReviewItem>,
     pub active_task_activity: Vec<WorkspaceActivityItem>,
     pub provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary,
@@ -482,24 +631,11 @@ pub struct WorkspaceViewModelBuildInput {
 }
 
 pub fn build_tasks_view_model(input: TasksViewModelBuildInput) -> TasksViewModel {
-    let task_run_ids = input
-        .task_inputs
-        .iter()
-        .flat_map(|task| task.related_run_ids.iter().cloned())
-        .collect::<BTreeSet<_>>();
-
     let mut items = input
         .task_inputs
         .into_iter()
         .map(task_item_from_input)
         .collect::<Vec<_>>();
-
-    for run_input in input.run_inputs {
-        if task_run_ids.contains(&run_input.run.id) {
-            continue;
-        }
-        items.push(run_only_item(run_input.run));
-    }
 
     items.sort_by_key(|item| std::cmp::Reverse(item.updated_at));
     let summary = summarize_tasks(&items);
@@ -513,19 +649,24 @@ pub fn build_tasks_view_model(input: TasksViewModelBuildInput) -> TasksViewModel
 }
 
 pub fn build_workspace_view_model(input: WorkspaceViewModelBuildInput) -> WorkspaceViewModel {
-    let active_task = input
+    let selected_conversation_id = input.selected_conversation_id;
+    let tasks = input
         .tasks
         .items
+        .into_iter()
+        .filter(|task| {
+            selected_conversation_id
+                .as_deref()
+                .is_none_or(|conversation_id| {
+                    task.conversation_id.as_deref() == Some(conversation_id)
+                })
+        })
+        .collect::<Vec<_>>();
+    let active_task = tasks
         .iter()
         .find(|item| item.lifecycle_status.is_active())
         .cloned();
-    let recent_task_refs = input
-        .tasks
-        .items
-        .iter()
-        .take(6)
-        .map(task_ref)
-        .collect::<Vec<_>>();
+    let recent_task_refs = tasks.iter().take(6).map(task_ref).collect::<Vec<_>>();
     let active_review_ids = active_task
         .as_ref()
         .map(|task| {
@@ -535,9 +676,6 @@ pub fn build_workspace_view_model(input: WorkspaceViewModelBuildInput) -> Worksp
                 .collect::<BTreeSet<_>>()
         })
         .unwrap_or_default();
-    let active_task_id = active_task
-        .as_ref()
-        .map(|task| task.canonical_task_id.as_str());
     let mut pending_review_items = input
         .review_items
         .iter()
@@ -547,12 +685,7 @@ pub fn build_workspace_view_model(input: WorkspaceViewModelBuildInput) -> Worksp
                 ReviewItemDecisionStatus::Pending
                     | ReviewItemDecisionStatus::Edited
                     | ReviewItemDecisionStatus::Deferred
-            ) && (active_review_ids.contains(item.id.as_str())
-                || active_task_id.is_some_and(|task_id| {
-                    item.task_resume_relation
-                        .as_ref()
-                        .is_some_and(|relation| relation.task_session_id == task_id)
-                }))
+            ) && active_review_ids.contains(item.id.as_str())
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -568,6 +701,8 @@ pub fn build_workspace_view_model(input: WorkspaceViewModelBuildInput) -> Worksp
     };
 
     WorkspaceViewModel {
+        selected_conversation_id,
+        tasks,
         active_task,
         recent_task_refs,
         pending_review_items,
@@ -580,20 +715,27 @@ pub fn build_workspace_view_model(input: WorkspaceViewModelBuildInput) -> Worksp
 }
 
 fn task_item_from_input(input: TaskViewModelTaskInput) -> TaskViewModelItem {
-    let lifecycle_status = lifecycle_status_for_task(&input);
-    let terminal_delivery_status = terminal_delivery_status_for_task(&input, lifecycle_status);
+    let lifecycle_status = input
+        .canonical_lifecycle_status
+        .unwrap_or(TaskLifecycleStatus::Unknown);
+    let terminal_delivery_status = input
+        .canonical_terminal_delivery_status
+        .unwrap_or_else(|| terminal_delivery_status_for_task(&input, lifecycle_status));
+    let final_delivery_evidence_present = input
+        .canonical_final_delivery_evidence_present
+        .unwrap_or(input.final_delivery_present);
     let controls = controls_for_task(&input, lifecycle_status);
     let mut evidence_refs = input.evidence_refs;
     evidence_refs.push(EvidenceRef {
-        id: input.task_session_id.clone(),
-        label: "Main Chat task session".into(),
+        id: input.task_id.clone(),
+        label: "Canonical Work Task".into(),
         source: EvidenceSource::Task,
         sensitivity: Some(EvidenceSensitivity::LocalPrivate),
     });
     for run_id in &input.related_run_ids {
         evidence_refs.push(EvidenceRef {
             id: run_id.clone(),
-            label: "AgentRun".into(),
+            label: "Canonical Work Run".into(),
             source: EvidenceSource::Task,
             sensitivity: Some(EvidenceSensitivity::LocalPrivate),
         });
@@ -604,17 +746,21 @@ fn task_item_from_input(input: TaskViewModelTaskInput) -> TaskViewModelItem {
     let latest_result_preview = latest_result_preview_for(
         terminal_delivery_status,
         input.latest_result_preview,
-        input.final_delivery_present,
-        &input.task_session_id,
+        final_delivery_evidence_present,
+        input.canonical_task_id.as_deref().unwrap_or(&input.task_id),
     );
     let next_recommended_control = input
         .next_recommended_control
         .filter(|control| !control.trim().is_empty())
         .unwrap_or_else(|| "open_trace".into());
+    let mut pending_review_item_refs = input.pending_review_item_refs;
+    pending_review_item_refs.sort_by(|left, right| left.id.cmp(&right.id));
+    pending_review_item_refs.dedup_by(|left, right| left.id == right.id);
 
     TaskViewModelItem {
-        canonical_task_id: input.task_session_id.clone(),
-        task_session_id: Some(input.task_session_id),
+        canonical_task_id: input
+            .canonical_task_id
+            .unwrap_or_else(|| input.task_id.clone()),
         related_run_ids: input.related_run_ids,
         conversation_id: input.conversation_id,
         title: if input.title.trim().is_empty() {
@@ -622,147 +768,21 @@ fn task_item_from_input(input: TaskViewModelTaskInput) -> TaskViewModelItem {
         } else {
             input.title
         },
-        strategy: input
-            .strategy
-            .map(|strategy| strategy.as_str().to_string())
-            .unwrap_or_else(|| "unknown".into()),
         lifecycle_status,
         terminal_delivery_status,
-        final_delivery_evidence_present: input.final_delivery_present,
+        final_delivery_evidence_present,
+        items: input.canonical_items,
+        work_plan: input.work_plan,
+        artifacts: input.canonical_artifacts,
         pending_blockers: dedup_strings(input.pending_blockers),
-        pending_review_item_refs: input.pending_review_item_refs,
+        needs_attention: input.needs_attention,
+        attention_reason_codes: dedup_strings(input.attention_reason_codes),
+        pending_review_item_refs,
         allowed_controls: controls,
         next_recommended_control,
         latest_result_preview,
         evidence_refs,
         updated_at: input.updated_at,
-    }
-}
-
-fn run_only_item(run: AgentRun) -> TaskViewModelItem {
-    let legacy_payload_unverified = run.legacy_payload_unverified;
-    let lifecycle_status = if legacy_payload_unverified {
-        TaskLifecycleStatus::Unknown
-    } else {
-        lifecycle_status_for_run(run.status)
-    };
-    let terminal_delivery_status = match lifecycle_status {
-        TaskLifecycleStatus::CompletedNeedsEvidence => {
-            TaskTerminalDeliveryStatus::MissingFinalDeliveryEvidence
-        }
-        TaskLifecycleStatus::Failed => TaskTerminalDeliveryStatus::Failed,
-        TaskLifecycleStatus::RemoteUnknown => TaskTerminalDeliveryStatus::Unknown,
-        TaskLifecycleStatus::Cancelled => TaskTerminalDeliveryStatus::Cancelled,
-        _ => TaskTerminalDeliveryStatus::Unknown,
-    };
-    let canonical_task_id = if run.task_id.trim().is_empty() {
-        format!("run:{}", run.id)
-    } else {
-        run.task_id.clone()
-    };
-    let title = if legacy_payload_unverified {
-        format!("{} run", run.kind)
-    } else {
-        run.user_input
-            .clone()
-            .or_else(|| run.output_preview.clone())
-            .unwrap_or_else(|| format!("{} run", run.kind))
-    };
-    let preview = if legacy_payload_unverified {
-        None
-    } else {
-        run.output_preview.clone().or_else(|| {
-            run.error
-                .as_ref()
-                .map(|error| format!("{}: {}", error.phase, error.message))
-        })
-    };
-    let mut pending_blockers = run.warnings.clone();
-    if legacy_payload_unverified {
-        pending_blockers.push("legacy_payload_unverified".into());
-    }
-    let evidence_refs = vec![EvidenceRef {
-        id: run.id.clone(),
-        label: "AgentRun without task session read model evidence".into(),
-        source: EvidenceSource::Task,
-        sensitivity: Some(EvidenceSensitivity::LocalPrivate),
-    }];
-    TaskViewModelItem {
-        canonical_task_id: canonical_task_id.clone(),
-        task_session_id: None,
-        related_run_ids: vec![run.id.clone()],
-        conversation_id: run.session_id.clone(),
-        title,
-        strategy: if legacy_payload_unverified {
-            "unknown".into()
-        } else {
-            run.reasoning_strategy
-                .clone()
-                .unwrap_or_else(|| run.kind.to_string())
-        },
-        lifecycle_status,
-        terminal_delivery_status,
-        final_delivery_evidence_present: false,
-        pending_blockers: dedup_strings(pending_blockers),
-        pending_review_item_refs: Vec::new(),
-        allowed_controls: vec![
-            TaskControl::new(
-                &canonical_task_id,
-                "open_run",
-                "Open run",
-                TaskControlKind::OpenRun,
-            ),
-            TaskControl::new(
-                &canonical_task_id,
-                "view_evidence",
-                "View evidence",
-                TaskControlKind::ViewEvidence,
-            ),
-        ],
-        next_recommended_control: "open_run".into(),
-        latest_result_preview: Some(TaskLatestResultPreview {
-            status: terminal_delivery_status,
-            label: terminal_label(terminal_delivery_status).into(),
-            preview,
-            final_delivery_ref: None,
-            evidence_refs: evidence_refs.clone(),
-        }),
-        evidence_refs,
-        updated_at: run.finished_at.or(Some(run.started_at)),
-    }
-}
-
-fn lifecycle_status_for_task(input: &TaskViewModelTaskInput) -> TaskLifecycleStatus {
-    let pending_review = !input.pending_review_item_refs.is_empty();
-    match input.session_status {
-        Some(AgentTaskSessionStatus::Running) => TaskLifecycleStatus::Running,
-        Some(AgentTaskSessionStatus::WaitingPermission) => TaskLifecycleStatus::WaitingPermission,
-        Some(AgentTaskSessionStatus::Blocked) => TaskLifecycleStatus::Blocked,
-        Some(AgentTaskSessionStatus::Failed) => TaskLifecycleStatus::Failed,
-        Some(AgentTaskSessionStatus::Cancelled) => TaskLifecycleStatus::Cancelled,
-        Some(AgentTaskSessionStatus::Completed) if pending_review => {
-            TaskLifecycleStatus::CompletedWithPendingReview
-        }
-        Some(AgentTaskSessionStatus::Completed) if final_delivery_status_is_complete(input) => {
-            TaskLifecycleStatus::Completed
-        }
-        Some(AgentTaskSessionStatus::Completed)
-            if input.final_delivery_status.as_deref() == Some("blocked") =>
-        {
-            TaskLifecycleStatus::Blocked
-        }
-        Some(AgentTaskSessionStatus::Completed)
-            if input.final_delivery_status.as_deref() == Some("failed") =>
-        {
-            TaskLifecycleStatus::Failed
-        }
-        Some(AgentTaskSessionStatus::Completed)
-            if input.final_delivery_status.as_deref() == Some("cancelled") =>
-        {
-            TaskLifecycleStatus::Cancelled
-        }
-        Some(AgentTaskSessionStatus::Completed) => TaskLifecycleStatus::CompletedNeedsEvidence,
-        None => TaskLifecycleStatus::Unknown,
     }
 }
 
@@ -783,6 +803,7 @@ fn terminal_delivery_status_for_task(
         TaskLifecycleStatus::Blocked | TaskLifecycleStatus::WaitingPermission => {
             TaskTerminalDeliveryStatus::Blocked
         }
+        TaskLifecycleStatus::WaitingReview => TaskTerminalDeliveryStatus::NotTerminal,
         TaskLifecycleStatus::Failed => TaskTerminalDeliveryStatus::Failed,
         TaskLifecycleStatus::RemoteUnknown => TaskTerminalDeliveryStatus::Unknown,
         TaskLifecycleStatus::Cancelled => TaskTerminalDeliveryStatus::Cancelled,
@@ -805,17 +826,6 @@ fn final_delivery_status_is_complete(input: &TaskViewModelTaskInput) -> bool {
             .unwrap_or(false)
 }
 
-fn lifecycle_status_for_run(status: AgentRunStatus) -> TaskLifecycleStatus {
-    match status {
-        AgentRunStatus::Running => TaskLifecycleStatus::Running,
-        AgentRunStatus::WaitingPermission => TaskLifecycleStatus::WaitingPermission,
-        AgentRunStatus::Completed => TaskLifecycleStatus::CompletedNeedsEvidence,
-        AgentRunStatus::Failed => TaskLifecycleStatus::Failed,
-        AgentRunStatus::RemoteUnknown => TaskLifecycleStatus::RemoteUnknown,
-        AgentRunStatus::Cancelled => TaskLifecycleStatus::Cancelled,
-    }
-}
-
 fn controls_for_task(
     input: &TaskViewModelTaskInput,
     lifecycle_status: TaskLifecycleStatus,
@@ -828,7 +838,7 @@ fn controls_for_task(
         .collect::<BTreeSet<_>>();
     let pending_review = !input.pending_review_item_refs.is_empty();
     controls.push(TaskControl::new(
-        &input.task_session_id,
+        &input.task_id,
         "open_trace",
         "Open trace",
         TaskControlKind::OpenTrace,
@@ -838,7 +848,7 @@ fn controls_for_task(
         match control {
             "resume" => {
                 let resume = TaskControl::new(
-                    &input.task_session_id,
+                    &input.task_id,
                     "resume",
                     "Resume",
                     TaskControlKind::Resume,
@@ -853,7 +863,7 @@ fn controls_for_task(
             }
             "retry" => {
                 let retry = TaskControl::new(
-                    &input.task_session_id,
+                    &input.task_id,
                     "retry",
                     "Retry",
                     TaskControlKind::Retry,
@@ -867,7 +877,7 @@ fn controls_for_task(
             }
             "cancel" => controls.push(
                 TaskControl::new(
-                    &input.task_session_id,
+                    &input.task_id,
                     "cancel",
                     "Cancel",
                     TaskControlKind::Cancel,
@@ -875,7 +885,7 @@ fn controls_for_task(
                 .requiring_confirmation(),
             ),
             "refresh_context" => controls.push(TaskControl::new(
-                &input.task_session_id,
+                &input.task_id,
                 "refresh_context",
                 "Refresh context",
                 TaskControlKind::RefreshContext,
@@ -883,7 +893,7 @@ fn controls_for_task(
             "open_trace" => {}
             _ => controls.push(
                 TaskControl::new(
-                    &input.task_session_id,
+                    &input.task_id,
                     format!("view_evidence:{control}"),
                     control.replace('_', " "),
                     TaskControlKind::ViewEvidence,
@@ -897,7 +907,7 @@ fn controls_for_task(
         for control in &mut controls {
             if matches!(
                 control.kind,
-                TaskControlKind::Resume | TaskControlKind::Cancel | TaskControlKind::Retry
+                TaskControlKind::Resume | TaskControlKind::Cancel
             ) {
                 control.enabled = false;
                 control.disabled_reason =
@@ -961,12 +971,19 @@ fn summarize_tasks(items: &[TaskViewModelItem]) -> TasksViewModelSummary {
         ..Default::default()
     };
     for item in items {
+        if item.needs_attention {
+            summary.needs_attention_count += 1;
+        }
         *summary
             .by_lifecycle_status
             .entry(item.lifecycle_status.as_str().into())
             .or_insert(0) += 1;
         match item.lifecycle_status {
             TaskLifecycleStatus::Running => summary.active_count += 1,
+            TaskLifecycleStatus::WaitingReview => {
+                summary.active_count += 1;
+                summary.waiting_review_count += 1;
+            }
             TaskLifecycleStatus::WaitingPermission => {
                 summary.active_count += 1;
                 summary.waiting_permission_count += 1;
@@ -1041,356 +1058,3 @@ impl std::fmt::Display for TaskViewModelContractError {
 }
 
 impl std::error::Error for TaskViewModelContractError {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::agent::main_chat_agent_v1::AgentTaskSessionStatus;
-    use crate::agent::product_read_model::ProductRiskLevel;
-
-    #[test]
-    fn remote_unknown_agent_run_remains_unknown_in_tasks_projection() {
-        let mut run = AgentRun::new_tool_execution_run("a2a.call_agent");
-        run.status = AgentRunStatus::RemoteUnknown;
-        run.finished_at = Some(Utc::now());
-        let model = build_tasks_view_model(TasksViewModelBuildInput {
-            run_inputs: vec![TaskViewModelRunInput { run }],
-            ..Default::default()
-        });
-
-        assert_eq!(model.items.len(), 1);
-        assert_eq!(
-            model.items[0].lifecycle_status,
-            TaskLifecycleStatus::RemoteUnknown
-        );
-        assert_eq!(
-            model.items[0].terminal_delivery_status,
-            TaskTerminalDeliveryStatus::Unknown
-        );
-        assert_eq!(model.summary.failed_count, 0);
-        assert_eq!(
-            model.summary.by_lifecycle_status.get("remote_unknown"),
-            Some(&1)
-        );
-    }
-
-    #[test]
-    fn completed_task_without_final_delivery_fails_closed() {
-        let model = build_tasks_view_model(TasksViewModelBuildInput {
-            task_inputs: vec![TaskViewModelTaskInput {
-                task_session_id: "task-1".into(),
-                title: "Needs evidence".into(),
-                session_status: Some(AgentTaskSessionStatus::Completed),
-                final_delivery_present: false,
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
-
-        let item = &model.items[0];
-        assert_eq!(
-            item.lifecycle_status,
-            TaskLifecycleStatus::CompletedNeedsEvidence
-        );
-        assert_eq!(
-            item.terminal_delivery_status,
-            TaskTerminalDeliveryStatus::MissingFinalDeliveryEvidence
-        );
-        assert_eq!(model.summary.completed_count, 0);
-        assert_eq!(model.summary.completed_needs_evidence_count, 1);
-    }
-
-    #[test]
-    fn completed_task_with_final_delivery_missing_status_fails_closed() {
-        let model = build_tasks_view_model(TasksViewModelBuildInput {
-            task_inputs: vec![TaskViewModelTaskInput {
-                task_session_id: "task-missing-status".into(),
-                title: "Missing final status".into(),
-                session_status: Some(AgentTaskSessionStatus::Completed),
-                final_delivery_present: true,
-                final_delivery_status: None,
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
-
-        let item = &model.items[0];
-        assert_eq!(
-            item.lifecycle_status,
-            TaskLifecycleStatus::CompletedNeedsEvidence
-        );
-        assert_eq!(
-            item.terminal_delivery_status,
-            TaskTerminalDeliveryStatus::MissingFinalDeliveryEvidence
-        );
-        assert_eq!(model.summary.completed_count, 0);
-        assert_eq!(model.summary.completed_needs_evidence_count, 1);
-    }
-
-    #[test]
-    fn completed_task_with_completed_status_is_delivered() {
-        let model = build_tasks_view_model(TasksViewModelBuildInput {
-            task_inputs: vec![TaskViewModelTaskInput {
-                task_session_id: "task-delivered".into(),
-                title: "Delivered".into(),
-                session_status: Some(AgentTaskSessionStatus::Completed),
-                final_delivery_present: true,
-                final_delivery_status: Some("completed".into()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
-
-        let item = &model.items[0];
-        assert_eq!(item.lifecycle_status, TaskLifecycleStatus::Completed);
-        assert_eq!(
-            item.terminal_delivery_status,
-            TaskTerminalDeliveryStatus::Delivered
-        );
-        assert_eq!(model.summary.completed_count, 1);
-        assert_eq!(model.summary.completed_needs_evidence_count, 0);
-    }
-
-    #[test]
-    fn completed_task_with_resolved_pending_delivery_is_delivered() {
-        let model = build_tasks_view_model(TasksViewModelBuildInput {
-            task_inputs: vec![TaskViewModelTaskInput {
-                task_session_id: "task-pending-delivery".into(),
-                title: "Resolved delivery".into(),
-                session_status: Some(AgentTaskSessionStatus::Completed),
-                final_delivery_present: true,
-                final_delivery_status: Some("completed_with_pending_items".into()),
-                review_projection_authoritative: true,
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
-
-        let item = &model.items[0];
-        assert_eq!(item.lifecycle_status, TaskLifecycleStatus::Completed);
-        assert_eq!(
-            item.terminal_delivery_status,
-            TaskTerminalDeliveryStatus::Delivered
-        );
-        assert_eq!(model.summary.completed_count, 1);
-        assert_eq!(model.summary.completed_needs_evidence_count, 0);
-    }
-
-    #[test]
-    fn completed_task_does_not_resolve_pending_delivery_when_review_projection_is_unknown() {
-        let model = build_tasks_view_model(TasksViewModelBuildInput {
-            task_inputs: vec![TaskViewModelTaskInput {
-                task_session_id: "task-review-unknown".into(),
-                title: "Unknown review projection".into(),
-                session_status: Some(AgentTaskSessionStatus::Completed),
-                final_delivery_present: true,
-                final_delivery_status: Some("completed_with_pending_items".into()),
-                review_projection_authoritative: false,
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
-
-        let item = &model.items[0];
-        assert_eq!(
-            item.lifecycle_status,
-            TaskLifecycleStatus::CompletedNeedsEvidence
-        );
-        assert_eq!(
-            item.terminal_delivery_status,
-            TaskTerminalDeliveryStatus::MissingFinalDeliveryEvidence
-        );
-    }
-
-    #[test]
-    fn completed_task_with_pending_review_is_not_plain_completed() {
-        let model = build_tasks_view_model(TasksViewModelBuildInput {
-            task_inputs: vec![TaskViewModelTaskInput {
-                task_session_id: "task-2".into(),
-                title: "Pending review".into(),
-                session_status: Some(AgentTaskSessionStatus::Completed),
-                final_delivery_present: true,
-                final_delivery_status: Some("completed_with_pending_items".into()),
-                pending_review_item_refs: vec![BackendEntityRef {
-                    id: "review-1".into(),
-                    kind: BackendEntityKind::ReviewItem,
-                    label: "Review item".into(),
-                    href: None,
-                }],
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
-
-        let item = &model.items[0];
-        assert_eq!(
-            item.lifecycle_status,
-            TaskLifecycleStatus::CompletedWithPendingReview
-        );
-        assert_eq!(model.summary.completed_count, 0);
-        assert_eq!(model.summary.pending_review_count, 1);
-    }
-
-    #[test]
-    fn request_controls_do_not_claim_completion_after_dispatch() {
-        let model = build_tasks_view_model(TasksViewModelBuildInput {
-            task_inputs: vec![TaskViewModelTaskInput {
-                task_session_id: "task-3".into(),
-                title: "Permission".into(),
-                session_status: Some(AgentTaskSessionStatus::WaitingPermission),
-                allowed_control_ids: vec!["resume".into(), "retry".into(), "cancel".into()],
-                retry_action_id: Some("action-1".into()),
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
-
-        let controls = &model.items[0].allowed_controls;
-        let resume = controls
-            .iter()
-            .find(|control| control.kind == TaskControlKind::Resume)
-            .expect("resume control");
-        assert_eq!(resume.effect, TaskControlEffect::TaskResumeRequest);
-        assert!(!resume.completion_proof_after_dispatch);
-        let retry = controls
-            .iter()
-            .find(|control| control.kind == TaskControlKind::Retry)
-            .expect("retry control");
-        assert_eq!(retry.effect, TaskControlEffect::TaskRetryRequest);
-        assert_eq!(retry.target_action_id.as_deref(), Some("action-1"));
-        let cancel = controls
-            .iter()
-            .find(|control| control.kind == TaskControlKind::Cancel)
-            .expect("cancel control");
-        assert_eq!(cancel.effect, TaskControlEffect::TaskCancelRequest);
-        assert!(cancel.requires_confirmation);
-    }
-
-    #[test]
-    fn task_control_effect_invariant_rejects_mismatches() {
-        let mut control = TaskControl::new("task-4", "resume", "Resume", TaskControlKind::Resume);
-        control.effect = TaskControlEffect::EvidenceOnly;
-
-        let err = control
-            .validate()
-            .expect_err("resume must be a request control");
-        assert_eq!(
-            err,
-            TaskViewModelContractError::TaskControlEffectMismatch {
-                kind: TaskControlKind::Resume,
-                expected: TaskControlEffect::TaskResumeRequest,
-                actual: TaskControlEffect::EvidenceOnly,
-            }
-        );
-    }
-
-    #[test]
-    fn workspace_composes_active_task_and_product_safe_activity() {
-        let tasks = build_tasks_view_model(TasksViewModelBuildInput {
-            task_inputs: vec![TaskViewModelTaskInput {
-                task_session_id: "task-5".into(),
-                title: "Running task".into(),
-                session_status: Some(AgentTaskSessionStatus::Running),
-                ..Default::default()
-            }],
-            ..Default::default()
-        });
-        let workspace = build_workspace_view_model(WorkspaceViewModelBuildInput {
-            tasks,
-            review_items: Vec::new(),
-            active_task_activity: vec![WorkspaceActivityItem::from_product_event(
-                "event-1",
-                "action",
-                "action_state_recorded",
-                Some("running"),
-                None,
-                Vec::new(),
-                None,
-            )],
-            provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary::unknown(),
-            source_refs: Vec::new(),
-            contract_limitations: Vec::new(),
-        });
-
-        assert_eq!(
-            workspace
-                .active_task
-                .as_ref()
-                .map(|task| task.canonical_task_id.as_str()),
-            Some("task-5")
-        );
-        assert_eq!(
-            workspace.activity[0].status,
-            WorkspaceActivityStatus::Recorded
-        );
-        assert_eq!(
-            workspace.provider_privacy_boundary_summary.risk,
-            ProductRiskLevel::Unknown
-        );
-    }
-
-    #[test]
-    fn unverified_legacy_run_only_item_exposes_unknown_not_persisted_status_or_strategy() {
-        let mut run = AgentRun::new_chat_run("legacy-session", "legacy input");
-        run.status = AgentRunStatus::Failed;
-        run.user_input = None;
-        run.output_preview = Some("run_output:bytes=14:hmac-sha256:legacy".into());
-        run.error = Some(crate::agent::types::AgentRunError {
-            message: "legacy error must not become product truth".into(),
-            phase: "provider".into(),
-            recoverable: false,
-        });
-        run.reasoning_strategy = Some("layered".into());
-        run.legacy_payload_unverified = true;
-
-        let tasks = build_tasks_view_model(TasksViewModelBuildInput {
-            run_inputs: vec![TaskViewModelRunInput { run }],
-            ..Default::default()
-        });
-        let item = &tasks.items[0];
-        let canonical_task_id = item.canonical_task_id.clone();
-
-        assert_eq!(item.lifecycle_status, TaskLifecycleStatus::Unknown);
-        assert_eq!(
-            item.terminal_delivery_status,
-            TaskTerminalDeliveryStatus::Unknown
-        );
-        assert_eq!(item.strategy, "unknown");
-        assert_eq!(
-            item.latest_result_preview
-                .as_ref()
-                .map(|preview| preview.status),
-            Some(TaskTerminalDeliveryStatus::Unknown)
-        );
-        assert!(item
-            .latest_result_preview
-            .as_ref()
-            .is_some_and(|preview| preview.preview.is_none()));
-        assert!(item
-            .pending_blockers
-            .iter()
-            .any(|warning| warning == "legacy_payload_unverified"));
-        assert_eq!(tasks.summary.failed_count, 0);
-        assert_eq!(tasks.summary.completed_count, 0);
-
-        let workspace = build_workspace_view_model(WorkspaceViewModelBuildInput {
-            tasks,
-            review_items: Vec::new(),
-            active_task_activity: vec![WorkspaceActivityItem::from_product_event(
-                "event-ignored",
-                "unknown",
-                "unknown",
-                Some("unknown"),
-                None,
-                Vec::new(),
-                None,
-            )],
-            provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary::unknown(),
-            source_refs: Vec::new(),
-            contract_limitations: Vec::new(),
-        });
-        assert!(workspace.active_task.is_none());
-        assert!(workspace.activity.is_empty());
-        assert_eq!(workspace.recent_task_refs[0].id, canonical_task_id);
-    }
-}

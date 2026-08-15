@@ -44,7 +44,7 @@ const migrationOwnerLabel: Record<LegacyLifeModelMigrationItemV2["targetOwner"],
   state_store: "当前状态",
   tasks: "任务",
   agent_memory: "Agent 记忆",
-  agent_runtime: "Agent 工具能力",
+  tool_capability: "Agent 工具能力",
   migration_metadata: "迁移记录",
   legacy_compatibility_projection: "旧兼容投影",
   unassigned: "尚未确定",
@@ -227,7 +227,7 @@ export function DurableTruthView({
   );
   const lifeModelItem =
     lifeModelItems.find(item => item.id === selectedItem?.id) ?? lifeModelItems[0] ?? null;
-  const state = durableLifecyclePresentation(snapshot, lifeModelItem);
+  const state = durableLifecyclePresentation(snapshot, lifeModelItem, "life_model");
   const memoryOwnerReady = snapshot.memoryEnvelope.status === "ready";
   const reviewOwnerReady = snapshot.reviewEnvelope.status === "ready";
 
@@ -499,7 +499,7 @@ export function DurableTruthView({
                       ) : null}
                       {candidate.status === "reviewable" && candidate.confirmedAt ? (
                         <FoundationActionButton
-                          label="送去审核中心"
+                          label="送去需处理"
                           icon={<ArrowRight size={16} aria-hidden="true" />}
                           loading={
                             learningAction?.candidateId === candidate.id &&

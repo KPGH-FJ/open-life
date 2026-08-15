@@ -33,10 +33,8 @@ export type TaskControlDispatchEvent =
 export const initialTaskControlDispatchState: TaskControlDispatchState = { phase: "idle" };
 
 const effectByKind = {
-  resume: "task_resume_request",
   retry: "task_retry_request",
   cancel: "task_cancel_request",
-  refresh_context: "task_refresh_request",
 } as const;
 
 export type ExecutableTaskControlKind = keyof typeof effectByKind;
@@ -70,20 +68,15 @@ function contractBlocker(control: TaskControl, expectedTaskId: string): string |
 }
 
 function identityMatches(control: TaskControl, task: TaskViewModelItem): boolean {
-  return (
-    task.canonicalTaskId === control.targetTaskId && task.taskSessionId === control.targetTaskId
-  );
+  return task.canonicalTaskId === control.targetTaskId;
 }
 
 function refreshedStateConfirmsRequest(control: TaskControl, task: TaskViewModelItem): boolean {
   if (control.kind === "cancel") return task.lifecycleStatus === "cancelled";
-  if (control.kind === "resume") {
-    return !["waiting_permission", "blocked", "unknown"].includes(task.lifecycleStatus);
-  }
   if (control.kind === "retry") {
     return !["failed", "remote_unknown", "unknown"].includes(task.lifecycleStatus);
   }
-  return control.kind === "refresh_context";
+  return false;
 }
 
 export function taskControlDispatchReducer(

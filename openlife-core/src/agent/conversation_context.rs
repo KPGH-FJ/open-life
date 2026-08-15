@@ -2,7 +2,11 @@ use crate::llm::ChatMessage;
 use ring::digest::{Context as DigestContext, SHA256};
 
 pub const CONVERSATION_CONTEXT_SCHEMA_VERSION: u32 = 1;
-pub const MAIN_CHAT_CONVERSATION_CONTEXT_CHAR_BUDGET: usize = 64 * 1024;
+// Keep the canonical provider projection below the smallest explicitly
+// configured first-party model window. The remaining local window is reserved
+// for the system/context contract and generated output. Long-lived truth stays
+// in `messages`; this is only the per-turn projection budget.
+pub const MAIN_CHAT_CONVERSATION_CONTEXT_CHAR_BUDGET: usize = 20 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalConversationMessage {
@@ -23,9 +27,9 @@ impl Default for ConversationContextConfig {
     fn default() -> Self {
         Self {
             max_chars: MAIN_CHAT_CONVERSATION_CONTEXT_CHAR_BUDGET,
-            recent_chars: 44 * 1024,
-            summary_chars: 16 * 1024,
-            excerpt_chars: 1_200,
+            recent_chars: 12 * 1024,
+            summary_chars: 6 * 1024,
+            excerpt_chars: 600,
         }
     }
 }
@@ -131,6 +135,7 @@ fn projection_without_summary(
 #[derive(Debug)]
 struct SummaryCandidate<'a> {
     message: &'a CanonicalConversationMessage,
+    pinned: bool,
     priority: u16,
     labels: Vec<&'static str>,
 }
@@ -172,7 +177,8 @@ fn build_extractive_summary(
         .filter_map(|(index, message)| {
             let mut labels = Vec::new();
             let mut priority = 0u16;
-            if Some(message.id) == first_user_id {
+            let pinned = Some(message.id) == first_user_id;
+            if pinned {
                 labels.push("目标");
                 priority = priority.max(100);
             }
@@ -248,6 +254,7 @@ fn build_extractive_summary(
                 labels.dedup();
                 Some(SummaryCandidate {
                     message,
+                    pinned,
                     priority,
                     labels,
                 })
@@ -256,8 +263,9 @@ fn build_extractive_summary(
         .collect::<Vec<_>>();
     candidates.sort_by(|left, right| {
         right
-            .priority
-            .cmp(&left.priority)
+            .pinned
+            .cmp(&left.pinned)
+            .then_with(|| right.priority.cmp(&left.priority))
             .then_with(|| right.message.id.cmp(&left.message.id))
     });
 
@@ -437,6 +445,17 @@ mod tests {
     }
 
     #[test]
+    fn default_projection_fits_the_explicit_local_provider_window() {
+        let config = ConversationContextConfig::default();
+
+        assert_eq!(config.max_chars, 20 * 1024);
+        assert_eq!(config.recent_chars, 12 * 1024);
+        assert_eq!(config.summary_chars, 6 * 1024);
+        assert_eq!(config.excerpt_chars, 600);
+        assert!(config.recent_chars + config.summary_chars <= config.max_chars);
+    }
+
+    #[test]
     fn long_context_is_bounded_and_keeps_the_exact_current_user_turn() {
         let mut messages = (1..=18)
             .map(|id| {
@@ -509,6 +528,53 @@ mod tests {
         assert!(projection.provider_messages.iter().any(|message| {
             message.role == "assistant" && message.content.contains("未完成")
         }));
+    }
+
+    #[test]
+    fn repeated_later_constraints_cannot_evict_the_first_user_goal() {
+        let mut messages = vec![message(
+            1,
+            "user",
+            format!(
+                "当前目标标记是 OL-LONG-GOAL-526；必须保持离线，约束标记是 \
+                 OL-LONG-RULE-804；未完成 Review 标记是 OL-LONG-PENDING-317；\
+                 证据来源是 https://example.com/openlife-5-6-c-source。{}",
+                "首轮填充".repeat(600)
+            ),
+        )];
+        for id in 2..=12 {
+            messages.push(message(
+                id,
+                "user",
+                format!(
+                    "只允许使用当前范围；这是重复约束与证据填充块 {id}，不是新的目标。{}",
+                    format!("块{id}-填充").repeat(500)
+                ),
+            ));
+        }
+        messages.push(message(
+            13,
+            "user",
+            "请仅基于这段对话写出当前目标、约束、未完成 Review 和证据来源。",
+        ));
+
+        let projection = compact_conversation_context(
+            &messages,
+            ConversationContextConfig {
+                max_chars: 3_200,
+                recent_chars: 1_200,
+                summary_chars: 1_800,
+                excerpt_chars: 500,
+            },
+        );
+        let summary = projection.summary.expect("long context summary");
+
+        assert!(summary.content.contains("OL-LONG-GOAL-526"));
+        assert!(summary.content.contains("OL-LONG-RULE-804"));
+        assert!(summary.content.contains("OL-LONG-PENDING-317"));
+        assert!(summary
+            .content
+            .contains("https://example.com/openlife-5-6-c-source"));
     }
 
     #[test]

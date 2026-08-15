@@ -14,7 +14,7 @@ function SafeModeSettings({
   surface = "model-provider",
 }: {
   source: SettingsPrivacyDataSource;
-  surface?: "model-provider" | "privacy-network";
+  surface?: "model-provider" | "privacy-network" | "diagnostics";
 }) {
   const controller = useSettingsPrivacyJourney(source, vi.fn());
   useEffect(() => {
@@ -68,11 +68,11 @@ function credentialSettingsSource(
               version: "credential_bootstrap_v1",
               digest: "a".repeat(64),
               purposes: [
-                { purpose: "agent_run_receipts", status },
-                { purpose: "main_chat_events", status },
-                { purpose: "action_queue", status },
+                { purpose: "canonical_task_receipts", status },
                 { purpose: "task_store", status },
                 { purpose: "mcp_audit", status },
+                { purpose: "provider_api_key", status },
+                { purpose: "search_provider_api_key", status },
               ],
             },
       diagnostics: [
@@ -95,6 +95,63 @@ function credentialSettingsSource(
 }
 
 describe("SettingsPrivacyView", () => {
+  it("renders only canonical product diagnostics and reports blockers explicitly", async () => {
+    const source = credentialSettingsSource(null);
+    const snapshot = await source.loadSettingsPrivacy();
+    source.loadSettingsPrivacy = vi.fn().mockResolvedValue({
+      ...snapshot,
+      productDiagnostics: {
+        generatedAt: "2026-08-14T00:00:00Z",
+        status: "degraded",
+        appVersion: "0.1.0",
+        runtimeBuild: {
+          profile: "qa",
+          gitSha: "abc123",
+          buildTime: "2026-08-14T00:00:00Z",
+          currentExe: "/Applications/OpenLife.app/Contents/MacOS/openlife-tauri",
+          binaryKind: "release_bundle",
+          frontendMode: "bundled_dist",
+          devUrl: "",
+          frontendDist: "frontend/dist",
+          dataDir: "/tmp/openlife",
+          devExtensionsEnabled: false,
+          arbitraryMcpRegistrationEnabled: false,
+          bundleIdentifier: "ai.openlife.desktop",
+          productName: "OpenLife",
+        },
+        persistenceMode: "read_only_degraded",
+        canonicalWritesAllowed: false,
+        providerDispatchAllowed: false,
+        toolDispatchAllowed: false,
+        stores: [
+          { store: "ConversationStore", status: "read_write_canonical" },
+          {
+            store: "CanonicalTaskRuntimeStore",
+            status: "read_only_canonical",
+            reasonCode: "runtime_io_failure",
+          },
+        ],
+        counts: { projectCount: 1, conversationCount: 2, taskCount: 3, activeTaskCount: 1 },
+        credentialBootstrap: { version: "v1", digest: "digest", purposes: [] },
+        blockerCodes: ["store:CanonicalTaskRuntimeStore:runtime_io_failure"],
+      },
+    });
+
+    const diagnosticsView = render(<SafeModeSettings source={source} surface="diagnostics" />);
+
+    expect(await screen.findByRole("heading", { name: "产品诊断" })).toBeInTheDocument();
+    expect(screen.getByText("部分能力降级")).toBeInTheDocument();
+    expect(screen.getByText("ai.openlife.desktop")).toBeInTheDocument();
+    expect(screen.getByText("隔离的本地 profile 文件（0600）")).toBeInTheDocument();
+    expect(
+      screen.getByText("store:CanonicalTaskRuntimeStore:runtime_io_failure")
+    ).toBeInTheDocument();
+    diagnosticsView.unmount();
+    render(<SafeModeSettings source={source} />);
+    expect(await screen.findByText("开发凭据与正式产品隔离")).toBeInTheDocument();
+    expect(screen.getByText(/不会从正式 profile 自动复制/)).toBeInTheDocument();
+  });
+
   it("shows explicit Search Provider controls and fail-closed artifact output state", async () => {
     const source = credentialSettingsSource(null);
     source.loadSettingsPrivacy = vi.fn().mockResolvedValue({
@@ -243,8 +300,32 @@ describe("SettingsPrivacyView", () => {
     fireEvent.click(action);
 
     expect(source.initializeRequiredCredentials).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("访问恢复完成，需要重启")).toBeInTheDocument();
+    expect(await screen.findByText("已请求访问，等待重启验证")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "等待重启" })).toBeDisabled();
+  });
+
+  it("binds a mixed credential snapshot to the unavailable recovery subset only", async () => {
+    const source = credentialSettingsSource("unavailable", true);
+    const snapshot = await source.loadSettingsPrivacy();
+    source.loadSettingsPrivacy = vi.fn().mockResolvedValue({
+      ...snapshot,
+      credentialBootstrap: {
+        ...snapshot.credentialBootstrap!,
+        purposes: [
+          { purpose: "canonical_task_receipts", status: "unavailable" },
+          { purpose: "task_store", status: "initialization_required" },
+          { purpose: "mcp_audit", status: "initialization_required" },
+          { purpose: "provider_api_key", status: "unavailable" },
+          { purpose: "search_provider_api_key", status: "initialization_required" },
+        ],
+      },
+    });
+
+    render(<SafeModeSettings source={source} />);
+
+    expect(await screen.findByRole("heading", { name: "凭据访问恢复" })).toBeInTheDocument();
+    expect(screen.getByText(/后端确认有 2 类既有凭据需要恢复访问/)).toBeInTheDocument();
+    expect(screen.queryByText(/5 类既有凭据需要恢复访问/)).not.toBeInTheDocument();
   });
 
   it("does not contradict an explicit credential initialization eligibility", async () => {

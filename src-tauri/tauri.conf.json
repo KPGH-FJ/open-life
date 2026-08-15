@@ -2,10 +2,10 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "OpenLife",
   "version": "0.1.0",
-  "identifier": "ai.openlife.app",
+  "identifier": "ai.openlife.desktop",
   "build": {
-    "beforeDevCommand": "corepack pnpm --dir ../frontend dev --host 127.0.0.1 --port 5173",
-    "beforeBuildCommand": "corepack pnpm --dir ../frontend build",
+    "beforeDevCommand": "corepack pnpm dev --host 127.0.0.1 --port 5173",
+    "beforeBuildCommand": "corepack pnpm build",
     "devUrl": "http://127.0.0.1:5173",
     "frontendDist": "../frontend/dist"
   },

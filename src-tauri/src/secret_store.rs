@@ -4,11 +4,15 @@ use openlife_core::config::AppConfig;
 use openlife_core::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditStore};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
-const SERVICE: &str = "com.openlife.desktop";
+const RELEASE_SERVICE: &str = "com.openlife.desktop";
+const DEV_SERVICE: &str = "com.openlife.desktop.dev";
+const QA_SERVICE: &str = "com.openlife.desktop.qa";
 #[cfg(all(feature = "dev-extensions", debug_assertions))]
 const NATIVE_ISOLATION_TRIAL_ENV: &str = "OPENLIFE_NATIVE_TAURI_ISOLATION_TRIAL";
 #[cfg(all(feature = "dev-extensions", debug_assertions))]
@@ -17,24 +21,21 @@ const KEYCHAIN_SERVICE_OVERRIDE_ENV: &str = "OPENLIFE_KEYCHAIN_SERVICE_OVERRIDE"
 const TRIAL_KEYCHAIN_SERVICE_PREFIX: &str = "com.openlife.desktop.trial.";
 const PROVIDER_ACCOUNT: &str = "provider-api-key";
 const SEARCH_ACCOUNT: &str = "search-provider-api-key";
-const MAIN_CHAT_EVENT_INTEGRITY_ACCOUNT: &str = "main-chat-event-integrity-key-v1";
-const ACTION_QUEUE_AUTHORITY_ACCOUNT: &str = "action-queue-authority-key-v1";
 const TASK_STORE_AUTHORITY_ACCOUNT: &str = "task-store-authority-key-v1";
-const AGENT_RUN_RECEIPT_ACCOUNT: &str = "agent-run-receipt-key-v1";
+const CANONICAL_TASK_RECEIPT_ACCOUNT: &str = "canonical-task-receipt-key-v1";
 const MCP_AUDIT_ACCOUNT_PREFIX: &str = "mcp-audit-key-epoch-";
 const PROVIDER_SECRET_ENVELOPE_VERSION: &str = "openlife_provider_secret_v1";
+const LOCAL_PROFILE_SECRET_FILE_VERSION: &str = "openlife_local_profile_secrets_v1";
+const LOCAL_PROFILE_SECRET_FILE_NAME: &str = "local-profile-secrets.json";
 static SELECTED_KEYRING_SERVICE: OnceLock<std::result::Result<String, String>> = OnceLock::new();
+static LOCAL_PROFILE_SECRET_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(crate) const PROVIDER_KEY_REF: &str = "keychain://com.openlife.desktop/provider-api-key";
 pub(crate) const SEARCH_KEY_REF: &str = "keychain://com.openlife.desktop/search-provider-api-key";
-pub(crate) const MAIN_CHAT_EVENT_INTEGRITY_KEY_REF: &str =
-    "keychain://com.openlife.desktop/main-chat-event-integrity-key-v1";
-pub(crate) const ACTION_QUEUE_AUTHORITY_KEY_REF: &str =
-    "keychain://com.openlife.desktop/action-queue-authority-key-v1";
 pub(crate) const TASK_STORE_AUTHORITY_KEY_REF: &str =
     "keychain://com.openlife.desktop/task-store-authority-key-v1";
-pub(crate) const AGENT_RUN_RECEIPT_KEY_REF: &str =
-    "keychain://com.openlife.desktop/agent-run-receipt-key-v1";
+pub(crate) const CANONICAL_TASK_RECEIPT_KEY_REF: &str =
+    "keychain://com.openlife.desktop/canonical-task-receipt-key-v1";
 pub(crate) const MCP_AUDIT_KEY_REF_PREFIX: &str =
     "keychain://com.openlife.desktop/mcp-audit-key-epoch-";
 
@@ -161,6 +162,131 @@ pub(crate) enum IntegrityKeyHydration {
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct KeyringSecretStore;
 
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct ProfileSecretStore;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SecretBackendKind {
+    OsKeyring,
+    LocalProfileFile,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+struct LocalProfileSecretFile {
+    version: String,
+    secrets: BTreeMap<String, String>,
+}
+
+impl Default for LocalProfileSecretFile {
+    fn default() -> Self {
+        Self {
+            version: LOCAL_PROFILE_SECRET_FILE_VERSION.into(),
+            secrets: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LocalProfileSecretStore {
+    path: PathBuf,
+}
+
+impl LocalProfileSecretStore {
+    fn for_current_profile() -> Result<Self> {
+        let profile = crate::storage::openlife_profile();
+        if crate::storage::normalize_openlife_profile(Some(&profile)) == "release" {
+            anyhow::bail!("release secrets must use the OS credential store");
+        }
+        Ok(Self {
+            path: crate::storage::app_data_dir().join(LOCAL_PROFILE_SECRET_FILE_NAME),
+        })
+    }
+
+    #[cfg(test)]
+    fn for_test_path(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    fn lock() -> std::sync::MutexGuard<'static, ()> {
+        LOCAL_PROFILE_SECRET_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn read_file(path: &Path) -> Result<LocalProfileSecretFile> {
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(LocalProfileSecretFile::default());
+            }
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("inspect local profile secret file {}", path.display())
+                });
+            }
+        };
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            anyhow::bail!("local profile secret path is not a regular file");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if metadata.permissions().mode() & 0o077 != 0 {
+                anyhow::bail!("local profile secret file permissions are broader than 0600");
+            }
+        }
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("read local profile secret file {}", path.display()))?;
+        let file: LocalProfileSecretFile =
+            serde_json::from_slice(&bytes).context("parse local profile secret file")?;
+        if file.version != LOCAL_PROFILE_SECRET_FILE_VERSION {
+            anyhow::bail!("local profile secret file version is unsupported");
+        }
+        Ok(file)
+    }
+
+    fn write_file(&self, file: &LocalProfileSecretFile) -> Result<()> {
+        let bytes = serde_json::to_vec(file).context("serialize local profile secret file")?;
+        openlife_core::atomic_file::write_atomic(&self.path, &bytes)
+            .context("write local profile secret file atomically")
+    }
+
+    fn account(secret_ref: &str) -> Result<String> {
+        keyring_account_for_secret_ref(secret_ref)
+    }
+}
+
+impl SecretStore for LocalProfileSecretStore {
+    fn get(&self, secret_ref: &str) -> Result<Option<String>> {
+        let account = Self::account(secret_ref)?;
+        let _guard = Self::lock();
+        Ok(Self::read_file(&self.path)?.secrets.get(&account).cloned())
+    }
+
+    fn set(&self, secret_ref: &str, value: &str) -> Result<()> {
+        if value.trim().is_empty() {
+            anyhow::bail!("refusing to store an empty secret");
+        }
+        let account = Self::account(secret_ref)?;
+        let _guard = Self::lock();
+        let mut file = Self::read_file(&self.path)?;
+        file.secrets.insert(account, value.to_string());
+        self.write_file(&file)
+    }
+
+    fn delete(&self, secret_ref: &str) -> Result<()> {
+        let account = Self::account(secret_ref)?;
+        let _guard = Self::lock();
+        let mut file = Self::read_file(&self.path)?;
+        if file.secrets.remove(&account).is_some() {
+            self.write_file(&file)?;
+        }
+        Ok(())
+    }
+}
+
 const STARTUP_SECRET_OPERATION_TIMEOUT: Duration = Duration::from_millis(1_500);
 
 /// Startup runs before Tauri owns an event loop or can present a useful
@@ -239,13 +365,54 @@ impl StartupKeyringSecretStore {
 }
 
 pub(crate) fn selected_keyring_service_classification() -> Result<&'static str> {
-    selected_keyring_service().map(|service| {
-        if service == SERVICE {
-            "default"
-        } else {
-            "isolated_trial"
-        }
+    selected_keyring_service().map(|service| match service.as_str() {
+        RELEASE_SERVICE => "release",
+        DEV_SERVICE => "dev",
+        QA_SERVICE => "qa",
+        _ => "isolated_trial",
     })
+}
+
+fn secret_backend_kind_for_profile(profile: &str, isolated_trial: bool) -> SecretBackendKind {
+    if isolated_trial || crate::storage::normalize_openlife_profile(Some(profile)) == "release" {
+        SecretBackendKind::OsKeyring
+    } else {
+        SecretBackendKind::LocalProfileFile
+    }
+}
+
+fn selected_secret_backend_kind() -> Result<SecretBackendKind> {
+    let isolated_trial = selected_keyring_service_classification()? == "isolated_trial";
+    Ok(secret_backend_kind_for_profile(
+        &crate::storage::openlife_profile(),
+        isolated_trial,
+    ))
+}
+
+pub(crate) fn selected_secret_store_classification() -> Result<&'static str> {
+    let profile = crate::storage::openlife_profile();
+    Ok(match selected_secret_backend_kind()? {
+        SecretBackendKind::OsKeyring
+            if crate::storage::normalize_openlife_profile(Some(&profile)) == "release" =>
+        {
+            "release_keychain"
+        }
+        SecretBackendKind::OsKeyring => "isolated_trial_keychain",
+        SecretBackendKind::LocalProfileFile
+            if crate::storage::normalize_openlife_profile(Some(&profile)) == "qa" =>
+        {
+            "qa_profile_file"
+        }
+        SecretBackendKind::LocalProfileFile => "dev_profile_file",
+    })
+}
+
+fn keyring_service_for_profile(profile: &str) -> &'static str {
+    match crate::storage::normalize_openlife_profile(Some(profile)) {
+        "dev" => DEV_SERVICE,
+        "qa" => QA_SERVICE,
+        _ => RELEASE_SERVICE,
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -253,10 +420,8 @@ fn keyring_account_for_secret_ref(secret_ref: &str) -> Result<String> {
     Ok(match secret_ref {
         PROVIDER_KEY_REF => PROVIDER_ACCOUNT.to_string(),
         SEARCH_KEY_REF => SEARCH_ACCOUNT.to_string(),
-        MAIN_CHAT_EVENT_INTEGRITY_KEY_REF => MAIN_CHAT_EVENT_INTEGRITY_ACCOUNT.to_string(),
-        ACTION_QUEUE_AUTHORITY_KEY_REF => ACTION_QUEUE_AUTHORITY_ACCOUNT.to_string(),
         TASK_STORE_AUTHORITY_KEY_REF => TASK_STORE_AUTHORITY_ACCOUNT.to_string(),
-        AGENT_RUN_RECEIPT_KEY_REF => AGENT_RUN_RECEIPT_ACCOUNT.to_string(),
+        CANONICAL_TASK_RECEIPT_KEY_REF => CANONICAL_TASK_RECEIPT_ACCOUNT.to_string(),
         value if value.starts_with(MCP_AUDIT_KEY_REF_PREFIX) => {
             let epoch = value.trim_start_matches(MCP_AUDIT_KEY_REF_PREFIX);
             if epoch.is_empty() || !epoch.chars().all(|character| character.is_ascii_digit()) {
@@ -380,11 +545,12 @@ fn optional_utf8_env_value(
 
 #[cfg(all(feature = "dev-extensions", debug_assertions))]
 fn selected_keyring_service_from_values(
+    profile: &str,
     trial_marker: Option<&str>,
     service_override: Option<&str>,
 ) -> Result<String> {
     match (trial_marker, service_override) {
-        (None, None) => Ok(SERVICE.to_string()),
+        (None, None) => Ok(keyring_service_for_profile(profile).to_string()),
         (Some("1"), Some(service)) => {
             validate_trial_keychain_service(service)?;
             eprintln!("OPENLIFE_NATIVE_TAURI_KEYCHAIN_SERVICE_CLASS=isolated_trial");
@@ -410,12 +576,16 @@ fn compute_selected_keyring_service() -> Result<String> {
         KEYCHAIN_SERVICE_OVERRIDE_ENV,
         std::env::var_os(KEYCHAIN_SERVICE_OVERRIDE_ENV),
     )?;
-    selected_keyring_service_from_values(trial_marker.as_deref(), service_override.as_deref())
+    selected_keyring_service_from_values(
+        &crate::storage::openlife_profile(),
+        trial_marker.as_deref(),
+        service_override.as_deref(),
+    )
 }
 
 #[cfg(not(all(feature = "dev-extensions", debug_assertions)))]
 fn compute_selected_keyring_service() -> Result<String> {
-    Ok(SERVICE.to_string())
+    Ok(keyring_service_for_profile(&crate::storage::openlife_profile()).to_string())
 }
 
 pub(crate) fn selected_keyring_service() -> Result<String> {
@@ -439,12 +609,7 @@ pub(crate) fn hydrate_or_create_integrity_key(
     secret_ref: &'static str,
     store: &dyn SecretStore,
 ) -> Result<[u8; 32]> {
-    if !matches!(
-        secret_ref,
-        MAIN_CHAT_EVENT_INTEGRITY_KEY_REF
-            | ACTION_QUEUE_AUTHORITY_KEY_REF
-            | AGENT_RUN_RECEIPT_KEY_REF
-    ) {
+    if !matches!(secret_ref, CANONICAL_TASK_RECEIPT_KEY_REF) {
         anyhow::bail!("unsupported OpenLife integrity key purpose");
     }
     if let Some(encoded) = store.get(secret_ref)? {
@@ -472,10 +637,7 @@ pub(crate) fn inspect_and_hydrate_integrity_key<R: SecretReader + ?Sized>(
 ) -> IntegrityKeyHydration {
     if !matches!(
         secret_ref,
-        MAIN_CHAT_EVENT_INTEGRITY_KEY_REF
-            | ACTION_QUEUE_AUTHORITY_KEY_REF
-            | TASK_STORE_AUTHORITY_KEY_REF
-            | AGENT_RUN_RECEIPT_KEY_REF
+        TASK_STORE_AUTHORITY_KEY_REF | CANONICAL_TASK_RECEIPT_KEY_REF
     ) {
         return IntegrityKeyHydration::Invalid;
     }
@@ -629,6 +791,51 @@ impl SecretStore for KeyringSecretStore {
         match keyring_entry(secret_ref)?.delete_credential() {
             Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
             Err(error) => Err(error).context("delete secret from OS credential store"),
+        }
+    }
+}
+
+impl SecretStore for ProfileSecretStore {
+    fn get(&self, secret_ref: &str) -> Result<Option<String>> {
+        match selected_secret_backend_kind()? {
+            SecretBackendKind::OsKeyring => KeyringSecretStore.get(secret_ref),
+            SecretBackendKind::LocalProfileFile => {
+                LocalProfileSecretStore::for_current_profile()?.get(secret_ref)
+            }
+        }
+    }
+
+    fn set(&self, secret_ref: &str, value: &str) -> Result<()> {
+        match selected_secret_backend_kind()? {
+            SecretBackendKind::OsKeyring => KeyringSecretStore.set(secret_ref, value),
+            SecretBackendKind::LocalProfileFile => {
+                LocalProfileSecretStore::for_current_profile()?.set(secret_ref, value)
+            }
+        }
+    }
+
+    fn delete(&self, secret_ref: &str) -> Result<()> {
+        match selected_secret_backend_kind()? {
+            SecretBackendKind::OsKeyring => KeyringSecretStore.delete(secret_ref),
+            SecretBackendKind::LocalProfileFile => {
+                LocalProfileSecretStore::for_current_profile()?.delete(secret_ref)
+            }
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct StartupProfileSecretStore {
+    keyring: StartupKeyringSecretStore,
+}
+
+impl SecretReader for StartupProfileSecretStore {
+    fn read_secret(&self, secret_ref: &str) -> Result<Option<String>> {
+        match selected_secret_backend_kind()? {
+            SecretBackendKind::OsKeyring => self.keyring.read_secret(secret_ref),
+            SecretBackendKind::LocalProfileFile => {
+                LocalProfileSecretStore::for_current_profile()?.get(secret_ref)
+            }
         }
     }
 }
@@ -1212,21 +1419,92 @@ mod tests {
     fn trial_keychain_service_selection_requires_both_exact_opt_ins() {
         let valid = "com.openlife.desktop.trial.0123456789abcdef0123456789abcdef";
         assert_eq!(
-            selected_keyring_service_from_values(None, None).unwrap(),
-            SERVICE
+            selected_keyring_service_from_values("dev", None, None).unwrap(),
+            "com.openlife.desktop.dev"
         );
         assert_eq!(
-            selected_keyring_service_from_values(Some("1"), Some(valid)).unwrap(),
+            selected_keyring_service_from_values("qa", Some("1"), Some(valid)).unwrap(),
             valid
         );
-        assert!(selected_keyring_service_from_values(Some("1"), None).is_err());
-        assert!(selected_keyring_service_from_values(None, Some(valid)).is_err());
-        assert!(selected_keyring_service_from_values(Some("true"), Some(valid)).is_err());
+        assert!(selected_keyring_service_from_values("dev", Some("1"), None).is_err());
+        assert!(selected_keyring_service_from_values("dev", None, Some(valid)).is_err());
+        assert!(selected_keyring_service_from_values("dev", Some("true"), Some(valid)).is_err());
         assert!(selected_keyring_service_from_values(
+            "dev",
             Some("1"),
             Some("com.openlife.desktop.trial.not-hex")
         )
         .is_err());
+    }
+
+    #[test]
+    fn stable_profiles_have_disjoint_keychain_services() {
+        assert_eq!(
+            keyring_service_for_profile("release"),
+            "com.openlife.desktop"
+        );
+        assert_eq!(
+            keyring_service_for_profile("dev"),
+            "com.openlife.desktop.dev"
+        );
+        assert_eq!(keyring_service_for_profile("qa"), "com.openlife.desktop.qa");
+        assert_ne!(
+            keyring_service_for_profile("dev"),
+            keyring_service_for_profile("qa")
+        );
+        assert_ne!(
+            keyring_service_for_profile("qa"),
+            keyring_service_for_profile("release")
+        );
+    }
+
+    #[test]
+    fn release_uses_keychain_while_dev_and_qa_use_profile_files() {
+        assert_eq!(
+            secret_backend_kind_for_profile("release", false),
+            SecretBackendKind::OsKeyring
+        );
+        assert_eq!(
+            secret_backend_kind_for_profile("dev", false),
+            SecretBackendKind::LocalProfileFile
+        );
+        assert_eq!(
+            secret_backend_kind_for_profile("qa", false),
+            SecretBackendKind::LocalProfileFile
+        );
+        assert_eq!(
+            secret_backend_kind_for_profile("qa", true),
+            SecretBackendKind::OsKeyring
+        );
+    }
+
+    #[test]
+    fn local_profile_secret_file_is_atomic_private_and_reopenable() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(LOCAL_PROFILE_SECRET_FILE_NAME);
+        let first = LocalProfileSecretStore::for_test_path(path.clone());
+        first.set(PROVIDER_KEY_REF, "profile-secret").unwrap();
+
+        let reopened = LocalProfileSecretStore::for_test_path(path.clone());
+        assert_eq!(
+            reopened.get(PROVIDER_KEY_REF).unwrap().as_deref(),
+            Some("profile-secret")
+        );
+        assert!(!String::from_utf8(std::fs::read(&path).unwrap())
+            .unwrap()
+            .contains(PROVIDER_KEY_REF));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+
+        reopened.delete(PROVIDER_KEY_REF).unwrap();
+        assert_eq!(first.get(PROVIDER_KEY_REF).unwrap(), None);
     }
 
     #[cfg(all(feature = "dev-extensions", debug_assertions, unix))]
@@ -1243,8 +1521,12 @@ mod tests {
 
     #[cfg(not(all(feature = "dev-extensions", debug_assertions)))]
     #[test]
-    fn release_keychain_service_is_fixed_to_product_default() {
-        assert_eq!(selected_keyring_service().unwrap(), SERVICE);
+    fn stable_build_uses_the_service_for_its_compiled_profile() {
+        let profile = crate::storage::openlife_profile();
+        assert_eq!(
+            selected_keyring_service().unwrap(),
+            keyring_service_for_profile(&profile)
+        );
     }
 
     struct KeychainCleanup<'a> {
@@ -1617,12 +1899,10 @@ mod tests {
         let store = MemorySecretStore::default();
         let directory = tempfile::tempdir().unwrap();
         let task_store_path = directory.path().join("tasks.db");
-        let event_key =
-            hydrate_or_create_integrity_key(MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, &store).unwrap();
-        let event_key_after_restart =
-            hydrate_or_create_integrity_key(MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, &store).unwrap();
-        let action_key =
-            hydrate_or_create_integrity_key(ACTION_QUEUE_AUTHORITY_KEY_REF, &store).unwrap();
+        let canonical_task_key =
+            hydrate_or_create_integrity_key(CANONICAL_TASK_RECEIPT_KEY_REF, &store).unwrap();
+        let canonical_task_key_after_restart =
+            hydrate_or_create_integrity_key(CANONICAL_TASK_RECEIPT_KEY_REF, &store).unwrap();
         let task_store_key = hydrate_or_create_canonical_store_integrity_key(
             TASK_STORE_AUTHORITY_KEY_REF,
             &task_store_path,
@@ -1635,24 +1915,11 @@ mod tests {
             &store,
         )
         .unwrap();
-        let agent_run_key =
-            hydrate_or_create_integrity_key(AGENT_RUN_RECEIPT_KEY_REF, &store).unwrap();
-        let agent_run_key_after_restart =
-            hydrate_or_create_integrity_key(AGENT_RUN_RECEIPT_KEY_REF, &store).unwrap();
-
-        assert_eq!(event_key_after_restart, event_key);
+        assert_eq!(canonical_task_key_after_restart, canonical_task_key);
         assert_eq!(task_store_key_after_restart, task_store_key);
-        assert_eq!(agent_run_key_after_restart, agent_run_key);
-        assert_ne!(action_key, event_key);
-        assert_ne!(task_store_key, event_key);
-        assert_ne!(task_store_key, action_key);
-        assert_ne!(agent_run_key, event_key);
-        assert_ne!(agent_run_key, action_key);
-        assert_ne!(agent_run_key, task_store_key);
-        assert!(event_key.iter().any(|byte| *byte != 0));
-        assert!(action_key.iter().any(|byte| *byte != 0));
+        assert_ne!(task_store_key, canonical_task_key);
+        assert!(canonical_task_key.iter().any(|byte| *byte != 0));
         assert!(task_store_key.iter().any(|byte| *byte != 0));
-        assert!(agent_run_key.iter().any(|byte| *byte != 0));
     }
 
     #[test]
@@ -1660,24 +1927,27 @@ mod tests {
         let store = MemorySecretStore::default();
 
         assert_eq!(
-            inspect_integrity_key_access(AGENT_RUN_RECEIPT_KEY_REF, &store),
+            inspect_integrity_key_access(CANONICAL_TASK_RECEIPT_KEY_REF, &store),
             IntegrityKeyInspection::Missing
         );
-        assert!(store.get(AGENT_RUN_RECEIPT_KEY_REF).unwrap().is_none());
+        assert!(store.get(CANONICAL_TASK_RECEIPT_KEY_REF).unwrap().is_none());
 
-        let original = hydrate_or_create_integrity_key(AGENT_RUN_RECEIPT_KEY_REF, &store).unwrap();
+        let original =
+            hydrate_or_create_integrity_key(CANONICAL_TASK_RECEIPT_KEY_REF, &store).unwrap();
         assert_eq!(
-            inspect_integrity_key_access(AGENT_RUN_RECEIPT_KEY_REF, &store),
+            inspect_integrity_key_access(CANONICAL_TASK_RECEIPT_KEY_REF, &store),
             IntegrityKeyInspection::Available
         );
         assert_eq!(
-            hydrate_or_create_integrity_key(AGENT_RUN_RECEIPT_KEY_REF, &store).unwrap(),
+            hydrate_or_create_integrity_key(CANONICAL_TASK_RECEIPT_KEY_REF, &store).unwrap(),
             original
         );
 
-        store.set(AGENT_RUN_RECEIPT_KEY_REF, "not-base64").unwrap();
+        store
+            .set(CANONICAL_TASK_RECEIPT_KEY_REF, "not-base64")
+            .unwrap();
         assert_eq!(
-            inspect_integrity_key_access(AGENT_RUN_RECEIPT_KEY_REF, &store),
+            inspect_integrity_key_access(CANONICAL_TASK_RECEIPT_KEY_REF, &store),
             IntegrityKeyInspection::Invalid
         );
     }
@@ -1702,10 +1972,7 @@ mod tests {
         }
 
         assert_eq!(
-            inspect_integrity_key_access(
-                MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
-                &UnavailableSecretStore
-            ),
+            inspect_integrity_key_access(CANONICAL_TASK_RECEIPT_KEY_REF, &UnavailableSecretStore),
             IntegrityKeyInspection::Unavailable
         );
     }
@@ -1714,17 +1981,17 @@ mod tests {
     fn malformed_integrity_key_fails_closed_without_rotation() {
         let store = MemorySecretStore::default();
         store
-            .set(MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, "not-base64")
+            .set(CANONICAL_TASK_RECEIPT_KEY_REF, "not-base64")
             .unwrap();
 
         let error =
-            hydrate_or_create_integrity_key(MAIN_CHAT_EVENT_INTEGRITY_KEY_REF, &store).unwrap_err();
+            hydrate_or_create_integrity_key(CANONICAL_TASK_RECEIPT_KEY_REF, &store).unwrap_err();
         assert!(error
             .to_string()
             .contains("decode OpenLife integrity key material"));
         assert_eq!(
             store
-                .get(MAIN_CHAT_EVENT_INTEGRITY_KEY_REF)
+                .get(CANONICAL_TASK_RECEIPT_KEY_REF)
                 .unwrap()
                 .as_deref(),
             Some("not-base64")

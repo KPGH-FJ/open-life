@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+
+use super::memory_lifecycle::MemoryLifecycleScope;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,138 +79,6 @@ pub struct MainChatMemoryRoutingResult {
 
 /// Opaque proof that the deterministic candidate router selected one exact,
 /// internal, low-risk LifeEvent candidate from the canonical user message.
-/// It is neither cloneable nor serializable and cannot be constructed by an
-/// IPC caller from candidate-shaped strings.
-pub(crate) struct DeterministicLifeEventPolicyProof {
-    message_ref: String,
-    message_digest: String,
-    candidate_id: String,
-    candidate_digest: String,
-    normalized_claim: String,
-    confidence: f32,
-    risk_level: crate::agent::RiskLevel,
-    sensitivity: crate::agent::life_event_store::LifeEventSensitivity,
-    runtime_binding_digest: String,
-    runtime_nonce: Uuid,
-}
-
-impl DeterministicLifeEventPolicyProof {
-    fn runtime_material(&self) -> String {
-        format!(
-            "message_ref\0{}:{}\0message_digest\0{}\0candidate_id\0{}:{}\0candidate_digest\0{}\0claim\0{}:{}\0confidence\0{}\0risk\0{}\0sensitivity\0{}\0nonce\0{}",
-            self.message_ref.len(),
-            self.message_ref,
-            self.message_digest,
-            self.candidate_id.len(),
-            self.candidate_id,
-            self.candidate_digest,
-            self.normalized_claim.len(),
-            self.normalized_claim,
-            self.confidence,
-            self.risk_level,
-            self.sensitivity.as_str(),
-            self.runtime_nonce,
-        )
-    }
-
-    pub(crate) fn runtime_seal_is_valid(&self) -> bool {
-        self.runtime_binding_digest == sha256_hex(self.runtime_material().as_bytes())
-    }
-
-    pub(crate) fn matches_message(
-        &self,
-        proof: &crate::memory::CanonicalConversationMessageProof,
-    ) -> bool {
-        self.message_ref == proof.canonical_ref()
-            && self.message_digest == proof.content_digest()
-            && proof.role() == "user"
-            && self.runtime_seal_is_valid()
-    }
-
-    pub(crate) fn candidate_id(&self) -> &str {
-        &self.candidate_id
-    }
-
-    pub(crate) fn normalized_claim(&self) -> &str {
-        &self.normalized_claim
-    }
-
-    pub(crate) fn confidence(&self) -> f32 {
-        self.confidence
-    }
-
-    pub(crate) fn risk_level(&self) -> crate::agent::RiskLevel {
-        self.risk_level
-    }
-
-    pub(crate) fn sensitivity(&self) -> crate::agent::life_event_store::LifeEventSensitivity {
-        self.sensitivity
-    }
-
-    #[cfg(test)]
-    pub(crate) fn with_policy_for_test(
-        mut self,
-        risk_level: crate::agent::RiskLevel,
-        sensitivity: crate::agent::life_event_store::LifeEventSensitivity,
-    ) -> Self {
-        self.risk_level = risk_level;
-        self.sensitivity = sensitivity;
-        self.runtime_binding_digest = sha256_hex(self.runtime_material().as_bytes());
-        self
-    }
-}
-
-impl std::fmt::Debug for DeterministicLifeEventPolicyProof {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("DeterministicLifeEventPolicyProof")
-            .field("candidate_id", &self.candidate_id)
-            .field("risk_level", &self.risk_level)
-            .field("sensitivity", &self.sensitivity)
-            .field("authority", &"[REDACTED]")
-            .finish()
-    }
-}
-
-pub(crate) fn issue_deterministic_life_event_policy_proof(
-    message_proof: &crate::memory::CanonicalConversationMessageProof,
-    current_user_text: &str,
-    candidate_id: &str,
-) -> Result<DeterministicLifeEventPolicyProof> {
-    if message_proof.role() != "user"
-        || sha256_prefixed(current_user_text) != message_proof.content_digest()
-    {
-        anyhow::bail!("life_event_policy_current_user_message_proof_mismatch");
-    }
-    let candidate = extract_main_chat_memory_candidates(current_user_text)
-        .into_iter()
-        .find(|candidate| candidate.candidate_id == candidate_id)
-        .context("life_event_policy_candidate_missing")?;
-    if candidate.destination != MemoryDestination::LifeEvent
-        || candidate.kind != MemoryCandidateKind::EpisodicLifeEvent
-        || candidate.sensitivity != "internal"
-        || !candidate.confidence.is_finite()
-        || !(0.0..=1.0).contains(&candidate.confidence)
-    {
-        anyhow::bail!("life_event_policy_candidate_requires_review");
-    }
-    let candidate_digest = sha256_hex(&serde_json::to_vec(&candidate)?);
-    let mut proof = DeterministicLifeEventPolicyProof {
-        message_ref: message_proof.canonical_ref().to_string(),
-        message_digest: message_proof.content_digest().to_string(),
-        candidate_id: candidate.candidate_id,
-        candidate_digest,
-        normalized_claim: candidate.normalized_claim,
-        confidence: candidate.confidence,
-        risk_level: crate::agent::RiskLevel::Low,
-        sensitivity: crate::agent::life_event_store::LifeEventSensitivity::Low,
-        runtime_binding_digest: String::new(),
-        runtime_nonce: Uuid::new_v4(),
-    };
-    proof.runtime_binding_digest = sha256_hex(proof.runtime_material().as_bytes());
-    Ok(proof)
-}
-
 pub fn extract_main_chat_memory_candidates(user_text: &str) -> Vec<MainChatMemoryCandidate> {
     let normalized = compact_text(user_text);
     if normalized.is_empty() {
@@ -529,11 +397,35 @@ fn push_candidate(
 }
 
 fn split_spans(user_text: &str) -> Vec<String> {
-    user_text
-        .split(['。', '.', '!', '！', ';', '；', '\n'])
-        .map(compact_text)
-        .filter(|span| !span.is_empty())
-        .collect()
+    let chars = user_text.chars().collect::<Vec<_>>();
+    let mut spans = Vec::new();
+    let mut current = String::new();
+
+    for (index, ch) in chars.iter().copied().enumerate() {
+        let period_inside_ascii_token = ch == '.'
+            && index > 0
+            && index + 1 < chars.len()
+            && chars[index - 1].is_ascii_alphanumeric()
+            && chars[index + 1].is_ascii_alphanumeric();
+        let is_separator = matches!(ch, '。' | '!' | '！' | ';' | '；' | '\n')
+            || (ch == '.' && !period_inside_ascii_token);
+
+        if is_separator {
+            let compact = compact_text(&current);
+            if !compact.is_empty() {
+                spans.push(compact);
+            }
+            current.clear();
+        } else {
+            current.push(ch);
+        }
+    }
+
+    let compact = compact_text(&current);
+    if !compact.is_empty() {
+        spans.push(compact);
+    }
+    spans
 }
 
 fn candidates_for_span<'a>(
@@ -578,7 +470,10 @@ fn memory_claim_for_span(span: &str) -> Option<String> {
                 }
                 return None;
             }
-            if meaningful_claim(&before) && !is_future_rule(&before.to_ascii_lowercase()) {
+            if meaningful_claim(&before)
+                && !is_memory_scope_instruction_fragment(&before)
+                && !is_future_rule(&before.to_ascii_lowercase())
+            {
                 return Some(before);
             }
             if meaningful_claim(&after) && !is_future_rule(&after.to_ascii_lowercase()) {
@@ -587,6 +482,64 @@ fn memory_claim_for_span(span: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn is_memory_scope_instruction_fragment(value: &str) -> bool {
+    let lower = value.trim().to_ascii_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "在当前会话范围",
+            "在当前工作区范围",
+            "在当前项目范围",
+            "仅限当前会话",
+            "仅限当前工作区",
+            "仅限当前项目",
+            "in the current conversation",
+            "in the current workspace",
+            "in the current project",
+            "conversation-scoped",
+            "workspace-scoped",
+            "project-scoped",
+        ],
+    )
+}
+
+pub fn explicit_memory_scope_from_user_text(user_text: &str) -> MemoryLifecycleScope {
+    let lower = user_text.to_ascii_lowercase();
+    if contains_any(
+        &lower,
+        &[
+            "在当前项目范围",
+            "仅限当前项目",
+            "in the current project",
+            "project-scoped",
+        ],
+    ) {
+        MemoryLifecycleScope::Project
+    } else if contains_any(
+        &lower,
+        &[
+            "在当前工作区范围",
+            "仅限当前工作区",
+            "in the current workspace",
+            "workspace-scoped",
+        ],
+    ) {
+        MemoryLifecycleScope::Workspace
+    } else if contains_any(
+        &lower,
+        &[
+            "在当前会话范围",
+            "仅限当前会话",
+            "in the current conversation",
+            "conversation-scoped",
+        ],
+    ) {
+        MemoryLifecycleScope::Conversation
+    } else {
+        MemoryLifecycleScope::Global
+    }
 }
 
 fn is_deictic_memory_trigger(trigger: &str) -> bool {
@@ -615,7 +568,10 @@ fn explicit_memory_life_event_claim(span: &str) -> Option<String> {
     ] {
         if let Some(pos) = lower.find(trigger) {
             let before = compact_claim(&span[..pos]);
-            if meaningful_claim(&before) && !is_future_rule(&before.to_ascii_lowercase()) {
+            if meaningful_claim(&before)
+                && !is_memory_scope_instruction_fragment(&before)
+                && !is_future_rule(&before.to_ascii_lowercase())
+            {
                 return Some(before);
             }
             return None;
@@ -739,6 +695,47 @@ fn has_explicit_memory_marker(lower: &str) -> bool {
             "加入记忆",
         ],
     )
+}
+
+pub fn is_explicit_memory_write_request(user_text: &str) -> bool {
+    let normalized = compact_text(user_text);
+    if normalized.is_empty() {
+        return false;
+    }
+    let lower = normalized.to_ascii_lowercase();
+    if is_negated_memory_or_lifemodel_write(&lower)
+        || contains_any(
+            &lower,
+            &[
+                "不要记住",
+                "别记住",
+                "无需记住",
+                "do not remember",
+                "don't remember",
+                "never remember",
+            ],
+        )
+    {
+        return false;
+    }
+
+    contains_any(
+        &lower,
+        &[
+            "please remember",
+            "remember this",
+            "remember that",
+            "save this",
+            "帮我记下来",
+            "帮我记一下",
+            "请记住",
+            "记下来",
+            "记一下",
+            "加入记忆",
+        ],
+    ) || lower.starts_with("remember ")
+        || (lower.starts_with("记住")
+            && !contains_any(&lower, &["记住了吗", "记住了什么", "记住什么", "？", "?"]))
 }
 
 fn is_future_rule(lower: &str) -> bool {
@@ -942,35 +939,63 @@ fn is_life_event_expression(lower: &str) -> bool {
 }
 
 fn is_action_or_advice_request(lower: &str) -> bool {
-    contains_any(
-        lower,
-        &[
-            "帮我",
-            "请帮",
-            "给我建议",
-            "只给建议",
-            "不要修改",
-            "不要执行",
-            "can you",
-            "help me",
-            "advice only",
-            "do not modify",
-            "do not execute",
-            "rewrite",
-            "rephrase",
-            "polish",
-            "translate",
-            "summarize",
-            "把这句话",
-            "把这段话",
-            "改得更",
-            "改写",
-            "重写",
-            "润色",
-            "翻译",
-            "总结",
-        ],
-    )
+    let trimmed = lower.trim_start();
+    let starts_with_task_verb = [
+        "读取",
+        "请读取",
+        "搜索",
+        "请搜索",
+        "检索",
+        "请检索",
+        "查询",
+        "请查询",
+        "read ",
+        "please read ",
+        "search ",
+        "please search ",
+        "look up ",
+        "please look up ",
+    ]
+    .iter()
+    .any(|prefix| trimmed.starts_with(prefix));
+    starts_with_task_verb
+        || contains_any(
+            lower,
+            &[
+                "帮我",
+                "请帮",
+                "给我建议",
+                "只给建议",
+                "不要修改",
+                "不要创建或修改",
+                "不要执行",
+                "can you",
+                "help me",
+                "advice only",
+                "do not modify",
+                "do not execute",
+                "rewrite",
+                "rephrase",
+                "polish",
+                "translate",
+                "summarize",
+                "把这句话",
+                "把这段话",
+                "改得更",
+                "改写",
+                "重写",
+                "润色",
+                "翻译",
+                "总结",
+                "生成一份",
+                "生成一个",
+                "并在我确认后保存",
+                "create a report",
+                "generate a report",
+                "draft a report",
+                "save after my confirmation",
+            ],
+        )
 }
 
 pub(crate) fn is_supplied_text_transformation_request(lower: &str) -> bool {
@@ -1206,21 +1231,6 @@ fn short_prefixed_digest(prefix: &str, value: &str) -> String {
     } else {
         format!("{prefix}_{hex}")
     }
-}
-
-fn sha256_prefixed(value: &str) -> String {
-    sha256_hex(value.as_bytes())
-}
-
-fn sha256_hex(value: &[u8]) -> String {
-    let hash = digest(&SHA256, value);
-    format!(
-        "sha256:{}",
-        hash.as_ref()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )
 }
 
 fn dedupe_candidates(candidates: Vec<MainChatMemoryCandidate>) -> Vec<MainChatMemoryCandidate> {
@@ -1490,6 +1500,88 @@ mod tests {
         assert!(result.lifemodel_proposal_candidate_ids.is_empty());
         assert_eq!(result.candidates.len(), 1);
         assert_eq!(result.candidates[0].sensitivity, "internal");
+    }
+
+    #[test]
+    fn explicit_scoped_memory_keeps_the_fact_after_the_scope_instruction() {
+        let result = routed("请在当前项目范围记住：发布复核代号是 OL-PROJECT-417。");
+        let proposals = result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.destination == MemoryDestination::MemoryProposal)
+            .collect::<Vec<_>>();
+
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(
+            proposals[0].normalized_claim,
+            "发布复核代号是 OL-PROJECT-417"
+        );
+    }
+
+    #[test]
+    fn explicit_memory_scope_requires_unambiguous_user_words() {
+        assert_eq!(
+            explicit_memory_scope_from_user_text("请记住：发布复核代号是 OL-GLOBAL-417。"),
+            MemoryLifecycleScope::Global
+        );
+        assert_eq!(
+            explicit_memory_scope_from_user_text("请在当前会话范围记住：只在这次对话使用。"),
+            MemoryLifecycleScope::Conversation
+        );
+        assert_eq!(
+            explicit_memory_scope_from_user_text("请在当前工作区范围记住：使用工作区检查表。"),
+            MemoryLifecycleScope::Workspace
+        );
+        assert_eq!(
+            explicit_memory_scope_from_user_text("请在当前项目范围记住：使用项目检查表。"),
+            MemoryLifecycleScope::Project
+        );
+    }
+
+    #[test]
+    fn explicit_memory_keeps_ascii_periods_inside_identifiers() {
+        let result = routed("请记住：5.6C 全局发布标记是 OL-G5-GLOBAL-314。");
+        let proposals = result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.destination == MemoryDestination::MemoryProposal)
+            .collect::<Vec<_>>();
+
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(
+            proposals[0].normalized_claim,
+            "5.6C 全局发布标记是 OL-G5-GLOBAL-314"
+        );
+    }
+
+    #[test]
+    fn explicit_memory_request_signal_excludes_questions_and_negations() {
+        assert!(is_explicit_memory_write_request("请记住。"));
+        assert!(is_explicit_memory_write_request(
+            "记住：发布代号是 OL-417。"
+        ));
+        assert!(!is_explicit_memory_write_request("记住了吗？"));
+        assert!(!is_explicit_memory_write_request("不要记住这件事。"));
+        assert!(!is_explicit_memory_write_request(
+            "你还记得我上次说了什么吗？"
+        ));
+    }
+
+    #[test]
+    fn generated_artifact_task_with_dotted_tokens_is_not_user_memory() {
+        let result = routed("使用 web.search 搜索 Example Domain 的公开信息，生成一份带 OpenLife 引用的 Markdown 报告 phase3-web-search-evidence.md，并在我确认后保存。");
+
+        assert!(result.memory_proposal_candidate_ids.is_empty());
+        assert!(result.lifemodel_proposal_candidate_ids.is_empty());
+    }
+
+    #[test]
+    fn mixed_document_and_web_task_is_not_user_memory() {
+        let result = routed("读取我添加的 h5-source.md，并使用 web.search 搜索 IANA Example Domains 的官方说明。最终回答分两段：1）本地文档事实，必须包含项目代号和验证标记；2）外部来源事实，必须带来源。不要创建或修改文件。");
+
+        assert!(result.candidates.is_empty(), "{:#?}", result.candidates);
+        assert!(result.memory_proposal_candidate_ids.is_empty());
+        assert!(result.lifemodel_proposal_candidate_ids.is_empty());
     }
 
     #[test]

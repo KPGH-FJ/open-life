@@ -1,8 +1,7 @@
 use crate::main_chat_context_loader::{
-    load_markdown_memory_context_candidates_from_roots,
     load_workspace_knowledge_context_candidates, sanitize_main_chat_selected_skill_id,
 };
-use crate::main_chat_react_tool_selection::main_chat_workspace_file_target;
+use crate::main_chat_tool_selection::main_chat_workspace_file_target;
 
 #[test]
 fn main_chat_context_loader_tests_are_not_concentrated_in_lib_rs() {
@@ -44,8 +43,6 @@ fn main_chat_context_loader_declares_controlled_knowledge_format_surfaces() {
         "SOUL.md",
         "USER.md",
         "memories/USER.md",
-        "configured_markdown_memory_roots",
-        "load_markdown_memory_files",
         "skills/<selected>/SKILL.md",
     ] {
         assert!(
@@ -143,27 +140,6 @@ fn main_chat_knowledge_context_loader_loads_bounded_workspace_formats() {
 }
 
 #[test]
-fn main_chat_markdown_memory_requires_an_explicit_scope_root() {
-    let root = create_main_chat_knowledge_workspace();
-    let generic = load_workspace_knowledge_context_candidates(
-        root.path(),
-        None,
-        "use bounded memory context",
-    );
-    assert!(!generic
-        .iter()
-        .any(|candidate| candidate.source_id.contains("MEMORY.md")));
-
-    let roots =
-        crate::markdown_memory::configured_markdown_memory_roots(root.path().to_str(), None);
-    let scoped =
-        load_markdown_memory_context_candidates_from_roots(&roots, "use bounded memory context");
-    assert!(scoped
-        .iter()
-        .any(|candidate| candidate.source_id == "markdown-memory:workspace:memories/MEMORY.md"));
-}
-
-#[test]
 fn main_chat_knowledge_context_loader_does_not_load_unselected_skill_instruction() {
     let root = create_main_chat_knowledge_workspace();
     let candidates =
@@ -173,49 +149,6 @@ fn main_chat_knowledge_context_loader_does_not_load_unselected_skill_instruction
         candidate.source_kind
             == openlife_core::agent::main_chat_agent_v1::ContextSourceKind::SkillInstruction
     }));
-}
-
-#[test]
-fn main_chat_context_compiler_is_extracted_to_context_loader() {
-    let lib_rs_path = format!("{}/src/lib.rs", env!("CARGO_MANIFEST_DIR"));
-    let source = std::fs::read_to_string(lib_rs_path).expect("read src/lib.rs");
-    let module_path =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/main_chat_context_loader.rs");
-    let module_source =
-        std::fs::read_to_string(&module_path).expect("read src/main_chat_context_loader.rs");
-    let compile_body = extract_rust_function_body(
-        &module_source,
-        "pub(crate) async fn compile_main_chat_context(",
-    );
-
-    assert!(
-        compile_body.contains("load_current_workspace_knowledge_context_candidates"),
-        "Main Chat context assembly must use the controlled knowledge-format loader"
-    );
-    assert!(
-        !compile_body.contains("std::fs::read_to_string(&path)"),
-        "Main Chat context assembly must not regress to ad hoc AGENTS.md-only reads"
-    );
-    assert!(
-        module_source.contains("selected_skill_id: Option<&str>"),
-        "Main Chat context compiler must accept a selected skill id from ordinary chat surfaces"
-    );
-    assert!(
-        !compile_body.contains("let selected_skill_id: Option<String> = None;"),
-        "Main Chat context compiler must not discard selected skill ids"
-    );
-    assert!(
-        module_source.contains("pub(crate) fn sanitize_main_chat_selected_skill_id("),
-        "selected skill id sanitization should live with Main Chat context loading"
-    );
-    assert!(
-        !source.contains("\nasync fn compile_main_chat_context("),
-        "Main Chat context compiler should not remain in lib.rs"
-    );
-    assert!(
-        !source.contains("\nfn sanitize_main_chat_selected_skill_id("),
-        "selected skill id sanitizer should not remain in lib.rs"
-    );
 }
 
 #[test]

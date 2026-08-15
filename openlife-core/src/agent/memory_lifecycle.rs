@@ -29,7 +29,7 @@ const MEMORY_LIFECYCLE_RETRIEVAL_OWNER_KIND: &str = "memory_lifecycle";
 macro_rules! record_select_sql {
     ($suffix:expr) => {
         concat!(
-            "SELECT memory_id, proposal_id, source_task_session_id, source_run_id, content, scope, scope_owner_ref, category, risk_level, sensitivity, audit_digest, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at FROM memory_lifecycle_records ",
+            "SELECT memory_id, proposal_id, source_task_id, source_run_id, content, scope, scope_owner_ref, category, risk_level, sensitivity, audit_digest, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at FROM memory_lifecycle_records ",
             $suffix
         )
     };
@@ -424,7 +424,7 @@ impl CanonicalMemoryFactDescriptor {
 pub struct MemoryLifecycleRecord {
     pub memory_id: String,
     pub proposal_id: String,
-    pub source_task_session_id: Option<String>,
+    pub source_task_id: Option<String>,
     pub source_run_id: Option<String>,
     pub content: String,
     pub scope: MemoryLifecycleScope,
@@ -494,7 +494,7 @@ pub struct MemoryLifecycleEvent {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemoryLifecycleAcceptanceInput {
     pub proposal_id: String,
-    pub source_task_session_id: Option<String>,
+    pub source_task_id: Option<String>,
     pub source_run_id: Option<String>,
     pub fact: CanonicalMemoryFactDescriptor,
     pub created_by: String,
@@ -520,7 +520,7 @@ pub enum MemoryAdmissionOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplicitMemoryWriteInput {
-    pub source_task_session_id: String,
+    pub source_task_id: String,
     pub source_run_id: String,
     pub source_message_id: String,
     pub source_message_digest: String,
@@ -720,7 +720,7 @@ impl MemoryLifecycleStore {
                 memory_id TEXT PRIMARY KEY,
                 proposal_id TEXT NOT NULL,
                 fact_key TEXT NOT NULL CHECK(TRIM(fact_key) != ''),
-                source_task_session_id TEXT,
+                source_task_id TEXT,
                 source_run_id TEXT,
                 content TEXT NOT NULL,
                 scope TEXT NOT NULL CHECK(scope IN ('global', 'workspace', 'conversation', 'project')),
@@ -985,7 +985,7 @@ impl MemoryLifecycleStore {
             let mut replacement = MemoryLifecycleRecord {
                 memory_id: memory_id.clone(),
                 proposal_id: input.proposal_id.clone(),
-                source_task_session_id: input.source_task_session_id,
+                source_task_id: input.source_task_id,
                 source_run_id: input.source_run_id,
                 content: input.fact.canonical_body,
                 scope: input.fact.scope,
@@ -1118,7 +1118,7 @@ impl MemoryLifecycleStore {
         let mut record = MemoryLifecycleRecord {
             memory_id,
             proposal_id: input.proposal_id.clone(),
-            source_task_session_id: input.source_task_session_id,
+            source_task_id: input.source_task_id,
             source_run_id: input.source_run_id,
             content: input.fact.canonical_body,
             scope: input.fact.scope,
@@ -1346,7 +1346,7 @@ impl MemoryLifecycleStore {
         let mut record = MemoryLifecycleRecord {
             memory_id: memory_id.clone(),
             proposal_id: proposal_id.clone(),
-            source_task_session_id: Some(input.source_task_session_id),
+            source_task_id: Some(input.source_task_id),
             source_run_id: Some(input.source_run_id),
             content: input.fact.canonical_body,
             scope: input.fact.scope,
@@ -1592,7 +1592,7 @@ impl MemoryLifecycleStore {
         record.status = MemoryLifecycleStatus::RolledBack;
         record.materialization_status = MemoryMaterializationStatus::NotRequired;
         record.materialization_error_code = None;
-        record.source_task_session_id = None;
+        record.source_task_id = None;
         record.source_run_id = None;
         record.created_by = "privacy_erasure_tombstone".into();
         record.accepted_by = None;
@@ -2391,27 +2391,29 @@ impl MemoryLifecycleAcceptanceInput {
     pub fn from_memory_proposal_with_terminal_origin(
         proposal: &AgentProposal,
         content: String,
-        task_session_id: &str,
+        task_id: &str,
+        conversation_owner_id: &str,
         run_id: &str,
         canonical_user_message_ref: &str,
         canonical_user_message_digest: &str,
     ) -> Result<Self> {
         let mut input = Self::from_memory_proposal(proposal, content)?;
-        if task_session_id.trim().is_empty()
+        if task_id.trim().is_empty()
+            || conversation_owner_id.trim().is_empty()
             || run_id.trim().is_empty()
             || canonical_user_message_ref.trim().is_empty()
             || canonical_user_message_digest.trim().is_empty()
         {
             anyhow::bail!("terminal owner Memory origin is incomplete");
         }
-        input.source_task_session_id = Some(task_session_id.to_string());
+        input.source_task_id = Some(task_id.to_string());
         input.source_run_id = Some(run_id.to_string());
         if input.fact.scope == MemoryLifecycleScope::Conversation
             && input.fact.scope_owner_ref.is_none()
         {
             input.fact.scope_owner_ref = Some(memory_scope_owner_ref(
                 MemoryLifecycleScope::Conversation,
-                task_session_id,
+                conversation_owner_id,
             )?);
         }
         input.evidence_ids = vec![
@@ -2470,7 +2472,7 @@ impl MemoryLifecycleAcceptanceInput {
             // Untyped Proposal fields are never terminal-owner authority.
             // Origin-bound Review acceptance must use
             // `from_memory_proposal_with_terminal_origin`.
-            source_task_session_id: None,
+            source_task_id: None,
             source_run_id: proposal.run_id.clone(),
             fact,
             created_by: created_by_from_source(proposal.source).into(),
@@ -3477,7 +3479,7 @@ fn rebuild_memory_lifecycle_tables_if_needed_tx(tx: &rusqlite::Transaction<'_>) 
             memory_id TEXT PRIMARY KEY,
             proposal_id TEXT NOT NULL,
             fact_key TEXT NOT NULL CHECK(TRIM(fact_key) != ''),
-            source_task_session_id TEXT,
+            source_task_id TEXT,
             source_run_id TEXT,
             content TEXT NOT NULL,
             scope TEXT NOT NULL CHECK(scope IN ('global', 'workspace', 'conversation', 'project')),
@@ -3505,14 +3507,14 @@ fn rebuild_memory_lifecycle_tables_if_needed_tx(tx: &rusqlite::Transaction<'_>) 
             updated_at TEXT NOT NULL
          );
          INSERT INTO memory_lifecycle_records_v4 (
-            memory_id, proposal_id, fact_key, source_task_session_id, source_run_id,
+            memory_id, proposal_id, fact_key, source_task_id, source_run_id,
             content, scope, scope_owner_ref, category, risk_level, sensitivity, audit_digest, status,
             materialization_status, materialization_error_code, created_by, accepted_by,
             accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json,
             confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id,
             rolled_back_by_event_id, runtime_context_excluded_at, created_at, updated_at
          )
-         SELECT memory_id, proposal_id, fact_key, source_task_session_id, source_run_id,
+         SELECT memory_id, proposal_id, fact_key, source_task_id, source_run_id,
             content, scope, scope_owner_ref, category, risk_level, sensitivity, audit_digest, status,
             materialization_status, materialization_error_code, created_by, accepted_by,
             accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json,
@@ -3578,7 +3580,7 @@ fn insert_record_tx(
         .collect::<Vec<_>>();
     params.push(Box::new(fact_key.to_string()));
     tx.execute(
-        "INSERT INTO memory_lifecycle_records (memory_id, proposal_id, fact_key, source_task_session_id, source_run_id, content, scope, scope_owner_ref, category, risk_level, sensitivity, audit_digest, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at, created_at, updated_at)
+        "INSERT INTO memory_lifecycle_records (memory_id, proposal_id, fact_key, source_task_id, source_run_id, content, scope, scope_owner_ref, category, risk_level, sensitivity, audit_digest, status, materialization_status, materialization_error_code, created_by, accepted_by, accepted_at, materialized_view_id, materialized_view_version, evidence_ids_json, confidence, conflict_ids_json, supersedes_memory_id, replacement_memory_id, rolled_back_by_event_id, runtime_context_excluded_at, created_at, updated_at)
          VALUES (?1, ?2, ?29, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
         rusqlite::params_from_iter(params.iter().map(|param| param.as_ref())),
     )?;
@@ -3592,7 +3594,7 @@ fn update_record_tx(
 ) -> Result<()> {
     let params = record_update_params(record, updated_at);
     tx.execute(
-        "UPDATE memory_lifecycle_records SET proposal_id = ?2, source_task_session_id = ?3, source_run_id = ?4, content = ?5, scope = ?6, scope_owner_ref = ?7, category = ?8, risk_level = ?9, sensitivity = ?10, audit_digest = ?11, status = ?12, materialization_status = ?13, materialization_error_code = ?14, created_by = ?15, accepted_by = ?16, accepted_at = ?17, materialized_view_id = ?18, materialized_view_version = ?19, evidence_ids_json = ?20, confidence = ?21, conflict_ids_json = ?22, supersedes_memory_id = ?23, replacement_memory_id = ?24, rolled_back_by_event_id = ?25, runtime_context_excluded_at = ?26, updated_at = ?27 WHERE memory_id = ?1",
+        "UPDATE memory_lifecycle_records SET proposal_id = ?2, source_task_id = ?3, source_run_id = ?4, content = ?5, scope = ?6, scope_owner_ref = ?7, category = ?8, risk_level = ?9, sensitivity = ?10, audit_digest = ?11, status = ?12, materialization_status = ?13, materialization_error_code = ?14, created_by = ?15, accepted_by = ?16, accepted_at = ?17, materialized_view_id = ?18, materialized_view_version = ?19, evidence_ids_json = ?20, confidence = ?21, conflict_ids_json = ?22, supersedes_memory_id = ?23, replacement_memory_id = ?24, rolled_back_by_event_id = ?25, runtime_context_excluded_at = ?26, updated_at = ?27 WHERE memory_id = ?1",
         rusqlite::params_from_iter(params.iter().map(|param| param.as_ref())),
     )?;
     Ok(())
@@ -3606,7 +3608,7 @@ fn record_params(
     [
         Box::new(record.memory_id.clone()),
         Box::new(record.proposal_id.clone()),
-        Box::new(record.source_task_session_id.clone()),
+        Box::new(record.source_task_id.clone()),
         Box::new(record.source_run_id.clone()),
         Box::new(record.content.clone()),
         Box::new(record.scope.to_string()),
@@ -3646,7 +3648,7 @@ fn record_update_params(
     [
         Box::new(record.memory_id.clone()),
         Box::new(record.proposal_id.clone()),
-        Box::new(record.source_task_session_id.clone()),
+        Box::new(record.source_task_id.clone()),
         Box::new(record.source_run_id.clone()),
         Box::new(record.content.clone()),
         Box::new(record.scope.to_string()),
@@ -3813,7 +3815,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryLifecycleRec
     Ok(MemoryLifecycleRecord {
         memory_id: row.get(0)?,
         proposal_id: row.get(1)?,
-        source_task_session_id: row.get(2)?,
+        source_task_id: row.get(2)?,
         source_run_id: row.get(3)?,
         content: row.get(4)?,
         scope,
@@ -3938,7 +3940,7 @@ mod tests {
 
     fn explicit_input(message_id: &str, content: &str) -> ExplicitMemoryWriteInput {
         ExplicitMemoryWriteInput {
-            source_task_session_id: "task-session".into(),
+            source_task_id: "task".into(),
             source_run_id: "run".into(),
             source_message_id: message_id.into(),
             source_message_digest: digest_label(content),
@@ -3954,7 +3956,7 @@ mod tests {
     fn acceptance_input(proposal_id: &str, content: &str) -> MemoryLifecycleAcceptanceInput {
         MemoryLifecycleAcceptanceInput {
             proposal_id: proposal_id.into(),
-            source_task_session_id: Some(format!("task:{proposal_id}")),
+            source_task_id: Some(format!("task:{proposal_id}")),
             source_run_id: Some(format!("run:{proposal_id}")),
             fact: fact_descriptor(
                 content,
@@ -3977,7 +3979,7 @@ mod tests {
             "CREATE TABLE memory_lifecycle_records (
                 memory_id TEXT PRIMARY KEY,
                 proposal_id TEXT NOT NULL,
-                source_task_session_id TEXT,
+                source_task_id TEXT,
                 source_run_id TEXT,
                 content TEXT NOT NULL,
                 scope TEXT NOT NULL,
@@ -4189,7 +4191,7 @@ mod tests {
         let proposed = store.accept_memory_proposal(proposal_input).unwrap();
         let explicit = store
             .commit_test_explicit_user_memory(ExplicitMemoryWriteInput {
-                source_task_session_id: "task-session".into(),
+                source_task_id: "task".into(),
                 source_run_id: "run".into(),
                 source_message_id: "message-typed-semantic-fact".into(),
                 source_message_digest: digest_label("User prefers focused work before lunch."),
@@ -4659,7 +4661,7 @@ mod tests {
                 ProposalType::MemoryWrite,
                 "memory.records",
                 after,
-                "Task session ownership must remain exact.",
+                "Task ownership must remain exact.",
                 0.9,
                 RiskLevel::Medium,
                 ProposalSource::Manual,
@@ -4674,38 +4676,79 @@ mod tests {
             "candidateKind": "semantic_user_fact",
             "riskLevel": "medium",
             "sensitivity": "internal",
-            "originatingTaskSessionId": "task-session-1"
+            "originatingTaskId": "task-1"
         });
         let valid = proposal(
             valid_after.clone(),
-            Some("main_chat_agent_task_session:task-session-1;candidate:candidate-1"),
+            Some("canonical_work_task:task-1;candidate:candidate-1"),
         );
         let input = MemoryLifecycleAcceptanceInput::from_memory_proposal(
             &valid,
             "Task-bound reviewed fact".into(),
         )
         .unwrap();
-        assert_eq!(input.source_task_session_id, None);
+        assert_eq!(input.source_task_id, None);
 
         let terminal_bound =
             MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
                 &valid,
                 "Task-bound reviewed fact".into(),
-                "task-session-1",
+                "task-1",
+                "chat-session-1",
+                "run-1",
+                "conversation-message:1",
+                "sha256:canonical-user-message",
+            )
+            .unwrap();
+        assert_eq!(terminal_bound.source_task_id.as_deref(), Some("task-1"));
+        assert_eq!(terminal_bound.source_run_id.as_deref(), Some("run-1"));
+        assert_eq!(
+            terminal_bound.fact.scope_owner_ref, None,
+            "global Memory remains ownerless"
+        );
+
+        let conversation = proposal(
+            json!({
+                "content": "Conversation reviewed fact",
+                "scope": "conversation",
+                "category": "fact",
+                "candidateKind": "semantic_user_fact",
+                "riskLevel": "medium",
+                "sensitivity": "internal"
+            }),
+            Some("canonical_work_task:task-1;candidate:candidate-2"),
+        );
+        let conversation_bound =
+            MemoryLifecycleAcceptanceInput::from_memory_proposal_with_terminal_origin(
+                &conversation,
+                "Conversation reviewed fact".into(),
+                "task-1",
+                "chat-session-1",
                 "run-1",
                 "conversation-message:1",
                 "sha256:canonical-user-message",
             )
             .unwrap();
         assert_eq!(
-            terminal_bound.source_task_session_id.as_deref(),
-            Some("task-session-1")
+            conversation_bound.fact.scope_owner_ref.as_deref(),
+            Some(
+                memory_scope_owner_ref(MemoryLifecycleScope::Conversation, "chat-session-1")
+                    .unwrap()
+                    .as_str()
+            )
         );
-        assert_eq!(terminal_bound.source_run_id.as_deref(), Some("run-1"));
+        assert_ne!(
+            conversation_bound.fact.scope_owner_ref.as_deref(),
+            Some(
+                memory_scope_owner_ref(MemoryLifecycleScope::Conversation, "task-1")
+                    .unwrap()
+                    .as_str()
+            )
+        );
 
         let drift = proposal(
             valid_after.clone(),
-            Some("main_chat_agent_task_session:task-session-2;candidate:candidate-1"),
+            Some("canonical_work_task:task-2;candidate:candidate-1"),
         );
         assert_eq!(
             MemoryLifecycleAcceptanceInput::from_memory_proposal(
@@ -4713,20 +4756,20 @@ mod tests {
                 "Task-bound reviewed fact".into(),
             )
             .unwrap()
-            .source_task_session_id,
+            .source_task_id,
             None,
             "source_detail cannot authorize terminal ownership"
         );
 
         let mut alias_drift = valid_after;
-        alias_drift["session_id"] = json!("task-session-2");
+        alias_drift["session_id"] = json!("task-2");
         assert_eq!(
             MemoryLifecycleAcceptanceInput::from_memory_proposal(
                 &proposal(alias_drift, None),
                 "Task-bound reviewed fact".into(),
             )
             .unwrap()
-            .source_task_session_id,
+            .source_task_id,
             None,
             "proposal JSON aliases cannot authorize terminal ownership"
         );
@@ -4748,7 +4791,7 @@ mod tests {
                 "Global reviewed fact".into(),
             )
             .unwrap()
-            .source_task_session_id,
+            .source_task_id,
             None,
             "non-session source metadata must not become a MemoryStore session owner"
         );
@@ -5126,7 +5169,7 @@ mod tests {
         let historical = reopened
             .accept_memory_proposal(MemoryLifecycleAcceptanceInput {
                 proposal_id: failed_high.proposal_id,
-                source_task_session_id: None,
+                source_task_id: None,
                 source_run_id: None,
                 fact: CanonicalMemoryFactDescriptor::new(
                     failed_high.content,
@@ -5239,7 +5282,7 @@ mod tests {
             .unwrap();
         assert!(tombstone.content.is_empty());
         assert!(tombstone.evidence_ids.is_empty());
-        assert!(tombstone.source_task_session_id.is_none());
+        assert!(tombstone.source_task_id.is_none());
         assert!(tombstone.source_run_id.is_none());
         assert!(tombstone.accepted_by.is_none());
         assert!(tombstone.runtime_context_excluded_at.is_some());
@@ -5595,7 +5638,7 @@ mod tests {
     fn direct_lane_rejects_boundary_identity_high_and_sensitive_memory() {
         let store = MemoryLifecycleStore::new_in_memory().unwrap();
         let boundary = ExplicitMemoryWriteInput {
-            source_task_session_id: "task-boundary".into(),
+            source_task_id: "task-boundary".into(),
             source_run_id: "run-boundary".into(),
             source_message_id: "message-boundary".into(),
             source_message_digest: digest_label("I am the finance administrator."),
@@ -5610,7 +5653,7 @@ mod tests {
             .unwrap(),
         };
         let identity = ExplicitMemoryWriteInput {
-            source_task_session_id: "task-identity".into(),
+            source_task_id: "task-identity".into(),
             source_run_id: "run-identity".into(),
             source_message_id: "message-identity".into(),
             source_message_digest: digest_label("I am the finance administrator."),

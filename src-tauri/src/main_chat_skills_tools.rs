@@ -1,11 +1,11 @@
-use crate::main_chat_react_tool_selection::{
+use crate::main_chat_tool_selection::{
     main_chat_governed_mcp_read_tool_candidates, main_chat_manifest_has_write_like_surface,
     main_chat_manifest_is_governed_read_candidate, main_chat_surface_contains_write_like_term,
 };
 use crate::AppState;
 use chrono::{DateTime, Utc};
-use openlife_core::agent::main_chat_agent_v1::ExecutionQueueStatus;
 use openlife_core::skills::{SkillExecutionStatus, SkillManifest, SkillSourceKind};
+use openlife_core::task_runtime::{CanonicalTaskItemKind, CanonicalTaskItemStatus};
 use openlife_core::tool_manifest::ToolManifest;
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -26,7 +26,7 @@ fn manifest_product_available(manifest: &SkillManifest) -> bool {
         && manifest
             .capability_flags
             .iter()
-            .any(|flag| flag == "main_chat_turn_runtime_native")
+            .any(|flag| flag == "canonical_chat_work_native")
 }
 
 fn manifest_source_kind(manifest: &SkillManifest) -> &'static str {
@@ -120,7 +120,7 @@ pub struct MainChatToolFailureRecovery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MainChatToolCandidateList {
-    pub task_session_id: Option<String>,
+    pub task_id: Option<String>,
     pub candidates: Vec<MainChatToolCandidate>,
     pub blocked_tools: Vec<MainChatBlockedTool>,
     pub failure_recovery: Option<MainChatToolFailureRecovery>,
@@ -274,13 +274,15 @@ pub(crate) async fn select_main_chat_skill_with_state(
     }
     state
         .persistence_coordinator
-        .require_effects_allowed()
+        .require_effects_for_stores(&["ConversationStore"])
         .map_err(|error| error.to_string())?;
     state
-        .memory_store
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| "conversation_store_unavailable".to_string())?
         .lock()
         .await
-        .set_chat_session_selected_skill(&session_id, Some(&detail.skill_id))
+        .set_selected_skill(&session_id, Some(&detail.skill_id))
         .map_err(|error| error.to_string())?;
     Ok(selection_from_detail(
         &session_id,
@@ -298,13 +300,15 @@ pub(crate) async fn clear_main_chat_skill_with_state(
         sanitize_session_id(session_id).ok_or_else(|| "invalid_session_id".to_string())?;
     state
         .persistence_coordinator
-        .require_effects_allowed()
+        .require_effects_for_stores(&["ConversationStore"])
         .map_err(|error| error.to_string())?;
     state
-        .memory_store
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| "conversation_store_unavailable".to_string())?
         .lock()
         .await
-        .set_chat_session_selected_skill(&session_id, None)
+        .set_selected_skill(&session_id, None)
         .map_err(|error| error.to_string())?;
     Ok(MainChatSelectedSkill {
         session_id,
@@ -325,9 +329,9 @@ pub(crate) async fn clear_main_chat_skill_with_state(
 
 pub(crate) async fn list_main_chat_tool_candidates_with_state(
     state: &Arc<AppState>,
-    task_session_id: Option<&str>,
+    task_id: Option<&str>,
 ) -> Result<MainChatToolCandidateList, String> {
-    let task_session_id = task_session_id.and_then(sanitize_optional_id);
+    let task_id = task_id.and_then(sanitize_optional_id);
     let registry = state.mcp_registry.lock().await;
     let safe_candidates = main_chat_governed_mcp_read_tool_candidates(&registry, "", 12)
         .into_iter()
@@ -364,20 +368,20 @@ pub(crate) async fn list_main_chat_tool_candidates_with_state(
     blocked_tools.truncate(64);
     drop(registry);
 
-    let failure_recovery = tool_failure_recovery(state, task_session_id.as_deref()).await;
+    let failure_recovery = tool_failure_recovery(state, task_id.as_deref()).await;
     let mut controls = Vec::new();
     if failure_recovery.is_some() {
-        controls.extend(["retry_tool".into(), "switch_tool".into()]);
+        controls.extend(["retry_task".into(), "choose_another_registered_tool".into()]);
     }
     let evidence_digest = digest_label_for_value(&json!({
-        "taskSessionId": task_session_id,
+        "taskId": task_id,
         "candidateCount": safe_candidates.len(),
         "blockedToolCount": blocked_tools.len(),
         "failureRecovery": failure_recovery,
         "directWritesExecuted": false,
     }));
     Ok(MainChatToolCandidateList {
-        task_session_id,
+        task_id,
         candidates: safe_candidates,
         blocked_tools,
         failure_recovery,
@@ -388,33 +392,36 @@ pub(crate) async fn list_main_chat_tool_candidates_with_state(
 
 async fn tool_failure_recovery(
     state: &Arc<AppState>,
-    task_session_id: Option<&str>,
+    task_id: Option<&str>,
 ) -> Option<MainChatToolFailureRecovery> {
-    let task_session_id = task_session_id?;
-    let store_arc = state.main_chat_action_queue_store.as_ref()?;
-    let store = store_arc.lock().await;
-    let failed = store
-        .list_for_session(task_session_id)
-        .ok()?
-        .into_iter()
-        .find(|action| {
-            action.status == ExecutionQueueStatus::Failed
-                && openlife_core::agent::main_chat_agent_v1::typed_tool_receipt_allows_automatic_retry(
-                    action,
-                )
-        })?;
+    let task_id = task_id?;
+    let snapshot = state
+        .canonical_task_runtime_store
+        .as_ref()?
+        .lock()
+        .await
+        .load_task_snapshot(task_id)
+        .ok()??;
+    let failed = snapshot.attempts.iter().rev().find(|attempt| {
+        attempt.executor_kind == "tool" && attempt.status == CanonicalTaskItemStatus::Failed
+    })?;
+    let item = snapshot
+        .items
+        .iter()
+        .find(|item| item.id == failed.item_id && item.kind == CanonicalTaskItemKind::ToolCall)?;
+    let tool_name = item
+        .summary_code
+        .strip_prefix("work_tool_call:")
+        .unwrap_or("tool");
     Some(MainChatToolFailureRecovery {
-        failed_candidate_id: failed
-            .observation_metadata
-            .as_ref()
-            .and_then(|metadata| metadata.get("candidateId"))
-            .and_then(Value::as_str)
-            .unwrap_or(&failed.action.action_type)
-            .to_string(),
-        failure_reason: failed.error.unwrap_or_else(|| "tool_failed_once".into()),
-        retry_available: true,
-        alternative_candidate_id: Some("builtin_echo".into()),
-        controls: vec!["retry_tool".into(), "switch_tool".into()],
+        failed_candidate_id: tool_name.to_string(),
+        failure_reason: "canonical_tool_attempt_failed".into(),
+        // R2 owns retry at Task/Run granularity. A failed Item does not mint a
+        // second hidden retry owner or claim that arbitrary tool fallback is
+        // safe.
+        retry_available: false,
+        alternative_candidate_id: None,
+        controls: vec!["retry_task".into(), "choose_another_registered_tool".into()],
     })
 }
 
@@ -640,14 +647,18 @@ async fn selected_skill_id_for_session(
     };
     state
         .persistence_coordinator
-        .require_trusted_read("MemoryStore")
+        .require_trusted_read("ConversationStore")
         .map_err(|error| error.to_string())?;
     state
-        .memory_store
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| "conversation_store_unavailable".to_string())?
         .lock()
         .await
-        .chat_session_selected_skill(session_id)
-        .map_err(|error| error.to_string())
+        .get_conversation(session_id)
+        .map_err(|error| error.to_string())?
+        .map(|conversation| conversation.selected_skill_id)
+        .ok_or_else(|| "conversation_not_found".to_string())
 }
 
 fn blocked_tool_from_manifest(manifest: ToolManifest) -> Option<MainChatBlockedTool> {
@@ -858,13 +869,16 @@ mod tests {
     #[tokio::test]
     async fn registry_skill_without_turn_runtime_native_contract_is_not_selectable() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
         state
-            .memory_store
+            .conversation_store
+            .as_ref()
+            .unwrap()
             .lock()
             .await
-            .create_chat_session("skill-truth", "Skill truth")
+            .create_conversation(&conversation_id, "Skill truth")
             .unwrap();
-        let skills = list_main_chat_skills_with_state(&state, Some("skill-truth"))
+        let skills = list_main_chat_skills_with_state(&state, Some(&conversation_id))
             .await
             .unwrap();
         let weekly_review = skills
@@ -873,31 +887,35 @@ mod tests {
             .expect("registry built-in remains inspectable");
         assert!(!weekly_review.available);
 
-        let error = select_main_chat_skill_with_state(&state, "skill-truth", "weekly_review")
+        let error = select_main_chat_skill_with_state(&state, &conversation_id, "weekly_review")
             .await
             .expect_err("a skill with no TurnRuntime-native context path must fail closed");
         assert_eq!(error, "skill_not_available_for_main_chat_context");
-        assert_eq!(
-            state
-                .memory_store
-                .lock()
-                .await
-                .chat_session_selected_skill("skill-truth")
-                .unwrap(),
-            None
-        );
+        let conversation = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_conversation(&conversation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(conversation.selected_skill_id, None);
     }
 
     #[tokio::test]
     async fn product_skill_catalog_excludes_unmarked_repository_fixtures() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
         state
-            .memory_store
+            .conversation_store
+            .as_ref()
+            .unwrap()
             .lock()
             .await
-            .create_chat_session("skill-catalog", "Skill catalog")
+            .create_conversation(&conversation_id, "Skill catalog")
             .unwrap();
-        let skills = list_main_chat_skills_with_state(&state, Some("skill-catalog"))
+        let skills = list_main_chat_skills_with_state(&state, Some(&conversation_id))
             .await
             .unwrap();
         assert!(skills
@@ -917,44 +935,131 @@ mod tests {
 
     #[tokio::test]
     async fn product_skill_selection_uses_the_conversation_store_as_owner() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let persistence = Arc::new(
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
+        );
+        persistence.register_read_write("ConversationStore");
+        persistence.seal();
+        assert!(persistence.require_effects_allowed().is_err());
+        Arc::get_mut(&mut state)
+            .expect("test state has one outer owner")
+            .persistence_coordinator = persistence;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
         state
-            .memory_store
+            .conversation_store
+            .as_ref()
+            .unwrap()
             .lock()
             .await
-            .create_chat_session("skill-persisted", "Skill persisted")
+            .create_conversation(&conversation_id, "Skill persisted")
             .unwrap();
 
         let selected =
-            select_main_chat_skill_with_state(&state, "skill-persisted", "evidence_review")
+            select_main_chat_skill_with_state(&state, &conversation_id, "evidence_review")
                 .await
                 .expect("select product skill");
         assert_eq!(
             selected.selected_skill_id.as_deref(),
             Some("evidence_review")
         );
+        let conversation = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_conversation(&conversation_id)
+            .unwrap()
+            .unwrap();
         assert_eq!(
-            state
-                .memory_store
-                .lock()
-                .await
-                .chat_session_selected_skill("skill-persisted")
-                .unwrap()
-                .as_deref(),
+            conversation.selected_skill_id.as_deref(),
             Some("evidence_review")
         );
 
-        clear_main_chat_skill_with_state(&state, "skill-persisted")
+        clear_main_chat_skill_with_state(&state, &conversation_id)
             .await
             .expect("clear product skill");
+        let conversation = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_conversation(&conversation_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(conversation.selected_skill_id, None);
+    }
+
+    #[tokio::test]
+    async fn tool_failure_recovery_reads_canonical_attempts() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let item_id = uuid::Uuid::new_v4().to_string();
+        let attempt_id = uuid::Uuid::new_v4().to_string();
+        let store = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .expect("canonical task store")
+            .lock()
+            .await;
+        store
+            .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: &turn_id,
+                instruction_digest: &format!("sha256:{}", "1".repeat(64)),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+        store
+            .append_general_item(
+                &task_id,
+                &run_id,
+                &item_id,
+                CanonicalTaskItemKind::ToolCall,
+                "work_tool_call:web.search",
+                &format!("sha256:{}", "2".repeat(64)),
+            )
+            .unwrap();
+        store
+            .begin_item_attempt(openlife_core::task_runtime::BeginItemAttemptInput {
+                attempt_id: &attempt_id,
+                task_id: &task_id,
+                run_id: &run_id,
+                item_id: &item_id,
+                executor_kind: "tool",
+                provider_profile_id: None,
+                provider_model_id: None,
+                request_digest: &format!("sha256:{}", "3".repeat(64)),
+            })
+            .unwrap();
+        store
+            .terminalize_item_attempt(
+                &attempt_id,
+                CanonicalTaskItemStatus::Failed,
+                Some(&format!("sha256:{}", "4".repeat(64))),
+            )
+            .unwrap();
+        drop(store);
+
+        let recovery = tool_failure_recovery(&state, Some(&task_id))
+            .await
+            .expect("canonical failed tool projection");
+        assert_eq!(recovery.failed_candidate_id, "web.search");
+        assert!(!recovery.retry_available);
+        assert_eq!(recovery.alternative_candidate_id, None);
         assert_eq!(
-            state
-                .memory_store
-                .lock()
-                .await
-                .chat_session_selected_skill("skill-persisted")
-                .unwrap(),
-            None
+            recovery.controls,
+            vec!["retry_task", "choose_another_registered_tool"]
         );
     }
 }

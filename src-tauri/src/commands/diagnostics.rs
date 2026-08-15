@@ -198,36 +198,21 @@ pub(crate) async fn get_system_diagnostics_with_state(
     let chat_session_count = {
         if state
             .persistence_coordinator
-            .require_trusted_read("MemoryStore")
+            .require_trusted_read("ConversationStore")
             .is_ok()
         {
-            let store = state.memory_store.lock().await;
-            store
-                .list_chat_sessions(1000)
-                .map(|sessions| sessions.len())
-                .unwrap_or_default()
-        } else {
-            0
-        }
-    };
-    let (agent_run_count, agent_run_store_status) = {
-        if state
-            .persistence_coordinator
-            .require_trusted_read("AgentRunStore")
-            .is_err()
-        {
-            (0, "unavailable".to_string())
-        } else if let Some(ref agent_run_store_arc) = state.agent_run_store {
-            let store = agent_run_store_arc.lock().await;
-            match crate::terminal_owner_write_gateway::register_agent_run_store_result(
-                state,
-                store.run_count().map_err(|error| error.to_string()),
-            ) {
-                Ok(count) => (count as usize, "ok".to_string()),
-                Err(_) => (0, "error".to_string()),
+            if let Some(store) = state.conversation_store.as_ref() {
+                store
+                    .lock()
+                    .await
+                    .list_conversations(false, 1000)
+                    .map(|conversations| conversations.len())
+                    .unwrap_or_default()
+            } else {
+                0
             }
         } else {
-            (0, "unavailable".to_string())
+            0
         }
     };
     let mut readiness_issues = Vec::new();
@@ -434,8 +419,6 @@ pub(crate) async fn get_system_diagnostics_with_state(
         usage_ready,
         usage_readiness_issues,
         ollama_models,
-        agent_run_count,
-        agent_run_store_status,
         pending_proposal_count,
         high_risk_pending_proposal_count,
         proposal_store_status,

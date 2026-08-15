@@ -8,7 +8,7 @@ use crate::llm::{
     ProviderPolicyProvenanceRef, ProviderPolicyReceiptEvidence, StreamResult,
 };
 use crate::network_client::NetworkPolicyDecision;
-use crate::ollama::prepare_ollama_chat_target;
+use crate::ollama::{prepare_ollama_chat_target, resolve_ollama_model};
 use crate::tasks::{ScheduledTaskClaim, TaskStore};
 use anyhow::Result;
 use futures::Stream;
@@ -1640,17 +1640,6 @@ pub struct ProviderReceiptSummary {
     pub overflow_digest: Option<String>,
 }
 
-#[cfg(test)]
-impl ProviderReceiptSummary {
-    pub(crate) fn from_receipts(receipts: Vec<ProviderInvocationReceipt>) -> Self {
-        let collector = ProviderReceiptCollector::default();
-        for receipt in receipts {
-            collector.record_terminal(receipt);
-        }
-        collector.summary()
-    }
-}
-
 #[derive(Default)]
 struct ProviderReceiptCollectorState {
     in_flight: Vec<ProviderStartedAttempt>,
@@ -2065,7 +2054,10 @@ fn provider_stream_error_digest(error: &str) -> String {
         .1
 }
 
-/// Inference scheduler: prefers local Ollama when available, otherwise falls back to OpenRouter.
+/// Inference scheduler bound to the user-selected local or cloud route.
+///
+/// A selected local route fails closed when its exact Ollama model is unavailable;
+/// it never widens the transmission boundary by silently switching to cloud.
 #[derive(Clone)]
 pub struct InferenceScheduler {
     pub local_model: String,
@@ -2749,15 +2741,13 @@ impl InferenceScheduler {
             let model = target.model.clone();
             prepared_ollama_target = Some(target);
             ("ollama".to_string(), model)
-        } else if self.prefer_local && !tools_required {
-            if let Some(target) = prepare_ollama_chat_target(&self.local_model).await {
-                let model = target.model.clone();
-                prepared_ollama_target = Some(target);
-                ("ollama".to_string(), model)
-            } else {
-                let decision = self.model_router.route_chat(tools_route_marker, false)?;
-                (decision.provider, decision.model)
-            }
+        } else if self.prefer_local {
+            let target = prepare_ollama_chat_target(&self.local_model)
+                .await
+                .ok_or_else(|| anyhow::anyhow!("selected local provider is unavailable"))?;
+            let model = target.model.clone();
+            prepared_ollama_target = Some(target);
+            ("ollama".to_string(), model)
         } else {
             let decision = self
                 .model_router
@@ -2910,27 +2900,60 @@ impl InferenceScheduler {
     {
         let system_prompt = request.system_prompt();
         let request_id = request.context_manifest.request_id.clone();
-        let structured_json_output = request.policy_receipt_evidence().payload_purpose
-            == Some(ProviderPayloadPurpose::MainChatArtifactDraft);
+        let payload_purpose = request.policy_receipt_evidence().payload_purpose;
+        let structured_json_output = matches!(
+            payload_purpose,
+            Some(
+                ProviderPayloadPurpose::MainChatArtifactDraft
+                    | ProviderPayloadPurpose::MainChatEvidenceCheck
+                    | ProviderPayloadPurpose::MainChatWorkPlan
+            )
+        );
+
+        if self.scripted_generation_response.is_some()
+            && (payload_purpose == Some(ProviderPayloadPurpose::MainChatWorkPlan)
+                || system_prompt
+                    .as_deref()
+                    .is_some_and(|prompt| prompt.contains("openlife.work-plan.v2")))
+        {
+            // The scripted provider is a test fixture for the execution
+            // response, not a second queue of planner responses. Keep its
+            // planner surface typed and deterministic so product-path tests
+            // still exercise plan admission without teaching fixtures to
+            // masquerade as a real adaptive model.
+            return Ok(
+                r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"analyze","kind":"analyze","required":true,"dependsOn":[]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["analyze"]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#
+                    .to_string(),
+            );
+        }
 
         if let Some(ref response) = self.scripted_generation_response {
             return Ok(response.clone());
         }
 
         if request.provider_target == "ollama" {
-            let deterministic_output = structured_json_output
-                || request
-                    .context_manifest
-                    .included_context_categories
-                    .iter()
-                    .any(|category| category == crate::web_search::WEB_SEARCH_CONTEXT_CATEGORY);
+            let deterministic_output = non_streaming_ollama_requires_deterministic_output(
+                payload_purpose,
+                &request.context_manifest.included_context_categories,
+            );
             return crate::ollama::chat_with_ollama_raw_at_endpoint_with_start_observer(
                 execution_binding.endpoint(),
                 &request.model_target,
                 request.messages,
                 system_prompt.as_deref(),
                 crate::ollama::OllamaOutputContract {
-                    structured_json: structured_json_output,
+                    structured_format: match payload_purpose {
+                        Some(ProviderPayloadPurpose::MainChatEvidenceCheck) => {
+                            Some(crate::ollama::main_chat_evidence_check_json_schema())
+                        }
+                        Some(ProviderPayloadPurpose::MainChatArtifactDraft) => {
+                            Some(serde_json::Value::String("json".into()))
+                        }
+                        Some(ProviderPayloadPurpose::MainChatWorkPlan) => {
+                            Some(crate::ollama::main_chat_work_plan_json_schema())
+                        }
+                        _ => None,
+                    },
                     deterministic: deterministic_output,
                 },
                 Some(&request_id),
@@ -3383,8 +3406,13 @@ impl InferenceScheduler {
                 endpoint: execution_binding.endpoint(),
                 api_key: execution_binding.api_key(),
                 model: &request.model_target,
-                structured_json_output: policy_evidence.payload_purpose
-                    == Some(ProviderPayloadPurpose::MainChatArtifactDraft),
+                structured_json_output: matches!(
+                    policy_evidence.payload_purpose,
+                    Some(
+                        ProviderPayloadPurpose::MainChatArtifactDraft
+                            | ProviderPayloadPurpose::MainChatEvidenceCheck
+                    )
+                ),
                 network_policy: &request.network_policy,
                 network_policy_decision: &request.network_policy_decision,
                 request_id: Some(&request_id),
@@ -3430,10 +3458,37 @@ impl InferenceScheduler {
     /// Preview the routing decision for a chat request without actually calling the LLM.
     /// Returns a ModelRouteTrace describing which backend would be chosen and why.
     pub async fn preview_chat_route(&self, tools_prompt: Option<&str>) -> ModelRouteTrace {
-        match self
-            .model_router
-            .route_chat(tools_prompt, self.prefer_local)
-        {
+        if self.prefer_local {
+            return match resolve_ollama_model(&self.local_model).await {
+                Some(model) => ModelRouteTrace {
+                    provider: "ollama".into(),
+                    model,
+                    route_type: "local".into(),
+                    prefer_local: true,
+                    local_model: self.local_model.clone(),
+                    reason: "user_selected_local_model_available".into(),
+                    privacy_level: crate::agent::types::RedactionLevel::None,
+                    latency_ms: None,
+                    retry_count: 0,
+                    fallback_reason: None,
+                    provider_health_is_estimated: Some(false),
+                },
+                None => ModelRouteTrace {
+                    provider: "none".into(),
+                    model: String::new(),
+                    route_type: "blocked".into(),
+                    prefer_local: true,
+                    local_model: self.local_model.clone(),
+                    reason: "selected_local_provider_unavailable".into(),
+                    privacy_level: crate::agent::types::RedactionLevel::Strict,
+                    latency_ms: None,
+                    retry_count: 0,
+                    fallback_reason: None,
+                    provider_health_is_estimated: Some(false),
+                },
+            };
+        }
+        match self.model_router.route_chat(tools_prompt, false) {
             Ok(decision) => decision.to_trace(),
             Err(error) => ModelRouteTrace {
                 provider: "none".into(),
@@ -3486,27 +3541,33 @@ impl ScheduledInferenceScheduler {
             .await
     }
 
-    pub(crate) fn verify_scheduled_outcome(&self, outcome: &PreparedProviderOutcome) -> Result<()> {
-        self.inner.verify_prepared_outcome_receipt(outcome)
-    }
-
     #[cfg(test)]
     fn truth_scope(&self) -> &ScheduledProviderTruthScope {
         &self.truth_scope
     }
+}
 
-    #[cfg(test)]
-    pub(crate) fn inner_provider_receipts_snapshot_for_test(
-        &self,
-    ) -> Vec<ProviderInvocationReceipt> {
-        self.inner.provider_receipts_snapshot()
-    }
+fn non_streaming_ollama_requires_deterministic_output(
+    payload_purpose: Option<ProviderPayloadPurpose>,
+    included_context_categories: &[String],
+) -> bool {
+    matches!(
+        payload_purpose,
+        Some(
+            ProviderPayloadPurpose::MainChatDirectAnswer
+                | ProviderPayloadPurpose::MainChatEvidenceCheck
+                | ProviderPayloadPurpose::MainChatArtifactDraft
+        )
+    ) || included_context_categories
+        .iter()
+        .any(|category| category == crate::web_search::WEB_SEARCH_CONTEXT_CATEGORY)
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        InferenceScheduler, PreparedProviderGenerationMismatch, PreparedProviderStreamEvent,
+        non_streaming_ollama_requires_deterministic_output, InferenceScheduler,
+        PreparedProviderGenerationMismatch, PreparedProviderStreamEvent,
         PreparedProviderStreamTerminal, ProviderInvocationProgress,
         ProviderInvocationTerminalBinding, ProviderStartedAttempt, ScheduledInferenceScheduler,
         ScheduledPreparedProviderTruthBinding, ScheduledProviderLocalAbortCause,
@@ -3516,12 +3577,28 @@ mod tests {
     use crate::agent::{ModelRouter, ProviderAvailability};
     use crate::llm::{
         BoundedContextBlock, ChatMessage, ContextManifest, ProviderDataRoute,
-        ProviderInvocationStatus, ProviderLocalOnlyReason, ProviderPolicyAuthorization,
-        ProviderPolicyReceiptEvidence,
+        ProviderInvocationStatus, ProviderLocalOnlyReason, ProviderPayloadPurpose,
+        ProviderPolicyAuthorization, ProviderPolicyReceiptEvidence,
     };
     use crate::tasks::{ScheduledTask, ScheduledTaskClaim, TaskStore};
     use futures::StreamExt;
     use std::sync::Arc;
+
+    #[test]
+    fn non_streaming_direct_answer_uses_deterministic_local_generation() {
+        assert!(non_streaming_ollama_requires_deterministic_output(
+            Some(ProviderPayloadPurpose::MainChatDirectAnswer),
+            &[],
+        ));
+        assert!(non_streaming_ollama_requires_deterministic_output(
+            Some(ProviderPayloadPurpose::MainChatArtifactDraft),
+            &[],
+        ));
+        assert!(!non_streaming_ollama_requires_deterministic_output(
+            Some(ProviderPayloadPurpose::ScheduledTaskStep),
+            &[],
+        ));
+    }
 
     fn allow_network_policy() -> crate::config::NetworkPolicy {
         crate::config::NetworkPolicy {
@@ -3576,7 +3653,7 @@ mod tests {
     ) -> ProviderPolicyAuthorization {
         canonical_cloud_subject_authorization(decision_id, current_user_text)
             .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::AgentRuntimeGeneration,
+                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
                 current_user_text,
                 &[ChatMessage {
                     role: "user".into(),
@@ -3593,7 +3670,7 @@ mod tests {
     ) -> ProviderPolicyAuthorization {
         ProviderPolicyAuthorization::local_only_fail_closed(ProviderLocalOnlyReason::TestFixture)
             .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::AgentRuntimeGeneration,
+                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
                 current_user_text,
                 messages,
                 &[],
@@ -3630,7 +3707,7 @@ mod tests {
         ProviderPolicyAuthorization::from_scheduled_claim(claim)
             .and_then(|authorization| {
                 authorization.authorize_derived_payload(
-                    crate::llm::ProviderPayloadPurpose::AgentLoopStep,
+                    crate::llm::ProviderPayloadPurpose::ScheduledTaskStep,
                     &claim.task().description,
                     messages,
                     &[],
@@ -4157,11 +4234,6 @@ mod tests {
     fn prepared_generation_requires_the_typed_receipt_outcome() {
         let removed_api = ["generate_", "prepared("].concat();
         let production_consumers = [
-            ("agent/runtime.rs", include_str!("agent/runtime.rs") as &str),
-            (
-                "agent/agent_loop.rs",
-                include_str!("agent/agent_loop.rs") as &str,
-            ),
             (
                 "agent/reasoning/layered.rs",
                 include_str!("agent/reasoning/layered.rs") as &str,
@@ -4571,7 +4643,7 @@ mod tests {
     async fn provider_route_fails_closed_without_an_available_provider() {
         let scheduler = InferenceScheduler::new(
             "qwen2.5".into(),
-            true,
+            false,
             "openai".into(),
             "https://api.openai.com/v1".into(),
             "".into(),
@@ -4591,7 +4663,7 @@ mod tests {
     async fn provider_route_uses_the_available_configured_cloud_adapter() {
         let scheduler = InferenceScheduler::new(
             "qwen2.5".into(),
-            true,
+            false,
             "openai".into(),
             "https://api.openai.com/v1".into(),
             "sk-test".into(),
@@ -4605,6 +4677,72 @@ mod tests {
         assert_eq!(trace.provider, "openai");
         assert_eq!(trace.model, "gpt-4o-mini");
         assert_eq!(trace.route_type, "cloud");
+    }
+
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
+    #[tokio::test(flavor = "current_thread")]
+    async fn selected_local_model_is_the_canonical_available_route() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", format!("http://{address}"));
+        std::env::remove_var("OLLAMA_HOST");
+        let server = tokio::spawn(serve_one_json_response(
+            listener,
+            r#"{"models":[{"name":"openlife-selected-local:latest","size":1}]}"#,
+        ));
+        let scheduler = InferenceScheduler::new(
+            "openlife-selected-local".into(),
+            true,
+            "openai".into(),
+            "https://api.openai.com/v1".into(),
+            "".into(),
+            "gpt-4o-mini".into(),
+            "text-embedding-3-small".into(),
+            false,
+        );
+
+        let trace = scheduler.preview_chat_route(None).await;
+        std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
+        server.await.unwrap();
+
+        assert_eq!(trace.provider, "ollama");
+        assert_eq!(trace.model, "openlife-selected-local:latest");
+        assert_eq!(trace.route_type, "local");
+        assert_eq!(trace.reason, "user_selected_local_model_available");
+        assert_eq!(trace.fallback_reason, None);
+    }
+
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
+    )]
+    #[tokio::test(flavor = "current_thread")]
+    async fn unavailable_selected_local_model_never_falls_back_to_configured_cloud() {
+        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
+        std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", "http://127.0.0.1:9");
+        std::env::remove_var("OLLAMA_HOST");
+        let scheduler = InferenceScheduler::new(
+            "openlife-selected-local-unavailable".into(),
+            true,
+            "openai".into(),
+            "https://api.openai.com/v1".into(),
+            "cloud-key-must-not-be-used".into(),
+            "gpt-4o-mini".into(),
+            "text-embedding-3-small".into(),
+            false,
+        );
+
+        let trace = scheduler.preview_chat_route(None).await;
+        std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
+
+        assert_eq!(trace.provider, "none");
+        assert_eq!(trace.route_type, "blocked");
+        assert_eq!(trace.reason, "selected_local_provider_unavailable");
+        assert_eq!(trace.fallback_reason, None);
     }
 
     #[expect(
@@ -4798,7 +4936,7 @@ mod tests {
         let authorization =
             canonical_cloud_subject_authorization("typed-cloud-decision", "typed authorization")
                 .authorize_derived_payload(
-                    crate::llm::ProviderPayloadPurpose::AgentRuntimeGeneration,
+                    crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
                     "typed authorization",
                     &[ChatMessage {
                         role: "user".into(),
@@ -5004,7 +5142,7 @@ mod tests {
         let rebound_error = authorization
             .clone()
             .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::AgentRuntimeGeneration,
+                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
                 current_user_text,
                 &messages,
                 std::slice::from_ref(&injected_context),
@@ -5223,7 +5361,7 @@ mod tests {
             .provider_authorization()
             .clone()
             .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::AgentRuntimeGeneration,
+                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
                 user_text,
                 &task.messages,
                 &[],

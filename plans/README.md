@@ -14,21 +14,20 @@ working tree.
 - Do not build ledgers, task-packet systems, approval chains, append-only
   registries, or validators for the planning process itself.
 
-## Active Product Development Program
+## Current Development Status
 
-[`openlife_product_development_program.md`](openlife_product_development_program.md)
-is the single active development program. It fixes the six-phase product path,
-phase exit criteria, and the method used to investigate and implement each
-phase.
-
-The current phase pointer in that file is authoritative for development order.
-Phase details may adapt to current source and product evidence, but Agents must
-not add, replace, reorder, or rename Program phases without explicit user
-approval.
+There is no active implementation plan. The H0-H6 capable-Agent reconstruction
+is complete and retained in Git history together with the earlier S0-S7 and
+R0-R8 programs. Product direction lives in `PRODUCT.md`; accepted architecture
+lives in ADRs. Add one small active Markdown plan only after the next concrete
+development objective is accepted.
 
 ## Accepted Decisions
 
 - `adr/0016-agent-memory-lifemodel-domain-boundaries.md`
+- `adr/0019-capable-agent-harness.md`
+- `adr/0018-product-reconstruction-contract.md`
+- `adr/0017-canonical-task-runtime.md`
 - `adr/0014-explicit-user-memory-write-lane.md`
 - `adr/0015-transient-state-command-lane.md`
 

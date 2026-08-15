@@ -144,24 +144,12 @@ pub struct SystemConfig {
     /// Safe paths for file.read tool (workspace directories allowed for file access)
     #[serde(default)]
     pub safe_paths: Vec<String>,
-    /// Enable AgentLoop for chat execution (dual-track beta)
-    #[serde(default)]
-    pub use_agent_loop: Option<bool>,
     /// Network access policy for web tools
     #[serde(default)]
     pub network_policy: NetworkPolicy,
     /// ICS calendar file paths for calendar.read tool
     #[serde(default)]
     pub calendar_ics_paths: Vec<String>,
-    /// Maximum ReAct loop steps per agent execution
-    #[serde(default = "default_agent_loop_max_steps")]
-    pub agent_loop_max_steps: u32,
-    /// Maximum tool calls across all steps
-    #[serde(default = "default_agent_loop_max_tool_calls")]
-    pub agent_loop_max_tool_calls: u32,
-    /// Timeout for a single agent execution (seconds)
-    #[serde(default = "default_agent_loop_timeout_seconds")]
-    pub agent_loop_timeout_seconds: u64,
     /// Proactive engine: days before a goal is considered stale
     #[serde(default = "default_stale_goal_days")]
     pub stale_goal_days: i64,
@@ -196,12 +184,8 @@ impl Default for SystemConfig {
             ollama_cache_ttl_seconds: default_ollama_cache_ttl_seconds(),
             memory_search_top_k: default_memory_search_top_k(),
             safe_paths: Vec::new(),
-            use_agent_loop: None,
             network_policy: NetworkPolicy::default(),
             calendar_ics_paths: Vec::new(),
-            agent_loop_max_steps: default_agent_loop_max_steps(),
-            agent_loop_max_tool_calls: default_agent_loop_max_tool_calls(),
-            agent_loop_timeout_seconds: default_agent_loop_timeout_seconds(),
             stale_goal_days: default_stale_goal_days(),
             proposal_reminder_days: default_proposal_reminder_days(),
             search_provider: default_search_provider(),
@@ -223,18 +207,6 @@ fn default_memory_search_top_k() -> usize {
     3
 }
 
-fn default_agent_loop_max_steps() -> u32 {
-    4
-}
-
-fn default_agent_loop_max_tool_calls() -> u32 {
-    6
-}
-
-fn default_agent_loop_timeout_seconds() -> u64 {
-    90
-}
-
 fn default_stale_goal_days() -> i64 {
     7
 }
@@ -247,31 +219,14 @@ fn default_search_provider() -> String {
     "duckduckgo".to_string()
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentRuntimeMode {
-    #[default]
-    LocalFirstDefault,
-    #[serde(rename = "capability_first", alias = "capability_first_beta")]
-    CapabilityFirst,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
     #[serde(default)]
     pub llm: LlmConfig,
     #[serde(default)]
-    pub runtime_mode: AgentRuntimeMode,
-    #[serde(default)]
     pub prefer_local_model: bool,
     #[serde(default = "default_local_model")]
     pub local_model: String,
-    #[serde(default)]
-    pub experimental_context_assembler: bool,
-    /// Use AgentLoop for chat execution instead of inline logic.
-    /// Capability-first runtime path with governed fallback reporting.
-    #[serde(default)]
-    pub use_agent_loop: bool,
     #[serde(default)]
     pub reasoning: ReasoningConfig,
     #[serde(default)]
@@ -282,11 +237,8 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             llm: LlmConfig::default(),
-            runtime_mode: AgentRuntimeMode::default(),
             prefer_local_model: true,
             local_model: default_local_model(),
-            experimental_context_assembler: false,
-            use_agent_loop: false,
             reasoning: ReasoningConfig::default(),
             system: SystemConfig::default(),
         }
@@ -409,10 +361,6 @@ mod tests {
         assert_eq!(config.llm.embedding_model, "text-embedding-3-small");
         assert_eq!(config.llm.chat_model, "gpt-4o-mini");
         assert!(config.llm.embedding_enabled);
-        assert!(matches!(
-            config.runtime_mode,
-            AgentRuntimeMode::LocalFirstDefault
-        ));
         assert_eq!(config.local_model, "llama2");
         assert!(config.prefer_local_model);
     }
@@ -431,11 +379,8 @@ mod tests {
                 chat_model: "gpt-4".into(),
                 embedding_enabled: false,
             },
-            runtime_mode: AgentRuntimeMode::CapabilityFirst,
             prefer_local_model: true,
             local_model: "qwen2.5".into(),
-            experimental_context_assembler: false,
-            use_agent_loop: false,
             reasoning: ReasoningConfig::default(),
             system: SystemConfig::default(),
         };
@@ -450,10 +395,6 @@ mod tests {
         assert_eq!(loaded.llm.embedding_model, config.llm.embedding_model);
         assert_eq!(loaded.llm.chat_model, config.llm.chat_model);
         assert_eq!(loaded.llm.embedding_enabled, config.llm.embedding_enabled);
-        assert!(matches!(
-            loaded.runtime_mode,
-            AgentRuntimeMode::CapabilityFirst
-        ));
         assert_eq!(loaded.prefer_local_model, config.prefer_local_model);
         assert_eq!(loaded.local_model, config.local_model);
 
@@ -464,27 +405,6 @@ mod tests {
         assert!(saved.contains("openai_key_ref:"));
         assert!(!saved.contains("search_provider_key:"));
         assert!(saved.contains("search_provider_key_ref:"));
-    }
-
-    #[test]
-    fn config_reads_legacy_capability_first_beta_alias_but_saves_new_value() {
-        let file = NamedTempFile::new().unwrap();
-        std::fs::write(
-            file.path(),
-            "runtime_mode: capability_first_beta\nprefer_local_model: false\n",
-        )
-        .unwrap();
-
-        let loaded = AppConfig::load(file.path()).unwrap();
-        assert!(matches!(
-            loaded.runtime_mode,
-            AgentRuntimeMode::CapabilityFirst
-        ));
-
-        loaded.save(file.path()).unwrap();
-        let saved = std::fs::read_to_string(file.path()).unwrap();
-        assert!(saved.contains("runtime_mode: capability_first"));
-        assert!(!saved.contains("runtime_mode: capability_first_beta"));
     }
 
     #[test]

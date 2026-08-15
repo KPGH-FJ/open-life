@@ -6,14 +6,15 @@ user-reviewed durable updates in one desktop product.
 
 ## Current Product
 
-The desktop workbench exposes six routes:
+The desktop product exposes three routes:
 
-- `/today`
 - `/workspace`
-- `/tasks`
-- `/review`
 - `/life-model`
 - `/settings`
+
+Workbench keeps conversations, results, and needs-attention items in one
+surface. Task and review state remain explicit backend facts rather than
+duplicated top-level pages.
 
 Unknown and retired routes fail closed instead of redirecting to old product
 surfaces.

@@ -5,6 +5,7 @@ const tauriMocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
   getLifeStateProjection: vi.fn(),
   getProviderPrivacyBoundarySummary: vi.fn(),
+  getProductDiagnosticsViewModel: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
   recoverRequiredCredentialAccess: vi.fn(),
   saveConfig: vi.fn(),
@@ -33,6 +34,12 @@ describe("Tauri settings privacy data source", () => {
     vi.clearAllMocks();
     tauriMocks.getLifeStateProjection.mockResolvedValue({
       safeMode: { active: false, reason: "", sourceRefs: [] },
+    });
+    tauriMocks.getProductDiagnosticsViewModel.mockResolvedValue({
+      status: "ready",
+      stores: [],
+      counts: {},
+      blockerCodes: [],
     });
   });
 

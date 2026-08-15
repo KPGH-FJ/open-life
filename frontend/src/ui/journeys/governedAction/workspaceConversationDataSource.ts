@@ -1,15 +1,16 @@
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
-  cancelMainChatAgentTask,
+  cancelChatTurn,
+  cancelWorkTask,
+  assignConversationProject,
   createChatSession,
+  createProject,
   deactivateMarkdownMemoryFileProposal,
   deleteChatSession,
   detachResourceFromTurn,
   draftMarkdownMemoryFileProposal,
-  getChatHistory,
-  getChatLifeModelInfluence,
+  getConversationViewModel,
   getMarkdownMemoryViewModel,
-  listChatSessions,
   listMainChatSkills,
   listMainChatToolCandidates,
   pickAndImportResources,
@@ -18,12 +19,12 @@ import {
   selectMainChatSkill,
   clearMainChatSkill,
   startStreamMessage,
-  type ChatSession,
-  type ChatLifeModelInfluenceSnapshot,
+  submitMainChatTaskSteering,
+  type ConversationViewModel,
   type ResourceDetachReceipt,
   type ResourceImportSelectionResult,
-  type MainChatAgentTaskState,
   type MainChatMessageOptions,
+  type ProjectRecord,
   type MainChatSelectedSkill,
   type MainChatSkillSummary,
   type MainChatToolCandidateList,
@@ -34,6 +35,7 @@ import {
   type StreamMessageChunkPayload,
   type StreamMessageDonePayload,
   type StreamMessageStartPayload,
+  type SubmitMainChatSteeringResponse,
 } from "@/tauri";
 import type { ChatMessage } from "@/types";
 
@@ -43,10 +45,10 @@ export type WorkspaceStreamEvents = {
 };
 
 export interface WorkspaceConversationDataSource {
-  listSessions(): Promise<ChatSession[]>;
-  loadHistory(sessionId: string): Promise<ChatMessage[]>;
-  loadLifeModelInfluence(sessionId: string): Promise<ChatLifeModelInfluenceSnapshot | null>;
+  loadConversation(conversationId?: string): Promise<ConversationViewModel>;
   createSession(sessionId: string, title: string): Promise<void>;
+  createProject?(projectId: string, name: string): Promise<ProjectRecord>;
+  assignProject?(conversationId: string, projectId: string | null): Promise<void>;
   renameSession(sessionId: string, title: string): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
   pickResources(
@@ -64,11 +66,19 @@ export interface WorkspaceConversationDataSource {
     options: MainChatMessageOptions,
     events: WorkspaceStreamEvents
   ): Promise<StreamMessageDonePayload>;
-  cancelTask(taskSessionId: string): Promise<MainChatAgentTaskState>;
+  cancelChatTurn?(conversationId: string, turnId: string): Promise<unknown>;
+  cancelWorkTask?(taskId: string): Promise<unknown>;
+  steerTask?(request: {
+    steeringId: string;
+    taskId: string;
+    runId: string;
+    sessionId: string;
+    content: string;
+  }): Promise<SubmitMainChatSteeringResponse>;
   listSkills?(sessionId?: string): Promise<MainChatSkillSummary[]>;
   selectSkill?(sessionId: string, skillId: string): Promise<MainChatSelectedSkill>;
   clearSkill?(sessionId: string): Promise<MainChatSelectedSkill>;
-  listToolCandidates?(taskSessionId?: string): Promise<MainChatToolCandidateList>;
+  listToolCandidates?(taskId?: string): Promise<MainChatToolCandidateList>;
   loadMarkdownMemory?(): Promise<MarkdownMemoryViewModel>;
   selectMarkdownMemoryRoot?(scope: MarkdownMemoryScope): Promise<MarkdownMemoryRootSelection>;
   draftMarkdownMemoryFileProposal?(request: {
@@ -121,16 +131,18 @@ async function streamTurn(
 }
 
 export const tauriWorkspaceConversationDataSource: WorkspaceConversationDataSource = {
-  listSessions: listChatSessions,
-  loadHistory: getChatHistory,
-  loadLifeModelInfluence: getChatLifeModelInfluence,
+  loadConversation: getConversationViewModel,
   createSession: createChatSession,
+  createProject,
+  assignProject: assignConversationProject,
   renameSession: renameChatSession,
   deleteSession: deleteChatSession,
   pickResources: pickAndImportResources,
   detachResource: detachResourceFromTurn,
   streamTurn,
-  cancelTask: cancelMainChatAgentTask,
+  cancelChatTurn,
+  cancelWorkTask,
+  steerTask: submitMainChatTaskSteering,
   listSkills: listMainChatSkills,
   selectSkill: selectMainChatSkill,
   clearSkill: clearMainChatSkill,

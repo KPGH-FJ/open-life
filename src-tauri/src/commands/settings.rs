@@ -46,9 +46,9 @@ use crate::secret_store::{
     create_mcp_audit_key_material, hydrate_bound_provider_secret,
     hydrate_or_create_canonical_store_integrity_key, hydrate_or_create_integrity_key,
     inspect_existing_mcp_audit_keys, inspect_integrity_key_access, stage_config_secrets,
-    IntegrityKeyInspection, KeyringSecretStore, McpAuditKeyHydrationInspection, SecretStore,
-    ACTION_QUEUE_AUTHORITY_KEY_REF, AGENT_RUN_RECEIPT_KEY_REF, MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
-    MCP_AUDIT_KEY_REF_PREFIX, PROVIDER_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF,
+    IntegrityKeyInspection, McpAuditKeyHydrationInspection, ProfileSecretStore, SecretStore,
+    CANONICAL_TASK_RECEIPT_KEY_REF, MCP_AUDIT_KEY_REF_PREFIX, PROVIDER_KEY_REF, SEARCH_KEY_REF,
+    TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::{CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{
@@ -259,24 +259,8 @@ fn inspect_required_credential_snapshot(
         inspect_fixed_credential_status(
             data_dir,
             store,
-            AGENT_RUN_RECEIPT_KEY_REF,
-            &[
-                "agent_runs.db",
-                "life_events.db",
-                "main_chat_agent_sessions.db",
-            ],
-        ),
-        inspect_fixed_credential_status(
-            data_dir,
-            store,
-            MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
-            &["main_chat_agent_events.db"],
-        ),
-        inspect_fixed_credential_status(
-            data_dir,
-            store,
-            ACTION_QUEUE_AUTHORITY_KEY_REF,
-            &["main_chat_action_queue.db"],
+            CANONICAL_TASK_RECEIPT_KEY_REF,
+            &["task_runtime.db"],
         ),
         inspect_fixed_credential_status(
             data_dir,
@@ -305,6 +289,21 @@ fn inspect_provider_credential_status(
     }
 }
 
+fn inspect_search_provider_credential_status(
+    config: &AppConfig,
+    store: &dyn SecretStore,
+) -> CredentialBootstrapStatus {
+    if config.system.search_provider_key_ref.as_deref() != Some(SEARCH_KEY_REF) {
+        return CredentialBootstrapStatus::MissingExistingData;
+    }
+    match store.get(SEARCH_KEY_REF) {
+        Ok(Some(secret)) if !secret.trim().is_empty() => CredentialBootstrapStatus::Available,
+        Ok(Some(_)) => CredentialBootstrapStatus::Invalid,
+        Ok(None) => CredentialBootstrapStatus::MissingExistingData,
+        Err(_) => CredentialBootstrapStatus::Unavailable,
+    }
+}
+
 fn inspect_current_credential_snapshot(
     data_dir: &Path,
     config: &AppConfig,
@@ -312,6 +311,7 @@ fn inspect_current_credential_snapshot(
 ) -> CredentialBootstrapSnapshot {
     inspect_required_credential_snapshot(data_dir, store)
         .with_provider_status(inspect_provider_credential_status(config, store))
+        .with_search_provider_status(inspect_search_provider_credential_status(config, store))
 }
 
 fn eligible_credential_purposes(snapshot: &CredentialBootstrapSnapshot) -> Vec<String> {
@@ -522,9 +522,7 @@ fn initialize_required_credentials_after_confirmation(
     let mut report = recovery_report_from_snapshot(&current_snapshot);
     let mut created = Vec::<CreatedCredential>::new();
     for (purpose, secret_ref) in [
-        ("agent_run_receipts", AGENT_RUN_RECEIPT_KEY_REF),
-        ("main_chat_events", MAIN_CHAT_EVENT_INTEGRITY_KEY_REF),
-        ("action_queue", ACTION_QUEUE_AUTHORITY_KEY_REF),
+        ("canonical_task_receipts", CANONICAL_TASK_RECEIPT_KEY_REF),
         ("task_store", TASK_STORE_AUTHORITY_KEY_REF),
     ] {
         if !eligible.iter().any(|eligible| eligible == purpose) {
@@ -673,7 +671,7 @@ fn recover_unavailable_credential_access_after_confirmation(
             .map(|item| item.status)
             .unwrap_or(CredentialBootstrapStatus::Unknown);
         if status == CredentialBootstrapStatus::Available {
-            set_recovery_item_status(&mut report, purpose, "access_restored");
+            set_recovery_item_status(&mut report, purpose, "pending_restart_verification");
         } else {
             set_recovery_item_status(&mut report, purpose, status.as_str());
             unresolved.push(format!("{purpose}={}", status.as_str()));
@@ -684,7 +682,7 @@ fn recover_unavailable_credential_access_after_confirmation(
         // Keep the legacy field true for the existing frontend contract: the
         // recovery operation is complete for this process, but ordinary
         // effects remain closed until a clean restart rehydrates every owner.
-        report.initialization_completed_for_restart = true;
+        report.initialization_completed_for_restart = false;
         report.restart_required = true;
     } else {
         report.blocked_reason = Some(format!(
@@ -799,8 +797,6 @@ fn danger_action_requires_native_confirmation(action_type: &str) -> bool {
             | "mcp_audit_export"
             | "mcp_audit_cleanup"
             | "mcp_audit_key_rotation"
-            | "agent_run_delete"
-            | "agent_run_bulk_delete"
             | "vector_rebuild"
     )
 }
@@ -1049,66 +1045,6 @@ fn danger_action_preflight_for_action_scoped(
                 "settings_command:get_danger_action_preflight".into(),
                 "final_command:rotate_mcp_audit_key".into(),
                 "governance:slice5b_danger_action_preflight".into(),
-            ],
-            recovery_operation_id: None,
-            recovery_stage: None,
-        },
-        "agent_run_delete" => DangerActionPreflightView {
-            action_type: "agent_run_delete".into(),
-            risk_tier: "high".into(),
-            scope_summary:
-                "删除选中的 AgentRun 运行记录；预检只保留数量和 id digest，不展开 transcript、tool input 或模型输出。"
-                    .into(),
-            data_categories: vec!["agent_run_metadata".into(), "run_trace_metadata".into()],
-            writes_durable_state: true,
-            privacy_sensitive: true,
-            external_transmission: "not_sent_externally".into(),
-            dry_run_available: false,
-            backup_status: "soft_delete_trash_view".into(),
-            requires_typed_confirmation,
-            confirmation_required,
-            confirmation_phrase,
-            confirmation_scope_digest: scope_digest.clone(),
-            preflight_id: preflight_id.clone(),
-            affected_item_count: affected_count,
-            affected_item_digest: scope_digest.clone(),
-            final_action_enabled: true,
-            safe_mode_blocked: false,
-            blocking_reasons: vec![],
-            source_refs: vec![
-                "settings_command:get_danger_action_preflight".into(),
-                "final_command:delete_agent_run".into(),
-                "governance:slice5c_danger_zone_consolidation".into(),
-            ],
-            recovery_operation_id: None,
-            recovery_stage: None,
-        },
-        "agent_run_bulk_delete" => DangerActionPreflightView {
-            action_type: "agent_run_bulk_delete".into(),
-            risk_tier: "high".into(),
-            scope_summary:
-                "批量删除选中的 AgentRun 运行记录；预检只保留 bounded 数量和 id digest，不展开 transcript、tool input 或模型输出。"
-                    .into(),
-            data_categories: vec!["agent_run_metadata".into(), "run_trace_metadata".into()],
-            writes_durable_state: true,
-            privacy_sensitive: true,
-            external_transmission: "not_sent_externally".into(),
-            dry_run_available: false,
-            backup_status: "soft_delete_trash_view".into(),
-            requires_typed_confirmation,
-            confirmation_required,
-            confirmation_phrase,
-            confirmation_scope_digest: scope_digest.clone(),
-            preflight_id: preflight_id.clone(),
-            affected_item_count: affected_count,
-            affected_item_digest: scope_digest.clone(),
-            final_action_enabled: true,
-            safe_mode_blocked: false,
-            blocking_reasons: vec![],
-            source_refs: vec![
-                "settings_command:get_danger_action_preflight".into(),
-                "final_command:delete_agent_run".into(),
-                "governance:slice5c_danger_zone_consolidation".into(),
             ],
             recovery_operation_id: None,
             recovery_stage: None,
@@ -1579,39 +1515,6 @@ fn validate_import_targets_cover_payload(
     Ok(())
 }
 
-#[derive(serde::Serialize)]
-pub struct LastModelError {
-    pub message: String,
-    pub phase: String,
-    pub timestamp: String,
-}
-
-#[tauri::command]
-pub async fn get_last_model_error(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Option<LastModelError>, AppError> {
-    let store_arc = state
-        .agent_run_store
-        .as_ref()
-        .ok_or_else(|| AppError::internal("agent_run_store_unavailable"))?;
-    let store = store_arc.lock().await;
-    let runs = crate::terminal_owner_write_gateway::register_agent_run_store_result(
-        state.inner(),
-        store.list_runs(10, 0).map_err(|error| error.to_string()),
-    )
-    .map_err(AppError::internal)?;
-    let last_error = runs
-        .iter()
-        .find(|r| r.error.is_some())
-        .and_then(|r| r.error.as_ref())
-        .map(|e| LastModelError {
-            message: e.message.clone(),
-            phase: e.phase.clone(),
-            timestamp: chrono::Utc::now().to_rfc3339(),
-        });
-    Ok(last_error)
-}
-
 /// Mask for sensitive API keys sent to the frontend.
 const KEY_MASK: &str = "***";
 
@@ -1803,7 +1706,7 @@ pub async fn recover_required_credential_access(
                 true,
                 &data_dir,
                 &config,
-                &KeyringSecretStore,
+                &ProfileSecretStore,
                 &snapshot_for_worker,
             )
         })
@@ -1819,7 +1722,7 @@ pub async fn recover_required_credential_access(
         inspect_current_credential_snapshot(
             &pre_confirmation_data_dir,
             &pre_confirmation_config,
-            &KeyringSecretStore,
+            &ProfileSecretStore,
         )
     })
     .await
@@ -1853,7 +1756,7 @@ pub async fn recover_required_credential_access(
         initialize_required_credentials_with_confirmation_result(
             true,
             &data_dir,
-            &KeyringSecretStore,
+            &ProfileSecretStore,
             &snapshot_for_worker,
         )
     })
@@ -1923,14 +1826,18 @@ fn reference_only_config_for_first_persist(mut config: AppConfig) -> AppConfig {
     config
 }
 
+fn require_config_write_admission(state: &Arc<AppState>) -> Result<(), AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_for_stores(&["ConfigStore"])
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))
+}
+
 async fn persist_artifact_output_directory(
     state: &Arc<AppState>,
     selected_path: &Path,
 ) -> Result<PathBuf, AppError> {
-    state
-        .persistence_coordinator
-        .require_effects_allowed()
-        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    require_config_write_admission(state)?;
     let canonical = validate_artifact_output_directory(selected_path)?;
     let _config_write_guard = CONFIG_WRITE_COORDINATOR.lock().await;
     let config_path = app_data_dir().join("config.yaml");
@@ -1990,10 +1897,7 @@ async fn persist_markdown_memory_root(
     scope: crate::markdown_memory::MarkdownMemoryScope,
     selected_path: &Path,
 ) -> Result<PathBuf, AppError> {
-    state
-        .persistence_coordinator
-        .require_effects_allowed()
-        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    require_config_write_admission(state)?;
     let canonical = validate_artifact_output_directory(selected_path)?;
     let _config_write_guard = CONFIG_WRITE_COORDINATOR.lock().await;
     let config_path = app_data_dir().join("config.yaml");
@@ -2108,7 +2012,7 @@ pub async fn save_config(
         config.system.search_provider_key_ref = current_config.system.search_provider_key_ref;
     }
 
-    let secret_store = KeyringSecretStore;
+    let secret_store = ProfileSecretStore;
     let rollback = stage_config_secrets(&mut config, &secret_store).map_err(AppError::from)?;
     if let Err(save_error) = config.save(&config_path) {
         return match rollback.rollback(&secret_store) {
@@ -4933,7 +4837,7 @@ pub async fn rotate_mcp_audit_key(
     let mut store = state.mcp_audit_store.lock().await;
     let timestamp_epoch = chrono::Utc::now().timestamp().max(0) as u64;
     let epoch = timestamp_epoch.max(store.key_config().epoch.saturating_add(1));
-    let secret_store = KeyringSecretStore;
+    let secret_store = ProfileSecretStore;
     let material = create_mcp_audit_key_material(epoch, &secret_store).map_err(AppError::from)?;
     let secret_ref = material.config.key_ref.clone().unwrap_or_default();
     let snapshot = store.clone();
@@ -5005,6 +4909,31 @@ mod tests {
 
         assert!(validate_artifact_output_directory(file.path()).is_err());
         assert!(validate_artifact_output_directory(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn config_only_directory_selection_fails_when_config_store_is_unavailable() {
+        let mut state = crate::test_utils::test_app_state();
+        let coordinator = Arc::new(
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
+        );
+        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
+            if *store == "ConfigStore" {
+                coordinator.register_unavailable(
+                    *store,
+                    "config_store_unavailable",
+                    "config store unavailable",
+                );
+            } else {
+                coordinator.register_read_write(*store);
+            }
+        }
+        coordinator.seal();
+        Arc::get_mut(&mut state)
+            .expect("isolated test state")
+            .persistence_coordinator = coordinator;
+
+        assert!(require_config_write_admission(&state).is_err());
     }
 
     #[test]
@@ -5110,7 +5039,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_credential_initialization_creates_exactly_five_empty_slots() {
+    fn credential_initialization_creates_only_current_internal_slots() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
@@ -5136,12 +5065,11 @@ mod tests {
                 "created",
                 "created",
                 "created",
-                "created",
-                "created",
+                "missing_existing_data",
                 "missing_existing_data",
             ]
         );
-        assert_eq!(*store.writes.lock().unwrap(), 5);
+        assert_eq!(*store.writes.lock().unwrap(), 3);
         assert_eq!(*store.deletes.lock().unwrap(), 0);
         let serialized = serde_json::to_string(&report).unwrap();
         assert!(!serialized.contains("keychain://"));
@@ -5154,14 +5082,9 @@ mod tests {
     fn credential_access_recovery_restores_existing_keys_without_writes_or_secret_output() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
-        for (index, secret_ref) in [
-            AGENT_RUN_RECEIPT_KEY_REF,
-            MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
-            ACTION_QUEUE_AUTHORITY_KEY_REF,
-            TASK_STORE_AUTHORITY_KEY_REF,
-        ]
-        .into_iter()
-        .enumerate()
+        for (index, secret_ref) in [CANONICAL_TASK_RECEIPT_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF]
+            .into_iter()
+            .enumerate()
         {
             store
                 .set(
@@ -5178,16 +5101,19 @@ mod tests {
                 &crate::secret_store::encode_provider_secret(&config, "sk-recovery-test").unwrap(),
             )
             .unwrap();
+        config.system.search_provider_key_ref = Some(SEARCH_KEY_REF.into());
+        store
+            .set(SEARCH_KEY_REF, "sk-search-recovery-test")
+            .unwrap();
         *store.writes.lock().unwrap() = 0;
 
         let expected = CredentialBootstrapSnapshot::from_statuses([
             CredentialBootstrapStatus::Unavailable,
             CredentialBootstrapStatus::Unavailable,
-            CredentialBootstrapStatus::Unavailable,
-            CredentialBootstrapStatus::Unavailable,
             CredentialBootstrapStatus::InitializationRequired,
         ])
-        .with_provider_status(CredentialBootstrapStatus::Unavailable);
+        .with_provider_status(CredentialBootstrapStatus::Unavailable)
+        .with_search_provider_status(CredentialBootstrapStatus::Unavailable);
         let report = recover_unavailable_credential_access_after_confirmation(
             true,
             directory.path(),
@@ -5198,13 +5124,12 @@ mod tests {
         .unwrap();
 
         assert!(report.restart_required);
-        assert!(report.initialization_completed_for_restart);
+        assert!(!report.initialization_completed_for_restart);
         for purpose in [
-            "agent_run_receipts",
-            "main_chat_events",
-            "action_queue",
+            "canonical_task_receipts",
             "task_store",
             "provider_api_key",
+            "search_provider_api_key",
         ] {
             assert_eq!(
                 report
@@ -5213,13 +5138,23 @@ mod tests {
                     .find(|item| item.purpose == purpose)
                     .unwrap()
                     .status,
-                "access_restored"
+                "pending_restart_verification"
             );
         }
+        assert_eq!(
+            report
+                .items
+                .iter()
+                .find(|item| item.purpose == "mcp_audit")
+                .unwrap()
+                .status,
+            "initialization_required"
+        );
         assert_eq!(*store.writes.lock().unwrap(), 0);
         assert_eq!(*store.deletes.lock().unwrap(), 0);
         let serialized = serde_json::to_string(&report).unwrap();
         assert!(!serialized.contains("sk-recovery-test"));
+        assert!(!serialized.contains("sk-search-recovery-test"));
         assert!(!serialized.contains("keychain://"));
     }
 
@@ -5278,9 +5213,9 @@ mod tests {
     #[test]
     fn nkr_s2_native_request_binds_exact_sorted_purpose_scope_and_batch_anchor() {
         let purposes = vec![
-            "action_queue".to_string(),
-            "agent_run_receipts".to_string(),
-            "main_chat_events".to_string(),
+            "canonical_task_receipts".to_string(),
+            "mcp_audit".to_string(),
+            "task_store".to_string(),
         ];
         let arguments = serde_json::json!({
             "eligiblePurposeIds": purposes,
@@ -5292,7 +5227,7 @@ mod tests {
         let request = credential_initialization_native_request(&purposes, &arguments);
 
         assert_eq!(request.target_ids_for_new_challenge, purposes);
-        assert_eq!(request.requested_target, Some("action_queue"));
+        assert_eq!(request.requested_target, Some("canonical_task_receipts"));
         assert!(request
             .target_ids_for_new_challenge
             .iter()
@@ -5309,12 +5244,7 @@ mod tests {
     #[test]
     fn nkr_s2_existing_canonical_data_never_becomes_initialization_eligible() {
         let directory = tempfile::tempdir().unwrap();
-        for file_name in [
-            "agent_runs.db",
-            "main_chat_agent_events.db",
-            "main_chat_action_queue.db",
-            "tasks.db",
-        ] {
+        for file_name in ["task_runtime.db", "tasks.db"] {
             std::fs::write(directory.path().join(file_name), b"canonical-data-sentinel").unwrap();
         }
         std::fs::write(
@@ -5327,11 +5257,11 @@ mod tests {
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
 
         assert!(eligible_credential_purposes(&snapshot).is_empty());
-        assert!(snapshot.purposes[..4]
+        assert!(snapshot.purposes[..2]
             .iter()
             .all(|item| item.status == CredentialBootstrapStatus::MissingExistingData));
         assert_eq!(
-            snapshot.purposes[4].status,
+            snapshot.purposes[2].status,
             CredentialBootstrapStatus::Unknown
         );
         assert_eq!(*store.writes.lock().unwrap(), 0);
@@ -5343,19 +5273,14 @@ mod tests {
     fn nkr_s2_invalid_existing_key_material_is_never_replaced() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
-        for secret_ref in [
-            AGENT_RUN_RECEIPT_KEY_REF,
-            MAIN_CHAT_EVENT_INTEGRITY_KEY_REF,
-            ACTION_QUEUE_AUTHORITY_KEY_REF,
-            TASK_STORE_AUTHORITY_KEY_REF,
-        ] {
+        for secret_ref in [CANONICAL_TASK_RECEIPT_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF] {
             store.set(secret_ref, "not-base64").unwrap();
         }
         *store.writes.lock().unwrap() = 0;
 
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
 
-        assert!(snapshot.purposes[..4]
+        assert!(snapshot.purposes[..2]
             .iter()
             .all(|item| item.status == CredentialBootstrapStatus::Invalid));
         assert_eq!(*store.writes.lock().unwrap(), 0);
@@ -5427,7 +5352,7 @@ mod tests {
             report
                 .items
                 .iter()
-                .find(|item| item.purpose == "action_queue")
+                .find(|item| item.purpose == "mcp_audit")
                 .unwrap()
                 .status,
             "cleanup_unknown"
@@ -5459,8 +5384,8 @@ mod tests {
                 .unwrap();
 
         assert_eq!(report.cleanup_status, "compensated");
-        assert_eq!(*store.writes.lock().unwrap(), 5);
-        assert_eq!(*store.deletes.lock().unwrap(), 5);
+        assert_eq!(*store.writes.lock().unwrap(), 3);
+        assert_eq!(*store.deletes.lock().unwrap(), 3);
         assert!(store.values.lock().unwrap().is_empty());
         assert!(!directory.path().join("mcp_audit_keys.json").exists());
     }
@@ -5557,8 +5482,8 @@ mod tests {
                 .status,
             "cleanup_unknown"
         );
-        assert_eq!(*store.writes.lock().unwrap(), 5);
-        assert_eq!(*store.deletes.lock().unwrap(), 4);
+        assert_eq!(*store.writes.lock().unwrap(), 3);
+        assert_eq!(*store.deletes.lock().unwrap(), 2);
         assert_eq!(store.values.lock().unwrap().len(), 1);
         assert!(directory.path().join("mcp_audit_keys.json").exists());
     }
@@ -5844,7 +5769,6 @@ mod tests {
             url,
             capability,
             "openai",
-            None,
             NetworkConsentSubmissionScope::ExplicitCommand,
         )
         .await
@@ -5886,7 +5810,6 @@ mod tests {
             url,
             capability,
             "openai",
-            None,
             NetworkConsentSubmissionScope::ExplicitCommand,
         )
         .await
@@ -5922,7 +5845,6 @@ mod tests {
                 url,
                 capability,
                 "openai",
-                None,
                 NetworkConsentSubmissionScope::ExplicitCommand,
             )
             .await
@@ -6138,32 +6060,7 @@ mod tests {
     }
 
     #[test]
-    fn danger_action_preflight_covers_run_delete_and_vector_rebuild_without_raw_scope_leaks() {
-        let view = danger_action_preflight_for_action_scoped(
-            "agent_run_bulk_delete",
-            false,
-            DangerActionPreflightScope {
-                target_ids: vec!["run-private-1".into(), "run-private-2".into()],
-                affected_count: Some(2),
-            },
-        )
-        .unwrap();
-
-        assert_eq!(view.action_type, "agent_run_bulk_delete");
-        assert!(view.writes_durable_state);
-        assert!(view.confirmation_required);
-        assert!(!view.requires_typed_confirmation);
-        assert!(view.confirmation_phrase.is_none());
-        assert_eq!(view.affected_item_count, 2);
-        assert!(view.affected_item_digest.starts_with("bytes:"));
-        assert!(view
-            .source_refs
-            .iter()
-            .any(|source| source == "final_command:delete_agent_run"));
-        let serialized = serde_json::to_string(&view).unwrap();
-        assert!(!serialized.contains("run-private-1"));
-        assert!(!serialized.contains("run-private-2"));
-
+    fn danger_action_preflight_covers_vector_rebuild() {
         let vector = danger_action_preflight_for_action_scoped(
             "vector_rebuild",
             false,
@@ -6185,34 +6082,11 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_preflight_view_cannot_mint_confirmation_authority() {
-        let view = danger_action_preflight_for_action_scoped(
-            "agent_run_delete",
-            false,
-            DangerActionPreflightScope {
-                target_ids: vec!["run-confirm-1".to_string()],
-                affected_count: Some(1),
-            },
-        )
-        .unwrap();
-        assert!(view.confirmation_required);
-        assert!(!view.requires_typed_confirmation);
-        assert!(view.confirmation_phrase.is_none());
-        assert!(view.preflight_id.is_empty());
-        assert!(!view
-            .source_refs
-            .iter()
-            .any(|source| source == "native_confirmation:server_challenge_pending"));
-    }
-
-    #[test]
     fn danger_action_preflight_safe_mode_blocks_destructive_actions() {
         for action_type in [
             "data_import_overwrite",
             "mcp_audit_cleanup",
             "mcp_audit_key_rotation",
-            "agent_run_delete",
-            "agent_run_bulk_delete",
             "vector_rebuild",
         ] {
             let view = danger_action_preflight_for_action(action_type, true).unwrap();
@@ -6433,8 +6307,6 @@ mod tests {
             "mcp_audit_export",
             "mcp_audit_cleanup",
             "mcp_audit_key_rotation",
-            "agent_run_delete",
-            "agent_run_bulk_delete",
             "vector_rebuild",
         ]
         .into_iter()

@@ -16,51 +16,40 @@ use tauri::State;
 struct DurableProviderTruth {
     route_type: ProviderRouteType,
     external_transmission: ExternalTransmissionStatus,
-    event_id: String,
-    event_type: String,
+    turn_id: String,
+    turn_status: String,
 }
 
-fn durable_provider_truth(
-    event: &crate::main_chat_event_stream::MainChatAgentDurableEvent,
-) -> Option<DurableProviderTruth> {
-    if !matches!(
-        event.source.as_str(),
-        "provider_adapter" | "openlife_turn_runtime"
-    ) || event.object_type != "provider_request"
-    {
-        return None;
-    }
-    let provider = event.payload.get("provider")?.as_str()?.trim();
-    if provider.is_empty() {
-        return None;
-    }
-    let local = provider.eq_ignore_ascii_case("ollama");
+async fn durable_provider_truth(state: &Arc<AppState>) -> Option<DurableProviderTruth> {
+    let store = state.conversation_store.as_ref()?.lock().await;
+    let conversation = store.list_conversations(true, 1).ok()?.into_iter().next()?;
+    let turn = store.latest_turn(&conversation.id).ok()??;
+    let local = turn.provider.provider_id.eq_ignore_ascii_case("ollama")
+        || turn.provider.endpoint_class.eq_ignore_ascii_case("local");
     let route_type = if local {
         ProviderRouteType::Local
     } else {
         ProviderRouteType::Cloud
     };
-    let external_transmission = match (event.event_type.as_str(), local) {
-        ("provider.completed" | "provider.failed", false) => ExternalTransmissionStatus::Sent,
+    let external_transmission = match (turn.status, local) {
+        (_, true) => ExternalTransmissionStatus::NotSent,
         (
-            "provider.completed"
-            | "provider.failed"
-            | "provider.started"
-            | "provider.remote_unknown",
-            true,
-        ) => ExternalTransmissionStatus::NotSent,
-        // Dispatch started, but no remote terminal was observed. The local
-        // boundary cannot claim whether the remote side received the payload.
-        ("provider.started" | "provider.remote_unknown", false) => {
-            ExternalTransmissionStatus::Unknown
-        }
-        _ => return None,
+            openlife_core::conversation::TurnStatus::Completed
+            | openlife_core::conversation::TurnStatus::Failed,
+            false,
+        ) => ExternalTransmissionStatus::Sent,
+        (
+            openlife_core::conversation::TurnStatus::Running
+            | openlife_core::conversation::TurnStatus::Cancelled
+            | openlife_core::conversation::TurnStatus::Interrupted,
+            false,
+        ) => ExternalTransmissionStatus::Unknown,
     };
     Some(DurableProviderTruth {
         route_type,
         external_transmission,
-        event_id: event.event_id.clone(),
-        event_type: event.event_type.clone(),
+        turn_id: turn.id,
+        turn_status: turn.status.as_str().into(),
     })
 }
 
@@ -86,12 +75,7 @@ pub(crate) async fn get_provider_privacy_boundary_summary_with_state(
         validation.status = "runtime_generation_incoherent";
         validation.last_error = Some("provider_runtime_generation_incoherent".into());
     }
-    let durable_provider_truth =
-        crate::main_chat_event_stream::latest_main_chat_provider_event_with_state(state)
-            .await
-            .map_err(|error| format!("provider receipt read failed: {error}"))?
-            .as_ref()
-            .and_then(durable_provider_truth);
+    let durable_provider_truth = durable_provider_truth(state).await;
     // ProviderPrivacy reports the same concrete route that Main Chat and the
     // shipped status probe will enforce. AppConfig remains the policy owner;
     // the scheduler snapshot remains the provider/base route owner.
@@ -137,8 +121,8 @@ pub(crate) async fn get_provider_privacy_boundary_summary_with_state(
     }
     if let Some(truth) = durable_provider_truth.as_ref() {
         evidence_refs.push(source_ref(
-            format!("provider_receipt_event:{}", truth.event_id),
-            format!("Durable provider adapter event: {}", truth.event_type),
+            format!("conversation_turn:{}", truth.turn_id),
+            format!("Canonical provider-bound Turn: {}", truth.turn_status),
             EvidenceSource::Provider,
         ));
     }
@@ -232,153 +216,5 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
         message: message.into(),
         severity: ViewModelWarningSeverity::Warning,
         evidence_refs: Vec::new(),
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    async fn append_provider_event(
-        state: &Arc<AppState>,
-        event_type: &str,
-        status: &str,
-    ) -> crate::main_chat_event_stream::MainChatAgentDurableEvent {
-        let started = crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
-            state,
-            "provider-privacy-task",
-            "provider-privacy-run",
-            "provider.started",
-            "provider_request",
-            "provider-request-1",
-            "provider_adapter",
-            serde_json::json!({
-                "requestId": "provider-request-1",
-                "provider": "openai",
-                "model": "gpt-test",
-                "status": "started",
-            }),
-        )
-        .await
-        .unwrap();
-        if event_type == "provider.started" {
-            return started;
-        }
-        crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
-            state,
-            "provider-privacy-task",
-            "provider-privacy-run",
-            event_type,
-            "provider_request",
-            "provider-request-1",
-            "provider_adapter",
-            serde_json::json!({
-                "requestId": "provider-request-1",
-                "provider": "openai",
-                "model": "gpt-test",
-                "status": status,
-            }),
-        )
-        .await
-        .unwrap()
-    }
-
-    #[tokio::test]
-    async fn provider_privacy_consumes_durable_completed_provider_receipt() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let event = append_provider_event(&state, "provider.completed", "completed").await;
-
-        let envelope = get_provider_privacy_boundary_summary_with_state(&state)
-            .await
-            .unwrap();
-        let summary = envelope.data.unwrap();
-
-        assert_eq!(
-            summary.external_transmission,
-            openlife_core::agent::ExternalTransmissionStatus::Sent
-        );
-        assert_eq!(
-            summary.route_type,
-            openlife_core::agent::ProviderRouteType::Cloud
-        );
-        assert!(envelope
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.id.contains(&event.event_id)));
-    }
-
-    #[tokio::test]
-    async fn confirmed_failed_cloud_receipt_proves_external_transmission() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        append_provider_event(&state, "provider.failed", "failed").await;
-
-        let envelope = get_provider_privacy_boundary_summary_with_state(&state)
-            .await
-            .unwrap();
-        let summary = envelope.data.unwrap();
-
-        assert_eq!(
-            summary.external_transmission,
-            openlife_core::agent::ExternalTransmissionStatus::Sent
-        );
-        assert_eq!(
-            summary.route_type,
-            openlife_core::agent::ProviderRouteType::Cloud
-        );
-    }
-
-    #[tokio::test]
-    async fn started_cloud_request_without_terminal_keeps_transmission_unknown() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        append_provider_event(&state, "provider.started", "started").await;
-
-        let envelope = get_provider_privacy_boundary_summary_with_state(&state)
-            .await
-            .unwrap();
-        assert_eq!(
-            envelope.data.unwrap().external_transmission,
-            openlife_core::agent::ExternalTransmissionStatus::Unknown
-        );
-    }
-
-    #[tokio::test]
-    async fn non_adapter_event_cannot_shadow_the_latest_durable_provider_receipt() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let trusted = append_provider_event(&state, "provider.completed", "completed").await;
-        let rejected = crate::main_chat_event_stream::append_main_chat_agent_runtime_event(
-            &state,
-            "provider-privacy-task",
-            "provider-privacy-run",
-            "provider.started",
-            "provider_request",
-            "non-adapter-provider-request",
-            "test_fixture",
-            serde_json::json!({
-                "requestId": "non-adapter-provider-request",
-                "provider": "openai",
-                "model": "gpt-test",
-                "status": "started",
-            }),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            rejected.contains("provider_lifecycle_start_proof_mismatch"),
-            "a schema-valid non-adapter lifecycle event must fail before it can obtain provider durability authority: {rejected}"
-        );
-
-        let envelope = get_provider_privacy_boundary_summary_with_state(&state)
-            .await
-            .unwrap();
-        let summary = envelope.data.unwrap();
-
-        assert_eq!(
-            summary.external_transmission,
-            openlife_core::agent::ExternalTransmissionStatus::Sent
-        );
-        assert!(envelope
-            .evidence_refs
-            .iter()
-            .any(|evidence| evidence.id.contains(&trusted.event_id)));
     }
 }

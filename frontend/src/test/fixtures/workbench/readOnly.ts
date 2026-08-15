@@ -5,16 +5,13 @@ import type {
   TasksViewModel,
   ViewModelEnvelope,
 } from "@/tauri";
-import {
-  buildTodayViewModelEnvelope,
-  type BuildTodayViewModelEnvelopeInput,
-} from "@/viewmodels/today/todayViewModelAdapter";
-import { makeDailyGoal, makeLifeStateProjection } from "@/viewmodels/today/todayViewModel.fixtures";
-import type {
-  ReadOnlySpineDataSource,
-  TasksReadOnlySnapshot,
-  TodayReadOnlySnapshot,
-} from "@/ui/journeys/readOnly";
+import type { ProductBoundaryDataSource } from "@/ui/journeys/productWorkbench";
+
+type TasksReadOnlySnapshot = {
+  envelope: ViewModelEnvelope<TasksViewModel>;
+  boundaryEnvelope: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
+  diagnostics: Array<{ id: string; status: string; message?: string }>;
+};
 
 export type WorkbenchFixtureId =
   | "fixture-ready"
@@ -103,10 +100,11 @@ function task(
     canonicalTaskId,
     relatedRunIds: [],
     title,
-    strategy: "react",
     lifecycleStatus: "running",
     terminalDeliveryStatus: "not_terminal",
     finalDeliveryEvidencePresent: false,
+    items: [],
+    artifacts: [],
     pendingBlockers: [],
     pendingReviewItemRefs: [],
     allowedControls: [],
@@ -136,6 +134,35 @@ const readyTasks: TaskViewModelItem[] = [
     canonicalTaskId: "task-weekly-brief",
     title: "把本周项目进展汇总成一页周报",
     lifecycleStatus: "running",
+    items: [
+      {
+        id: "item:weekly-brief:document-read",
+        runId: "run:weekly-brief",
+        sequence: 3,
+        kind: "tool_call",
+        status: "completed",
+        summaryCode: "work_tool_call:document.read",
+        evidenceRefs: [taskEvidence("item:weekly-brief:document-read", "本地文档读取")],
+      },
+      {
+        id: "item:weekly-brief:document-observation",
+        runId: "run:weekly-brief",
+        sequence: 4,
+        kind: "observation",
+        status: "completed",
+        summaryCode: "work_tool_observation:document.read",
+        evidenceRefs: [taskEvidence("item:weekly-brief:document-observation", "本地文档结果")],
+      },
+      {
+        id: "item:weekly-brief:provider",
+        runId: "run:weekly-brief",
+        sequence: 5,
+        kind: "provider_generation",
+        status: "running",
+        summaryCode: "work_provider_generation",
+        evidenceRefs: [taskEvidence("item:weekly-brief:provider", "模型生成状态")],
+      },
+    ],
     latestResultPreview: {
       status: "not_terminal",
       label: "正在整理本地笔记",
@@ -149,6 +176,47 @@ const readyTasks: TaskViewModelItem[] = [
     lifecycleStatus: "completed",
     terminalDeliveryStatus: "delivered",
     finalDeliveryEvidencePresent: true,
+    artifacts: [
+      {
+        artifactId: "artifact:travel-checklist",
+        version: 1,
+        status: "materialized",
+        mediaType: "text/markdown; charset=utf-8",
+        contentDigest: "sha256:travel-checklist-v1",
+        targetReferenceDigest: "sha256:travel-checklist-target",
+        materializedReference: "/OpenLife/Results/travel-checklist.md",
+        observedContentDigest: "sha256:travel-checklist-v1",
+        proposalRef: {
+          id: "proposal:travel-checklist-v1",
+          kind: "review_item",
+          label: "清单写入审核",
+        },
+        sourceItemRef: {
+          id: "item:travel-checklist-delivery",
+          kind: "evidence",
+          label: "清单产物草稿",
+        },
+        evidenceRefs: [taskEvidence("artifact:travel-checklist:v1", "清单产物版本")],
+        change: {
+          kind: "create",
+          status: "materialized",
+          targetReference: "/OpenLife/Results/travel-checklist.md",
+        },
+        preview: {
+          status: "available",
+          content: "# 周末出行清单\n\n- 证件\n- 交通\n- 天气",
+        },
+        verification: {
+          status: "verified",
+          expectedContentDigest: "sha256:travel-checklist-v1",
+          observedContentDigest: "sha256:travel-checklist-v1",
+          verificationItemPresent: true,
+        },
+        undo: {
+          available: true,
+        },
+      },
+    ],
     latestResultPreview: {
       status: "delivered",
       label: "清单已交付",
@@ -204,9 +272,13 @@ function tasksEnvelope(
     items,
     summary: {
       total: items.length,
+      needsAttentionCount: items.filter(item => item.needsAttention).length,
       activeCount: items.filter(item =>
-        ["running", "waiting_permission", "blocked"].includes(item.lifecycleStatus)
+        ["running", "waiting_review", "waiting_permission", "blocked"].includes(
+          item.lifecycleStatus
+        )
       ).length,
+      waitingReviewCount: items.filter(item => item.lifecycleStatus === "waiting_review").length,
       waitingPermissionCount: items.filter(item => item.lifecycleStatus === "waiting_permission")
         .length,
       blockedCount: items.filter(item => item.lifecycleStatus === "blocked").length,
@@ -274,102 +346,7 @@ function tasksEnvelope(
   };
 }
 
-function todayInput(id: WorkbenchFixtureId): BuildTodayViewModelEnvelopeInput {
-  if (id === "fixture-error") {
-    return {
-      projection: null,
-      status: "error",
-      errorMessage: "LifeStateProjection fixture could not be loaded.",
-    };
-  }
-  if (id === "fixture-empty") {
-    return {
-      projection: makeLifeStateProjection({
-        generatedAt,
-        pending: {
-          pendingProposalCount: 0,
-          editedProposalCount: 0,
-          totalReviewRequiredCount: 0,
-          highRiskReviewRequiredCount: 0,
-          proposalStoreStatus: "ok",
-          requiresUserAction: false,
-        },
-        taskState: {
-          taskStoreStatus: "ok",
-          latestTaskId: null,
-          latestTaskStatus: null,
-          runningCount: 0,
-          waitingPermissionCount: 0,
-          blockedCount: 0,
-          failedCount: 0,
-          cancelledCount: 0,
-          completedCount: 0,
-          activeCount: 0,
-        },
-      }),
-      dailyGoals: [],
-      providerPrivacyBoundary: localBoundary,
-      status: "empty",
-    };
-  }
-  return {
-    projection: makeLifeStateProjection({
-      generatedAt,
-      pending: {
-        pendingProposalCount: 1,
-        editedProposalCount: 0,
-        totalReviewRequiredCount: 1,
-        highRiskReviewRequiredCount: 0,
-        proposalStoreStatus: "ok",
-        requiresUserAction: true,
-      },
-      taskState: {
-        taskStoreStatus: "ok",
-        latestTaskId: "task-weekly-brief",
-        latestTaskStatus: "running",
-        runningCount: 1,
-        waitingPermissionCount: 1,
-        blockedCount: 0,
-        failedCount: 0,
-        cancelledCount: 0,
-        completedCount: 1,
-        activeCount: 2,
-      },
-    }),
-    dailyGoals: [
-      makeDailyGoal({
-        name: "整理下周客户访谈要验证的三个问题",
-        time_block: { start: "09:30", end: "10:30" },
-      }),
-    ],
-    providerPrivacyBoundary: localBoundary,
-    status: id === "fixture-stale" ? "stale" : "ready",
-    lastUpdatedAt: id === "fixture-stale" ? "2026-07-15T08:30:00.000Z" : generatedAt,
-  };
-}
-
-function makeTodaySnapshot(id: WorkbenchFixtureId): TodayReadOnlySnapshot {
-  const boundaryStatus =
-    id === "fixture-error" ? "error" : id === "fixture-stale" ? "stale" : "ready";
-  return {
-    envelope: buildTodayViewModelEnvelope(todayInput(id)),
-    boundaryEnvelope: boundaryEnvelope(
-      boundaryStatus,
-      boundaryStatus === "error" ? null : localBoundary
-    ),
-    diagnostics: [
-      {
-        id: "life_state_projection",
-        status: id === "fixture-error" ? "failed" : "loaded",
-        message: id === "fixture-error" ? "Static error fixture." : undefined,
-      },
-      { id: "daily_goals", status: id === "fixture-error" ? "failed" : "loaded" },
-      { id: "provider_privacy", status: id === "fixture-error" ? "failed" : "loaded" },
-    ],
-  };
-}
-
-function makeTasksSnapshot(id: WorkbenchFixtureId): TasksReadOnlySnapshot {
+export function makeTasksSnapshot(id: WorkbenchFixtureId): TasksReadOnlySnapshot {
   const status =
     id === "fixture-error"
       ? "error"
@@ -414,13 +391,11 @@ export const workbenchFixtureLabels: Record<WorkbenchFixtureId, string> = {
   "fixture-settings-save-failed": "设置：保存失败",
 };
 
-export function readOnlyFixtureDataSource(id: WorkbenchFixtureId): ReadOnlySpineDataSource {
+export function readOnlyFixtureDataSource(id: WorkbenchFixtureId): ProductBoundaryDataSource {
   return {
-    async loadToday() {
-      return makeTodaySnapshot(id);
-    },
-    async loadTasks() {
-      return makeTasksSnapshot(id);
+    async loadBoundary() {
+      const status = id === "fixture-error" ? "error" : id === "fixture-stale" ? "stale" : "ready";
+      return boundaryEnvelope(status, status === "error" ? null : localBoundary);
     },
   };
 }

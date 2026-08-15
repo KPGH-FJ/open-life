@@ -199,7 +199,7 @@ export function LifeModelBuilderPanel({
           <p>当前仍是空模型；只有 Review 批准并成功物化后，第一条长期信息才会成为规范版本。</p>
           {onOpenReview ? (
             <FoundationActionButton
-              label="前往审核中心"
+              label="前往需处理"
               icon={<ArrowRight size={17} aria-hidden="true" />}
               variant="primary"
               onClick={onOpenReview}

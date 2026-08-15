@@ -20,13 +20,13 @@ function control(overrides: Partial<TaskControl> = {}): TaskControl {
 function task(overrides: Partial<TaskViewModelItem> = {}): TaskViewModelItem {
   return {
     canonicalTaskId: "task-1",
-    taskSessionId: "task-1",
     relatedRunIds: [],
     title: "整理访谈",
-    strategy: "react",
     lifecycleStatus: "running",
     terminalDeliveryStatus: "not_terminal",
     finalDeliveryEvidencePresent: false,
+    items: [],
+    artifacts: [],
     pendingBlockers: [],
     pendingReviewItemRefs: [],
     allowedControls: [],

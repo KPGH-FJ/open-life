@@ -5,6 +5,10 @@ const mocks = vi.hoisted(() => ({
   listeners: new Map<string, (event: { payload: unknown }) => void>(),
   unlisten: vi.fn(),
   startStreamMessage: vi.fn(),
+  cancelChatTurn: vi.fn(),
+  cancelWorkTask: vi.fn(),
+  createProject: vi.fn(),
+  assignConversationProject: vi.fn(),
   pickAndImportResources: vi.fn(),
   detachResourceFromTurn: vi.fn(),
   listMainChatSkills: vi.fn(),
@@ -12,9 +16,11 @@ const mocks = vi.hoisted(() => ({
   clearMainChatSkill: vi.fn(),
   listMainChatToolCandidates: vi.fn(),
   getMarkdownMemoryViewModel: vi.fn(),
+  getConversationViewModel: vi.fn(),
   selectMarkdownMemoryRoot: vi.fn(),
   draftMarkdownMemoryFileProposal: vi.fn(),
   deactivateMarkdownMemoryFileProposal: vi.fn(),
+  submitMainChatTaskSteering: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/api/event", () => ({
@@ -26,11 +32,13 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@/tauri", () => ({
   cancelMainChatAgentTask: vi.fn(),
+  cancelChatTurn: mocks.cancelChatTurn,
+  cancelWorkTask: mocks.cancelWorkTask,
   createChatSession: vi.fn(),
+  createProject: mocks.createProject,
+  assignConversationProject: mocks.assignConversationProject,
   deleteChatSession: vi.fn(),
-  getChatHistory: vi.fn(),
-  getChatLifeModelInfluence: vi.fn(),
-  listChatSessions: vi.fn(),
+  getConversationViewModel: mocks.getConversationViewModel,
   renameChatSession: vi.fn(),
   startStreamMessage: mocks.startStreamMessage,
   pickAndImportResources: mocks.pickAndImportResources,
@@ -43,6 +51,7 @@ vi.mock("@/tauri", () => ({
   selectMarkdownMemoryRoot: mocks.selectMarkdownMemoryRoot,
   draftMarkdownMemoryFileProposal: mocks.draftMarkdownMemoryFileProposal,
   deactivateMarkdownMemoryFileProposal: mocks.deactivateMarkdownMemoryFileProposal,
+  submitMainChatTaskSteering: mocks.submitMainChatTaskSteering,
 }));
 
 import { tauriWorkspaceConversationDataSource } from "./workspaceConversationDataSource";
@@ -52,6 +61,9 @@ describe("workspace conversation Tauri stream adapter", () => {
     mocks.listeners.clear();
     mocks.unlisten.mockClear();
     mocks.startStreamMessage.mockReset();
+    mocks.cancelWorkTask.mockReset();
+    mocks.createProject.mockReset();
+    mocks.assignConversationProject.mockReset();
     mocks.pickAndImportResources.mockReset();
     mocks.detachResourceFromTurn.mockReset();
     mocks.listMainChatSkills.mockReset();
@@ -59,9 +71,11 @@ describe("workspace conversation Tauri stream adapter", () => {
     mocks.clearMainChatSkill.mockReset();
     mocks.listMainChatToolCandidates.mockReset();
     mocks.getMarkdownMemoryViewModel.mockReset();
+    mocks.getConversationViewModel.mockReset();
     mocks.selectMarkdownMemoryRoot.mockReset();
     mocks.draftMarkdownMemoryFileProposal.mockReset();
     mocks.deactivateMarkdownMemoryFileProposal.mockReset();
+    mocks.submitMainChatTaskSteering.mockReset();
   });
 
   it("keeps Markdown Memory reads, root selection, writes, and deactivation on backend bridges", async () => {
@@ -160,7 +174,7 @@ describe("workspace conversation Tauri stream adapter", () => {
       payload: {
         session_id: "conversation-1",
         operation_id: "another-operation",
-        task_session_id: "wrong-task",
+        task_id: "wrong-task",
         run_id: "wrong-run",
         reasoning_trace: {},
         tool_calls: [],
@@ -170,7 +184,7 @@ describe("workspace conversation Tauri stream adapter", () => {
       payload: {
         session_id: "another-conversation",
         operation_id: "operation-1",
-        task_session_id: "wrong-task",
+        task_id: "wrong-task",
         run_id: "wrong-run",
         chunk: "错误回复",
       } satisfies StreamMessageChunkPayload,
@@ -181,7 +195,7 @@ describe("workspace conversation Tauri stream adapter", () => {
     const exactStart = {
       session_id: "conversation-1",
       operation_id: "operation-1",
-      task_session_id: "task-1",
+      task_id: "task-1",
       run_id: "run-1",
       reasoning_trace: {},
       tool_calls: [],
@@ -189,7 +203,7 @@ describe("workspace conversation Tauri stream adapter", () => {
     const exactChunk = {
       session_id: "conversation-1",
       operation_id: "operation-1",
-      task_session_id: "task-1",
+      task_id: "task-1",
       run_id: "run-1",
       chunk: "正确回复",
     } satisfies StreamMessageChunkPayload;
@@ -201,7 +215,7 @@ describe("workspace conversation Tauri stream adapter", () => {
     finish({
       session_id: "conversation-1",
       operation_id: "operation-1",
-      task_session_id: "task-1",
+      task_id: "task-1",
       run_id: "run-1",
       reply: "正确回复",
       status: "completed",

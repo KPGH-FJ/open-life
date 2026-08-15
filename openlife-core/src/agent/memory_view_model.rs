@@ -649,7 +649,7 @@ mod tests {
         MemoryLifecycleRecord {
             memory_id: id.into(),
             proposal_id: proposal_id.into(),
-            source_task_session_id: None,
+            source_task_id: None,
             source_run_id: None,
             content: "metadata-safe content".into(),
             scope: crate::agent::memory_lifecycle::MemoryLifecycleScope::Global,

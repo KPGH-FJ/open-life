@@ -376,19 +376,19 @@ export function useSettingsPrivacyJourney(
   );
 
   const validation = useMemo(() => validateSettingsDraft(draft), [draft]);
-  const eligibleCredentialPurposes = useMemo(
-    () =>
-      dataSource?.initializeRequiredCredentials
-        ? (snapshot?.credentialBootstrap?.purposes ?? [])
-            .filter(
-              purpose =>
-                purpose.status === "initialization_required" || purpose.status === "unavailable"
-            )
-            .map(purpose => purpose.purpose)
-            .sort()
-        : [],
-    [dataSource, snapshot?.credentialBootstrap]
-  );
+  const eligibleCredentialPurposes = useMemo(() => {
+    if (!dataSource?.initializeRequiredCredentials) return [];
+    const purposes = snapshot?.credentialBootstrap?.purposes ?? [];
+    const unavailable = purposes
+      .filter(purpose => purpose.status === "unavailable")
+      .map(purpose => purpose.purpose)
+      .sort();
+    if (unavailable.length > 0) return unavailable;
+    return purposes
+      .filter(purpose => purpose.status === "initialization_required")
+      .map(purpose => purpose.purpose)
+      .sort();
+  }, [dataSource, snapshot?.credentialBootstrap]);
   const credentialAccessRecoveryRequired = useMemo(
     () =>
       (snapshot?.credentialBootstrap?.purposes ?? []).some(
@@ -669,7 +669,7 @@ export function useSettingsPrivacyJourney(
         announce(
           report.restartRequired
             ? credentialAccessRecoveryRequired
-              ? "既有凭据访问已经恢复；必须完全重启 OpenLife 后才能重新判断可用状态。"
+              ? "本次凭据读取已经获得系统许可；必须完全重启 OpenLife，并由非交互启动读取验证持续访问。"
               : "系统凭据初始化已经完成；必须完全重启 OpenLife 后才能重新判断可用状态。"
             : "凭据恢复未完成；当前继续保持阻塞。"
         );

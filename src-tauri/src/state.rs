@@ -2,8 +2,8 @@
 //! Holds all shared state for the Tauri application, including
 //! store handles, registries, configuration, and lifecycle signals.
 
-use crate::a2a_sidecar;
 use openlife_core::config::AppConfig;
+use openlife_core::conversation::ConversationStore;
 use openlife_core::feedback::FeedbackStore;
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
@@ -61,14 +61,8 @@ pub struct CredentialBootstrapSnapshot {
 }
 
 impl CredentialBootstrapSnapshot {
-    pub(crate) fn from_statuses(statuses: [CredentialBootstrapStatus; 5]) -> Self {
-        let purpose_names = [
-            "agent_run_receipts",
-            "main_chat_events",
-            "action_queue",
-            "task_store",
-            "mcp_audit",
-        ];
+    pub(crate) fn from_statuses(statuses: [CredentialBootstrapStatus; 3]) -> Self {
+        let purpose_names = ["canonical_task_receipts", "task_store", "mcp_audit"];
         let mut purposes = purpose_names
             .into_iter()
             .zip(statuses)
@@ -81,6 +75,10 @@ impl CredentialBootstrapSnapshot {
             purpose: "provider_api_key".into(),
             status: CredentialBootstrapStatus::MissingExistingData,
         });
+        purposes.push(CredentialPurposeBootstrapState {
+            purpose: "search_provider_api_key".into(),
+            status: CredentialBootstrapStatus::MissingExistingData,
+        });
         Self::from_purposes(purposes)
     }
 
@@ -89,6 +87,17 @@ impl CredentialBootstrapSnapshot {
             .purposes
             .iter_mut()
             .find(|item| item.purpose == "provider_api_key")
+        {
+            provider.status = status;
+        }
+        Self::from_purposes(self.purposes)
+    }
+
+    pub(crate) fn with_search_provider_status(mut self, status: CredentialBootstrapStatus) -> Self {
+        if let Some(provider) = self
+            .purposes
+            .iter_mut()
+            .find(|item| item.purpose == "search_provider_api_key")
         {
             provider.status = status;
         }
@@ -117,7 +126,7 @@ impl CredentialBootstrapSnapshot {
 
 impl Default for CredentialBootstrapSnapshot {
     fn default() -> Self {
-        Self::from_statuses([CredentialBootstrapStatus::Unknown; 5])
+        Self::from_statuses([CredentialBootstrapStatus::Unknown; 3])
     }
 }
 
@@ -175,15 +184,23 @@ fn provider_runtime_is_coherent(config: &AppConfig, scheduler: &InferenceSchedul
 }
 
 /// In-memory Main Chat route evidence for the current app process.
-#[derive(Clone, Debug, Default)]
+const DEFAULT_MAIN_CHAT_CONCURRENCY_LIMIT: usize = 3;
+
+#[derive(Clone, Debug)]
 pub struct MainChatRuntimeState {
-    pub legacy_fallback_used_count: u64,
-    pub last_legacy_fallback_reason_code: Option<String>,
-    pub last_legacy_fallback_at: Option<String>,
-    pub last_kernel_event_count: Option<usize>,
-    pub latest_turn_route_evidence: Option<MainChatTurnRouteEvidenceSnapshot>,
-    pub latest_final_gate_readiness: Option<MainChatFinalGateReadinessSnapshot>,
     pub(crate) cancellation_registry: crate::main_chat_cancellation::MainChatCancellationRegistry,
+    pub(crate) execution_slots: Arc<tokio::sync::Semaphore>,
+}
+
+impl Default for MainChatRuntimeState {
+    fn default() -> Self {
+        Self {
+            cancellation_registry: Default::default(),
+            execution_slots: Arc::new(tokio::sync::Semaphore::new(
+                DEFAULT_MAIN_CHAT_CONCURRENCY_LIMIT,
+            )),
+        }
+    }
 }
 
 impl MainChatRuntimeState {
@@ -208,30 +225,6 @@ impl VectorPersistenceMode {
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct MainChatFinalGateReadinessSnapshot {
-    pub status: String,
-    pub blockers: Vec<String>,
-    pub last_report_run_id: Option<String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct MainChatTurnRouteEvidenceSnapshot {
-    pub stream_mode: String,
-    pub execution_path: String,
-    pub strategy_label: String,
-    pub reason_code: String,
-    pub kernel_supported: bool,
-    pub kernel_support_disposition: String,
-    pub fallback_allowed: bool,
-    pub requires_tool_loop: bool,
-    pub observed_agent_loop: bool,
-    pub observed_agent_loop_without_fallback: bool,
-    pub legacy_fallback_used: bool,
-    pub kernel_event_count: Option<usize>,
-    pub recorded_at: String,
-}
-
 /// Central application state shared across all Tauri commands.
 #[derive(Clone)]
 pub struct AppState {
@@ -247,6 +240,9 @@ pub struct AppState {
     /// and derived projection protocol. It never owns product data itself.
     pub life_model_write_coordinator: Arc<Mutex<()>>,
     pub memory_store: Arc<Mutex<MemoryStore>>,
+    /// R1 canonical owner for ordinary Chat Conversation, Turn, and Item
+    /// lifecycle. It is intentionally independent of Memory and Task stores.
+    pub conversation_store: Option<Arc<Mutex<ConversationStore>>>,
     pub mcp_registry: Arc<Mutex<McpRegistry>>,
     pub scheduler: Arc<Mutex<InferenceScheduler>>,
     pub privacy_engine: Arc<Mutex<PrivacyEngine>>,
@@ -254,26 +250,20 @@ pub struct AppState {
     pub feedback_store: Arc<Mutex<FeedbackStore>>,
     pub vector_store: Arc<Mutex<VectorStore>>,
     pub vector_persistence_mode: VectorPersistenceMode,
-    pub a2a_sidecar: Arc<Mutex<a2a_sidecar::A2ASidecar>>,
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
-    pub agent_run_store: Option<Arc<Mutex<openlife_core::agent::AgentRunStore>>>,
+    /// Canonical Work owner for Task, Run, Item, ItemAttempt, FinalResult, and
+    /// Artifact metadata. Its receipts use the independent canonical Task
+    /// authority; retired run-store state is not part of this lifecycle.
+    pub canonical_task_runtime_store:
+        Option<Arc<Mutex<openlife_core::task_runtime::CanonicalTaskRuntimeStore>>>,
     pub evidence_store: Arc<Mutex<openlife_core::agent::EvidenceStore>>,
-    pub life_event_store: Option<Arc<Mutex<openlife_core::agent::LifeEventStore>>>,
     pub policy_store: Arc<openlife_core::agent::PolicyStore>,
     pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
     pub memory_lifecycle_store: Option<Arc<Mutex<openlife_core::agent::MemoryLifecycleStore>>>,
     /// Bounded Observation/Candidate bridge for LifeModel learning. It does
     /// not own proposals or canonical LifeModel state.
     pub life_model_learning_store: Option<Arc<Mutex<openlife_core::agent::LifeModelLearningStore>>>,
-    pub plan_execute_session_store:
-        Option<Arc<Mutex<openlife_core::agent::PlanExecuteSessionStore>>>,
-    pub main_chat_agent_session_store:
-        Option<Arc<Mutex<openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStore>>>,
-    pub main_chat_action_queue_store:
-        Option<Arc<Mutex<openlife_core::agent::main_chat_agent_v1::ActionQueueStore>>>,
-    pub main_chat_agent_event_store:
-        Option<Arc<Mutex<crate::main_chat_event_stream::MainChatAgentEventStore>>>,
     pub main_chat_runtime_state: Arc<Mutex<MainChatRuntimeState>>,
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,
@@ -285,8 +275,6 @@ pub struct AppState {
     pub credential_bootstrap_snapshot: CredentialBootstrapSnapshot,
     pub provider_health_cache: Arc<tokio::sync::Mutex<Option<ProviderHealthCache>>>,
     pub scheduled_task_store: Arc<openlife_core::tasks::TaskStore>,
-    pub(crate) runtime_clock_source:
-        Arc<tokio::sync::Mutex<crate::main_chat_runtime_facts::MainChatRuntimeClockSource>>,
     pub web_search_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
     pub(crate) resource_runtime: Option<Arc<crate::resource_commands::ResourceRuntime>>,
     /// Canonical ADR 0015 owner. Absence is an explicit degraded state; release

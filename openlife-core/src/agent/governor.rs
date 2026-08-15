@@ -1,5 +1,4 @@
 use crate::agent::policy_store::BUILTIN_POLICY_EXTERNAL_WRITES_PROPOSAL_FIRST;
-use crate::agent::runtime_contract::RuntimeInput;
 use crate::agent::types::{ProposalType, RiskLevel};
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
@@ -8,7 +7,6 @@ use serde_json::{json, Value};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GovernanceSubject {
-    RuntimeInput,
     ToolAction,
     ModelRoute,
     MemoryWrite,
@@ -18,7 +16,6 @@ pub enum GovernanceSubject {
 impl GovernanceSubject {
     fn as_str(self) -> &'static str {
         match self {
-            GovernanceSubject::RuntimeInput => "runtime_input",
             GovernanceSubject::ToolAction => "tool_action",
             GovernanceSubject::ModelRoute => "model_route",
             GovernanceSubject::MemoryWrite => "memory_write",
@@ -298,51 +295,6 @@ impl LifeModelGovernor {
                 source_run_id,
                 None,
                 reason_code,
-            ),
-            Vec::new(),
-        )
-    }
-
-    pub fn govern_runtime_input(
-        &self,
-        input: &RuntimeInput,
-        local_model_available: bool,
-    ) -> GovernanceDecision {
-        if input.policy_context.provider_authorization().data_route()
-            == crate::llm::ProviderDataRoute::LocalOnly
-            && !local_model_available
-        {
-            return decision(
-                GovernanceSubject::ModelRoute,
-                GovernanceDecisionKind::Block,
-                RiskLevel::High,
-                "typed Policy requires local execution but no local model is available",
-                summary(
-                    GovernanceSubject::ModelRoute,
-                    None,
-                    None,
-                    RiskLevel::High,
-                    input.source_run_id.as_deref(),
-                    None,
-                    "local_only_model_unavailable",
-                ),
-                Vec::new(),
-            );
-        }
-
-        decision(
-            GovernanceSubject::RuntimeInput,
-            GovernanceDecisionKind::Allow,
-            RiskLevel::Low,
-            "runtime input has no explicit governed write intent",
-            summary(
-                GovernanceSubject::RuntimeInput,
-                None,
-                None,
-                RiskLevel::Low,
-                None,
-                None,
-                "no_explicit_write_intent",
             ),
             Vec::new(),
         )

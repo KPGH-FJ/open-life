@@ -57,8 +57,7 @@ pub enum ProviderPayloadCategory {
     CurrentUserConversation,
     RuntimeCompiledMessages,
     FrozenEvaluationInput,
-    MainChatReactCandidateRanking,
-    A2aAuthenticatedUserMessage,
+    MainChatToolCandidateRanking,
     ExplicitProviderProbe,
     PrivacyPolicyMasked,
 }
@@ -69,8 +68,7 @@ impl ProviderPayloadCategory {
             Self::CurrentUserConversation => "current_user_conversation",
             Self::RuntimeCompiledMessages => "runtime_compiled_messages",
             Self::FrozenEvaluationInput => "frozen_evaluation_input",
-            Self::MainChatReactCandidateRanking => "main_chat_react_candidate_ranking",
-            Self::A2aAuthenticatedUserMessage => "a2a_authenticated_user_message",
+            Self::MainChatToolCandidateRanking => "main_chat_tool_candidate_ranking",
             Self::ExplicitProviderProbe => "explicit_provider_probe",
             Self::PrivacyPolicyMasked => "privacy_policy_masked",
         }
@@ -276,10 +274,12 @@ pub enum ProviderLocalOnlyReason {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderPayloadPurpose {
     MainChatDirectAnswer,
+    MainChatEvidenceCheck,
     MainChatArtifactDraft,
-    MainChatReactRanking,
-    AgentLoopStep,
-    AgentRuntimeGeneration,
+    MainChatWorkPlan,
+    MainChatToolRanking,
+    ScheduledTaskStep,
+    ScheduledTaskGeneration,
     LayeredReasoningPhase,
     FrozenRuntimeEvaluation,
     ExplicitProviderProbe,
@@ -289,10 +289,12 @@ impl ProviderPayloadPurpose {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MainChatDirectAnswer => "main_chat_direct_answer",
+            Self::MainChatEvidenceCheck => "main_chat_evidence_check",
             Self::MainChatArtifactDraft => "main_chat_artifact_draft",
-            Self::MainChatReactRanking => "main_chat_react_ranking",
-            Self::AgentLoopStep => "agent_loop_step",
-            Self::AgentRuntimeGeneration => "agent_runtime_generation",
+            Self::MainChatWorkPlan => "main_chat_work_plan",
+            Self::MainChatToolRanking => "main_chat_tool_ranking",
+            Self::ScheduledTaskStep => "scheduled_task_step",
+            Self::ScheduledTaskGeneration => "scheduled_task_generation",
             Self::LayeredReasoningPhase => "layered_reasoning_phase",
             Self::FrozenRuntimeEvaluation => "frozen_runtime_evaluation",
             Self::ExplicitProviderProbe => "explicit_provider_probe",
@@ -1424,22 +1426,33 @@ impl PreparedProviderRequest {
     }
 
     pub fn system_prompt(&self) -> Option<String> {
-        let prompt = self
-            .context_blocks
-            .iter()
-            .filter_map(|block| {
-                let content = block.content.trim();
-                (!content.is_empty()).then(|| {
-                    format!(
-                        "[context:{}:{}]\n{}",
-                        block.category, block.source_ref, content
-                    )
-                })
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        (!prompt.is_empty()).then_some(prompt)
+        render_provider_system_prompt(&self.context_blocks)
     }
+}
+
+fn render_provider_system_prompt(context_blocks: &[BoundedContextBlock]) -> Option<String> {
+    let prompt = context_blocks
+        .iter()
+        .filter_map(|block| {
+            let content = block.content.trim();
+            if content.is_empty() {
+                None
+            } else if block.category == "kernel_bounded_context" {
+                // The snapshot reference remains bound into the manifest and
+                // request digest, but it is audit metadata rather than model
+                // context. Exposing it in the prompt invites the model to
+                // repeat an internal identifier to the user.
+                Some(content.to_string())
+            } else {
+                Some(format!(
+                    "[context:{}:{}]\n{}",
+                    block.category, block.source_ref, content
+                ))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    (!prompt.is_empty()).then_some(prompt)
 }
 
 pub fn provider_label(provider: &str) -> String {
@@ -1777,6 +1790,13 @@ where
     });
     if structured_json_output && provider == "deepseek" {
         body["response_format"] = json!({ "type": "json_object" });
+        // DeepSeek V4 enables thinking by default and counts reasoning tokens
+        // against `max_tokens`. Artifact/evidence requests need the bounded
+        // budget for the validated JSON result itself; otherwise a long
+        // governed context can exhaust the budget before `content` begins.
+        // Keep ordinary Chat on the selected model's default mode and narrow
+        // this provider-specific control to structured output only.
+        body["thinking"] = json!({ "type": "disabled" });
     }
 
     let mut headers = HeaderMap::new();
@@ -2076,11 +2096,26 @@ mod tests {
         chat_completions_url, default_base_for_provider, effective_api_key_for_endpoint,
         extract_chat_content, extract_stream_content, has_reasoning_content,
         provider_credential_identity, provider_endpoint_allows_system_fake_ip_proxy,
-        provider_label, resolve_provider_chat_model,
+        provider_label, render_provider_system_prompt, resolve_provider_chat_model,
+        BoundedContextBlock,
     };
     use futures::StreamExt;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+
+    #[test]
+    fn trusted_kernel_context_does_not_expose_its_internal_snapshot_ref_to_the_model() {
+        let prompt = render_provider_system_prompt(&[BoundedContextBlock {
+            source_ref: "mainchat_ctx_deadbeef".into(),
+            category: "kernel_bounded_context".into(),
+            content: "Trusted bounded instructions.".into(),
+        }])
+        .expect("provider system prompt");
+
+        assert_eq!(prompt, "Trusted bounded instructions.");
+        assert!(!prompt.contains("mainchat_ctx_deadbeef"));
+        assert!(!prompt.contains("kernel_bounded_context"));
+    }
 
     async fn serve_provider_response(
         listener: tokio::net::TcpListener,
@@ -2255,6 +2290,7 @@ mod tests {
         let body = request.split("\r\n\r\n").nth(1).expect("HTTP request body");
         let body: serde_json::Value = serde_json::from_str(body).expect("JSON request body");
         assert_eq!(body["response_format"]["type"], "json_object");
+        assert_eq!(body["thinking"]["type"], "disabled");
     }
 
     #[test]

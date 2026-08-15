@@ -2,165 +2,128 @@
 
 ## Status
 
-Source-backed description of the current runtime. It is not a product-readiness
-claim.
+Source-backed description of the current release runtime after H6 cleanup. It
+is an architecture map, not a readiness claim. Controlled tests, exact-native
+evidence, and external-live evidence remain separate.
 
-The current ordinary Main Chat entrypoints are implemented through
-`send_message_with_state` and `start_stream_message_with_state`, which delegate
-to `OpenLifeTurnRuntime`. Local command-surface and runtime evals are evidence
-inputs, but they do not count as external live provider completion.
+Last verified: 2026-08-15.
 
-## Authority
+## Product spine
 
-Product boundaries come from `PRODUCT.md`, `AGENTS.md`, accepted ADRs, and
-current source. Superseded execution plans remain in Git history.
+OpenLife has two composer modes over one canonical Conversation owner:
 
-## Last verified
+```text
+frontend/src/tauri.ts
+  -> main_chat_send.rs | main_chat_streaming.rs
+  -> canonical_chat_runtime.rs | canonical_work_runtime.rs
+  -> main_chat_kernel.rs
+  -> ConversationStore
+  -> CanonicalTaskRuntimeStore (Work only)
+```
 
-2026-08-10 during Phase 5.5C generic runtime input convergence.
+Chat owns `Conversation -> Turn -> Item`. It records the authenticated user
+Item, provider attempt, assistant Item, and terminal Turn state. Chat never
+creates a Task.
+
+Work owns `Task -> Run -> Item -> ItemAttempt -> FinalResult` in addition to
+the same Conversation history. One Conversation may retain multiple completed
+Tasks, while the Workbench presents the currently relevant outcome. Retry
+creates a new Run and Turn under the same Task; it never creates another
+lifecycle owner.
+
+No parallel execution store, plan lifecycle, action queue, or compatibility
+IPC participates in the release graph.
 
 ## Source map
 
-- `src-tauri/src/main_chat_send.rs`
-- `src-tauri/src/main_chat_streaming.rs`
-- `src-tauri/src/main_chat_turn_runtime.rs`
-- `src-tauri/src/main_chat_turn_pipeline.rs`
+- `src-tauri/src/canonical_chat_runtime.rs`
+- `src-tauri/src/canonical_work_runtime.rs`
 - `src-tauri/src/main_chat_kernel.rs`
 - `src-tauri/src/main_chat_context_loader.rs`
-- `src-tauri/src/main_chat_policy_runtime.rs`
-- `src-tauri/src/main_chat_react_tool_selection.rs`
-- `src-tauri/src/main_chat_react_runtime.rs`
-- `src-tauri/src/main_chat_react_execution.rs`
-- `src-tauri/src/main_chat_runtime_support.rs`
-- `src-tauri/src/main_chat_command_surface_eval.rs`
-- `src-tauri/src/main_chat_final_gate.rs`
-- `src-tauri/src/main_chat_live_provider_harness.rs`
-- `src-tauri/src/main_chat_runtime_module_tests.rs`
-- `src-tauri/src/main_chat_command_surface_tests.rs`
-- `src-tauri/src/main_chat_live_provider_tests.rs`
+- `src-tauri/src/main_chat_tool_selection.rs`
+- `src-tauri/src/main_chat_tool_observation.rs`
+- `src-tauri/src/main_chat_steering.rs`
+- `src-tauri/src/personal_intelligence_ports.rs`
+- `src-tauri/src/read_models/tasks.rs`
+- `openlife-core/src/conversation.rs`
+- `openlife-core/src/task_runtime.rs`
+- `openlife-core/src/work_orchestration.rs`
 - `openlife-core/src/agent/main_chat_agent_v1.rs`
-- `openlife-core/src/agent/model_router.rs`
+- `openlife-core/src/agent/tool_gateway.rs`
 
-## Evidence Boundary
+## Planning and capability execution
 
-Runtime tests and live-provider report builders are local evidence. External
-provider behavior remains unproven until an explicitly authorized live run.
+Planning is a schema-validated Plan Item inside the current Run. The model may
+propose the structure, but Policy defines eligible capability kinds and the
+runtime validates dependencies, targets, budgets, and completion requirements.
+There is no separate plan session, plan store, or plan-specific task lifecycle.
 
-## Current Entry Flow
+The Work Item scheduler handles imported documents, workspace files, Web
+Search, Web Fetch, selected Skills, and exact registered read-only MCP tools.
+`main_chat_tool_selection.rs` builds bounded governed candidates; it is not a
+second execution runtime. Every real tool or provider dispatch becomes a
+canonical ItemAttempt with a typed receipt. Successful reads add digest-only
+Observation Items. Tool bodies and provider prompts are not stored as task
+metadata.
 
-Ordinary buffered chat enters `src-tauri/src/main_chat_send.rs`. Ordinary
-streaming chat enters `src-tauri/src/main_chat_streaming.rs`. Both wrappers
-construct `OpenLifeTurnRuntime` and pass `OpenLifeTurnInput` containing the
-session id, chat messages, optional selected skill id, and delivery mode.
+One bounded evidence-driven plan revision may continue the same Run. It cannot
+expand Policy scope, repeat a completed capability, reset budget, or erase
+earlier attempts. Failed, blocked, cancelled, and effect-unknown attempts stay
+terminal facts.
 
-`src-tauri/src/main_chat_turn_runtime.rs` owns the current runtime boundary. It
-starts or resumes an Agent task session through `start_main_chat_agent_turn`,
-decides a route, invokes the Main Chat kernel, records route evidence, and
-finalizes the task state. Its canonical delivery view separates answer text,
-completed actions, observations, proposals, blockers, and pending user actions.
+## Context, Memory, and LifeModel
 
-`src-tauri/src/main_chat_turn_pipeline.rs` is a compatibility wrapper around
-`OpenLifeTurnRuntime`. It does not make the older route family authoritative.
+`main_chat_context_loader.rs` compiles bounded Conversation history,
+workspace/configured instruction files, selected Skill instructions, accepted
+Agent Memory, and confirmed LifeModel v2 hints. Context never grants a tool,
+permission, durable write, or completion claim.
 
-## Kernel Responsibilities
+Agent Memory and LifeModel are optional typed collaborators through
+`personal_intelligence_ports.rs`. Their unavailable state degrades
+personalization without replacing Conversation or Task truth. Workspace and
+Project Markdown Memory remains a user-controlled file surface in
+`markdown_memory.rs`; the release runtime does not treat an unbound Markdown
+file as implicit model context.
 
-`src-tauri/src/main_chat_kernel.rs` is the current turn-level kernel. It builds
-bounded context, classifies write and memory intents, handles proposal/blocker
-paths, executes read-tool paths, and falls back to DirectAnswer when no governed
-tool or proposal path applies.
+## Policy, provider, and network boundary
 
-Current kernel result paths set `legacy_fallback_used=false` and
-`direct_writes_executed=false`. DirectAnswer uses a model client and records
-provider/scheduler trace evidence, but it does not create tools, proposals, or
-durable writes. Proposal paths create Review Center proposals rather than
-applying durable truth directly.
+Policy owns risk, capability, scope, and data route. The user-selected provider
+profile and model remain fixed for the Turn/Run; there is no silent provider or
+model substitution. Network policy is resolved at the exact endpoint and
+capability boundary. An Ask decision creates one scoped Review checkpoint;
+approval authorizes only the matching retry.
 
-`src-tauri/src/main_chat_context_loader.rs` builds bounded knowledge-format
-context from workspace/configured files such as `AGENTS.md`, `SOUL.md`,
-`USER.md`, `MEMORY.md`, and selected `SKILL.md`. Those surfaces are context,
-not policy override and not user truth promotion.
+Provider and tool receipts bind the canonical Task, Run, Item, and Attempt
+identities. Settings route evidence reports configuration readiness separately
+from proof that a provider request was actually sent.
 
-`src-tauri/src/main_chat_policy_runtime.rs` classifies the current task's
-policy topic, risk, and write-side-effect requirements. It reads PolicyStore
-only: sensitive topics remain LocalOnly and unconfirmed external writes remain
-proposal-first. It does not read HeuristicStore or inject personalization.
+## Artifact and Review lifecycle
 
-Generic `AgentRuntime` and `AgentLoop` accept an explicit `RuntimePolicyContext`
-containing provider authorization, metadata-safe provenance and the
-proposal-first action fact. They do not accept a legacy YAML `LifeModel`, an
-HS packet, heuristic guidance or an implicit personalization prompt. Agent
-Memory remains an explicit input; canonical LifeModel v2 personalization is
-compiled by the owning product adapter before the generic runtime boundary.
+Artifact identity is independent of Proposal identity. Each ArtifactVersion
+owns its Task/Run/Item provenance, managed draft, target precondition, content
+digest, Review checkpoint, materializer attempt, verification, and optional
+Undo.
 
-Main Chat personalization has one product path: bounded Agent Memory plus the
-canonical LifeModel v2 runtime context. The kernel no longer compiles an
-accepted-guidance/HS context in parallel. PlanExecute receives the same
-canonical v2 planning hints; its product entrypoint does not enable legacy
-runtime-guidance consumption.
+Review approval is a checkpoint transition, not task completion. Confirmed
+materialization projects into the same ArtifactVersion and only then permits a
+FinalResult. Recovery distinguishes prepared, staged, confirmed,
+failed-before-effect, and effect-unknown states and never blindly redispatches
+an ambiguous effect.
 
-Historical AgentRun rows can still expose minimized HS selection-audit and
-behavior-check metadata through the product read model. Those DTOs are
-read-only compatibility: current constructors initialize them empty, and no
-selector, provider authorization, tool capability, or durable-write path can
-be reconstructed from them. They can be removed when the corresponding
-historical AgentRun columns are explicitly migrated or retired.
+Review does not own a generic task-resume action. Canonical Work controls own
+cancel and retry; approval resumes only the exact waiting Item checkpoint.
 
-Scheduled tasks consume their durable task claim, typed Policy, canonical
-StateStore snapshot and Agent Memory. Planner mode does not advertise the
-legacy `life_model.read` or mixed-owner `goal.read` tools. The authenticated
-development A2A sidecar exposes only its bounded reasoning bridge and does not
-serve legacy personal-profile query skills; release frontend code exposes no
-A2A wrapper. The old release Proactive suggestion command and frontend wrapper
-had no product caller and are retired. The remaining Proactive core is limited
-to proposal-rejection evidence compatibility; it does not own LifeModel,
-learning, or the Agent runtime.
+## Workbench projection
 
-## ReAct And Tool Execution
+`TasksViewModel` and `WorkspaceViewModel` read canonical Task snapshots. They
+project plans, Items, attempts, Needs Attention, inline Review, Results,
+Changes, Preview, Verification, and Undo. React does not reconstruct lifecycle
+truth from messages, Proposal payloads, diagnostics, or local files.
 
-ReAct tool selection starts in
-`src-tauri/src/main_chat_react_tool_selection.rs`. It builds governed action
-plans, candidate contracts, target allowlists, action-target allowlists, and
-metadata-safe candidate labels. Generic MCP read candidates are bounded and
-filtered to exclude high-risk, confirmation-required, write-like, disabled,
-declarative-only, or contract-unsafe manifests.
+## Evidence boundary
 
-Provider-ranked candidate preselection is allowed only when the route,
-credential, network, and contract checks pass. The model response must be an
-exact complete permutation in a one-field JSON object. Invalid responses are
-ignored and deterministic ordering is kept.
-
-`src-tauri/src/main_chat_react_runtime.rs` runs the governed AgentLoop with
-`allow_writes=false`. It blocks allowlist violations, unsupported action types,
-wrong action-target pairs, missing planned actions, and policy-denied selected
-candidates as explicit blockers instead of silently executing a fallback.
-
-`src-tauri/src/main_chat_react_execution.rs` executes accepted read actions
-through `ToolGateway` and the ActionExecutor with write access disabled. Local
-network policy can convert a web/network attempt into a structured blocker.
-
-## Runtime Support And Task Evidence
-
-`src-tauri/src/main_chat_runtime_support.rs` creates task sessions, appends
-metadata-safe transcript entries, queues governed actions, classifies execution
-policy, and finalizes failures with `directWritesExecuted=false`.
-
-`src-tauri/src/main_chat_task_controls.rs` exposes task-state, list/detail,
-refresh, resume, cancel, and retry controls. Resume and retry are evidence
-aware: they inspect continuity diagnostics, pending permissions, replay safety,
-tool availability, provider availability, and action metadata before replay.
-
-## Test And Eval Surfaces
-
-`src-tauri/src/main_chat_command_surface_eval.rs` runs local command-surface
-coverage across buffered and streaming cases. It proves ordinary send/stream
-shape for DirectAnswer, file/session/memory reads, proposal paths, web blockers,
-MCP read paths, and ToolPermission proposals under local/scripted conditions.
-
-`src-tauri/src/main_chat_final_gate.rs` aggregates command-surface and live
-provider evidence. It requires separate direct generation, web AgentLoop,
-registered MCP AgentLoop, and proposal-permission live scenarios before final
-readiness can be credited.
-
-`src-tauri/src/main_chat_live_provider_harness.rs` contains fail-closed live
-provider preflight and harness logic. Local HTTP compatible proof remains
-provider-client path evidence only, not external live provider completion.
+Repository tests prove controlled source and product contracts. Browser-shell
+tests prove the React/Tauri contract under controlled data. Exact signed QA
+runs prove native process, persistence, and UI paths for the exact artifact.
+External-live credit additionally requires the selected real provider or Web
+route and its receipts. No evidence level substitutes for another.

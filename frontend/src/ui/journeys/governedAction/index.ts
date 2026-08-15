@@ -1,4 +1,3 @@
-export * from "./governedActionContract";
 export * from "./governedActionDataSource";
 export * from "./governedActionPresentation";
 export * from "./taskControlContract";

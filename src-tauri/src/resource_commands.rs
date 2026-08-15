@@ -144,7 +144,7 @@ pub(crate) async fn pick_and_import_resources<R: Runtime>(
 ) -> Result<ResourceImportSelectionResult, String> {
     state
         .persistence_coordinator
-        .require_effects_allowed()
+        .require_effects_for_stores(&["ResourceStore"])
         .map_err(|error| error.to_string())?;
     validate_uuid_v4("resource_turn_operation_id", &turn_operation_id)?;
     let runtime = state
@@ -242,7 +242,7 @@ pub(crate) async fn detach_resource_from_turn(
 ) -> Result<ResourceDetachReceipt, String> {
     state
         .persistence_coordinator
-        .require_effects_allowed()
+        .require_effects_for_stores(&["ResourceStore"])
         .map_err(|error| error.to_string())?;
     validate_uuid_v4("resource_detach_operation_id", &operation_id)?;
     validate_uuid_v4("resource_turn_operation_id", &turn_operation_id)?;

@@ -85,11 +85,8 @@ function configForFixture(id: WorkbenchFixtureId): AppConfig {
       chat_model: external ? "deepseek-chat" : "qwen2.5:14b",
       embedding_enabled: false,
     },
-    runtime_mode: "local_first_default",
     prefer_local_model: !external,
     local_model: "qwen2.5:14b",
-    experimental_context_assembler: false,
-    use_agent_loop: true,
     system: {
       network_policy: {
         enabled: true,

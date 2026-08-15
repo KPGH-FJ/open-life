@@ -2,7 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
-import { ReadOnlySpineJourney } from "@/ui/journeys/readOnly";
+import { ProductWorkbenchJourney } from "@/ui/journeys/productWorkbench";
 import type { ReviewAction, ReviewItem } from "@/tauri";
 import {
   reviewDecisionFeedback,
@@ -74,28 +74,21 @@ describe("Workbench governed action journey", () => {
     expect(sections[1].items).toEqual([ordinaryItem]);
   });
 
-  it("keeps view, approval, refresh, resume, and completion as separate states", async () => {
+  it("keeps an inline checkpoint decision separate from Work completion", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
     const dispatchReview = vi.spyOn(dataSource, "dispatchReviewAction");
-    const resumeTask = vi.spyOn(dataSource, "resumeTask");
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
         initialSurface="workspace"
       />
     );
 
-    expect(
-      await screen.findByRole("heading", {
-        name: "整理三次客户访谈，归纳下周要验证的问题",
-      })
-    ).toBeInTheDocument();
-    expect(screen.getByText("任务暂停在一个动作之前")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "查看权限请求" }));
+    expect(await screen.findByRole("heading", { name: "Work 进度与结果" })).toBeInTheDocument();
     expect(
       await screen.findByRole("heading", { name: "读取本地客户访谈记录", level: 2 })
     ).toBeInTheDocument();
@@ -108,22 +101,13 @@ describe("Workbench governed action journey", () => {
 
     await user.click(screen.getByRole("button", { name: "确认仅允许本次" }));
     await waitFor(() => expect(dispatchReview).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText("决定已记录，尚未继续任务")).toBeInTheDocument();
-    expect(screen.getAllByText("已允许一次").length).toBeGreaterThan(0);
+    expect(
+      await screen.findByText("已开始读取本地记录并提取重复问题；尚未形成最终结果。")
+    ).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "仅允许本次" })).not.toBeInTheDocument();
     expect(screen.queryByText("任务已完成")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "返回工作区" }));
-    expect(await screen.findByRole("button", { name: "继续任务" })).toBeEnabled();
-    expect(screen.getByText("一次性权限决定已经记录，等待你明确继续任务。")).toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "继续任务" }));
-    expect(screen.getByRole("dialog", { name: "确认继续这项任务？" })).toBeInTheDocument();
-    expect(resumeTask).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "确认继续" }));
-
-    await waitFor(() => expect(resumeTask).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText("任务已继续，正在处理")).toBeInTheDocument();
-    expect(screen.getByText("任务正在处理")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "继续任务" })).not.toBeInTheDocument();
     expect(screen.queryByText("任务已完成")).not.toBeInTheDocument();
   });
 
@@ -133,10 +117,10 @@ describe("Workbench governed action journey", () => {
     const dispatchReview = vi.spyOn(dataSource, "dispatchReviewAction");
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
-        initialSurface="review"
+        initialSurface="workspace"
       />
     );
 
@@ -153,52 +137,69 @@ describe("Workbench governed action journey", () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
       ...fixture,
+      loadConversation: async () => ({
+        status: "empty" as const,
+        conversations: [],
+        projects: [],
+        selectedProjectId: null,
+        selectedConversationId: null,
+        messages: [],
+        latestTurn: null,
+        providerStatus: "ready" as const,
+        providerProfiles: [],
+        selectedProviderProfileId: null,
+        providerErrorCode: null,
+        workStatus: "ready" as const,
+      }),
       load: async () => {
         const snapshot = await fixture.load();
         const item = snapshot.reviewEnvelope.data!.items[0];
+        const lifeModelItem = {
+          ...item,
+          type: "life_model_update" as const,
+          decisionContext: {
+            ...item.decisionContext,
+            title: "Review LifeModel changes",
+            summary: "Review an exact version-bound LifeModel change.",
+            permission: undefined,
+            before: {
+              kind: "object" as const,
+              summary: "LifeModel v2 version 1",
+              detail: "sha256:base",
+              sensitivity: "local_private" as const,
+              truncated: false,
+            },
+            after: {
+              kind: "list" as const,
+              summary: "1 LifeModel change(s): 1 add, 0 replace, 0 remove",
+              detail: "add values/value:autonomy: Autonomy matters.",
+              sensitivity: "local_private" as const,
+              truncated: false,
+            },
+          },
+        };
         return {
           ...snapshot,
           reviewEnvelope: {
             ...snapshot.reviewEnvelope,
             data: {
               ...snapshot.reviewEnvelope.data!,
-              items: [
-                {
-                  ...item,
-                  type: "life_model_update" as const,
-                  decisionContext: {
-                    ...item.decisionContext,
-                    title: "Review LifeModel changes",
-                    summary: "Review an exact version-bound LifeModel change.",
-                    permission: undefined,
-                    before: {
-                      kind: "object" as const,
-                      summary: "LifeModel v2 version 1",
-                      detail: "sha256:base",
-                      sensitivity: "local_private" as const,
-                      truncated: false,
-                    },
-                    after: {
-                      kind: "list" as const,
-                      summary: "1 LifeModel change(s): 1 add, 0 replace, 0 remove",
-                      detail: "add values/value:autonomy: Autonomy matters.",
-                      sensitivity: "local_private" as const,
-                      truncated: false,
-                    },
-                  },
-                },
-              ],
+              items: [lifeModelItem],
             },
+          },
+          workspaceEnvelope: {
+            ...snapshot.workspaceEnvelope,
+            data: { ...snapshot.workspaceEnvelope.data!, pendingReviewItems: [lifeModelItem] },
           },
         };
       },
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
-        initialSurface="review"
+        initialSurface="workspace"
       />
     );
 
@@ -216,10 +217,10 @@ describe("Workbench governed action journey", () => {
     const dispatchReview = vi.spyOn(dataSource, "dispatchReviewAction");
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
-        initialSurface="review"
+        initialSurface="workspace"
       />
     );
 
@@ -241,10 +242,10 @@ describe("Workbench governed action journey", () => {
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
-        initialSurface="review"
+        initialSurface="workspace"
       />
     );
 
@@ -256,92 +257,17 @@ describe("Workbench governed action journey", () => {
     expect(screen.getAllByText("等待决定").length).toBeGreaterThan(0);
     expect(screen.queryByText("决定已记录，尚未继续任务")).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole("button", { name: "重新读取" }));
+    await user.click(
+      within(screen.getByRole("region", { name: "当前 Work 的决定节点" })).getByRole("button", {
+        name: "重新读取",
+      })
+    );
     await waitFor(() => expect(screen.queryByText("决定尚未被读模型确认")).not.toBeInTheDocument());
     expect(dataSource.dispatchReviewAction).toHaveBeenCalledTimes(1);
     expect(screen.getAllByText("等待决定").length).toBeGreaterThan(0);
   });
 
-  it("keeps resume pending when the refreshed exact task is still waiting", async () => {
-    const user = userEvent.setup();
-    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
-    const initial = await fixture.load();
-    const approve = initial.reviewEnvelope.data!.items[0].allowedActions.find(
-      action => action.kind === "approve"
-    )!;
-    await fixture.dispatchReviewAction(approve);
-    const resumeTask = vi.fn(async () => undefined);
-    const dataSource = {
-      ...fixture,
-      resumeTask,
-    };
-
-    render(
-      <ReadOnlySpineJourney
-        dataSource={dataSource}
-        governedActionDataSource={dataSource}
-        initialSurface="workspace"
-      />
-    );
-
-    await screen.findByRole("button", { name: "继续任务" });
-    await user.click(screen.getByRole("button", { name: "继续任务" }));
-    await user.click(screen.getByRole("button", { name: "确认继续" }));
-
-    expect(await screen.findByText("任务仍未确认继续")).toBeInTheDocument();
-    expect(screen.getByText("任务暂停在一个动作之前")).toBeInTheDocument();
-    expect(screen.queryByText("任务已继续，正在处理")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "重新读取" }));
-    await waitFor(() => expect(screen.queryByText("任务仍未确认继续")).not.toBeInTheDocument());
-    expect(resumeTask).toHaveBeenCalledTimes(1);
-    expect(screen.getByText("任务暂停在一个动作之前")).toBeInTheDocument();
-  });
-
-  it("dispatches a Tasks surface control and treats the refreshed task as the only result", async () => {
-    const user = userEvent.setup();
-    const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
-    const initial = await dataSource.load();
-    const approve = initial.reviewEnvelope.data!.items[0].allowedActions.find(
-      action => action.kind === "approve"
-    )!;
-    await dataSource.dispatchReviewAction(approve);
-    const dispatchTaskControl = vi.spyOn(dataSource, "dispatchTaskControl");
-
-    const { container } = render(
-      <ReadOnlySpineJourney
-        dataSource={dataSource}
-        governedActionDataSource={dataSource}
-        initialSurface="tasks"
-      />
-    );
-
-    await user.click(
-      await screen.findByRole("button", {
-        name: /整理三次客户访谈，归纳下周要验证的问题/,
-      })
-    );
-    const resume = await screen.findByRole("button", { name: "继续任务" });
-    expect(resume).toHaveAttribute("data-action-kind", "resume");
-    expect(resume).toHaveAttribute("data-action-effect", "task_resume_request");
-    expect(resume).toHaveAttribute("data-action-target-ref", "task-interview-notes");
-    expect(resume).toHaveAttribute("data-action-completion-proof-after-dispatch", "false");
-
-    await user.click(resume);
-    const dialog = screen.getByRole("dialog", { name: "确认执行这项任务动作？" });
-    expect(dispatchTaskControl).not.toHaveBeenCalled();
-    await user.click(within(dialog).getByRole("button", { name: "继续任务" }));
-
-    await waitFor(() => expect(dispatchTaskControl).toHaveBeenCalledTimes(1));
-    expect(await screen.findByText("任务状态已更新")).toBeInTheDocument();
-    expect(
-      screen.getByText("刷新后的同一任务当前为 running；这不是完成证明。")
-    ).toBeInTheDocument();
-    expect(container).not.toHaveTextContent("任务已完成");
-  });
-
   it("ignores old task and review payloads when their envelopes are empty", async () => {
-    const user = userEvent.setup();
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
       ...fixture,
@@ -356,17 +282,16 @@ describe("Workbench governed action journey", () => {
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
         initialSurface="workspace"
       />
     );
 
-    expect(await screen.findByRole("heading", { name: "没有活动任务" })).toBeInTheDocument();
-    expect(screen.queryByText("任务暂停在一个动作之前")).not.toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: /^审核中心\s+建议与权限决定/ }));
-    expect(await screen.findByRole("heading", { name: "暂无审核项" })).toBeInTheDocument();
+    expect(await screen.findByText("继续当前工作")).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "Work 进度与结果" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "仅允许本次" })).not.toBeInTheDocument();
   });
 
@@ -375,6 +300,20 @@ describe("Workbench governed action journey", () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
       ...fixture,
+      loadConversation: async () => ({
+        status: "empty" as const,
+        conversations: [],
+        projects: [],
+        selectedProjectId: null,
+        selectedConversationId: null,
+        messages: [],
+        latestTurn: null,
+        providerStatus: "ready" as const,
+        providerProfiles: [],
+        selectedProviderProfileId: null,
+        providerErrorCode: null,
+        workStatus: "ready" as const,
+      }),
       load: async () => {
         const snapshot = await fixture.load();
         return {
@@ -402,7 +341,7 @@ describe("Workbench governed action journey", () => {
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         workspaceConversationDataSource={dataSource}
@@ -416,7 +355,7 @@ describe("Workbench governed action journey", () => {
     expect(screen.getByRole("button", { name: "开始并发送" })).toBeEnabled();
   });
 
-  it("opens Personal Intelligence from a durable Life Model influence receipt", async () => {
+  it("opens Personal Intelligence from the canonical navigation", async () => {
     const user = userEvent.setup();
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
@@ -482,32 +421,10 @@ describe("Workbench governed action journey", () => {
           },
         };
       },
-      loadLifeModelInfluence: vi.fn().mockResolvedValue({
-        status: "completed" as const,
-        lifeModelInfluence: {
-          status: "applied_context_building",
-          sourceId: "lifemodel.v2.runtime",
-          modelVersion: 8,
-          selectedItems: [
-            {
-              itemRef: "collaboration_preferences:communication-direct",
-              statement: "沟通保持简洁直接",
-              sourceRefs: ["message:user:confirmed-preference"],
-              confirmedAt: "2026-08-09T00:00:00Z",
-              reasonCode: "task intent matches collaboration_preferences",
-            },
-          ],
-          appliedSurfaces: ["context_building", "communication_style"],
-          currentInstructionPriorityPreserved: true,
-          policyPriorityPreserved: true,
-          permissionGranted: false,
-          durableWriteAuthorized: false,
-        },
-      }),
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         durableTruthDataSource={dataSource}
@@ -516,17 +433,9 @@ describe("Workbench governed action journey", () => {
       />
     );
 
-    expect(await screen.findByText("本轮参考了你的 Life Model")).toBeInTheDocument();
-    await user.click(screen.getByText("查看使用依据"));
-    await user.click(screen.getByRole("button", { name: "在个人智能中查看：沟通保持简洁直接" }));
+    await user.click(await screen.findByRole("button", { name: /^个人智能\s+关于我与记忆/ }));
 
     expect(await screen.findByRole("tab", { name: /关于我.*LifeModel/ })).toBeInTheDocument();
-    expect(screen.getByText("本次影响使用的长期信息")).toBeInTheDocument();
-    expect(
-      screen
-        .getByText("collaboration_preferences:communication-direct")
-        .closest("[data-lifemodel-item-ref]")
-    ).toHaveAttribute("data-lifemodel-item-ref", "collaboration_preferences:communication-direct");
     expect(screen.getByRole("button", { name: /^个人智能\s+关于我与记忆/ })).toHaveAttribute(
       "aria-current",
       "page"
@@ -550,6 +459,7 @@ describe("Workbench governed action journey", () => {
             ...snapshot.workspaceEnvelope,
             data: {
               ...snapshot.workspaceEnvelope.data!,
+              selectedConversationId: "another-conversation",
               activeTask: {
                 ...snapshot.workspaceEnvelope.data!.activeTask!,
                 conversationId: "another-conversation",
@@ -561,7 +471,7 @@ describe("Workbench governed action journey", () => {
     };
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         workspaceConversationDataSource={dataSource}
@@ -569,15 +479,10 @@ describe("Workbench governed action journey", () => {
       />
     );
 
-    expect(await screen.findByText("全局活动任务")).toBeInTheDocument();
     expect(
-      screen.getByText(
-        "后端仍有这项任务，但对应会话记录已经缺失；当前不会从摘要猜测上下文或继续执行。"
-      )
+      await screen.findByText("Work 投影尚未匹配当前 Conversation；旧任务不会暂时显示在这里。")
     ).toBeInTheDocument();
-    const resume = screen.getByRole("button", { name: "继续任务" });
-    expect(resume).toBeDisabled();
-    expect(resume).toHaveAttribute("data-action-enabled", "false");
+    expect(screen.queryByRole("heading", { name: "Work 进度与结果" })).not.toBeInTheDocument();
   });
 
   it("shows only backend-confirmed resources and removes them through the exact binding", async () => {
@@ -587,7 +492,7 @@ describe("Workbench governed action journey", () => {
     const detachResource = vi.spyOn(dataSource, "detachResource");
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         workspaceConversationDataSource={dataSource}
@@ -595,6 +500,11 @@ describe("Workbench governed action journey", () => {
       />
     );
 
+    await screen.findByText("继续当前工作");
+    const workMode = screen.getByRole("radio", { name: "Work" });
+    await waitFor(() => expect(workMode).toBeEnabled());
+    await user.click(workMode);
+    await waitFor(() => expect(screen.getByRole("radio", { name: "Work" })).toBeChecked());
     await user.click(await screen.findByRole("button", { name: "添加文件" }));
 
     expect(await screen.findByText("访谈记录.md")).toBeInTheDocument();
@@ -789,7 +699,7 @@ describe("Workbench governed action journey", () => {
     const deleteSession = vi.spyOn(dataSource, "deleteSession");
 
     render(
-      <ReadOnlySpineJourney
+      <ProductWorkbenchJourney
         dataSource={dataSource}
         governedActionDataSource={dataSource}
         workspaceConversationDataSource={dataSource}
