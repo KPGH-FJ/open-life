@@ -1007,6 +1007,57 @@ impl ConversationStore {
         items.reverse();
         Ok(items)
     }
+
+    /// Returns the bounded transcript that may be sent to a model for the
+    /// current Turn. Only completed prior Turns and the exact current running
+    /// Turn are eligible. User Items left behind by failed, cancelled, or
+    /// interrupted Turns remain visible in product history but never become
+    /// implicit instructions for a later model call.
+    pub fn list_model_context_items(
+        &self,
+        conversation_id: &str,
+        current_turn_id: &str,
+        limit: usize,
+    ) -> Result<Vec<ConversationItemRecord>> {
+        validate_uuid("conversation_id", conversation_id)?;
+        validate_uuid("current_turn_id", current_turn_id)?;
+        let conn = self.lock_conn()?;
+        let current: Option<(String, String)> = conn
+            .query_row(
+                "SELECT conversation_id,status FROM conversation_turns WHERE id=?1",
+                [current_turn_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if current
+            .as_ref()
+            .map(|(owner, status)| (owner.as_str(), status.as_str()))
+            != Some((conversation_id, "running"))
+        {
+            anyhow::bail!("conversation_model_context_turn_not_running");
+        }
+        let mut stmt = conn.prepare(
+            "SELECT i.id,i.conversation_id,i.turn_id,i.sequence,i.kind,i.content,
+                    i.content_digest,i.created_at
+             FROM conversation_items i
+             INNER JOIN conversation_turns t ON t.id=i.turn_id
+             WHERE i.conversation_id=?1
+               AND (t.status='completed' OR t.id=?2)
+             ORDER BY i.sequence DESC LIMIT ?3",
+        )?;
+        let mut items = stmt
+            .query_map(
+                params![
+                    conversation_id,
+                    current_turn_id,
+                    limit.clamp(1, 1000) as i64
+                ],
+                item_from_row,
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        items.reverse();
+        Ok(items)
+    }
 }
 
 fn user_proof_from_snapshot(
@@ -1346,6 +1397,83 @@ mod tests {
             completed.items[1].kind,
             ConversationItemKind::AssistantMessage
         );
+    }
+
+    #[test]
+    fn model_context_excludes_non_successful_prior_turns() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let conversation_id = id();
+        store
+            .create_conversation(&conversation_id, "Clean context")
+            .unwrap();
+
+        let completed_turn = id();
+        store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &completed_turn,
+                conversation_id: &conversation_id,
+                user_message: "completed user",
+                provider: &provider(),
+            })
+            .unwrap();
+        store
+            .complete_chat_turn(&completed_turn, "completed assistant")
+            .unwrap();
+
+        let failed_turn = id();
+        store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &failed_turn,
+                conversation_id: &conversation_id,
+                user_message: "failed user must not leak",
+                provider: &provider(),
+            })
+            .unwrap();
+        store.fail_chat_turn(&failed_turn, "test_failure").unwrap();
+
+        let cancelled_turn = id();
+        store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &cancelled_turn,
+                conversation_id: &conversation_id,
+                user_message: "cancelled user must not leak",
+                provider: &provider(),
+            })
+            .unwrap();
+        store.cancel_chat_turn(&cancelled_turn).unwrap();
+
+        let interrupted_turn = id();
+        store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &interrupted_turn,
+                conversation_id: &conversation_id,
+                user_message: "interrupted user must not leak",
+                provider: &provider(),
+            })
+            .unwrap();
+        assert_eq!(store.interrupt_incomplete_turns().unwrap(), 1);
+
+        let current_turn = id();
+        store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &current_turn,
+                conversation_id: &conversation_id,
+                user_message: "current user",
+                provider: &provider(),
+            })
+            .unwrap();
+
+        let context = store
+            .list_model_context_items(&conversation_id, &current_turn, 100)
+            .unwrap();
+        assert_eq!(
+            context
+                .iter()
+                .map(|item| item.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["completed user", "completed assistant", "current user"]
+        );
+        assert_eq!(store.list_items(&conversation_id, 100).unwrap().len(), 6);
     }
 
     #[test]

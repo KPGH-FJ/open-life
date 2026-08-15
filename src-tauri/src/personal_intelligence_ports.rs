@@ -110,7 +110,6 @@ impl LifeModelContextMetadata {
 pub struct LifeModelContextSnapshot {
     pub metadata: LifeModelContextMetadata,
     pub candidates: Vec<ContextSourceCandidate>,
-    pub planning_hints: Vec<openlife_core::agent::PlanExecuteLifeModelHint>,
     pub memory_rerank_terms: Vec<String>,
     pub tool_preference_hints: Vec<String>,
 }
@@ -549,30 +548,6 @@ pub(crate) fn build_life_model_context(
         )],
         _ => Vec::new(),
     };
-    let planning_hints = packet
-        .as_ref()
-        .map(|packet| {
-            packet
-                .facts
-                .iter()
-                .filter(|fact| {
-                    matches!(
-                        fact.section,
-                        openlife_core::life_model::v2::LifeModelSectionV2::LongTermGoals
-                            | openlife_core::life_model::v2::LifeModelSectionV2::Values
-                            | openlife_core::life_model::v2::LifeModelSectionV2::PersonalBoundaries
-                            | openlife_core::life_model::v2::LifeModelSectionV2::DecisionPrinciples
-                    )
-                })
-                .map(|fact| openlife_core::agent::PlanExecuteLifeModelHint {
-                    item_id: fact.item_id.clone(),
-                    section: fact.section,
-                    value: fact.value.clone(),
-                    selected_reason: fact.selected_reason.clone(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
     let memory_rerank_terms = packet
         .as_ref()
         .map(|packet| packet.facts.iter().map(|fact| fact.value.clone()).collect())
@@ -597,7 +572,6 @@ pub(crate) fn build_life_model_context(
     LifeModelContextSnapshot {
         metadata,
         candidates,
-        planning_hints,
         memory_rerank_terms,
         tool_preference_hints,
     }

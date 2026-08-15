@@ -1640,17 +1640,6 @@ pub struct ProviderReceiptSummary {
     pub overflow_digest: Option<String>,
 }
 
-#[cfg(test)]
-impl ProviderReceiptSummary {
-    pub(crate) fn from_receipts(receipts: Vec<ProviderInvocationReceipt>) -> Self {
-        let collector = ProviderReceiptCollector::default();
-        for receipt in receipts {
-            collector.record_terminal(receipt);
-        }
-        collector.summary()
-    }
-}
-
 #[derive(Default)]
 struct ProviderReceiptCollectorState {
     in_flight: Vec<ProviderStartedAttempt>,
@@ -2925,7 +2914,7 @@ impl InferenceScheduler {
             && (payload_purpose == Some(ProviderPayloadPurpose::MainChatWorkPlan)
                 || system_prompt
                     .as_deref()
-                    .is_some_and(|prompt| prompt.contains("openlife.work-plan.v1")))
+                    .is_some_and(|prompt| prompt.contains("openlife.work-plan.v2")))
         {
             // The scripted provider is a test fixture for the execution
             // response, not a second queue of planner responses. Keep its
@@ -2933,7 +2922,7 @@ impl InferenceScheduler {
             // still exercise plan admission without teaching fixtures to
             // masquerade as a real adaptive model.
             return Ok(
-                r#"{"schemaVersion":"openlife.work-plan.v1","steps":[{"id":"analyze","kind":"analyze","required":true,"dependsOn":[]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["analyze"]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#
+                r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"analyze","kind":"analyze","required":true,"dependsOn":[]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["analyze"]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#
                     .to_string(),
             );
         }
@@ -2961,7 +2950,7 @@ impl InferenceScheduler {
                             Some(serde_json::Value::String("json".into()))
                         }
                         Some(ProviderPayloadPurpose::MainChatWorkPlan) => {
-                            Some(serde_json::Value::String("json".into()))
+                            Some(crate::ollama::main_chat_work_plan_json_schema())
                         }
                         _ => None,
                     },
@@ -3552,20 +3541,9 @@ impl ScheduledInferenceScheduler {
             .await
     }
 
-    pub(crate) fn verify_scheduled_outcome(&self, outcome: &PreparedProviderOutcome) -> Result<()> {
-        self.inner.verify_prepared_outcome_receipt(outcome)
-    }
-
     #[cfg(test)]
     fn truth_scope(&self) -> &ScheduledProviderTruthScope {
         &self.truth_scope
-    }
-
-    #[cfg(test)]
-    pub(crate) fn inner_provider_receipts_snapshot_for_test(
-        &self,
-    ) -> Vec<ProviderInvocationReceipt> {
-        self.inner.provider_receipts_snapshot()
     }
 }
 
@@ -3617,7 +3595,7 @@ mod tests {
             &[],
         ));
         assert!(!non_streaming_ollama_requires_deterministic_output(
-            Some(ProviderPayloadPurpose::AgentLoopStep),
+            Some(ProviderPayloadPurpose::ScheduledTaskStep),
             &[],
         ));
     }
@@ -3675,7 +3653,7 @@ mod tests {
     ) -> ProviderPolicyAuthorization {
         canonical_cloud_subject_authorization(decision_id, current_user_text)
             .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::AgentRuntimeGeneration,
+                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
                 current_user_text,
                 &[ChatMessage {
                     role: "user".into(),
@@ -3692,7 +3670,7 @@ mod tests {
     ) -> ProviderPolicyAuthorization {
         ProviderPolicyAuthorization::local_only_fail_closed(ProviderLocalOnlyReason::TestFixture)
             .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::AgentRuntimeGeneration,
+                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
                 current_user_text,
                 messages,
                 &[],
@@ -3729,7 +3707,7 @@ mod tests {
         ProviderPolicyAuthorization::from_scheduled_claim(claim)
             .and_then(|authorization| {
                 authorization.authorize_derived_payload(
-                    crate::llm::ProviderPayloadPurpose::AgentLoopStep,
+                    crate::llm::ProviderPayloadPurpose::ScheduledTaskStep,
                     &claim.task().description,
                     messages,
                     &[],
@@ -4256,11 +4234,6 @@ mod tests {
     fn prepared_generation_requires_the_typed_receipt_outcome() {
         let removed_api = ["generate_", "prepared("].concat();
         let production_consumers = [
-            ("agent/runtime.rs", include_str!("agent/runtime.rs") as &str),
-            (
-                "agent/agent_loop.rs",
-                include_str!("agent/agent_loop.rs") as &str,
-            ),
             (
                 "agent/reasoning/layered.rs",
                 include_str!("agent/reasoning/layered.rs") as &str,
@@ -4963,7 +4936,7 @@ mod tests {
         let authorization =
             canonical_cloud_subject_authorization("typed-cloud-decision", "typed authorization")
                 .authorize_derived_payload(
-                    crate::llm::ProviderPayloadPurpose::AgentRuntimeGeneration,
+                    crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
                     "typed authorization",
                     &[ChatMessage {
                         role: "user".into(),
@@ -5169,7 +5142,7 @@ mod tests {
         let rebound_error = authorization
             .clone()
             .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::AgentRuntimeGeneration,
+                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
                 current_user_text,
                 &messages,
                 std::slice::from_ref(&injected_context),
@@ -5388,7 +5361,7 @@ mod tests {
             .provider_authorization()
             .clone()
             .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::AgentRuntimeGeneration,
+                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
                 user_text,
                 &task.messages,
                 &[],

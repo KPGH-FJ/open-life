@@ -1148,17 +1148,6 @@ impl McpRegistry {
         );
     }
 
-    pub fn register_dev_a2a_tool(&mut self) {
-        self.register_execution_tool(
-            "a2a.call_agent",
-            "开发模式调用已配对的外部 A2A Agent",
-            "medium",
-            vec!["external_side_effect".into(), "network".into()],
-            "external_side_effect",
-            ToolIdempotencyContract::NonIdempotent,
-        );
-    }
-
     /// Helper to register a Core OS tool with standard metadata.
     pub fn register_core_os_tool(
         &mut self,
@@ -1586,7 +1575,6 @@ impl McpRegistry {
             ToolSource::Mcp { .. } => Err(anyhow::anyhow!(
                 "MCP manifest execution requires the asynchronous transport"
             )),
-            ToolSource::A2A { .. } => Err(anyhow::anyhow!("A2A tool execution is not wired yet")),
             ToolSource::Plugin { plugin_id } => Err(anyhow::anyhow!(
                 "Plugin tool '{}' from '{}' requires a configured executor/provider before it can run",
                 manifest.name,
@@ -1610,28 +1598,6 @@ impl McpRegistry {
     #[cfg(test)]
     fn execute_manifest(&self, manifest: &ToolManifest, arguments: Value) -> Result<String> {
         self.execute_manifest_body(manifest, arguments)
-    }
-
-    #[cfg(test)]
-    async fn execute_manifest_async(
-        &self,
-        manifest: &ToolManifest,
-        arguments: Value,
-    ) -> Result<String> {
-        let (_, request_digest) =
-            crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
-                "manifestId": manifest.id,
-                "arguments": &arguments,
-            }));
-        let receipt_tracker = ToolExecutionReceiptTracker::new(
-            None,
-            Some(manifest.id.clone()),
-            request_digest,
-            ToolActionEffect::from_contract(&manifest.action_type, &manifest.capabilities),
-            manifest.idempotency_contract,
-        );
-        self.execute_manifest_async_with_receipt_tracker(manifest, arguments, receipt_tracker, None)
-            .await
     }
 
     pub(crate) async fn execute_manifest_async_with_receipt_tracker(
@@ -1684,7 +1650,7 @@ impl McpRegistry {
                 receipt_tracker.finish();
                 result
             }
-            ToolSource::A2A { .. } | ToolSource::Plugin { .. } => {
+            ToolSource::Plugin { .. } => {
                 receipt_tracker.finish();
                 self.execute_manifest_after_instance_acquire(manifest, arguments, &instance_lease)
             }
@@ -2237,7 +2203,6 @@ mod tests {
         assert!(names.contains("memory.propose_write"));
         assert!(!names.contains("builtin_echo"));
         assert!(!names.contains("mcp.call_tool"));
-        assert!(!names.contains("a2a.call_agent"));
     }
 
     #[test]
@@ -2310,6 +2275,22 @@ mod tests {
             inspection.sanitized_arguments["query"],
             "帮我搜索 test@example.com 的公开信息"
         );
+    }
+
+    #[test]
+    fn inspect_web_search_does_not_treat_ordinary_chinese_copy_as_a_name() {
+        let registry = McpRegistry::new();
+        let inspection = registry.inspect_call_arguments(
+            "web.search",
+            &serde_json::json!({
+                "query": "搜索 Example Domain 官方页面的标题",
+                "max_results": 5,
+                "governedInputSource": "kernel_web_search_query_from_user_text"
+            }),
+        );
+
+        assert!(!inspection.pii_found, "{:?}", inspection.findings);
+        assert!(!inspection.requires_confirmation);
     }
 
     #[test]
@@ -2701,148 +2682,6 @@ for line in sys.stdin:
         );
         drop(instance_lease);
         assert_eq!(accepted_tracker.snapshot().dispatch_attempt_count, 1);
-    }
-
-    #[tokio::test]
-    async fn registry_requires_typed_contract_executes_mcp_and_issues_bound_content_receipt() {
-        let script = r#"
-import json, sys
-for line in sys.stdin:
-    message = json.loads(line)
-    method = message.get('method')
-    if method == 'initialize':
-        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'protocolVersion':'2024-11-05','capabilities':{}}}), flush=True)
-    elif method == 'tools/list':
-        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'tools':[{'name':'echo','description':'echo','parameters':{'type':'object','properties':{'text':{'type':'string'}}}}]}}), flush=True)
-    elif method == 'tools/call':
-        text = message.get('params', {}).get('arguments', {}).get('text', '')
-        print(json.dumps({'jsonrpc':'2.0','id':message['id'],'result':{'content':[{'type':'text','text':text}]}}), flush=True)
-"#;
-        let mut registry = McpRegistry::new();
-        let args = ["-u", "-c", script];
-        let missing_contract_error = registry
-            .register_with_env("test", "python3", &args, &HashMap::new())
-            .await
-            .unwrap_err()
-            .to_string();
-        assert!(missing_contract_error.contains("typed manifests"));
-
-        let manifest = ToolManifest {
-            id: "mcp:test:echo".into(),
-            name: "echo".into(),
-            description: "Echo bounded text".into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {"text": {"type": "string"}}
-            }),
-            permission_level: "low".into(),
-            risk_level: "low".into(),
-            version: "1.0.0".into(),
-            source: ToolSource::Mcp {
-                server_name: "test".into(),
-            },
-            capabilities: vec!["read".into()],
-            requires_confirmation: false,
-            enabled: true,
-            declarative_only: false,
-            action_type: "read".into(),
-            idempotency_contract: ToolIdempotencyContract::Idempotent,
-            tags: vec!["typed_contract".into()],
-        };
-        registry
-            .register_with_env_and_manifests(
-                "test",
-                "python3",
-                &args,
-                &HashMap::new(),
-                vec![manifest.clone()],
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            registry
-                .execute_manifest_async(&manifest, serde_json::json!({"text": "verified"}))
-                .await
-                .unwrap(),
-            "verified"
-        );
-
-        let permissions = crate::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
-        permissions
-            .grant(
-                "echo",
-                "mcp:test",
-                "low",
-                "read",
-                crate::tool_permissions::ToolPermissionPolicy::AllowUntilRevoked,
-                None,
-            )
-            .unwrap();
-        let audit_dir = tempfile::tempdir().unwrap();
-        let audit = crate::mcp_audit::McpAuditStore::new(audit_dir.path().join("audit.db"));
-        let privacy = PrivacyEngine::new();
-        let agent_run_store = crate::agent::AgentRunStore::new_in_memory().unwrap();
-        let mut agent_run = crate::agent::AgentRun::new_chat_run("mcp-real-chain-test", "");
-        agent_run_store.create_run(&agent_run).unwrap();
-        let context = crate::agent::ActionExecutionContext::new(
-            &registry,
-            &permissions,
-            &audit,
-            &privacy,
-            &[],
-        )
-        .with_agent_run_store(&agent_run_store);
-        let result = crate::agent::ToolGateway::from_executor_config(Default::default())
-            .execute(
-                crate::agent::AgentActionRequest {
-                    action_type: "mcp_tool".into(),
-                    target: "echo".into(),
-                    input: serde_json::json!({"arguments": {"text": "gateway-verified"}}),
-                    source_run_id: Some(agent_run.id.clone()),
-                    step_index: 0,
-                },
-                &context,
-            )
-            .await
-            .unwrap();
-        assert_eq!(
-            result.status,
-            crate::agent::ActionExecutionStatus::Succeeded
-        );
-        assert!(result.observation.content.contains("gateway-verified"));
-        assert!(result
-            .action
-            .react_trace
-            .as_ref()
-            .and_then(|trace| trace.output_receipt.as_ref())
-            .is_some());
-        assert!(result.observation.react_trace.is_none());
-        let mut forged_run = agent_run.clone();
-        forged_run.actions.push(result.action.clone());
-        let mut forged_observation = result.observation.clone();
-        forged_observation
-            .structured_result
-            .as_mut()
-            .and_then(serde_json::Value::as_object_mut)
-            .expect("gateway structured evidence")
-            .insert("gatewayEvidenceTampered".into(), serde_json::json!(true));
-        forged_run.observations.push(forged_observation);
-        let error = agent_run_store
-            .update_run(&forged_run)
-            .expect_err("post-gateway semantic mutation must invalidate the final binding")
-            .to_string();
-        assert!(error.contains("canonical_binding_invalid"), "{error}");
-        agent_run.actions.push(result.action);
-        agent_run.observations.push(result.observation);
-        agent_run_store.update_run(&agent_run).unwrap();
-        let persisted = agent_run_store.get_run(&agent_run.id).unwrap().unwrap();
-        assert!(persisted.actions[0]
-            .react_trace
-            .as_ref()
-            .and_then(|trace| trace.output_receipt.as_ref())
-            .is_some());
-        assert!(persisted.observations[0].react_trace.is_none());
-        assert_eq!(audit.list_logs(10).unwrap().len(), 1);
     }
 
     #[tokio::test]

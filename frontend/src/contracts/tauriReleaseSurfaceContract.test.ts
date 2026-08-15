@@ -16,7 +16,7 @@ describe("release Tauri surface", () => {
     expect(config.build?.beforeDevCommand).toBe("corepack pnpm dev --host 127.0.0.1 --port 5173");
   });
 
-  it("does not expose retired lifecycle, feedback, evolution, proactive, or dev A2A wrappers", () => {
+  it("does not expose retired lifecycle, feedback, evolution, or proactive wrappers", () => {
     const releaseClient = read("src/tauri.ts");
     const browserMock = read("src/test/mocks/tauri.ts");
 
@@ -37,13 +37,6 @@ describe("release Tauri surface", () => {
       "get_proactive_suggestions",
       "generate_micro_evolution_changes",
       "calibration_create_proposals",
-      "a2a_discover_agent",
-      "a2a_send_task",
-      "a2a_local_agent_card",
-      "a2a_handle_task",
-      "a2a_bridge_local",
-      "a2a_restart_sidecar",
-      "a2a_stop_sidecar",
     ]) {
       expect(releaseClient, retiredCommand).not.toContain(`"${retiredCommand}"`);
       expect(browserMock, retiredCommand).not.toContain(`"${retiredCommand}"`);

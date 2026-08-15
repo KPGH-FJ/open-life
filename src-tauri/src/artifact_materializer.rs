@@ -92,9 +92,17 @@ fn canonical_safe_paths(safe_paths: &[String]) -> Vec<PathBuf> {
             if path_contains_symlink(path) {
                 return None;
             }
-            path.canonicalize().ok()
+            let canonical = path.canonicalize().ok()?;
+            canonical.parent().is_some().then_some(canonical)
         })
         .collect()
+}
+
+/// Resolves the same first safe root used by the materializer. Planning and
+/// staging must share this boundary so a path cannot be accepted while the
+/// draft is produced and rejected only after canonical Task state exists.
+pub(crate) fn first_canonical_artifact_safe_root(safe_paths: &[String]) -> Option<PathBuf> {
+    canonical_safe_paths(safe_paths).into_iter().next()
 }
 
 fn canonical_parent_in_safe_paths(

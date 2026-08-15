@@ -157,7 +157,6 @@ function actionLabel(action: ReviewAction, item: ReviewItem): string {
     edit: "修改",
     apply: "应用变更",
     revoke: "撤销",
-    resume: "继续任务",
     view_evidence: item.type === "tool_permission" ? "查看访问范围" : "查看依据",
   };
   return labels[action.kind] ?? action.label;

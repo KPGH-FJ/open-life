@@ -85,29 +85,6 @@ pub trait CanonicalWriteAdmission: Send + Sync {
     ) -> Result<Box<dyn CanonicalWritePermit>, CanonicalWriteAdmissionRejection>;
 }
 
-/// Explicit deterministic-eval fixture, visible only inside the `agent`
-/// module tree. It cannot be supplied by Tauri or another product consumer.
-pub(super) struct DeterministicFixtureCanonicalWriteAdmission;
-
-struct FixtureCanonicalWritePermit;
-
-impl CanonicalWritePermit for FixtureCanonicalWritePermit {
-    fn finish_committed(self: Box<Self>) {}
-
-    fn finish_failed(self: Box<Self>) {}
-
-    fn finish_noop(self: Box<Self>) {}
-}
-
-impl CanonicalWriteAdmission for DeterministicFixtureCanonicalWriteAdmission {
-    fn acquire(
-        &self,
-        _request: CanonicalWriteAdmissionRequest,
-    ) -> Result<Box<dyn CanonicalWritePermit>, CanonicalWriteAdmissionRejection> {
-        Ok(Box::new(FixtureCanonicalWritePermit))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

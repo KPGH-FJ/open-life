@@ -2,12 +2,6 @@ use crate::AppState;
 use std::sync::Arc;
 use tauri::State;
 
-#[cfg(test)]
-mod plan_execute_product;
-
-#[cfg(test)]
-pub(crate) use plan_execute_product::*;
-
 #[tauri::command]
 pub async fn list_main_chat_skills(
     session_id: Option<String>,
@@ -60,12 +54,12 @@ pub async fn clear_main_chat_skill(
 
 #[tauri::command]
 pub async fn list_main_chat_tool_candidates(
-    task_session_id: Option<String>,
+    task_id: Option<String>,
     state: State<'_, Arc<AppState>>,
 ) -> Result<crate::main_chat_skills_tools::MainChatToolCandidateList, String> {
     crate::main_chat_skills_tools::list_main_chat_tool_candidates_with_state(
         &state.inner().clone(),
-        task_session_id.as_deref(),
+        task_id.as_deref(),
     )
     .await
 }

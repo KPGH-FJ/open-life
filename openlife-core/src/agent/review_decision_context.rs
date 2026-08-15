@@ -793,7 +793,6 @@ fn action_bound_transmission_boundary(
     evidence_refs: &[EvidenceRef],
 ) -> PermissionTransmissionBoundary {
     let external = source.starts_with("mcp:")
-        || source.starts_with("a2a:")
         || source.starts_with("plugin:")
         || capabilities.iter().any(|capability| {
             matches!(

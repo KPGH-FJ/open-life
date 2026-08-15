@@ -150,14 +150,7 @@
         "kind": "tool_permission",
         "label": "Tool permission"
       }
-    ],
-    "taskResumeRelation": {
-      "taskSessionId": "task-1",
-      "resumeRequiresMaterialization": false,
-      "canRequestResume": false,
-      "resumeActionId": "review-permission-1:resume",
-      "blockedReason": "Approve before requesting task resume."
-    }
+    ]
   },
   "workspaceActivity": {
     "id": "event-1",

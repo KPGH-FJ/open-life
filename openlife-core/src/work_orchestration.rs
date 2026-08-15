@@ -185,6 +185,51 @@ impl StructuredWorkPlan {
         Ok(())
     }
 
+    /// A model may choose among allowed capabilities, but it may not omit a
+    /// capability that the authenticated instruction mechanically requires.
+    /// This second boundary is deliberately separate from `validate`: allowed
+    /// is an authorization ceiling, while required is the task contract floor.
+    pub fn validate_required_kinds(
+        &self,
+        required_kinds: &HashSet<WorkPlanStepKind>,
+    ) -> Result<(), String> {
+        let mut required_kinds = required_kinds.iter().copied().collect::<Vec<_>>();
+        required_kinds.sort_by_key(|kind| kind.as_str());
+        for required_kind in &required_kinds {
+            if !self
+                .steps
+                .iter()
+                .any(|step| step.required && step.kind == *required_kind)
+            {
+                return Err(format!(
+                    "work_plan_required_step_missing_{}",
+                    required_kind.as_str()
+                ));
+            }
+        }
+
+        let evidence_or_effect_required = required_kinds.iter().any(|kind| {
+            matches!(
+                kind,
+                WorkPlanStepKind::ReadImportedDocument
+                    | WorkPlanStepKind::ReadWorkspaceFile
+                    | WorkPlanStepKind::WebSearch
+                    | WorkPlanStepKind::WebFetch
+                    | WorkPlanStepKind::ReadMcp
+                    | WorkPlanStepKind::DraftArtifact
+            )
+        });
+        if evidence_or_effect_required && !self.completion.requires_verification {
+            return Err("work_plan_required_verification_missing".into());
+        }
+
+        let artifact_required = required_kinds.contains(&WorkPlanStepKind::DraftArtifact);
+        if artifact_required != (self.completion.result_kind == WorkResultKind::Artifact) {
+            return Err("work_plan_required_result_kind_mismatch".into());
+        }
+        Ok(())
+    }
+
     pub fn canonical_json(&self) -> Result<String, String> {
         serde_json::to_string(self).map_err(|_| "work_plan_serialization_failed".into())
     }
@@ -389,6 +434,40 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(forward, "work_plan_dependency_order_invalid");
+    }
+
+    #[test]
+    fn required_capability_floor_cannot_be_omitted_by_a_valid_allowed_plan() {
+        let answer_only = StructuredWorkPlan::parse_and_validate(
+            r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"analyze","kind":"analyze","required":true,"dependsOn":[]},{"id":"verify","kind":"verify","required":true,"dependsOn":["analyze"]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["verify"]}],"completion":{"resultKind":"answer","requiresVerification":true}}"#,
+            &allowed(),
+            &HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            answer_only
+                .validate_required_kinds(&HashSet::from([
+                    WorkPlanStepKind::WebSearch,
+                    WorkPlanStepKind::Verify,
+                    WorkPlanStepKind::DeliverResult,
+                ]))
+                .unwrap_err(),
+            "work_plan_required_step_missing_web_search"
+        );
+
+        let governed_web = StructuredWorkPlan::parse_and_validate(
+            r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"research","kind":"web_search","required":true,"dependsOn":[]},{"id":"verify","kind":"verify","required":true,"dependsOn":["research"]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["verify"]}],"completion":{"resultKind":"answer","requiresVerification":true}}"#,
+            &allowed(),
+            &HashSet::new(),
+        )
+        .unwrap();
+        governed_web
+            .validate_required_kinds(&HashSet::from([
+                WorkPlanStepKind::WebSearch,
+                WorkPlanStepKind::Verify,
+                WorkPlanStepKind::DeliverResult,
+            ]))
+            .unwrap();
     }
 
     #[test]

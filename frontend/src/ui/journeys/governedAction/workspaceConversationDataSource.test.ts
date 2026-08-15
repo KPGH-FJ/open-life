@@ -174,7 +174,7 @@ describe("workspace conversation Tauri stream adapter", () => {
       payload: {
         session_id: "conversation-1",
         operation_id: "another-operation",
-        task_session_id: "wrong-task",
+        task_id: "wrong-task",
         run_id: "wrong-run",
         reasoning_trace: {},
         tool_calls: [],
@@ -184,7 +184,7 @@ describe("workspace conversation Tauri stream adapter", () => {
       payload: {
         session_id: "another-conversation",
         operation_id: "operation-1",
-        task_session_id: "wrong-task",
+        task_id: "wrong-task",
         run_id: "wrong-run",
         chunk: "错误回复",
       } satisfies StreamMessageChunkPayload,
@@ -195,7 +195,7 @@ describe("workspace conversation Tauri stream adapter", () => {
     const exactStart = {
       session_id: "conversation-1",
       operation_id: "operation-1",
-      task_session_id: "task-1",
+      task_id: "task-1",
       run_id: "run-1",
       reasoning_trace: {},
       tool_calls: [],
@@ -203,7 +203,7 @@ describe("workspace conversation Tauri stream adapter", () => {
     const exactChunk = {
       session_id: "conversation-1",
       operation_id: "operation-1",
-      task_session_id: "task-1",
+      task_id: "task-1",
       run_id: "run-1",
       chunk: "正确回复",
     } satisfies StreamMessageChunkPayload;
@@ -215,7 +215,7 @@ describe("workspace conversation Tauri stream adapter", () => {
     finish({
       session_id: "conversation-1",
       operation_id: "operation-1",
-      task_session_id: "task-1",
+      task_id: "task-1",
       run_id: "run-1",
       reply: "正确回复",
       status: "completed",

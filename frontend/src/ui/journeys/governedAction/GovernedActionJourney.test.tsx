@@ -137,7 +137,20 @@ describe("Workbench governed action journey", () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
       ...fixture,
-      listSessions: async () => [],
+      loadConversation: async () => ({
+        status: "empty" as const,
+        conversations: [],
+        projects: [],
+        selectedProjectId: null,
+        selectedConversationId: null,
+        messages: [],
+        latestTurn: null,
+        providerStatus: "ready" as const,
+        providerProfiles: [],
+        selectedProviderProfileId: null,
+        providerErrorCode: null,
+        workStatus: "ready" as const,
+      }),
       load: async () => {
         const snapshot = await fixture.load();
         const item = snapshot.reviewEnvelope.data!.items[0];
@@ -287,7 +300,20 @@ describe("Workbench governed action journey", () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
       ...fixture,
-      listSessions: async () => [],
+      loadConversation: async () => ({
+        status: "empty" as const,
+        conversations: [],
+        projects: [],
+        selectedProjectId: null,
+        selectedConversationId: null,
+        messages: [],
+        latestTurn: null,
+        providerStatus: "ready" as const,
+        providerProfiles: [],
+        selectedProviderProfileId: null,
+        providerErrorCode: null,
+        workStatus: "ready" as const,
+      }),
       load: async () => {
         const snapshot = await fixture.load();
         return {
@@ -329,7 +355,7 @@ describe("Workbench governed action journey", () => {
     expect(screen.getByRole("button", { name: "开始并发送" })).toBeEnabled();
   });
 
-  it("opens Personal Intelligence from a durable Life Model influence receipt", async () => {
+  it("opens Personal Intelligence from the canonical navigation", async () => {
     const user = userEvent.setup();
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
@@ -395,28 +421,6 @@ describe("Workbench governed action journey", () => {
           },
         };
       },
-      loadLifeModelInfluence: vi.fn().mockResolvedValue({
-        status: "completed" as const,
-        lifeModelInfluence: {
-          status: "applied_context_building",
-          sourceId: "lifemodel.v2.runtime",
-          modelVersion: 8,
-          selectedItems: [
-            {
-              itemRef: "collaboration_preferences:communication-direct",
-              statement: "沟通保持简洁直接",
-              sourceRefs: ["message:user:confirmed-preference"],
-              confirmedAt: "2026-08-09T00:00:00Z",
-              reasonCode: "task intent matches collaboration_preferences",
-            },
-          ],
-          appliedSurfaces: ["context_building", "communication_style"],
-          currentInstructionPriorityPreserved: true,
-          policyPriorityPreserved: true,
-          permissionGranted: false,
-          durableWriteAuthorized: false,
-        },
-      }),
     };
 
     render(
@@ -429,17 +433,9 @@ describe("Workbench governed action journey", () => {
       />
     );
 
-    expect(await screen.findByText("本轮参考了你的 Life Model")).toBeInTheDocument();
-    await user.click(screen.getByText("查看使用依据"));
-    await user.click(screen.getByRole("button", { name: "在个人智能中查看：沟通保持简洁直接" }));
+    await user.click(await screen.findByRole("button", { name: /^个人智能\s+关于我与记忆/ }));
 
     expect(await screen.findByRole("tab", { name: /关于我.*LifeModel/ })).toBeInTheDocument();
-    expect(screen.getByText("本次影响使用的长期信息")).toBeInTheDocument();
-    expect(
-      screen
-        .getByText("collaboration_preferences:communication-direct")
-        .closest("[data-lifemodel-item-ref]")
-    ).toHaveAttribute("data-lifemodel-item-ref", "collaboration_preferences:communication-direct");
     expect(screen.getByRole("button", { name: /^个人智能\s+关于我与记忆/ })).toHaveAttribute(
       "aria-current",
       "page"

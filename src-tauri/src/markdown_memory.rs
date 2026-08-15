@@ -16,8 +16,6 @@ pub(crate) const MARKDOWN_MEMORY_TOPIC_DIRECTORY: &str = "memories";
 pub(crate) const MAX_MARKDOWN_MEMORY_FILES_PER_SCOPE: usize = 16;
 pub(crate) const MAX_MARKDOWN_MEMORY_FILE_CHARS: usize = 32 * 1024;
 pub(crate) const MAX_MARKDOWN_MEMORY_VIEW_CHARS: usize = 64 * 1024;
-pub(crate) const MAX_MARKDOWN_MEMORY_CONTEXT_CHARS: usize = 4_800;
-pub(crate) const MAX_MARKDOWN_MEMORY_CONTEXT_FILES: usize = 4;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 #[serde(rename_all = "snake_case")]

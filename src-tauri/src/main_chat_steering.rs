@@ -54,6 +54,10 @@ pub(crate) async fn submit_main_chat_task_steering_with_state(
     {
         return Err("main_chat_steering_input_invalid".into());
     }
+    state
+        .persistence_coordinator
+        .require_effects_for_stores(&["ConversationStore", "CanonicalTaskRuntimeStore"])
+        .map_err(|error| error.to_string())?;
     let store = state
         .canonical_task_runtime_store
         .as_ref()

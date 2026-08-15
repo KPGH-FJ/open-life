@@ -22,11 +22,9 @@ function action(kind: ReviewAction["kind"]): ReviewAction {
   const effect =
     kind === "apply"
       ? "materialization_request"
-      : kind === "resume"
-        ? "task_resume_request"
-        : kind === "view_evidence"
-          ? "evidence_only"
-          : "decision_only";
+      : kind === "view_evidence"
+        ? "evidence_only"
+        : "decision_only";
   return {
     id: `review-1:${kind}`,
     label: kind,
@@ -206,8 +204,8 @@ describe("governed action Tauri data source", () => {
     );
   });
 
-  it("fails closed instead of inventing edit, apply, revoke, resume, or evidence dispatch", async () => {
-    for (const kind of ["edit", "apply", "revoke", "resume", "view_evidence"] as const) {
+  it("fails closed instead of inventing edit, apply, revoke, or evidence dispatch", async () => {
+    for (const kind of ["edit", "apply", "revoke", "view_evidence"] as const) {
       await expect(
         tauriGovernedActionDataSource.dispatchReviewAction(action(kind))
       ).rejects.toThrow();

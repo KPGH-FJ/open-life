@@ -160,7 +160,7 @@ pub enum EvidenceSourceType {
     MemoryRecord,
     VectorChunk,
     Proposal,
-    AgentRun,
+    WorkRun,
     RunMetadata,
     Feedback,
     UserEdit,
@@ -174,7 +174,7 @@ impl std::fmt::Display for EvidenceSourceType {
             EvidenceSourceType::MemoryRecord => write!(f, "memory_record"),
             EvidenceSourceType::VectorChunk => write!(f, "vector_chunk"),
             EvidenceSourceType::Proposal => write!(f, "proposal"),
-            EvidenceSourceType::AgentRun => write!(f, "agent_run"),
+            EvidenceSourceType::WorkRun => write!(f, "work_run"),
             EvidenceSourceType::RunMetadata => write!(f, "run_metadata"),
             EvidenceSourceType::Feedback => write!(f, "feedback"),
             EvidenceSourceType::UserEdit => write!(f, "user_edit"),
@@ -248,7 +248,7 @@ pub struct EvidenceRecord {
     pub support_count: u32,
     pub opposing_refs: Vec<String>,
     pub linked_proposal_ids: Vec<String>,
-    pub linked_agent_run_ids: Vec<String>,
+    pub linked_work_run_ids: Vec<String>,
     pub run_metadata: Value,
     pub tombstone: Option<EvidenceTombstone>,
     pub created_at: DateTime<Utc>,
@@ -269,7 +269,7 @@ pub struct EvidenceDraft {
     pub source_refs: Vec<EvidenceSourceRef>,
     pub opposing_refs: Vec<String>,
     pub linked_proposal_ids: Vec<String>,
-    pub linked_agent_run_ids: Vec<String>,
+    pub linked_work_run_ids: Vec<String>,
     pub run_metadata: Value,
 }
 
@@ -291,7 +291,7 @@ impl EvidenceDraft {
             source_refs: Vec::new(),
             opposing_refs: Vec::new(),
             linked_proposal_ids: Vec::new(),
-            linked_agent_run_ids: Vec::new(),
+            linked_work_run_ids: Vec::new(),
             run_metadata: serde_json::json!({}),
         }
     }
@@ -311,8 +311,8 @@ impl EvidenceDraft {
         self
     }
 
-    pub fn with_linked_agent_run(mut self, run_id: impl Into<String>) -> Self {
-        append_unique(&mut self.linked_agent_run_ids, run_id.into());
+    pub fn with_linked_work_run(mut self, run_id: impl Into<String>) -> Self {
+        append_unique(&mut self.linked_work_run_ids, run_id.into());
         self
     }
 
@@ -356,7 +356,7 @@ pub struct EvidenceQuery {
     pub status: Option<EvidenceStatus>,
     pub privacy_level: Option<EvidencePrivacyLevel>,
     pub linked_proposal_id: Option<String>,
-    pub linked_agent_run_id: Option<String>,
+    pub linked_work_run_id: Option<String>,
     pub limit: Option<usize>,
 }
 
@@ -427,7 +427,7 @@ impl EvidenceStore {
                 support_count INTEGER NOT NULL,
                 opposing_refs_json TEXT NOT NULL,
                 linked_proposal_ids_json TEXT NOT NULL,
-                linked_agent_run_ids_json TEXT NOT NULL,
+                linked_work_run_ids_json TEXT NOT NULL,
                 run_metadata_json TEXT NOT NULL,
                 tombstone_json TEXT,
                 created_at TEXT NOT NULL,
@@ -473,7 +473,7 @@ impl EvidenceStore {
             source_refs: draft.source_refs,
             opposing_refs: draft.opposing_refs,
             linked_proposal_ids: draft.linked_proposal_ids,
-            linked_agent_run_ids: draft.linked_agent_run_ids,
+            linked_work_run_ids: draft.linked_work_run_ids,
             run_metadata: draft.run_metadata,
             tombstone: None,
             created_at: now,
@@ -490,7 +490,7 @@ impl EvidenceStore {
             "INSERT INTO evidence_records (
                 id, evidence_type, affected_path, summary, confidence, risk_level,
                 privacy_level, status, source_refs_json, support_count,
-                opposing_refs_json, linked_proposal_ids_json, linked_agent_run_ids_json,
+                opposing_refs_json, linked_proposal_ids_json, linked_work_run_ids_json,
                 run_metadata_json, tombstone_json, created_at, updated_at,
                 last_observed_at, archived_at
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
@@ -507,7 +507,7 @@ impl EvidenceStore {
                 record.support_count,
                 serde_json::to_string(&record.opposing_refs)?,
                 serde_json::to_string(&record.linked_proposal_ids)?,
-                serde_json::to_string(&record.linked_agent_run_ids)?,
+                serde_json::to_string(&record.linked_work_run_ids)?,
                 serde_json::to_string(&record.run_metadata)?,
                 record
                     .tombstone
@@ -587,10 +587,10 @@ impl EvidenceStore {
                     .any(|linked_id| linked_id == proposal_id)
             });
         }
-        if let Some(run_id) = query.linked_agent_run_id.as_deref() {
+        if let Some(run_id) = query.linked_work_run_id.as_deref() {
             records.retain(|record| {
                 record
-                    .linked_agent_run_ids
+                    .linked_work_run_ids
                     .iter()
                     .any(|linked_id| linked_id == run_id)
             });
@@ -683,9 +683,9 @@ impl EvidenceStore {
         self.save_record(record)
     }
 
-    pub fn link_agent_run(&self, id: &str, run_id: impl Into<String>) -> Result<EvidenceRecord> {
+    pub fn link_work_run(&self, id: &str, run_id: impl Into<String>) -> Result<EvidenceRecord> {
         let mut record = self.require_evidence(id)?;
-        append_unique(&mut record.linked_agent_run_ids, run_id.into());
+        append_unique(&mut record.linked_work_run_ids, run_id.into());
         self.save_record(record)
     }
 
@@ -719,7 +719,7 @@ impl EvidenceStore {
                 support_count = ?10,
                 opposing_refs_json = ?11,
                 linked_proposal_ids_json = ?12,
-                linked_agent_run_ids_json = ?13,
+                linked_work_run_ids_json = ?13,
                 run_metadata_json = ?14,
                 tombstone_json = ?15,
                 updated_at = ?16,
@@ -739,7 +739,7 @@ impl EvidenceStore {
                 record.support_count,
                 serde_json::to_string(&record.opposing_refs)?,
                 serde_json::to_string(&record.linked_proposal_ids)?,
-                serde_json::to_string(&record.linked_agent_run_ids)?,
+                serde_json::to_string(&record.linked_work_run_ids)?,
                 serde_json::to_string(&record.run_metadata)?,
                 record
                     .tombstone
@@ -757,7 +757,7 @@ impl EvidenceStore {
     fn columns() -> &'static str {
         "id, evidence_type, affected_path, summary, confidence, risk_level,
          privacy_level, status, source_refs_json, support_count,
-         opposing_refs_json, linked_proposal_ids_json, linked_agent_run_ids_json,
+         opposing_refs_json, linked_proposal_ids_json, linked_work_run_ids_json,
          run_metadata_json, tombstone_json, created_at, updated_at,
          last_observed_at, archived_at"
     }
@@ -780,7 +780,7 @@ impl EvidenceStore {
             support_count: row.get::<_, i64>(9)?.max(0) as u32,
             opposing_refs: json_column(row, 10)?,
             linked_proposal_ids: json_column(row, 11)?,
-            linked_agent_run_ids: json_column(row, 12)?,
+            linked_work_run_ids: json_column(row, 12)?,
             run_metadata: json_column(row, 13)?,
             tombstone: optional_json_column(row, 14)?,
             created_at: datetime_column(row, 15)?,

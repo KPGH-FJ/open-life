@@ -20,9 +20,7 @@ import {
   clearMainChatSkill,
   startStreamMessage,
   submitMainChatTaskSteering,
-  type ChatSession,
   type ConversationViewModel,
-  type ChatLifeModelInfluenceSnapshot,
   type ResourceDetachReceipt,
   type ResourceImportSelectionResult,
   type MainChatMessageOptions,
@@ -47,11 +45,7 @@ export type WorkspaceStreamEvents = {
 };
 
 export interface WorkspaceConversationDataSource {
-  loadConversation?(conversationId?: string): Promise<ConversationViewModel>;
-  /** Test/Work compatibility only; canonical Chat UI reads loadConversation. */
-  listSessions?(): Promise<ChatSession[]>;
-  loadHistory?(sessionId: string): Promise<ChatMessage[]>;
-  loadLifeModelInfluence?(sessionId: string): Promise<ChatLifeModelInfluenceSnapshot | null>;
+  loadConversation(conversationId?: string): Promise<ConversationViewModel>;
   createSession(sessionId: string, title: string): Promise<void>;
   createProject?(projectId: string, name: string): Promise<ProjectRecord>;
   assignProject?(conversationId: string, projectId: string | null): Promise<void>;
@@ -84,7 +78,7 @@ export interface WorkspaceConversationDataSource {
   listSkills?(sessionId?: string): Promise<MainChatSkillSummary[]>;
   selectSkill?(sessionId: string, skillId: string): Promise<MainChatSelectedSkill>;
   clearSkill?(sessionId: string): Promise<MainChatSelectedSkill>;
-  listToolCandidates?(taskSessionId?: string): Promise<MainChatToolCandidateList>;
+  listToolCandidates?(taskId?: string): Promise<MainChatToolCandidateList>;
   loadMarkdownMemory?(): Promise<MarkdownMemoryViewModel>;
   selectMarkdownMemoryRoot?(scope: MarkdownMemoryScope): Promise<MarkdownMemoryRootSelection>;
   draftMarkdownMemoryFileProposal?(request: {

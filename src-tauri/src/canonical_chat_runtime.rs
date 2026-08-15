@@ -1,14 +1,14 @@
 //! R1 canonical ordinary Chat runtime.
 //!
 //! This path owns Conversation -> Turn -> Item. It deliberately has no Task,
-//! AgentRun, ActionQueue, durable MainChatEvent, Proposal, or effect writer.
+//! retired Work lifecycle stores, Review proposals, or effect writers.
 
 use crate::main_chat_kernel::{
     BufferedMainChatEventSink, MainChatEventSink, MainChatKernel, MainChatKernelContextConfig,
     MainChatKernelEvent, MainChatProviderAuthorization, MainChatTurnInput,
     SchedulerMainChatModelClient,
 };
-use crate::main_chat_turn_runtime::ProviderInvocationState;
+use crate::provider_invocation_state::ProviderInvocationState;
 use crate::state::AppState;
 use crate::{SendMessageResult, ToolCallResult};
 use openlife_core::agent::main_chat_agent_v1::{AgentIngress, PolicyRouteKind};
@@ -477,7 +477,7 @@ pub(crate) async fn run_canonical_chat(
     let history = conversation_store
         .lock()
         .await
-        .list_items(&input.conversation_id, 200)
+        .list_model_context_items(&input.conversation_id, &input.turn_id, 200)
         .map_err(|error| format!("load canonical Chat history failed: {error}"))?
         .into_iter()
         .filter_map(|item| match item.kind {
@@ -516,8 +516,7 @@ pub(crate) async fn run_canonical_chat(
         provider_runtime.scheduler,
         privacy_engine,
         provider_runtime.config.system.network_policy,
-    )
-    .with_configured_conversation_provider_grant();
+    );
     let personal_context = crate::personal_intelligence_ports::load_personal_intelligence_context(
         state,
         crate::personal_intelligence_ports::PersonalIntelligenceContextRequest {
@@ -714,15 +713,10 @@ fn output_from_result(
         tool_calls: Vec::<ToolCallResult>::new(),
         run_id: None,
         agent_ingress: None,
-        agent_state: None,
-        execution_transcript: Vec::new(),
-        legacy_fallback_used: false,
-        legacy_runtime_invoked: false,
         provider_invocation_status: invocation,
         model_invoked: invocation.observed_adapter_start(),
         tool_invoked: false,
         life_model_influence: life_model_influence.clone(),
-        turn_terminal: None,
     };
     let done_payload = serde_json::json!({
         "session_id": input.conversation_id,
@@ -760,7 +754,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn chat_commits_exact_items_without_task_run_or_event_growth() {
+    async fn chat_commits_exact_conversation_turn_and_items() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         crate::main_chat_acceptance_test_support::configure_live_provider_eval_state_with_captured_streaming_local_http_provider(
             &state,
@@ -780,24 +774,6 @@ mod tests {
             .await
             .create_conversation(&conversation_id, "Canonical Chat")
             .unwrap();
-        let task_count_before = state
-            .main_chat_agent_session_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .list_sessions(None, 100, 0)
-            .unwrap()
-            .len();
-        let run_count_before = state
-            .agent_run_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .list_runs(100, 0)
-            .unwrap()
-            .len();
         let mut events = Vec::new();
         let started = std::time::Instant::now();
         let mut first_chunk_elapsed = None;
@@ -844,45 +820,77 @@ mod tests {
             .unwrap();
         assert_eq!(snapshot.turn.status, TurnStatus::Completed);
         assert_eq!(snapshot.items.len(), 2);
-        assert_eq!(
-            state
-                .main_chat_agent_session_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .list_sessions(None, 100, 0)
-                .unwrap()
-                .len(),
-            task_count_before
-        );
-        assert_eq!(
-            state
-                .agent_run_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .list_runs(100, 0)
-                .unwrap()
-                .len(),
-            run_count_before
-        );
-        assert!(state
-            .main_chat_agent_event_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .list(&turn_id, 0, 100)
-            .unwrap()
-            .is_empty());
         assert!(events
             .iter()
             .any(|(kind, _)| kind == "stream-message-start"));
         assert!(events
             .iter()
             .any(|(kind, _)| kind == "stream-message-chunk"));
+    }
+
+    #[tokio::test]
+    async fn chinese_and_english_chat_share_the_same_conversation_turn_contract() {
+        for (title, prompt, reply) in [
+            (
+                "English Chat",
+                "Explain the current status.",
+                "English reply",
+            ),
+            ("中文对话", "请解释当前状态。", "中文回答"),
+        ] {
+            let state = canonical_state(reply).await;
+            let conversation_id = uuid::Uuid::new_v4().to_string();
+            let turn_id = uuid::Uuid::new_v4().to_string();
+            state
+                .conversation_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .create_conversation(&conversation_id, title)
+                .unwrap();
+
+            let output = run_canonical_chat(
+                CanonicalChatInput {
+                    turn_id: turn_id.clone(),
+                    conversation_id: conversation_id.clone(),
+                    messages: vec![ChatMessage {
+                        role: "user".into(),
+                        content: prompt.into(),
+                    }],
+                    selected_skill_id: None,
+                    stream: false,
+                },
+                &state,
+                &mut |_, _| {},
+            )
+            .await
+            .unwrap();
+
+            assert_eq!(output.result.reply, reply);
+            let snapshot = state
+                .conversation_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .get_turn(&turn_id)
+                .unwrap()
+                .unwrap();
+            assert_eq!(snapshot.turn.status, TurnStatus::Completed);
+            assert_eq!(snapshot.items.len(), 2);
+            assert_eq!(snapshot.items[0].content, prompt);
+            assert_eq!(snapshot.items[1].content, reply);
+            assert!(state
+                .canonical_task_runtime_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list_task_snapshots(10)
+                .unwrap()
+                .is_empty());
+        }
     }
 
     #[tokio::test]

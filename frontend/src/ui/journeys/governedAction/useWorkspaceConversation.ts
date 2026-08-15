@@ -66,11 +66,11 @@ export type WorkspaceTurnState =
       phase: "streaming";
       sessionId: string;
       turnId: string;
-      taskSessionId?: string;
+      taskId?: string;
       runId?: string;
       cancelError?: string;
     }
-  | { phase: "cancelling"; sessionId: string; turnId: string; taskSessionId?: string }
+  | { phase: "cancelling"; sessionId: string; turnId: string; taskId?: string }
   | { phase: "refreshing"; sessionId: string; status: MainChatTurnStatus }
   | {
       phase: "resolved";
@@ -93,21 +93,6 @@ function sessionTitle(input: string): string {
 
 function resolvedTurnStatus(status: MainChatTurnStatus | undefined): MainChatTurnStatus {
   return status ?? "failed";
-}
-
-async function requireLegacySessions(
-  dataSource: WorkspaceConversationDataSource
-): Promise<ChatSession[]> {
-  if (!dataSource.listSessions) throw new Error("legacy_conversation_list_unavailable");
-  return dataSource.listSessions();
-}
-
-async function requireLegacyHistory(
-  dataSource: WorkspaceConversationDataSource,
-  sessionId: string
-): Promise<ChatMessage[]> {
-  if (!dataSource.loadHistory) throw new Error("legacy_conversation_history_unavailable");
-  return dataSource.loadHistory(sessionId);
 }
 
 function sourceBoundBasisFromTrace(
@@ -137,7 +122,6 @@ function streamIdentityMatches(
     conversation_id?: string;
     turn_id?: string;
     task_id?: string;
-    task_session_id?: string;
   },
   mode: WorkspaceConversationMode,
   sessionId: string,
@@ -179,7 +163,7 @@ export type WorkspaceConversationController = {
   loadError: string | null;
   turnState: WorkspaceTurnState;
   streamingReply: string;
-  activeTaskSessionId: string | null;
+  activeTaskId: string | null;
   mode: WorkspaceConversationMode;
   provider: WorkspaceConversationProviderState;
   workStatus: WorkspaceConversationWorkStatus;
@@ -241,7 +225,7 @@ export function useWorkspaceConversation(
   const [loadError, setLoadError] = useState<string | null>(null);
   const [turnState, setTurnState] = useState<WorkspaceTurnState>({ phase: "idle" });
   const [streamingReply, setStreamingReply] = useState("");
-  const [activeTaskSessionId, setActiveTaskSessionId] = useState<string | null>(null);
+  const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [mode, setModeState] = useState<WorkspaceConversationMode>("chat");
   const [provider, setProvider] = useState<WorkspaceConversationProviderState>({
     status: "unknown",
@@ -294,7 +278,7 @@ export function useWorkspaceConversation(
     setLoadError(null);
     setTurnState({ phase: "idle" });
     setStreamingReply("");
-    setActiveTaskSessionId(null);
+    setActiveTaskId(null);
     setModeState("chat");
     setProvider({
       status: "unknown",
@@ -349,10 +333,7 @@ export function useWorkspaceConversation(
   }, [dataSource]);
 
   useEffect(() => {
-    if (
-      !dataSource?.loadMarkdownMemory ||
-      (dataSource.loadConversation && (mode !== "work" || workStatus !== "ready"))
-    ) {
+    if (!dataSource?.loadMarkdownMemory || mode !== "work" || workStatus !== "ready") {
       setMarkdownMemory({ phase: "loading", model: null });
       return;
     }
@@ -474,7 +455,7 @@ export function useWorkspaceConversation(
     void Promise.all([
       dataSource.listSkills(selectedSessionId ?? undefined),
       shouldLoadWorkTools
-        ? dataSource.listToolCandidates!(activeTaskSessionId ?? undefined)
+        ? dataSource.listToolCandidates!(activeTaskId ?? undefined)
         : Promise.resolve(null),
     ])
       .then(([nextSkills, nextTools]) => {
@@ -495,56 +476,31 @@ export function useWorkspaceConversation(
     return () => {
       active = false;
     };
-  }, [activeTaskSessionId, dataSource, loadStatus, mode, selectedSessionId, workStatus]);
+  }, [activeTaskId, dataSource, loadStatus, mode, selectedSessionId, workStatus]);
 
   const loadHistory = useCallback(
     async (sessionId: string, requestId: number): Promise<void> => {
       if (!dataSource) throw new Error("workspace_conversation_data_source_unavailable");
-      const canonical = dataSource.loadConversation
-        ? await dataSource.loadConversation(sessionId)
-        : null;
-      if (canonical && canonical.selectedConversationId !== sessionId) {
+      const canonical = await dataSource.loadConversation(sessionId);
+      if (canonical.selectedConversationId !== sessionId) {
         throw new Error("conversation_view_model_selection_mismatch");
       }
-      if (canonical) {
-        setProjects(canonical.projects);
-        setSelectedProjectId(canonical.selectedProjectId);
-      }
-      const history = canonical?.messages ?? (await requireLegacyHistory(dataSource, sessionId));
-      let influence = null;
-      let influenceError: string | null = null;
-      if (!canonical) {
-        try {
-          influence = dataSource.loadLifeModelInfluence
-            ? await dataSource.loadLifeModelInfluence(sessionId)
-            : null;
-        } catch (error) {
-          influenceError = errorText(error);
-        }
-      }
+      setProjects(canonical.projects);
+      setSelectedProjectId(canonical.selectedProjectId);
+      const history = canonical.messages;
       if (requestId !== requestRef.current) return;
       setSelectedSessionId(sessionId);
       setMessages(history);
-      if (influenceError) {
-        setTurnState({ phase: "failed", stage: "refresh", reason: influenceError });
-      } else if (
-        canonical?.latestTurn?.status === "failed" ||
-        canonical?.latestTurn?.status === "cancelled" ||
-        canonical?.latestTurn?.status === "interrupted"
+      if (
+        canonical.latestTurn?.status === "failed" ||
+        canonical.latestTurn?.status === "cancelled" ||
+        canonical.latestTurn?.status === "interrupted"
       ) {
         setTurnState({
           phase: "resolved",
           sessionId,
           status: canonical.latestTurn.status,
           blockers: canonical.latestTurn.errorCode ? [canonical.latestTurn.errorCode] : [],
-        });
-      } else if (influence) {
-        setTurnState({
-          phase: "resolved",
-          sessionId,
-          status: influence.status,
-          blockers: [],
-          lifeModelInfluence: influence.lifeModelInfluence,
         });
       } else {
         setTurnState({ phase: "idle" });
@@ -559,33 +515,26 @@ export function useWorkspaceConversation(
     setLoadError(null);
     try {
       if (!dataSource) throw new Error("workspace_conversation_data_source_unavailable");
-      const canonical = dataSource.loadConversation
-        ? await dataSource.loadConversation(selectedSessionId ?? preferredSessionId ?? undefined)
-        : null;
-      const nextSessions = canonical?.conversations ?? (await requireLegacySessions(dataSource));
-      if (canonical) {
-        setProjects(canonical.projects);
-        setSelectedProjectId(canonical.selectedProjectId);
-        setProvider({
-          status: canonical.providerStatus,
-          profiles: canonical.providerProfiles,
-          selectedProfileId: canonical.selectedProviderProfileId,
-          errorCode: canonical.providerErrorCode,
-        });
-        setWorkStatus(canonical.workStatus);
-      } else {
-        // Compatibility-only data sources used by the pre-R2 Work behavior
-        // tests do not expose the canonical Conversation ViewModel. Production
-        // always does, so it cannot silently take this lane.
-        setWorkStatus("ready");
-      }
+      const canonical = await dataSource.loadConversation(
+        selectedSessionId ?? preferredSessionId ?? undefined
+      );
+      const nextSessions = canonical.conversations;
+      setProjects(canonical.projects);
+      setSelectedProjectId(canonical.selectedProjectId);
+      setProvider({
+        status: canonical.providerStatus,
+        profiles: canonical.providerProfiles,
+        selectedProfileId: canonical.selectedProviderProfileId,
+        errorCode: canonical.providerErrorCode,
+      });
+      setWorkStatus(canonical.workStatus);
       if (requestId !== requestRef.current) return false;
       setSessions(nextSessions);
       const currentStillExists =
         selectedSessionId && nextSessions.some(item => item.session_id === selectedSessionId);
       const preferredStillExists =
         preferredSessionId && nextSessions.some(item => item.session_id === preferredSessionId);
-      const nextSessionId = canonical?.selectedConversationId
+      const nextSessionId = canonical.selectedConversationId
         ? canonical.selectedConversationId
         : currentStillExists
           ? selectedSessionId
@@ -593,7 +542,7 @@ export function useWorkspaceConversation(
             ? preferredSessionId
             : (nextSessions[0]?.session_id ?? null);
       if (nextSessionId) {
-        if (canonical && canonical.selectedConversationId === nextSessionId) {
+        if (canonical.selectedConversationId === nextSessionId) {
           setSelectedSessionId(nextSessionId);
           setMessages(canonical.messages);
           setSelectedProjectId(canonical.selectedProjectId);
@@ -648,7 +597,7 @@ export function useWorkspaceConversation(
     setLoadError(null);
     setTurnState({ phase: "idle" });
     setStreamingReply("");
-    setActiveTaskSessionId(null);
+    setActiveTaskId(null);
     void loadHistory(preferredSessionId, requestId)
       .then(() => {
         if (requestId === requestRef.current) setLoadStatus("ready");
@@ -746,7 +695,7 @@ export function useWorkspaceConversation(
       setLoadError(null);
       setTurnState({ phase: "idle" });
       setStreamingReply("");
-      setActiveTaskSessionId(null);
+      setActiveTaskId(null);
       void loadHistory(sessionId, requestId)
         .then(() => {
           if (requestId === requestRef.current) setLoadStatus("ready");
@@ -782,7 +731,7 @@ export function useWorkspaceConversation(
     setLoadStatus("ready");
     setTurnState({ phase: "idle" });
     setStreamingReply("");
-    setActiveTaskSessionId(null);
+    setActiveTaskId(null);
     if (!canDetachBackgroundWork) {
       announce("已打开新对话草稿；发送前不会创建会话或写入记录。");
     }
@@ -976,7 +925,7 @@ export function useWorkspaceConversation(
         setDraft("");
         setTurnState({ phase: "sending", sessionId });
         setStreamingReply("");
-        setActiveTaskSessionId(null);
+        setActiveTaskId(null);
         announce("正在发送；命令返回后仍会重新读取会话和工作区状态。");
 
         const result = await dataSource.streamTurn(
@@ -1005,13 +954,13 @@ export function useWorkspaceConversation(
                 setPendingResourceTurnOperationId(null);
                 setResourceMutation({ phase: "idle" });
               }
-              const activeTaskId = payload.task_id ?? payload.task_session_id ?? null;
-              setActiveTaskSessionId(activeTaskId);
+              const activeTaskId = payload.task_id ?? null;
+              setActiveTaskId(activeTaskId);
               setTurnState({
                 phase: "streaming",
                 sessionId: turnSessionId,
                 turnId: payload.turn_id ?? turnOperationId,
-                taskSessionId: activeTaskId ?? undefined,
+                taskId: activeTaskId ?? undefined,
                 runId: payload.run_id,
               });
               announce("OpenLife 正在回复；现在可以取消这一轮对话。");
@@ -1043,15 +992,13 @@ export function useWorkspaceConversation(
           setResourceMutation({ phase: "idle" });
         }
         cancelRequestRef.current += 1;
-        const status = resolvedTurnStatus(result.status ?? result.turn_terminal?.status);
-        setActiveTaskSessionId(result.task_session_id ?? null);
+        const status = resolvedTurnStatus(result.status);
+        setActiveTaskId(result.task_id ?? null);
         setTurnState({ phase: "refreshing", sessionId, status });
 
         let refreshedHistory: ChatMessage[];
         try {
-          refreshedHistory = dataSource.loadConversation
-            ? (await dataSource.loadConversation(sessionId)).messages
-            : await requireLegacyHistory(dataSource, sessionId);
+          refreshedHistory = (await dataSource.loadConversation(sessionId)).messages;
         } catch (error) {
           if (operationId !== operationRef.current) return;
           setTurnState({ phase: "failed", stage: "refresh", reason: errorText(error) });
@@ -1062,12 +1009,12 @@ export function useWorkspaceConversation(
         if (operationId !== operationRef.current) return;
         setMessages(refreshedHistory);
         setStreamingReply("");
-        setActiveTaskSessionId(null);
+        setActiveTaskId(null);
         setTurnState({
           phase: "resolved",
           sessionId,
           status,
-          blockers: result.blockers ?? result.turn_terminal?.blockers ?? [],
+          blockers: result.blockers ?? [],
           lifeModelInfluence: result.life_model_influence,
           sourceBoundBasis: sourceBoundBasisFromTrace(result.reasoning_trace?.generation_result),
         });
@@ -1091,14 +1038,18 @@ export function useWorkspaceConversation(
         );
         try {
           if (sessionId) {
-            const refreshedHistory = dataSource.loadConversation
-              ? (await dataSource.loadConversation(sessionId)).messages
-              : await requireLegacyHistory(dataSource, sessionId);
+            const refreshedHistory = (await dataSource.loadConversation(sessionId)).messages;
             if (operationId === operationRef.current) setMessages(refreshedHistory);
           }
         } catch {
           // The explicit failed state already communicates that persistence is unverified.
         }
+        // A failed stream may still have durably created or terminalized a
+        // canonical Work Task (for example, a blocked tool attempt). Refresh
+        // the backend-owned Workspace projection on both success and failure
+        // so Results / Needs Attention never disappear behind the composer
+        // error state.
+        if (operationId === operationRef.current) await onAfterTurn();
       }
     },
     [
@@ -1124,13 +1075,13 @@ export function useWorkspaceConversation(
       announce("当前没有可以取消的运行中对话。");
       return;
     }
-    const { sessionId, turnId, taskSessionId } = turnState;
+    const { sessionId, turnId, taskId } = turnState;
     const cancelRequestId = ++cancelRequestRef.current;
-    setTurnState({ phase: "cancelling", sessionId, turnId, taskSessionId });
+    setTurnState({ phase: "cancelling", sessionId, turnId, taskId });
     announce("正在请求取消；只有后端终态返回后才会显示已取消。");
     try {
-      if (mode === "work" && taskSessionId && dataSource.cancelWorkTask) {
-        await dataSource.cancelWorkTask(taskSessionId);
+      if (mode === "work" && taskId && dataSource.cancelWorkTask) {
+        await dataSource.cancelWorkTask(taskId);
       } else if (dataSource.cancelChatTurn) {
         await dataSource.cancelChatTurn(sessionId, turnId);
       } else {
@@ -1142,7 +1093,7 @@ export function useWorkspaceConversation(
         phase: "streaming",
         sessionId,
         turnId,
-        taskSessionId,
+        taskId,
         runId: turnState.runId,
         cancelError: errorText(error),
       });
@@ -1156,7 +1107,7 @@ export function useWorkspaceConversation(
       !dataSource?.steerTask ||
       turnState.phase !== "streaming" ||
       !selectedSessionId ||
-      !activeTaskSessionId ||
+      !activeTaskId ||
       !turnState.runId ||
       !text
     ) {
@@ -1166,7 +1117,7 @@ export function useWorkspaceConversation(
     try {
       const result = await dataSource.steerTask({
         steeringId: crypto.randomUUID(),
-        taskId: activeTaskSessionId,
+        taskId: activeTaskId,
         runId: turnState.runId,
         sessionId: selectedSessionId,
         content: text,
@@ -1180,7 +1131,7 @@ export function useWorkspaceConversation(
     } catch (error) {
       announce(`任务调整未被后端接受：${errorText(error)}`);
     }
-  }, [activeTaskSessionId, announce, dataSource, draft, selectedSessionId, turnState]);
+  }, [activeTaskId, announce, dataSource, draft, selectedSessionId, turnState]);
 
   const renameSelected = useCallback(
     async (title: string): Promise<boolean> => {
@@ -1295,7 +1246,7 @@ export function useWorkspaceConversation(
       loadError,
       turnState,
       streamingReply,
-      activeTaskSessionId,
+      activeTaskId,
       mode,
       provider,
       workStatus,
@@ -1369,7 +1320,7 @@ export function useWorkspaceConversation(
       startNewConversation,
       assignProject,
       streamingReply,
-      activeTaskSessionId,
+      activeTaskId,
       turnState,
       toolCandidates,
       updateDraft,

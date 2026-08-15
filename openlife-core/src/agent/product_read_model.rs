@@ -120,7 +120,6 @@ pub enum ReviewActionKind {
     Later,
     Revoke,
     Apply,
-    Resume,
     ViewEvidence,
 }
 
@@ -129,7 +128,6 @@ pub enum ReviewActionKind {
 pub enum ReviewActionEffect {
     DecisionOnly,
     MaterializationRequest,
-    TaskResumeRequest,
     EvidenceOnly,
 }
 
@@ -140,7 +138,6 @@ impl ReviewActionKind {
                 ReviewActionEffect::DecisionOnly
             }
             Self::Apply => ReviewActionEffect::MaterializationRequest,
-            Self::Resume => ReviewActionEffect::TaskResumeRequest,
             Self::ViewEvidence => ReviewActionEffect::EvidenceOnly,
         }
     }
@@ -159,8 +156,6 @@ pub struct ReviewAction {
     #[serde(default)]
     pub requires_confirmation: bool,
     pub target_review_item_id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub target_task_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expected_materialization_status_after_dispatch: Option<ReviewItemMaterializationStatus>,
     #[serde(default)]
@@ -183,15 +178,9 @@ impl ReviewAction {
             disabled_reason: None,
             requires_confirmation: false,
             target_review_item_id: target_review_item_id.into(),
-            target_task_session_id: None,
             expected_materialization_status_after_dispatch: None,
             completion_proof_after_dispatch: false,
         }
-    }
-
-    pub fn for_task(mut self, task_session_id: impl Into<String>) -> Self {
-        self.target_task_session_id = Some(task_session_id.into());
-        self
     }
 
     pub fn validate(&self) -> Result<(), ProductReadModelContractError> {
@@ -554,10 +543,6 @@ mod tests {
             (
                 ReviewActionKind::Apply,
                 ReviewActionEffect::MaterializationRequest,
-            ),
-            (
-                ReviewActionKind::Resume,
-                ReviewActionEffect::TaskResumeRequest,
             ),
             (
                 ReviewActionKind::ViewEvidence,

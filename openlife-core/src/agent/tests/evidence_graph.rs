@@ -25,8 +25,8 @@ fn preference_draft(id: &str, confidence: f32) -> EvidenceDraft {
         EvidencePrivacyLevel::Internal,
     )
     .with_summary("metadata safe planning preference")
-    .with_source_ref(source_ref(EvidenceSourceType::AgentRun, id))
-    .with_linked_agent_run(id)
+    .with_source_ref(source_ref(EvidenceSourceType::WorkRun, id))
+    .with_linked_work_run(id)
 }
 
 fn rejected_outcome_draft(source_evidence_id: &str, proposal_id: &str) -> EvidenceDraft {
@@ -40,7 +40,7 @@ fn rejected_outcome_draft(source_evidence_id: &str, proposal_id: &str) -> Eviden
     .with_summary("metadata safe rejected proposal outcome")
     .with_source_ref(source_ref(EvidenceSourceType::Proposal, proposal_id))
     .with_linked_proposal(proposal_id)
-    .with_linked_agent_run("run-rejected-outcome");
+    .with_linked_work_run("run-rejected-outcome");
     draft.opposing_refs = vec![source_evidence_id.to_string()];
     draft.run_metadata = serde_json::json!({
         "schema": "w75.maturationProposalOutcomeEvidence.v1",
@@ -84,7 +84,7 @@ fn w128_evidence_graph_clusters_support_and_opposition_with_source_weights() {
     assert!(graph.clusters[0]
         .source_weights
         .iter()
-        .any(|weight| weight.source_type == "agent_run" && weight.ref_count == 2));
+        .any(|weight| weight.source_type == "work_run" && weight.ref_count == 2));
     assert!(graph
         .links
         .iter()
@@ -203,7 +203,7 @@ fn w130_evidence_timeline_is_metadata_safe_and_exposes_required_fields() {
     assert_eq!(item.privacy_level, "internal");
     assert_eq!(item.polarity, EvidencePolarity::Supporting);
     assert_eq!(item.linked_proposal_ids, vec!["proposal-raw-source"]);
-    assert_eq!(item.linked_agent_run_ids, vec!["run-raw-source"]);
+    assert_eq!(item.linked_work_run_ids, vec!["run-raw-source"]);
     assert!(item.cluster_id.starts_with("egc_"));
     assert_eq!(item.cluster_hash.len(), 64);
     assert_eq!(item.source_ref_count, 1);

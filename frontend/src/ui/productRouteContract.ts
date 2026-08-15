@@ -18,7 +18,6 @@ const RETIRED_PRODUCT_PATHS = new Set([
   "/builder",
   "/versions",
   "/mcp",
-  "/a2a",
   "/calibration",
   "/metrics",
   "/today",

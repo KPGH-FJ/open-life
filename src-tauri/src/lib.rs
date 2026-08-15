@@ -5,8 +5,6 @@ use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 
-pub mod a2a_server;
-pub mod a2a_sidecar;
 pub(crate) mod artifact_materializer;
 pub mod bootstrap;
 mod canonical_chat_runtime;
@@ -16,71 +14,43 @@ mod credential_bootstrap;
 pub(crate) mod danger_action_confirmation;
 pub mod errors;
 pub(crate) mod life_model_learning;
-#[allow(dead_code)]
 pub(crate) mod life_model_materializer_guard;
 pub(crate) mod life_model_write_gateway;
 pub(crate) mod life_state_projection;
-pub(crate) mod main_chat_agent_state_payload;
 pub(crate) mod main_chat_cancellation;
-#[cfg(test)]
-pub(crate) mod main_chat_capability_eval;
-#[cfg(test)]
-pub(crate) mod main_chat_command_surface_eval;
 pub(crate) mod main_chat_context_loader;
-#[allow(dead_code)]
-pub(crate) mod main_chat_eval_state;
-#[allow(dead_code)]
-pub(crate) mod main_chat_event_stream;
-#[allow(dead_code)]
-pub(crate) mod main_chat_final_gate;
-#[allow(dead_code)]
-pub(crate) mod main_chat_generation_support;
-#[allow(dead_code)]
-pub(crate) mod main_chat_kernel;
 #[cfg(test)]
-pub(crate) mod main_chat_live_provider_harness;
+pub(crate) mod main_chat_eval_state;
+pub(crate) mod main_chat_kernel;
 pub(crate) mod main_chat_memory_proposals;
-pub(crate) mod main_chat_policy_runtime;
-#[allow(dead_code)]
-pub(crate) mod main_chat_preprocess;
-pub(crate) mod main_chat_react_execution;
-#[allow(dead_code)]
-pub(crate) mod main_chat_react_runtime;
-#[allow(dead_code)]
-pub(crate) mod main_chat_react_tool_selection;
-pub(crate) mod main_chat_replay_contract;
-#[allow(dead_code)]
 pub(crate) mod main_chat_runtime_facts;
-#[allow(dead_code)]
-pub(crate) mod main_chat_runtime_status;
-pub(crate) mod main_chat_runtime_support;
 pub(crate) mod main_chat_send;
 pub(crate) mod main_chat_skills_tools;
 pub(crate) mod main_chat_source_bound;
 pub(crate) mod main_chat_steering;
 pub(crate) mod main_chat_streaming;
-#[cfg(test)]
-pub(crate) mod main_chat_task_controls;
+pub(crate) mod main_chat_tool_observation;
 #[allow(dead_code)]
-pub mod main_chat_turn_runtime;
+pub(crate) mod main_chat_tool_selection;
 pub(crate) mod markdown_memory;
 #[allow(dead_code)]
 pub(crate) mod memory_gateway;
+#[allow(dead_code)]
+pub(crate) mod memory_retrieval_filter;
 pub(crate) mod persistence_coordinator;
 pub(crate) mod personal_intelligence_ports;
 pub(crate) mod product_agent_dto;
+pub(crate) mod provider_invocation_state;
 pub(crate) mod provider_network_consent;
 pub(crate) mod provider_registry;
 pub(crate) mod provider_validation;
 pub(crate) mod read_models;
 pub(crate) mod resource_commands;
 pub mod runtime_build_info;
-pub mod scheduler_runner;
 pub(crate) mod secret_store;
 pub mod state;
 pub(crate) mod state_projection;
 pub mod storage;
-pub(crate) mod terminal_owner_write_gateway;
 pub(crate) mod tool_gateway_resources;
 pub(crate) mod workspace_file_resolver;
 
@@ -88,34 +58,7 @@ pub(crate) mod workspace_file_resolver;
 mod main_chat_acceptance_test_support;
 
 #[cfg(test)]
-mod main_chat_live_provider_tests;
-
-#[cfg(test)]
-mod main_chat_command_surface_tests;
-
-#[cfg(test)]
-mod main_chat_capability_eval_tests;
-
-#[cfg(test)]
-mod main_chat_react_boundary_tests;
-
-#[cfg(test)]
-mod main_chat_react_unit_tests;
-
-#[cfg(test)]
-mod main_chat_policy_runtime_tests;
-
-#[cfg(test)]
-mod main_chat_task_control_tests;
-
-#[cfg(test)]
 mod main_chat_context_loader_tests;
-
-#[cfg(test)]
-mod main_chat_runtime_module_tests;
-
-#[cfg(test)]
-mod main_chat_runtime_facts_tests;
 
 #[cfg(test)]
 pub mod test_utils;
@@ -123,14 +66,7 @@ pub mod test_utils;
 pub use state::AppState;
 
 // Re-exports for test modules (imported as crate::...)
-#[cfg(feature = "dev-extensions")]
-use commands::a2a::{
-    a2a_bridge_local, a2a_discover_agent, a2a_handle_task, a2a_local_agent_card,
-    a2a_restart_sidecar, a2a_send_task, a2a_stop_sidecar,
-};
-#[cfg(test)]
-use commands::agent::get_agent_run;
-use commands::agent_runtime::{
+use commands::main_chat_tools::{
     clear_main_chat_skill, get_main_chat_skill_detail, list_main_chat_skills,
     list_main_chat_tool_candidates, select_main_chat_skill,
 };
@@ -142,10 +78,6 @@ use commands::chat::{
 #[cfg(feature = "dev-extensions")]
 use commands::execution::{disable_plugin, enable_plugin, list_plugins, reload_plugins};
 use commands::execution::{list_tool_permissions, revoke_tool_permission};
-pub use openlife_core::memory_cache::HotMemoryCache;
-pub use openlife_core::memory_cache::SharedHotCache;
-pub use openlife_core::privacy::PrivacyEngine;
-// Hermes module removed: replaced by AgentRuntime
 use commands::life_model::{
     confirm_lifemodel_learning_candidate, delete_lifemodel_learning_candidate,
     draft_legacy_lifemodel_migration, draft_lifemodel_v2_change, draft_lifemodel_v2_export,
@@ -173,9 +105,9 @@ use commands::proposal::{
 };
 use commands::settings::{
     abandon_governed_data_import_recovery, export_all_data, get_config,
-    get_danger_action_preflight, get_governed_data_import_status, get_last_model_error,
-    get_privacy_policy, import_all_data, recover_required_credential_access, save_config,
-    set_privacy_policy, test_llm_connection,
+    get_danger_action_preflight, get_governed_data_import_status, get_privacy_policy,
+    import_all_data, recover_required_credential_access, save_config, set_privacy_policy,
+    test_llm_connection,
 };
 #[cfg(feature = "dev-extensions")]
 use commands::settings::{cleanup_mcp_audit_logs, export_mcp_audit_logs, rotate_mcp_audit_key};
@@ -186,6 +118,9 @@ use markdown_memory::{
     deactivate_markdown_memory_file_proposal, draft_markdown_memory_file_proposal,
     get_markdown_memory_view_model,
 };
+pub use openlife_core::memory_cache::HotMemoryCache;
+pub use openlife_core::memory_cache::SharedHotCache;
+pub use openlife_core::privacy::PrivacyEngine;
 use read_models::diagnostics::get_product_diagnostics_view_model;
 use read_models::life_model::get_life_model_view_model;
 use read_models::memory::get_memory_view_model;
@@ -220,7 +155,7 @@ pub struct ToolCallResult {
     pub action_id: Option<String>,
     pub run_id: Option<String>,
     pub permission_decision: Option<String>,
-    pub react_trace: Option<crate::product_agent_dto::ProductReactActionTrace>,
+    pub tool_trace: Option<crate::product_agent_dto::ProductToolActionTrace>,
     /// Runtime-only tool execution authority. Product IPC receives an exact,
     /// body-free ProductToolCallResult projection instead of this receipt.
     pub execution_receipt: Option<openlife_core::tool_execution_receipt::ToolExecutionReceipt>,
@@ -263,7 +198,7 @@ impl std::fmt::Debug for ToolCallResult {
             .field("action_id", &self.action_id)
             .field("run_id", &self.run_id)
             .field("permission_decision", &self.permission_decision)
-            .field("react_trace_present", &self.react_trace.is_some())
+            .field("tool_trace_present", &self.tool_trace.is_some())
             .field(
                 "execution_receipt_present",
                 &self.execution_receipt.is_some(),
@@ -285,21 +220,11 @@ pub struct SendMessageResult {
     pub tool_calls: Vec<ToolCallResult>,
     pub run_id: Option<String>,
     pub agent_ingress: Option<openlife_core::agent::main_chat_agent_v1::AgentIngressDecision>,
-    #[serde(serialize_with = "crate::product_agent_dto::serialize_product_agent_state")]
-    pub agent_state:
-        Option<openlife_core::agent::main_chat_runtime_contract::MainChatAgentStateSnapshot>,
-    #[serde(serialize_with = "crate::product_agent_dto::serialize_product_execution_transcript")]
-    pub execution_transcript:
-        Vec<openlife_core::agent::main_chat_agent_v1::ExecutionTranscriptEntry>,
-    pub legacy_fallback_used: bool,
-    pub legacy_runtime_invoked: bool,
-    pub provider_invocation_status: crate::main_chat_turn_runtime::ProviderInvocationState,
+    pub provider_invocation_status: crate::provider_invocation_state::ProviderInvocationState,
     pub model_invoked: bool,
     pub tool_invoked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub life_model_influence: Option<crate::main_chat_kernel::MainChatLifeModelProductReceipt>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub turn_terminal: Option<crate::main_chat_turn_runtime::OpenLifeTurnTerminal>,
 }
 
 impl std::fmt::Debug for SendMessageResult {
@@ -313,20 +238,12 @@ impl std::fmt::Debug for SendMessageResult {
             .field("tool_call_count", &self.tool_calls.len())
             .field("run_id", &self.run_id)
             .field("agent_ingress_present", &self.agent_ingress.is_some())
-            .field("agent_state_present", &self.agent_state.is_some())
-            .field(
-                "execution_transcript_count",
-                &self.execution_transcript.len(),
-            )
-            .field("legacy_fallback_used", &self.legacy_fallback_used)
-            .field("legacy_runtime_invoked", &self.legacy_runtime_invoked)
             .field(
                 "provider_invocation_status",
                 &self.provider_invocation_status,
             )
             .field("model_invoked", &self.model_invoked)
             .field("tool_invoked", &self.tool_invoked)
-            .field("turn_terminal_present", &self.turn_terminal.is_some())
             .finish()
     }
 }
@@ -375,8 +292,6 @@ pub struct SystemDiagnostics {
     pub usage_ready: bool,
     pub usage_readiness_issues: Vec<String>,
     pub ollama_models: Vec<OllamaModelInfo>,
-    pub agent_run_count: usize,
-    pub agent_run_store_status: String,
     pub pending_proposal_count: usize,
     pub high_risk_pending_proposal_count: usize,
     pub proposal_store_status: String,
@@ -423,22 +338,12 @@ async fn send_message(
             )
             .await
         }
-        #[cfg(test)]
-        "legacy_test" => {
-            main_chat_send::send_message_with_operation_state(
-                operation_id,
-                session_id,
-                messages,
-                selected_skill_id,
-                state.inner(),
-            )
-            .await
-        }
         _ => Err("invalid_main_chat_mode".into()),
     }
 }
 
 #[derive(serde::Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
 struct StartStreamMessageArgs {
     operation_id: String,
     session_id: String,
@@ -516,18 +421,6 @@ async fn start_stream_message<R: tauri::Runtime>(
                     selected_skill_id,
                     stream: true,
                 },
-                state.inner(),
-                emit,
-            )
-            .await
-        }
-        #[cfg(test)]
-        "legacy_test" => {
-            main_chat_streaming::start_stream_message_with_operation_state(
-                operation_id,
-                session_id,
-                messages,
-                selected_skill_id,
                 state.inner(),
                 emit,
             )
@@ -638,117 +531,6 @@ async fn detach_resource_from_turn(
     .await
 }
 
-#[tauri::command]
-#[cfg(feature = "dev-extensions")]
-async fn execute_tool_call(
-    name: String,
-    arguments: serde_json::Value,
-    state: State<'_, Arc<AppState>>,
-) -> Result<ToolCallResult, String> {
-    state
-        .persistence_coordinator
-        .require_effects_allowed()
-        .map_err(|error| error.to_string())?;
-    let resources = crate::tool_gateway_resources::snapshot_tool_gateway_resources_for_dev_command(
-        state.inner(),
-    )
-    .await?;
-    let safe_paths = resources.shared.safe_paths.clone();
-
-    // Create an AgentRun for direct tool execution audit trail
-    let mut run = openlife_core::agent::AgentRun::new_tool_execution_run(&name);
-    let run_id = run.id.clone();
-
-    let tool_gateway = openlife_core::agent::ToolGateway::from_executor_config(
-        openlife_core::agent::ActionExecutorConfig::default(),
-    );
-    let ctx = openlife_core::agent::ActionExecutionContext::new(
-        &resources.shared.registry,
-        &resources.shared.permission_store,
-        &resources.shared.audit_store,
-        &resources.shared.privacy_engine,
-        &safe_paths,
-    );
-    let ctx = ctx
-        .with_tool_audit_persistence_observer(resources.shared.persistence_coordinator.as_ref())
-        .with_durable_store_failure_observer(resources.shared.persistence_coordinator.as_ref())
-        .with_agent_run_store(&resources.agent_run_store);
-
-    let request = openlife_core::agent::AgentActionRequest {
-        action_type: "mcp_tool".to_string(),
-        target: name.clone(),
-        input: serde_json::json!({ "arguments": arguments }),
-        source_run_id: Some(run_id.clone()),
-        step_index: 0,
-    };
-
-    let result = tool_gateway
-        .execute(request, &ctx)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Persist the AgentRun
-    run.actions.push(result.action.clone());
-    run.observations.push(result.observation.clone());
-    run.status = match result.status {
-        openlife_core::agent::ActionExecutionStatus::Succeeded => {
-            openlife_core::agent::AgentRunStatus::Completed
-        }
-        _ => openlife_core::agent::AgentRunStatus::Failed,
-    };
-    run.finished_at = Some(chrono::Utc::now());
-
-    let _ = resources.agent_run_store.create_run(&run);
-
-    let product_projection =
-        crate::product_agent_dto::VerifiedProductToolCallProjection::from_bound_action(
-            &result.action,
-            &result.execution_receipt,
-            &run_id,
-        );
-
-    let tool_result = ToolCallResult {
-        name: name.clone(),
-        arguments: arguments.clone(),
-        sanitized_arguments: Some(arguments),
-        success: result.status == openlife_core::agent::ActionExecutionStatus::Succeeded,
-        output: result
-            .action
-            .output
-            .as_ref()
-            .and_then(|o| o.get("text").and_then(|t| t.as_str()).map(String::from)),
-        error: result.action.error.clone(),
-        permission_level: result
-            .action
-            .tool_scope
-            .as_ref()
-            .map(|s| s.risk_level.clone())
-            .unwrap_or_else(|| "medium".into()),
-        status: match result.status {
-            openlife_core::agent::ActionExecutionStatus::Succeeded => ToolCallStatus::Success,
-            openlife_core::agent::ActionExecutionStatus::Failed => ToolCallStatus::Error,
-            openlife_core::agent::ActionExecutionStatus::Blocked => ToolCallStatus::Blocked,
-            openlife_core::agent::ActionExecutionStatus::NeedsConfirmation => {
-                ToolCallStatus::NeedsConfirmation
-            }
-        },
-        requires_confirmation: result.status
-            == openlife_core::agent::ActionExecutionStatus::NeedsConfirmation,
-        pii_found: false,
-        privacy_warnings: vec![],
-        action_id: Some(result.action.id),
-        run_id: Some(run_id),
-        permission_decision: result.action.permission_decision,
-        react_trace: result
-            .action
-            .react_trace
-            .map(crate::product_agent_dto::ProductReactActionTrace::from_transient_trace),
-        execution_receipt: Some(result.execution_receipt),
-        product_projection,
-    };
-
-    Ok(tool_result)
-}
 #[cfg(feature = "dev-extensions")]
 #[tauri::command]
 async fn inspect_mcp_call(
@@ -807,7 +589,6 @@ fn start_dev_extension_background_workers(app_state: Arc<AppState>) {
             }
         });
     }
-    scheduler_runner::start_scheduler_runner(app_state);
 }
 
 #[cfg(debug_assertions)]
@@ -912,11 +693,6 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(app_state.clone())
         .setup(move |app| {
-            if let Err(error) = tauri::async_runtime::block_on(
-                bootstrap::reconcile_startup_orphaned_main_chat_runs(&app_state_for_setup),
-            ) {
-                log::error!("[setup] orphan Main Chat reconciliation degraded: {error}");
-            }
             if app_state_for_setup
                 .persistence_coordinator
                 .startup_reconciliation_mutations_safe()
@@ -928,19 +704,6 @@ pub fn run() {
                     app_state_for_setup
                         .persistence_coordinator
                         .degrade_globally("startup_canonical_outbox_reconciliation_failed");
-                }
-            }
-            if app_state_for_setup
-                .persistence_coordinator
-                .startup_reconciliation_mutations_safe()
-            {
-                if let Err(error) = tauri::async_runtime::block_on(
-                    bootstrap::reconcile_startup_terminal_owner_successors(&app_state_for_setup),
-                ) {
-                    log::error!("[setup] terminal-owner reconciliation degraded: {error}");
-                    app_state_for_setup
-                        .persistence_coordinator
-                        .degrade_globally("startup_terminal_owner_reconciliation_failed");
                 }
             }
             let proposal_backlog = if app_state_for_setup
@@ -1009,26 +772,6 @@ pub fn run() {
                 return Err(Box::new(e));
             }
             #[cfg(feature = "dev-extensions")]
-            {
-                if std::env::var("OPENLIFE_DEV_AUTOSTART_A2A").as_deref() == Ok("1") {
-                    if let Err(reason) = a2a_server::require_authenticated_dev_a2a_opt_in() {
-                        log::warn!(
-                            "[setup] refusing A2A autostart without explicit pairing: {}",
-                            reason
-                        );
-                    } else {
-                        log::info!("[setup] launching explicitly enabled development A2A sidecar");
-                        let a2a_sidecar = app_state_for_setup.a2a_sidecar.clone();
-                        tauri::async_runtime::spawn(async move {
-                            let sidecar = a2a_sidecar.lock().await.clone();
-                            if let Err(e) = sidecar.start().await {
-                                log::warn!("[setup] development a2a sidecar start failed: {}", e);
-                            }
-                        });
-                    }
-                }
-            }
-            #[cfg(feature = "dev-extensions")]
             start_dev_extension_background_workers(app_state_for_setup.clone());
             Ok(())
         })
@@ -1093,8 +836,6 @@ pub fn run() {
             submit_main_chat_task_steering,
             get_conversation_view_model,
             #[cfg(feature = "dev-extensions")]
-            execute_tool_call,
-            #[cfg(feature = "dev-extensions")]
             inspect_mcp_call,
             #[cfg(feature = "dev-extensions")]
             register_mcp_server,
@@ -1115,27 +856,12 @@ pub fn run() {
             count_memory_chunks,
             create_knowledge_note,
             search_memory,
-            #[cfg(feature = "dev-extensions")]
-            a2a_discover_agent,
-            #[cfg(feature = "dev-extensions")]
-            a2a_send_task,
-            #[cfg(feature = "dev-extensions")]
-            a2a_local_agent_card,
-            #[cfg(feature = "dev-extensions")]
-            a2a_handle_task,
-            #[cfg(feature = "dev-extensions")]
-            a2a_bridge_local,
-            #[cfg(feature = "dev-extensions")]
-            a2a_restart_sidecar,
-            #[cfg(feature = "dev-extensions")]
-            a2a_stop_sidecar,
             export_all_data,
             get_danger_action_preflight,
             import_all_data,
             abandon_governed_data_import_recovery,
             get_governed_data_import_status,
             test_llm_connection,
-            get_last_model_error,
             create_chat_session,
             create_project,
             assign_conversation_project,
@@ -1181,30 +907,6 @@ pub fn run() {
             }
             _ => {}
         });
-}
-
-/// Builds focused real shipped-command IPC handlers in the command owner
-/// module, where Tauri's generated command macros are natively scoped.
-/// Keeping each handler focused prevents the generated test dispatcher for
-/// unrelated commands from sharing the invoked command's worker stack. These
-/// remain after `run` so source guards cannot mistake them for the shipped
-/// command handler.
-#[cfg(test)]
-fn main_chat_send_command_surface_test_handler<R: tauri::Runtime>(
-) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![send_message]
-}
-
-#[cfg(test)]
-fn main_chat_stream_command_surface_test_handler<R: tauri::Runtime>(
-) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![start_stream_message]
-}
-
-#[cfg(test)]
-fn main_chat_get_agent_run_command_surface_test_handler<R: tauri::Runtime>(
-) -> impl Fn(tauri::ipc::Invoke<R>) -> bool + Send + Sync + 'static {
-    tauri::generate_handler![get_agent_run]
 }
 
 #[cfg(test)]

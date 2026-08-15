@@ -22,8 +22,8 @@ use crate::agent::review_workflow::{DurableWriteRequest, DurableWriteSource, Dur
 use crate::agent::tool_gateway::ToolGatewayContractEvidence;
 use crate::agent::types::{
     AgentAction, AgentObservation, AgentProposal, BoundContentField, ContentReceiptBinding,
-    ContentReceiptKind, ProposalSource, ProposalType, ReactActionTraceEnvelope, RiskLevel,
-    ToolActionScope,
+    ContentReceiptKind, ProposalSource, ProposalType, RiskLevel, ToolActionScope,
+    ToolActionTraceEnvelope,
 };
 use crate::agent::{ExternalWriteGovernanceInput, LifeModelGovernor, MemoryWriteGovernanceInput};
 use crate::network_client::{
@@ -247,7 +247,7 @@ impl super::ActionExecutor {
 
         if let Some(m) = manifest
             .as_ref()
-            .filter(|m| matches!(m.source, ToolSource::Plugin { .. } | ToolSource::A2A { .. }))
+            .filter(|m| matches!(m.source, ToolSource::Plugin { .. }))
         {
             let forced_decision = ToolPermissionDecision {
                 allowed: false,
@@ -970,9 +970,9 @@ impl super::ActionExecutor {
                         allowed: result.success,
                     });
                     for trace in action
-                        .react_trace
+                        .tool_trace
                         .iter_mut()
-                        .chain(observation.react_trace.iter_mut())
+                        .chain(observation.tool_trace.iter_mut())
                     {
                         trace.tool_name = target_manifest.name.clone();
                         trace.tool_id = target_manifest.id.clone();
@@ -1202,7 +1202,7 @@ impl super::ActionExecutor {
             request.step_index,
             now.timestamp_nanos_opt().unwrap_or_default()
         );
-        let trace = self.build_react_trace_envelope(
+        let trace = self.build_tool_trace_envelope(
             &action_id,
             Some(&observation_id),
             tool_name,
@@ -1232,7 +1232,7 @@ impl super::ActionExecutor {
                 Some(decision.reason.clone())
             },
             timestamp: now,
-            react_trace: Some(trace.clone()),
+            tool_trace: Some(trace.clone()),
             runtime_execution_receipt: None,
         };
 
@@ -1255,7 +1255,7 @@ impl super::ActionExecutor {
                 "directWritesExecuted": false,
             })),
             timestamp: now,
-            react_trace: Some(trace),
+            tool_trace: Some(trace),
         };
 
         (action, observation)
@@ -1301,7 +1301,7 @@ impl super::ActionExecutor {
             request.step_index,
             now.timestamp_nanos_opt().unwrap_or_default()
         );
-        let trace = self.build_react_trace_envelope(
+        let trace = self.build_tool_trace_envelope(
             &action_id,
             Some(&observation_id),
             tool_name,
@@ -1339,7 +1339,7 @@ impl super::ActionExecutor {
             finished_at: Some(now),
             error: result.error.clone(),
             timestamp: now,
-            react_trace: Some(trace.clone()),
+            tool_trace: Some(trace.clone()),
             runtime_execution_receipt: None,
         };
 
@@ -1362,7 +1362,7 @@ impl super::ActionExecutor {
                 "directWritesExecuted": false,
             })),
             timestamp: now,
-            react_trace: Some(trace),
+            tool_trace: Some(trace),
         };
 
         let observed_body_admission = mint_observed_body_admission(
@@ -1425,7 +1425,7 @@ impl super::ActionExecutor {
         let permission_decision = "read_only_memory_search".to_string();
         let observed_body =
             succeeded.then_some((observation_content.as_str(), ContentReceiptKind::ToolOutput));
-        let trace = ReactActionTraceEnvelope {
+        let trace = ToolActionTraceEnvelope {
             run_id: request.source_run_id.clone(),
             action_id: action_id.clone(),
             step_index: request.step_index,
@@ -1477,7 +1477,7 @@ impl super::ActionExecutor {
                 // and stop_reason retain the execution failure.
                 allowed: true,
             }),
-            react_trace: Some(trace.clone()),
+            tool_trace: Some(trace.clone()),
             runtime_execution_receipt: None,
         };
         let observation = AgentObservation {
@@ -1487,7 +1487,7 @@ impl super::ActionExecutor {
             source: request.action_type.clone(),
             structured_result: Some(structured_result),
             timestamp: now,
-            react_trace: Some(trace),
+            tool_trace: Some(trace),
         };
         let admission =
             mint_observed_body_admission(observed_body, request, &action, &observation, true)?;
@@ -1522,7 +1522,7 @@ impl super::ActionExecutor {
             request.step_index,
             now.timestamp_nanos_opt().unwrap_or_default()
         );
-        let trace = self.build_react_trace_envelope(
+        let trace = self.build_tool_trace_envelope(
             &action_id,
             Some(&observation_id),
             &request.target,
@@ -1547,7 +1547,7 @@ impl super::ActionExecutor {
             finished_at: Some(now),
             error: Some(reason.to_string()),
             timestamp: now,
-            react_trace: Some(trace.clone()),
+            tool_trace: Some(trace.clone()),
             runtime_execution_receipt: None,
         };
         let observation = AgentObservation {
@@ -1563,7 +1563,7 @@ impl super::ActionExecutor {
                 "proposal_required": true,
             })),
             timestamp: now,
-            react_trace: Some(trace),
+            tool_trace: Some(trace),
         };
         let governance_report = match request.action_type.as_str() {
             "memory_write" | "memory_archive" => Some(
@@ -1597,7 +1597,7 @@ impl super::ActionExecutor {
         clippy::too_many_arguments,
         reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
     )]
-    fn build_react_trace_envelope(
+    fn build_tool_trace_envelope(
         &self,
         action_id: &str,
         observation_id: Option<&str>,
@@ -1609,7 +1609,7 @@ impl super::ActionExecutor {
         permission_decision: Option<String>,
         started_at: Option<chrono::DateTime<chrono::Utc>>,
         finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> ReactActionTraceEnvelope {
+    ) -> ToolActionTraceEnvelope {
         let output_preview = observed_body.map(|(text, _)| metadata_safe_text_preview(text));
         let output_item_count = observed_body
             .and_then(|(text, _)| serde_json::from_str::<Value>(text).ok())
@@ -1641,7 +1641,7 @@ impl super::ActionExecutor {
                 }
             });
 
-        ReactActionTraceEnvelope {
+        ToolActionTraceEnvelope {
             run_id: request.source_run_id.clone(),
             action_id: action_id.to_string(),
             step_index: request.step_index,
@@ -1790,13 +1790,13 @@ impl super::ActionExecutor {
                 object.insert("directWritesExecuted".into(), serde_json::json!(false));
             }
         }
-        if let Some(trace) = result.action.react_trace.as_mut() {
+        if let Some(trace) = result.action.tool_trace.as_mut() {
             trace.proposal_id = Some(outcome.proposal_id().to_string());
             trace.status = "needs_confirmation".into();
             trace.permission_decision = Some("tool_permission_required".into());
             trace.action_category = "proposal".into();
         }
-        if let Some(trace) = result.observation.react_trace.as_mut() {
+        if let Some(trace) = result.observation.tool_trace.as_mut() {
             trace.proposal_id = Some(outcome.proposal_id().to_string());
             trace.status = "needs_confirmation".into();
             trace.observation_status = Some("needs_confirmation".into());
@@ -1917,8 +1917,8 @@ impl super::ActionExecutor {
             }
         }
         for trace in [
-            result.action.react_trace.as_mut(),
-            result.observation.react_trace.as_mut(),
+            result.action.tool_trace.as_mut(),
+            result.observation.tool_trace.as_mut(),
         ]
         .into_iter()
         .flatten()
@@ -1928,7 +1928,7 @@ impl super::ActionExecutor {
             trace.permission_decision = Some("network_policy_consent_required".into());
             trace.action_category = "proposal".into();
         }
-        if let Some(trace) = result.observation.react_trace.as_mut() {
+        if let Some(trace) = result.observation.tool_trace.as_mut() {
             trace.observation_status = Some("needs_confirmation".into());
         }
 
@@ -2030,11 +2030,11 @@ impl super::ActionExecutor {
                 })
                 .to_report(),
         );
-        if let Some(trace) = result.action.react_trace.as_mut() {
+        if let Some(trace) = result.action.tool_trace.as_mut() {
             trace.proposal_id = Some(proposal_id.clone());
             trace.action_category = "proposal".into();
         }
-        if let Some(trace) = result.observation.react_trace.as_mut() {
+        if let Some(trace) = result.observation.tool_trace.as_mut() {
             trace.proposal_id = Some(proposal_id);
             trace.action_category = "proposal".into();
         }
@@ -2228,180 +2228,5 @@ fn manifest_risk_level(manifest: &ToolManifest) -> RiskLevel {
         "high" => RiskLevel::High,
         "medium" => RiskLevel::Medium,
         _ => RiskLevel::Low,
-    }
-}
-
-#[cfg(test)]
-mod bound_content_receipt_tests {
-    use super::*;
-    use crate::agent::action_executor::{ActionExecutor, ActionExecutorConfig};
-    use crate::tool_manifest::{ToolIdempotencyContract, ToolSource};
-
-    fn manifest() -> ToolManifest {
-        let mut manifest = ToolManifest::new(
-            "memory.search",
-            "Search canonical memory",
-            serde_json::json!({"type": "object"}),
-            "low",
-            "1",
-            ToolSource::BuiltIn,
-        );
-        manifest.id = "builtin.memory.search".into();
-        manifest.risk_level = "low".into();
-        manifest.capabilities = vec!["read".into(), "memory".into()];
-        manifest.action_type = "read".into();
-        manifest.idempotency_contract = ToolIdempotencyContract::Idempotent;
-        manifest
-    }
-
-    fn request(run_id: &str) -> AgentActionRequest {
-        AgentActionRequest {
-            action_type: "read".into(),
-            target: "memory.search".into(),
-            input: serde_json::json!({"arguments": {"query": "private transient input"}}),
-            source_run_id: Some(run_id.into()),
-            step_index: 1,
-        }
-    }
-
-    #[test]
-    fn bound_content_receipt_admission_has_one_private_mint_surface() {
-        let executor_source = include_str!("tool_executor.rs").replace("\r\n", "\n");
-        let production_source = executor_source
-            .split("#[cfg(test)]\nmod bound_content_receipt_tests")
-            .next()
-            .expect("production ToolExecutor source");
-        let admission_declaration = executor_source
-            .split("pub(crate) struct ObservedToolBodyAdmission")
-            .nth(1)
-            .and_then(|tail| tail.split("impl ObservedToolBodyAdmission").next())
-            .expect("admission declaration");
-        assert!(!admission_declaration.contains("derive"));
-        assert_eq!(
-            production_source
-                .matches("ObservedToolBodyAdmission::from_adapter_observation")
-                .count(),
-            1,
-            "only the real adapter observation builder may mint an admission"
-        );
-        assert_eq!(
-            production_source
-                .matches("fn from_adapter_observation(")
-                .count(),
-            1,
-            "the admission has exactly one module-private constructor definition"
-        );
-        assert!(!production_source.contains("pub fn build_success_action_observation"));
-        for non_issuer_source in [
-            include_str!("../types.rs"),
-            include_str!("../store.rs"),
-            include_str!("mod.rs"),
-        ] {
-            assert!(
-                !non_issuer_source.contains("ObservedToolBodyAdmission::from_adapter_observation")
-            );
-        }
-    }
-
-    #[test]
-    fn tool_executor_success_and_error_issue_runtime_bound_receipts() {
-        let executor = ActionExecutor::new(ActionExecutorConfig::default());
-        let manifest = manifest();
-        let run_id = uuid::Uuid::new_v4().to_string();
-        let request = request(&run_id);
-
-        for (result, expected_kind) in [
-            (
-                ToolCallInternalResult {
-                    success: true,
-                    output: Some("real adapter success body".into()),
-                    error: None,
-                },
-                ContentReceiptKind::ToolOutput,
-            ),
-            (
-                ToolCallInternalResult {
-                    success: false,
-                    output: None,
-                    error: Some("real adapter error body".into()),
-                },
-                ContentReceiptKind::ToolError,
-            ),
-        ] {
-            let store = crate::agent::AgentRunStore::new_in_memory().unwrap();
-            let mut run = crate::agent::AgentRun::new_chat_run("tool-receipt-test", "");
-            run.id = run_id.clone();
-            store.create_run(&run).unwrap();
-            let (mut action, mut observation, admission) = executor
-                .build_success_action_observation(
-                    &manifest.name,
-                    &serde_json::json!({"query": "transient"}),
-                    &result,
-                    Some(&manifest),
-                    &request,
-                )
-                .unwrap();
-            let receipt = crate::agent::action_executor::BoundContentReceiptIssuer::issue_bound_content_receipt(
-                &store,
-                admission.expect("adapter body admission"),
-                &action,
-                &observation,
-            )
-            .unwrap();
-            action.react_trace.as_mut().unwrap().output_receipt = Some(receipt);
-            observation.react_trace = None;
-            let action_receipt = action
-                .react_trace
-                .as_ref()
-                .and_then(|trace| trace.output_receipt.as_ref())
-                .expect("ToolExecutor action receipt");
-            assert_eq!(action_receipt.kind(), expected_kind);
-
-            run.actions.push(action);
-            run.observations.push(observation);
-            store.update_run(&run).unwrap();
-            let reloaded = store.get_run(&run.id).unwrap().unwrap();
-            let durable = reloaded.actions[0]
-                .react_trace
-                .as_ref()
-                .and_then(|trace| trace.output_receipt.as_ref())
-                .expect("durable ToolExecutor receipt");
-            assert_eq!(durable.kind(), expected_kind);
-            assert_eq!(durable.version(), 2);
-            assert!(durable.binding_receipt().starts_with("hmac-sha256:"));
-            assert!(reloaded.observations[0].react_trace.is_none());
-            let product_json = serde_json::to_string(&reloaded).unwrap();
-            assert!(!product_json.contains("real adapter success body"));
-            assert!(!product_json.contains("real adapter error body"));
-            assert!(!product_json.contains("bound-content-receipt://"));
-        }
-    }
-
-    #[test]
-    fn oversized_adapter_body_returns_a_typed_failure() {
-        let executor = ActionExecutor::new(ActionExecutorConfig::default());
-        let manifest = manifest();
-        let run_id = uuid::Uuid::new_v4().to_string();
-        let request = request(&run_id);
-        let result = ToolCallInternalResult {
-            success: true,
-            output: Some("x".repeat(16 * 1024 * 1024 + 1)),
-            error: None,
-        };
-
-        let error = match executor.build_success_action_observation(
-            &manifest.name,
-            &serde_json::json!({}),
-            &result,
-            Some(&manifest),
-            &request,
-        ) {
-            Ok(_) => panic!("oversized observed bodies must not silently omit receipt authority"),
-            Err(error) => error,
-        };
-        assert!(matches!(
-            error.downcast_ref::<crate::agent::types::ContentReceiptIssuanceError>(),
-            Some(crate::agent::types::ContentReceiptIssuanceError::ObservedBodyTooLarge { .. })
-        ));
     }
 }

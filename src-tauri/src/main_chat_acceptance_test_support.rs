@@ -1,5 +1,3 @@
-use crate::main_chat_command_surface_eval;
-use crate::main_chat_command_surface_eval::MainChatCommandSurfaceEvalReport;
 use crate::AppState;
 use std::sync::Arc;
 
@@ -82,20 +80,6 @@ pub(crate) async fn configure_live_web_eval_state_with_citation_retry_local_http
     captured_requests
 }
 
-pub(crate) async fn configure_live_resource_and_web_eval_state_with_citation_echo_local_http_provider(
-    state: &Arc<AppState>,
-) -> Arc<std::sync::Mutex<Vec<String>>> {
-    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let provider_base = fake_local_chat_provider_endpoint(
-        "",
-        Some(Arc::clone(&captured_requests)),
-        LocalCitationEcho::ResourceAndWeb,
-    )
-    .await;
-    configure_local_http_provider(state, provider_base).await;
-    captured_requests
-}
-
 pub(crate) async fn configure_live_resource_eval_state_with_all_citations_local_http_provider(
     state: &Arc<AppState>,
 ) -> Arc<std::sync::Mutex<Vec<String>>> {
@@ -122,77 +106,6 @@ pub(crate) async fn configure_live_resource_and_web_artifact_eval_state_with_cit
     .await;
     configure_local_http_provider(state, provider_base).await;
     captured_requests
-}
-
-pub(crate) async fn configure_live_resource_artifact_eval_state_with_citation_echo_local_http_provider(
-    state: &Arc<AppState>,
-) -> Arc<std::sync::Mutex<Vec<String>>> {
-    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let provider_base = fake_local_chat_provider_endpoint(
-        "",
-        Some(Arc::clone(&captured_requests)),
-        LocalCitationEcho::ResourceArtifact,
-    )
-    .await;
-    configure_local_http_provider(state, provider_base).await;
-    captured_requests
-}
-
-pub(crate) async fn configure_live_forged_resource_artifact_eval_state_with_local_http_provider(
-    state: &Arc<AppState>,
-) -> Arc<std::sync::Mutex<Vec<String>>> {
-    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let provider_base = fake_local_chat_provider_endpoint(
-        "",
-        Some(Arc::clone(&captured_requests)),
-        LocalCitationEcho::ResourceForgedArtifact,
-    )
-    .await;
-    configure_local_http_provider(state, provider_base).await;
-    captured_requests
-}
-
-pub(crate) async fn configure_live_web_artifact_eval_state_with_citation_echo_local_http_provider(
-    state: &Arc<AppState>,
-) -> Arc<std::sync::Mutex<Vec<String>>> {
-    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let provider_base = fake_local_chat_provider_endpoint(
-        "",
-        Some(Arc::clone(&captured_requests)),
-        LocalCitationEcho::WebArtifact,
-    )
-    .await;
-    configure_local_http_provider(state, provider_base).await;
-    captured_requests
-}
-
-pub(crate) async fn configure_live_resource_and_forged_web_artifact_eval_state_with_local_http_provider(
-    state: &Arc<AppState>,
-) -> Arc<std::sync::Mutex<Vec<String>>> {
-    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let provider_base = fake_local_chat_provider_endpoint(
-        "",
-        Some(Arc::clone(&captured_requests)),
-        LocalCitationEcho::ResourceAndForgedWebArtifact,
-    )
-    .await;
-    configure_local_http_provider(state, provider_base).await;
-    captured_requests
-}
-
-pub(crate) async fn configure_live_provider_eval_state_with_barriered_streaming_local_http_provider(
-    state: &Arc<AppState>,
-    chunks: Vec<(&'static str, std::time::Duration)>,
-) -> Arc<std::sync::atomic::AtomicBool> {
-    let release_remaining_chunks = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let provider_base = fake_streaming_local_chat_provider_endpoint(
-        chunks,
-        Arc::clone(&release_remaining_chunks),
-        None,
-    )
-    .await;
-    configure_local_http_provider(state, provider_base).await;
-    release_remaining_chunks
 }
 
 pub(crate) async fn configure_live_provider_eval_state_with_captured_streaming_local_http_provider(
@@ -356,13 +269,8 @@ enum LocalCitationEcho {
     None,
     Web,
     WebAfterRetry,
-    WebArtifact,
     AllResources,
-    ResourceArtifact,
-    ResourceForgedArtifact,
-    ResourceAndWeb,
     ResourceAndWebArtifact,
-    ResourceAndForgedWebArtifact,
 }
 
 impl LocalCitationEcho {
@@ -401,21 +309,6 @@ impl LocalCitationEcho {
                     "The first draft intentionally omitted its citation.".into()
                 }
             }
-            Self::WebArtifact => issued_citation("webref_", 31)
-                .map(|citation| {
-                    serde_json::json!({
-                        "markdown": format!(
-                            "# Web 报告\n\n公开网页证据 [{citation}] 已纳入报告。"
-                        )
-                    })
-                    .to_string()
-                })
-                .unwrap_or_else(|| {
-                    serde_json::json!({
-                        "markdown": "Provider did not observe an issued Web citation."
-                    })
-                    .to_string()
-                }),
             Self::AllResources => {
                 let citations = request_text
                     .match_indices("cite_")
@@ -437,35 +330,6 @@ impl LocalCitationEcho {
                     )
                 }
             }
-            Self::ResourceArtifact => issued_citation("cite_", 29)
-                .map(|citation| {
-                    serde_json::json!({
-                        "markdown": format!(
-                            "# 附件报告\n\n附件证据 [{citation}] 已纳入报告。"
-                        )
-                    })
-                    .to_string()
-                })
-                .unwrap_or_else(|| {
-                    serde_json::json!({
-                        "markdown": "Provider did not observe an issued Resource citation."
-                    })
-                    .to_string()
-                }),
-            Self::ResourceForgedArtifact => serde_json::json!({
-                "markdown": "# 伪造附件引用\n\n这不是本次签发的引用 [cite_aaaaaaaaaaaaaaaaaaaaaaaa]。"
-            })
-            .to_string(),
-            Self::ResourceAndWeb => {
-                let resource = issued_citation("cite_", 29);
-                let web = issued_citation("webref_", 31);
-                match (resource, web) {
-                    (Some(resource), Some(web)) => format!(
-                        "Synthesis used the issued Resource citation [{resource}] and the issued Web citation [{web}]."
-                    ),
-                    _ => "Both issued Resource and Web citations were not observed.".into(),
-                }
-            }
             Self::ResourceAndWebArtifact => {
                 let resource = issued_citation("cite_", 29);
                 let web = issued_citation("webref_", 31);
@@ -481,16 +345,6 @@ impl LocalCitationEcho {
                     })
                     .to_string(),
                 }
-            }
-            Self::ResourceAndForgedWebArtifact => {
-                let resource = issued_citation("cite_", 29)
-                    .unwrap_or_else(|| "cite_aaaaaaaaaaaaaaaaaaaaaaaa".into());
-                serde_json::json!({
-                    "markdown": format!(
-                        "# Forged citation report\n\nValid Resource [{resource}], forged Web [webref_aaaaaaaaaaaaaaaaaaaaaaaa]."
-                    )
-                })
-                .to_string()
             }
         }
     }
@@ -786,6 +640,78 @@ async fn fake_hanging_local_chat_provider_endpoint() -> (
     )
 }
 
-pub(crate) async fn run_main_chat_command_surface_eval_gate() -> MainChatCommandSurfaceEvalReport {
-    main_chat_command_surface_eval::run_main_chat_command_surface_eval_report().await
+pub(crate) async fn grant_canonical_web_search_once(state: &Arc<AppState>) {
+    state
+        .tool_permission_store
+        .lock()
+        .await
+        .grant(
+            "web.search",
+            "builtin",
+            "medium",
+            "read",
+            openlife_core::tool_permissions::ToolPermissionPolicy::AllowOnce,
+            None,
+        )
+        .expect("grant explicit one-shot web.search permission");
+}
+
+pub(crate) fn isolated_canonical_state_with_resource_runtime() -> Arc<AppState> {
+    let store = openlife_core::resource::ResourceStore::new_in_memory()
+        .expect("create isolated canonical resource store");
+    let runtime = crate::resource_commands::ResourceRuntime::new(
+        openlife_core::resource_gateway::ResourceGateway::new(
+            store,
+            openlife_core::resource_gateway::ResourceParserProcess::for_current_executable()
+                .expect("resource parser process"),
+        ),
+    );
+    let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+    Arc::get_mut(&mut state)
+        .expect("isolated canonical state must have one owner")
+        .resource_runtime = Some(Arc::new(runtime));
+    state
+}
+
+pub(crate) fn import_frozen_resources_to_canonical_state(
+    state: &Arc<AppState>,
+    operation_id: &str,
+    sources: Vec<openlife_core::resource_gateway::ResourceImportSource>,
+) {
+    let expected_count = sources.len();
+    let resources = sources
+        .into_iter()
+        .map(|source| {
+            let extraction = openlife_core::resource_parser::extract_resource(
+                openlife_core::resource_parser::ResourceExtractionRequest {
+                    filename: source.filename.clone(),
+                    declared_mime: source.declared_mime.clone(),
+                    bytes: source.bytes.clone(),
+                },
+            )
+            .expect("extract frozen resource with the production bounded parser");
+            openlife_core::resource::ResourceImportCandidate {
+                resource_id: uuid::Uuid::new_v4().to_string(),
+                filename: source.filename,
+                declared_mime: source.declared_mime,
+                detected_mime: extraction.detected_mime,
+                format: extraction.format,
+                bytes: source.bytes,
+                chunks: extraction.chunks,
+            }
+        })
+        .collect();
+    let receipt = state
+        .resource_runtime
+        .as_ref()
+        .expect("canonical resource runtime")
+        .gateway()
+        .store()
+        .commit_import_batch(openlife_core::resource::ResourceImportBatch {
+            operation_id: uuid::Uuid::new_v4().to_string(),
+            message_id: operation_id.to_string(),
+            resources,
+        })
+        .expect("bind production-parsed frozen resources to ResourceStore");
+    assert_eq!(receipt.resources.len(), expected_count);
 }

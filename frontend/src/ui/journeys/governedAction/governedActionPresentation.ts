@@ -318,11 +318,9 @@ export function reviewInspector(
         ? `风险级别由后端标记为 ${item.risk}；不能从页面文本重新分级。`
         : "没有可用于决定的上下文。",
     nextAction: item
-      ? item.status === "approved" && item.taskResumeRelation?.canRequestResume
-        ? "返回工作区，刷新并核对同一任务的恢复控制。"
-        : ["pending", "edited", "deferred"].includes(item.status)
-          ? "比较范围、影响与来源，再选择拒绝、稍后或批准。"
-          : "查看刷新后的状态与证据；不要从命令回调推断完成。"
+      ? ["pending", "edited", "deferred"].includes(item.status)
+        ? "比较范围、影响与来源，再选择拒绝、稍后或批准。"
+        : "查看刷新后的状态与证据；不要从命令回调推断完成。"
       : "选择一个审核项。",
     evidence,
     evidenceFeedback: selectedEvidence
@@ -336,7 +334,6 @@ export function reviewInspector(
       { label: "decision", value: item?.status ?? "none" },
       { label: "materialization", value: item?.materializationStatus ?? "none" },
       { label: "proposalId", value: item?.source.proposalId ?? "none" },
-      { label: "taskSessionId", value: item?.taskResumeRelation?.taskSessionId ?? "none" },
       { label: "scopeKind", value: permission?.scopeKind ?? "none" },
       { label: "scopeDigest", value: permission?.scopeDigest ?? "none" },
       { label: "requestDigest", value: permission?.requestDigest ?? "none" },

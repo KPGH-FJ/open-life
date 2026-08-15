@@ -18,6 +18,7 @@ import {
 } from "./governedActionDataSource";
 
 type Announce = (message: string) => void;
+type RefreshDependentState = () => Promise<void>;
 
 function reviewEnvelopeAllowsDecisions(snapshot: GovernedActionSnapshot | null): boolean {
   return snapshot?.reviewEnvelope.status === "ready";
@@ -54,7 +55,8 @@ export type GovernedActionJourneyController = {
 
 export function useGovernedActionJourney(
   dataSource: GovernedActionDataSource | undefined,
-  announce: Announce
+  announce: Announce,
+  refreshDependentState?: RefreshDependentState
 ): GovernedActionJourneyController {
   const [snapshot, setSnapshot] = useState<GovernedActionSnapshot | null>(null);
   const [selectedItemId, setSelectedItemId] = useState<string | null>(null);
@@ -73,6 +75,16 @@ export function useGovernedActionJourney(
   const operationSequenceRef = useRef(0);
   const activeReviewOperationRef = useRef<number | null>(null);
   const activeTaskControlOperationRef = useRef<number | null>(null);
+
+  const refreshMutationDependents = useCallback(async (): Promise<boolean> => {
+    if (!refreshDependentState) return true;
+    try {
+      await refreshDependentState();
+      return true;
+    } catch {
+      return false;
+    }
+  }, [refreshDependentState]);
 
   useEffect(() => {
     requestRef.current += 1;
@@ -244,6 +256,7 @@ export function useGovernedActionJourney(
         }
 
         const refreshed = await loadSnapshot(false);
+        const dependentsReady = await refreshMutationDependents();
         if (
           refreshed.reviewEnvelope.status !== "ready" &&
           refreshed.reviewEnvelope.status !== "empty"
@@ -252,7 +265,11 @@ export function useGovernedActionJourney(
             type: "refresh_failed",
             errorCode: `review_refresh_status_${refreshed.reviewEnvelope.status}`,
           });
-          announce("决定已发送，但审核读模型未能完成核对；当前不展示成功结论。");
+          announce(
+            dependentsReady
+              ? "决定已发送，但审核读模型未能完成核对；当前不展示成功结论。"
+              : "决定已发送，但审核读模型与对话记录未能完成核对；当前不展示成功结论。"
+          );
           return;
         }
         const item = refreshed.reviewEnvelope.data?.items.find(
@@ -260,7 +277,11 @@ export function useGovernedActionJourney(
         );
         if (!item) {
           dispatchReview({ type: "refresh_failed", errorCode: "review_refresh_target_missing" });
-          announce("决定已发送，但刷新后找不到同一审核项；当前不展示成功结论。");
+          announce(
+            dependentsReady
+              ? "决定已发送，但刷新后找不到同一审核项；当前不展示成功结论。"
+              : "决定已发送，但刷新后找不到同一审核项，且对话记录刷新失败；当前不展示成功结论。"
+          );
           return;
         }
         const refreshEvent = {
@@ -286,13 +307,16 @@ export function useGovernedActionJourney(
         } else {
           announce("决定已刷新；页面没有从命令回调推断后续结果。");
         }
+        if (!dependentsReady) {
+          announce("决定状态已核对，但对话记录刷新失败；请重新读取后再判断任务结果。");
+        }
       } finally {
         if (activeReviewOperationRef.current === operationId) {
           activeReviewOperationRef.current = null;
         }
       }
     },
-    [announce, dataSource, loadSnapshot]
+    [announce, dataSource, loadSnapshot, refreshMutationDependents]
   );
 
   const requestReviewAction = useCallback(
@@ -370,17 +394,29 @@ export function useGovernedActionJourney(
           dispatchTaskControlState({ type: "dispatch_succeeded" });
         } catch (error) {
           dispatchTaskControlState({ type: "dispatch_failed", errorCode: errorCode(error) });
-          announce("任务请求失败；当前不会显示状态已经改变。");
+          const refreshed = await loadSnapshot(false);
+          const dependentsReady = await refreshMutationDependents();
+          const taskStateReady = refreshed.tasksEnvelope.status === "ready";
+          announce(
+            taskStateReady && dependentsReady
+              ? "任务请求返回失败；任务与对话已重新读取，不会把错误回调解释成状态未改变。"
+              : "任务请求返回失败，且任务或对话状态未能完整重读；当前结果保持未知。"
+          );
           return;
         }
 
         const refreshed = await loadSnapshot(false);
+        const dependentsReady = await refreshMutationDependents();
         if (refreshed.tasksEnvelope.status !== "ready") {
           dispatchTaskControlState({
             type: "refresh_failed",
             errorCode: `task_refresh_status_${refreshed.tasksEnvelope.status}`,
           });
-          announce("任务请求已发送，但任务读模型未能完成核对；当前不展示成功结论。");
+          announce(
+            dependentsReady
+              ? "任务请求已发送，但任务读模型未能完成核对；当前不展示成功结论。"
+              : "任务请求已发送，但任务读模型与对话记录未能完成核对；当前不展示成功结论。"
+          );
           return;
         }
         const task = findRefreshedTask(refreshed, control.targetTaskId);
@@ -405,13 +441,16 @@ export function useGovernedActionJourney(
         } else if (verification.phase === "resolved") {
           announce("刷新后的同一任务已确认继续；这还不是完成结论。");
         }
+        if (!dependentsReady) {
+          announce("任务状态已核对，但对话记录刷新失败；请重新读取后再判断最终回答。");
+        }
       } finally {
         if (activeTaskControlOperationRef.current === operationId) {
           activeTaskControlOperationRef.current = null;
         }
       }
     },
-    [announce, dataSource, loadSnapshot]
+    [announce, dataSource, loadSnapshot, refreshMutationDependents]
   );
 
   const requestTaskControl = useCallback(

@@ -157,15 +157,14 @@ LifeModel for identity, values, current goals, recent state, refresh time, and
 LifeModel version. The cache is a prompt/context support surface, not a
 canonical truth write path.
 
-`src-tauri/src/main_chat_context_loader.rs` can include accepted lifecycle
-memory snippets and bounded Markdown working-memory surfaces in Main Chat
-context. It labels them as bounded memory context and not trusted raw memory.
+`src-tauri/src/main_chat_context_loader.rs` can include bounded accepted
+lifecycle Memory through the typed Personal Intelligence port. It labels the
+content as optional context, not policy, permission, or completion evidence.
 
-Since R1, ordinary Chat history is canonical only in
-`ConversationStore.conversation_items`. `MemoryStore.messages` remains a
-compatibility input for the Work runtime until R2 and is not read by the Chat
-ViewModel or canonical Chat runtime. The runtime reconstructs a bounded
-provider context from the canonical Conversation Items through
+Ordinary Chat and Work history is canonical only in
+`ConversationStore.conversation_items`; the retired conversation-memory store
+is not a release input. The runtime reconstructs a bounded provider context
+from canonical Conversation Items through
 `agent/conversation_context.rs`; its deterministic summary is a derived
 projection with a source range and digest, not long-term Memory.
 
@@ -177,13 +176,12 @@ They are not inferred from the process working directory or from the list of
 generic knowledge roots. If both scopes select the same physical directory,
 the directory is loaded once rather than receiving two competing identities.
 
-Within each selected root, the active readable files are limited to
+Within each selected root, the readable editor files are limited to
 `MEMORY.md` and one-level `memories/*.md` topic files. Symbolic links, nested
 paths, disabled `*.disabled.md` files, oversized files, and every other root are
-excluded. Runtime selection is task-relevant and capped by both file count and
-total character budgets. Each context block exposes its scope, relative source,
-and selection reason, and says explicitly that working memory is not identity,
-permission, or completion evidence.
+excluded. Merely binding a root does not silently inject those files into every
+provider request. A future recall policy must enter through the typed Memory
+context port with explicit source and budget contracts.
 
 The Workspace editor reads through a backend ViewModel. Creating or editing a
 file only creates an `ExternalWriteAction` Review proposal with an exact target
@@ -213,8 +211,8 @@ missing store remain unavailable.
 ## Canonical Chat And Work Port
 
 Release Chat and Work depend on `AgentMemoryContextPort` in
-`src-tauri/src/personal_intelligence_ports.rs`, not on legacy TaskSession or
-AgentRun conversation-memory tables. The port retrieves bounded lifecycle
+`src-tauri/src/personal_intelligence_ports.rs`, not on execution-runtime
+tables. The port retrieves bounded lifecycle
 Memory, may use confirmed LifeModel terms only for reranking, and returns
 context candidates that grant no permission or completion authority. A missing
 optional port degrades context without making the Conversation or Task owner

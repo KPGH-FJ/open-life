@@ -1,6 +1,6 @@
 # OpenLife Capable Agent Harness Plan
 
-Status: active
+Status: complete
 
 ## Objective
 
@@ -127,63 +127,47 @@ returns to the originating product context. Wide/narrow component tests, full
 frontend tests, browser-shell checks, production absence guards, and the full
 Rust repository gates passed before advancing.
 
-## Current stage: H5 - Behavior And Native Evidence Matrix
+## Completed: H5 - Behavior And Native Evidence Matrix
 
-### In scope
+The bilingual controlled matrix now enters through the shipped Chat/Work
+coordinator and covers direct answers, documents, Web, mixed-source reports,
+Skills, read-only MCP, planning, steering, Review checkpoints, cancellation,
+retry, Artifact verification and Undo, blocked scope, provider failure,
+effect-unknown, restart recovery, and Workbench states. All controlled rows and
+the full Rust/frontend/browser-shell/absence gates pass.
 
-1. Define one Chinese/English matrix for Chat and Work: direct answer,
-   document, Web, mixed-source report, selected Skill, read-only MCP, planning,
-   steering, checkpoint approval/rejection, cancellation, retry, Artifact
-   verification/Undo, blocked scope, provider failure, and effect unknown.
-2. Bind every row to its real production entrypoint, canonical Task/Run/Item or
-   Chat Turn result, expected user-visible state, and the minimum evidence
-   level that can prove it.
-3. Run controlled source tests first, then one exact signed macOS bundle with an
-   isolated profile through the required native golden paths. Process launch is
-   not a native product pass.
-4. Run only the minimum external-live provider and Web cases that cannot be
-   proven locally, with the user-selected provider/model and no silent route
-   substitution. Retain typed receipts and bounded metadata, not secrets or
-   source bodies.
-5. Repair product/runtime defects found by the matrix in the owning H0-H4
-   module; do not add an evaluation runtime, second harness, or fixture-only
-   product path.
+An exact signed QA bundle with an isolated profile proved visible Conversation,
+Chat, canonical Work progress, document plus real Web search, inline Review,
+single file materialization, digest verification, cancellation, retry, and
+cross-build restart recovery. The explicitly selected Provider/model and real
+Web route completed without silent substitution. QA and dev use separate
+atomic `0600` profile secret files; release remains on Keychain. Rebuilding the
+QA executable changed its CDHash without another credential initialization or
+recovery prompt.
 
-### Acceptance
+The matrix exposed and closed defects in canonical retry identity, exact Web
+subject extraction, action-instruction Memory classification, Workbench refresh
+after controls, Artifact safe-path admission, and bounded Artifact schema
+repair. Controlled, exact-native, and external-live evidence remain separate in
+`docs/development/testing.md`.
 
-- Every matrix row is pass, fail, blocked, or not-required with an exact reason;
-  mocks, browser-shell, native, and external-live evidence are never conflated.
-- Exact-native proves Conversation creation, Chat, canonical Work progress,
-  inline checkpoint continuation, verified result, cancellation/retry, and
-  restart recovery on the exact tested bundle.
-- Required live provider/Web rows prove real dispatch and terminal receipt
-  truth without provider fallback or unreviewed durable effects.
-- Any discovered failure is fixed and the proportional repository gates are
-  rerun before H5 is marked complete.
+## Completed: H6 - Clean Release Baseline
 
-## Checks
+Release Chat and Work now have one canonical persistence, control, recovery,
+and projection spine. Retired execution stores, strategy runtimes, task-control
+owners, event stores, queues, packages, commands, fixtures, credential purposes,
+routes, frontend branches, and stable documentation claims were removed with
+their consumers. The remaining historical scheduler column is read only by its
+bounded database migration and cannot become a runtime owner.
 
-During implementation, run focused Rust and frontend tests. At stage closure:
+The kernel now receives structured Work-plan decisions and current capability
+contracts directly. Keyword ReAct planning, replay-derived tool graphs,
+provider-lifecycle re-projection, and duplicate artifact/proposal identities no
+longer participate in release execution. Workbench reads canonical backend
+ViewModels and ships no compatibility route, old page, or dev harness.
 
-```sh
-git diff --check
-cargo fmt --check
-cargo clippy --all --locked -- -D warnings
-cargo test --all --locked
-corepack pnpm --dir frontend format:check
-corepack pnpm --dir frontend typecheck
-corepack pnpm --dir frontend test
-corepack pnpm --dir frontend build
-corepack pnpm --dir frontend test:e2e
-corepack pnpm --dir frontend verify:release-absence
-```
-
-Exact-native and external-live checks follow `docs/development/testing.md`.
-External-live runs only when the accepted behavior cannot be proven locally
-and require the necessary provider/network authorization.
-
-## Stop condition
-
-Do not advance while the current stage leaves a second production owner or a
-false completion/readiness claim. Pause only for a required secret, an
-irreversible external action, a product-direction change, or a genuine blocker.
+All Rust and frontend gates, browser-shell tests, production absence checks,
+release and QA exact-signature checks, and an isolated no-network QA startup
+passed. The isolated profile opened current canonical stores with a private
+`0600` profile-secret file. No external-live rerun was needed because H6 did not
+change the H5 provider or Web adapter behavior.

@@ -85,6 +85,8 @@ export function SettingsPrivacyView({
   const searchProvider = draft.system?.search_provider ?? "duckduckgo";
   const searchCredential = searchCredentialState(draft);
   const artifactOutputDirectory = draft.system?.safe_paths?.[0];
+  const runtimeProfile = controller.snapshot?.productDiagnostics?.runtimeBuild.profile ?? null;
+  const localProfileCredentialStore = runtimeProfile === "dev" || runtimeProfile === "qa";
 
   return (
     <div
@@ -138,6 +140,16 @@ export function SettingsPrivacyView({
       {surface === "model-provider" ? (
         <fieldset className="ol-settings-form" disabled={busy}>
           <legend className="ol-sr-only">模型与供应商配置</legend>
+
+          {localProfileCredentialStore && (
+            <FoundationNotice title="开发凭据与正式产品隔离">
+              <p>
+                当前是 {runtimeProfile === "qa" ? "QA" : "DEV"}{" "}
+                构建。内部凭据及你在此构建中明确保存的 Provider 凭据只写入当前 profile 的本地 0600
+                文件，不使用正式产品 Keychain，也不会从正式 profile 自动复制。
+              </p>
+            </FoundationNotice>
+          )}
 
           <section className="ol-settings-section" aria-labelledby="ol-settings-local-title">
             <div className="ol-settings-section-heading">
@@ -332,10 +344,6 @@ export function SettingsPrivacyView({
           <details className="ol-settings-advanced">
             <summary>高级配置摘要</summary>
             <dl>
-              <div>
-                <dt>运行模式</dt>
-                <dd>{draft.runtime_mode ?? "后端未返回"}</dd>
-              </div>
               <div>
                 <dt>Embedding</dt>
                 <dd>{draft.llm.embedding_enabled === false ? "关闭" : "由当前配置决定"}</dd>
@@ -541,7 +549,7 @@ function ProductDiagnosticsPanel({ controller }: { controller: SettingsPrivacyJo
         data-settings-surface="diagnostics"
       >
         <FoundationNotice title="产品诊断不可用" tone="error">
-          <p>后端没有返回 canonical 产品诊断；页面不会从旧 AgentRun 或日志统计推断健康状态。</p>
+          <p>后端没有返回 canonical 产品诊断；页面不会从日志或非产品状态推断健康状态。</p>
         </FoundationNotice>
         <FoundationActionButton
           label="重新读取"
@@ -599,6 +607,14 @@ function ProductDiagnosticsPanel({ controller }: { controller: SettingsPrivacyJo
           <div>
             <dt>Bundle ID</dt>
             <dd>{diagnostics.runtimeBuild.bundleIdentifier}</dd>
+          </div>
+          <div>
+            <dt>凭据存储</dt>
+            <dd>
+              {diagnostics.runtimeBuild.profile === "release"
+                ? "系统 Keychain"
+                : "隔离的本地 profile 文件（0600）"}
+            </dd>
           </div>
           <div>
             <dt>持久化</dt>
@@ -749,10 +765,14 @@ function CredentialInitializationPanel({
       </div>
       {restartRequired ? (
         <FoundationNotice
-          title={accessRecovery ? "访问恢复完成，需要重启" : "初始化完成，需要重启"}
+          title={accessRecovery ? "已请求访问，等待重启验证" : "初始化完成，需要重启"}
           live
         >
-          <p>当前进程仍保持受限；完全退出并重新启动 OpenLife 后才会重新读取这些凭据。</p>
+          <p>
+            {accessRecovery
+              ? "当前只证明了本次交互读取；完全退出并重新启动 OpenLife 后，非交互读取成功才算持续访问已经恢复。"
+              : "当前进程仍保持受限；完全退出并重新启动 OpenLife 后才会重新读取这些凭据。"}
+          </p>
         </FoundationNotice>
       ) : phase === "blocked" ? (
         <FoundationNotice title="初始化未完成" tone="error" live>
@@ -781,7 +801,9 @@ function CredentialInitializationPanel({
         disabled={restartRequired || cleanupUnknown}
         disabledReason={
           restartRequired
-            ? "初始化已完成；必须重启后重新读取状态。"
+            ? accessRecovery
+              ? "本次交互读取已完成；必须重启并通过非交互读取验证。"
+              : "初始化已完成；必须重启后重新读取状态。"
             : cleanupUnknown
               ? "后端无法证明补偿完成；必须先重启并重新检查状态。"
               : undefined

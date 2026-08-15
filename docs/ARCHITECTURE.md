@@ -57,11 +57,8 @@ not a rewrite of the first attempt. Document retry can reuse only the failed
 Run's exact Turn-bound resource scope.
 
 One Conversation may retain multiple Tasks. Planning is a typed Item inside a
-Run, not a PlanExecute session or strategy-owned lifecycle. Release Work does
-not create or read TaskSession, AgentRun, ActionQueue, or durable Main Chat
-Event lifecycle state. Those stores remain only as effect/materialization,
-scheduling, or test migration consumers for R4 and later stages and are not
-Task truth.
+Run, never a separate session or strategy-owned lifecycle. Release Work uses
+only the canonical Conversation and Task runtime stores.
 
 General Work owns stable Task identity, Run membership, typed
 instruction/plan/tool/observation/provider-generation/artifact/review/
@@ -105,7 +102,7 @@ execution capability, cannot widen the registered target set, and inherits the
 original budget. Every admitted revision is retained in
 `canonical_work_plan_revisions`; failed, cancelled, blocked, or effect-unknown
 attempts are terminal and can never be hidden by replanning. Release Work does
-not compile the retired ReAct or PlanExecute execution branches.
+not compile a strategy-owned execution branch.
 While Review is pending, the exact assistant Conversation Item identity is
 stored as a deferred result relation. Approval can therefore complete the same
 FinalResult after restart without inventing a second Task owner.
@@ -149,16 +146,16 @@ limit while the user opens another Conversation.
 
 Review approval addresses the exact Proposal and effect. For canonical Work
 Artifacts, confirmed materialization projects back into the same Task, Run,
-ArtifactVersion, and FinalResult. There is no release
-`accept_proposal_and_continue` or compatibility TaskSession-resume command.
+ArtifactVersion, and FinalResult. There is no proposal-owned continuation or
+compatibility resume command.
 Approval, effect confirmation, and canonical completion remain separate facts
 even though the product can present one decision.
 
 The backend-owned `TasksViewModel` and `WorkspaceViewModel` now read canonical
 Task snapshots directly. They project Work and report Run membership, typed
 Items, attempts, FinalResult, Artifact versions, Review wait, rejection,
-verified delivery, and effect-unknown states. They do not overlay TaskSession
-or AgentRun state. Current Work controls use canonical cancel and retry IPCs.
+verified delivery, and effect-unknown states. They do not overlay another
+execution store. Current Work controls use canonical cancel and retry IPCs.
 Unresolved review, blocked, failed, effect-unknown, and stale-scope facts are
 projected as backend-owned Needs Attention state rather than inferred by React.
 `WorkspaceViewModel` accepts the selected Conversation identity and returns only
@@ -220,23 +217,18 @@ implementation.
 Memory and LifeModel remain retained stores behind the narrow typed ports in
 `src-tauri/src/personal_intelligence_ports.rs`.
 
-The following remain capability migration consumers, not Work lifecycle owners:
+The canonical runtime has no compatibility lifecycle owner:
 
-- `AgentTaskSessionStore`, `AgentRunStore`, `ActionQueueStore`, and
-  `MainChatAgentEventStore` remain compatibility/evaluation/scheduling stores,
-  but no longer own release Chat, Work, Artifact materialization, or Undo;
 - generated Artifact effects are accepted only when they carry canonical Work
-  Task/Run/Item/Artifact identity. The compatibility kernel fails closed rather
-  than creating a report-only Artifact owner;
-- PlanExecute session/store/IPC ownership is retired; remaining PlanExecute
-  names are drafting algorithms or test fixtures; and
+  Task/Run/Item/Artifact identity;
+- no parallel execution, plan, action-queue, or event-lifecycle package is
+  reachable from release; planning is an Item inside canonical Work; and
 - Today, Tasks, and Review are retired product routes. Their backend facts are
   presented only inside the Conversation Workbench or an exact domain
   checkpoint opened from Personal Intelligence or Settings.
 
-H0-H6 migrate these consumers vertically and delete each old writer, read
-model, IPC, and frontend surface only after its complete replacement exists.
-Adding another compatibility store or restoring a retired route is forbidden.
+Adding another compatibility lifecycle store or restoring a retired route is
+forbidden.
 
 The Work lifecycle remains:
 
@@ -288,7 +280,7 @@ filter rather than duplicate top-level Task and Review products.
 
 The current boundary is defined by ADR 0016:
 
-- Agent Runtime owns turn and action execution;
+- Conversation and the canonical Work runtime own Chat and Work execution;
 - Agent Memory owns working, project, episodic, semantic, procedural, and
   Reflection context;
 - LifeModel owns confirmed long-term understanding of the user;
@@ -331,6 +323,15 @@ refreshed product read model where one exists.
   authority.
 - Backend ViewModels are rebuildable projections and the only product-facing
   composition surface when a ViewModel exists.
+
+Credential storage follows the build identity rather than sharing a global
+development bucket. Release uses the OS credential store. Dev and QA use
+separate app identities, data directories, and atomic `0600` local profile
+secret files; they never import release Provider/Search credentials
+automatically. This avoids treating changing self-signed development CDHashes
+as release update behavior. It is not the distributed-release design: a future
+Developer ID build must continue to prove stable Keychain access across signed
+updates.
 
 For release Work, `CanonicalTaskRuntimeStore` is the Task, Run, Item,
 ItemAttempt, terminal-state, recovery, and FinalResult owner. Provider and tool

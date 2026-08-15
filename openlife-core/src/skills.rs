@@ -108,7 +108,7 @@ impl SkillRegistry {
         let execution_surface = if manifest
             .capability_flags
             .iter()
-            .any(|flag| flag == "main_chat_turn_runtime_native")
+            .any(|flag| flag == "canonical_chat_work_native")
         {
             "turn_runtime_native"
         } else {
@@ -148,9 +148,9 @@ impl SkillRegistry {
         SkillManifest {
             id: "weekly_review".into(),
             name: "Weekly Review".into(),
-            description: "汇总近期 AgentRun、目标、状态和记忆，生成周复盘与改进建议。".into(),
+            description: "汇总近期 Work 运行、目标、状态和记忆，生成周复盘与改进建议。".into(),
             required_context: vec![
-                "agent_runs".into(),
+                "work_runs".into(),
                 "life_model.goals".into(),
                 "life_model.state".into(),
                 "memory".into(),
@@ -313,7 +313,7 @@ impl SkillRegistry {
             proposal_policy: "no_writes".into(),
             source_kind: SkillSourceKind::BuiltIn,
             execution_status: SkillExecutionStatus::ExecutableBuiltIn,
-            capability_flags: vec!["main_chat_turn_runtime_native".into(), "read_only".into()],
+            capability_flags: vec!["canonical_chat_work_native".into(), "read_only".into()],
             plugin_id: None,
         }
     }
@@ -399,7 +399,7 @@ mod tests {
             assert!(!manifest
                 .capability_flags
                 .iter()
-                .any(|flag| flag == "main_chat_turn_runtime_native"));
+                .any(|flag| flag == "canonical_chat_work_native"));
         }
     }
 
@@ -416,7 +416,7 @@ mod tests {
         assert!(manifest
             .capability_flags
             .iter()
-            .any(|flag| flag == "main_chat_turn_runtime_native"));
+            .any(|flag| flag == "canonical_chat_work_native"));
         let prompt = registry
             .build_system_prompt("evidence_review")
             .expect("runtime prompt");

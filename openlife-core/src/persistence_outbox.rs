@@ -680,7 +680,7 @@ pub fn mark_delivery_applied(
     Ok(())
 }
 
-/// Finalize an AgentRun-style state projection only while the event is still
+/// Finalize a Work-run state projection only while the event is still
 /// the durable aggregate head. A process-local lock closes ordinary in-process
 /// TOCTOU; this transaction is the cross-process/restart truth check.
 pub fn mark_delivery_applied_if_canonical_head(
@@ -3725,17 +3725,17 @@ mod tests {
     fn repeated_tombstone_reuses_one_canonical_deletion_fact() {
         let mut conn = store();
         let tx = conn.transaction().unwrap();
-        let first =
-            enqueue_tombstone(&tx, "agent_run", "run-1", None, &["turn_event_store"]).unwrap();
+        let first = enqueue_tombstone(&tx, "work_run", "run-1", None, &["conversation_projection"])
+            .unwrap();
         tx.commit().unwrap();
 
         let tx = conn.transaction().unwrap();
         let second = enqueue_tombstone(
             &tx,
-            "agent_run",
+            "work_run",
             "run-1",
             Some("different prose must not duplicate deletion"),
-            &["turn_event_store", "life_event_store"],
+            &["conversation_projection", "audit_projection"],
         )
         .unwrap();
         tx.commit().unwrap();
@@ -3757,10 +3757,14 @@ mod tests {
             let tx = conn.transaction().unwrap();
             let receipt = enqueue_tombstone(
                 &tx,
-                "agent_run",
+                "work_run",
                 "run-restored",
                 None,
-                &["turn_event_store", "action_queue_store", "life_event_store"],
+                &[
+                    "conversation_projection",
+                    "search_projection",
+                    "audit_projection",
+                ],
             )
             .unwrap();
             tx.commit().unwrap();
@@ -3769,7 +3773,7 @@ mod tests {
         mark_delivery_degraded(
             &conn,
             &deleted.event_id,
-            "life_event_store",
+            "search_projection",
             "injected projection failure",
         )
         .unwrap();
@@ -3778,10 +3782,14 @@ mod tests {
             let tx = conn.transaction().unwrap();
             let receipt = supersede_active_tombstone(
                 &tx,
-                "agent_run",
+                "work_run",
                 "run-restored",
                 &metadata_digest("restored"),
-                &["turn_event_store", "action_queue_store", "life_event_store"],
+                &[
+                    "conversation_projection",
+                    "search_projection",
+                    "audit_projection",
+                ],
             )
             .unwrap();
             tx.commit().unwrap();
@@ -3821,7 +3829,7 @@ mod tests {
         let deleted_first = {
             let tx = conn.transaction().unwrap();
             let receipt =
-                enqueue_tombstone(&tx, "agent_run", "run-fourth", None, &["turn"]).unwrap();
+                enqueue_tombstone(&tx, "work_run", "run-fourth", None, &["turn"]).unwrap();
             tx.commit().unwrap();
             receipt
         };
@@ -3830,7 +3838,7 @@ mod tests {
             let tx = conn.transaction().unwrap();
             let receipt = supersede_active_tombstone(
                 &tx,
-                "agent_run",
+                "work_run",
                 "run-fourth",
                 &metadata_digest("restore-one"),
                 &["turn"],
@@ -3842,7 +3850,7 @@ mod tests {
         let deleted_stale_head = {
             let tx = conn.transaction().unwrap();
             let receipt =
-                enqueue_tombstone(&tx, "agent_run", "run-fourth", None, &["turn"]).unwrap();
+                enqueue_tombstone(&tx, "work_run", "run-fourth", None, &["turn"]).unwrap();
             tx.commit().unwrap();
             receipt
         };
@@ -3850,7 +3858,7 @@ mod tests {
             let tx = conn.transaction().unwrap();
             let receipt = supersede_active_tombstone(
                 &tx,
-                "agent_run",
+                "work_run",
                 "run-fourth",
                 &metadata_digest("restore-two"),
                 &["turn"],

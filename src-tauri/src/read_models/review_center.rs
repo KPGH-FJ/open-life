@@ -33,19 +33,6 @@ pub(crate) async fn get_review_center_view_model_with_state(
     let proposals = proposal_store
         .list_all_proposals(100, 0)
         .map_err(|err| format!("failed to load review proposals: {err}"))?;
-    let terminal_owner_task_session_ids = proposals
-        .iter()
-        .filter_map(|proposal| {
-            proposal_store
-                .terminal_owner_origin_binding(&proposal.id)
-                .transpose()
-                .map(|result| {
-                    result
-                        .map(|binding| (proposal.id.clone(), binding.task_session_id().to_string()))
-                })
-        })
-        .collect::<Result<BTreeMap<_, _>, _>>()
-        .map_err(|err| format!("failed to load canonical review origins: {err}"))?;
     let artifact_evidence = proposals
         .iter()
         .map(|proposal| {
@@ -97,7 +84,6 @@ pub(crate) async fn get_review_center_view_model_with_state(
         safe_paths,
         safe_path_overrides,
         materialization_overrides,
-        terminal_owner_task_session_ids,
         artifact_evidence,
     });
 

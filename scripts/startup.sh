@@ -4,11 +4,10 @@
 # =============================================================================
 # 使用方法:
 #   chmod +x scripts/startup.sh
-#   ./scripts/startup.sh [dev|a2a|check]
+#   ./scripts/startup.sh [dev|check]
 #
 # 命令说明:
 #   ./scripts/startup.sh dev    - 启动 Tauri 桌面应用开发模式（默认）
-#   ./scripts/startup.sh a2a    - 启动独立 A2A 服务器
 #   ./scripts/startup.sh check  - 仅检查环境依赖，不启动应用
 #
 # 前提条件:
@@ -53,7 +52,6 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 FRONTEND_DIR="$REPO_ROOT/frontend"
 TAURI_DIR="$REPO_ROOT/src-tauri"
 ENV_FILE="$REPO_ROOT/.env"
-A2A_PORT="${A2A_PORT:-}"
 VITE_PORT="${PORT:-}"
 
 # =============================================================================
@@ -155,7 +153,7 @@ json_escape() {
 
 configure_runtime_profile() {
     local command="${1:-dev}"
-    if [ "$command" = "dev" ] || [ "$command" = "a2a" ]; then
+    if [ "$command" = "dev" ]; then
         if [ -n "${OPENLIFE_DATA_DIR:-}" ] && [ "${OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR:-0}" != "1" ]; then
             log_error "dev-extensions 拒绝使用 OPENLIFE_DATA_DIR；请使用隔离 dev profile"
             log_info "如确需隔离的自定义目录，请显式设置 OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR=1"
@@ -169,14 +167,6 @@ configure_runtime_profile() {
     fi
 
     VITE_PORT="${PORT:-${VITE_PORT:-5173}}"
-    if [ -z "${A2A_PORT:-}" ]; then
-        if [ "$OPENLIFE_PROFILE" = "dev" ]; then
-            A2A_PORT="8766"
-        else
-            A2A_PORT="8765"
-        fi
-    fi
-    export A2A_PORT
 }
 
 tauri_config_override() {
@@ -412,7 +402,6 @@ start_dev() {
     echo ""
     log_info "Profile: $OPENLIFE_PROFILE"
     log_info "Vite: $OPENLIFE_DEV_URL"
-    log_info "A2A: 127.0.0.1:$A2A_PORT"
 
     cd "$REPO_ROOT"
 
@@ -428,15 +417,6 @@ start_dev() {
         exit 1
     fi
 
-    if [ "${OPENLIFE_DEV_AUTOSTART_A2A:-0}" = "1" ]; then
-        if [ "${OPENLIFE_ENABLE_DEV_A2A:-0}" != "1" ] || [ "${#OPENLIFE_A2A_PAIRED_TOKEN}" -lt 32 ]; then
-            log_error "A2A autostart requires OPENLIFE_ENABLE_DEV_A2A=1 and a 32+ character OPENLIFE_A2A_PAIRED_TOKEN"
-            exit 1
-        fi
-        log_info "构建显式启用的开发 A2A sidecar..."
-        cargo build -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
-    fi
-
     # 检查使用哪种方式启动 Tauri
     if [ -f "$FRONTEND_DIR/node_modules/.bin/tauri" ]; then
         log_info "使用本地 Tauri CLI 启动..."
@@ -449,34 +429,6 @@ start_dev() {
         log_info "请先运行: corepack pnpm --dir \"$FRONTEND_DIR\" install"
         exit 1
     fi
-}
-
-start_a2a() {
-    log_step "启动 A2A 独立服务器"
-
-    if [ "${OPENLIFE_ENABLE_DEV_A2A:-0}" != "1" ] || [ "${#OPENLIFE_A2A_PAIRED_TOKEN}" -lt 32 ]; then
-        log_error "A2A 默认关闭；启动需要显式启用并配置强配对凭据"
-        log_info "设置 OPENLIFE_ENABLE_DEV_A2A=1 和 32+ 字符 OPENLIFE_A2A_PAIRED_TOKEN"
-        exit 1
-    fi
-    OPENLIFE_PROFILE="dev"
-    export OPENLIFE_PROFILE
-
-    # 检查端口
-    check_port "$A2A_PORT" || {
-        log_error "A2A 端口 $A2A_PORT 被占用"
-        log_info "可设置环境变量: A2A_PORT=9999 ./scripts/startup.sh a2a"
-        exit 1
-    }
-
-    log_info "A2A 服务器将监听: http://127.0.0.1:$A2A_PORT"
-    log_info "API 端点:"
-    log_info "  GET  http://127.0.0.1:$A2A_PORT/agent.json"
-    log_info "  GET  http://127.0.0.1:$A2A_PORT/.well-known/agent.json (public minimal)"
-    log_info "  POST http://127.0.0.1:$A2A_PORT/tasks/send (Bearer paired)"
-
-    cd "$TAURI_DIR"
-    cargo run -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
 }
 
 # =============================================================================
@@ -513,17 +465,10 @@ main() {
             init_database
             start_dev
             ;;
-        a2a)
-            check_environment
-            setup_env
-            configure_runtime_profile "$command"
-            start_a2a
-            ;;
         *)
-            echo "用法: $0 [dev|a2a|check]"
+            echo "用法: $0 [dev|check]"
             echo ""
             echo "  dev    - 启动 Tauri 桌面应用开发模式（默认）"
-            echo "  a2a    - 启动独立 A2A 服务器"
             echo "  check  - 仅检查环境依赖"
             echo ""
             exit 1

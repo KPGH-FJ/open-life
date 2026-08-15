@@ -100,7 +100,6 @@ function task(
     canonicalTaskId,
     relatedRunIds: [],
     title,
-    strategy: "react",
     lifecycleStatus: "running",
     terminalDeliveryStatus: "not_terminal",
     finalDeliveryEvidencePresent: false,

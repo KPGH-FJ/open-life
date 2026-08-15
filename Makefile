@@ -14,7 +14,6 @@
 #   make test-rust  - 运行 Rust 测试
 #   make clean      - 清理构建缓存（保留 product-audit 证据）
 #   make clean-audit-results - 明确清理本地 product-audit 证据
-#   make a2a        - 启动 A2A 独立服务器
 #
 # 平台支持：
 #   自动检测 macOS/Linux/Windows，调用对应的脚本
@@ -40,7 +39,7 @@ FRONTEND_INSTALL = corepack pnpm install
 # 主要命令
 # =============================================================================
 
-.PHONY: help setup dev build check test test-front test-rust clean clean-audit-results clean-rust-target clean-all a2a format format-check lint ci build-front check-pnpm check-lockfile
+.PHONY: help setup dev build check test test-front test-rust clean clean-audit-results clean-rust-target clean-all format format-check lint ci build-front check-pnpm check-lockfile
 
 ## 显示帮助信息
 help:
@@ -60,7 +59,6 @@ help:
 	@echo "  make clean       - 清理构建缓存（保留 product-audit 证据）"
 	@echo "  make clean-audit-results - 明确清理本地 product-audit 证据"
 	@echo "  make clean-rust-target - 清理 Cargo workspace target（释放空间，后续 Rust 构建会变慢）"
-	@echo "  make a2a         - 启动 A2A 独立服务器"
 	@echo ""
 
 ## 初始化开发环境
@@ -82,11 +80,6 @@ build:
 check:
 	@echo "🔍 检查环境依赖..."
 	$(SHELL_RUN) scripts/startup.$(SHELL_EXT) check
-
-## 启动 A2A 独立服务器
-a2a:
-	@echo "🌐 启动 A2A 独立服务器..."
-	$(SHELL_RUN) scripts/startup.$(SHELL_EXT) a2a
 
 # =============================================================================
 # 测试

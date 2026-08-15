@@ -1,29 +1,7 @@
 use crate::agent::{
-    AgentExecutionBudget, AgentTask, AgentTaskKind, ExternalWriteGovernanceInput,
-    GovernanceDecisionClassification, GovernanceDecisionKind, LifeModelGovernor,
-    MemoryWriteGovernanceInput, RiskLevel, RuntimeInput, RuntimePolicyContext, ToolGovernanceInput,
+    ExternalWriteGovernanceInput, GovernanceDecisionClassification, GovernanceDecisionKind,
+    LifeModelGovernor, MemoryWriteGovernanceInput, RiskLevel, ToolGovernanceInput,
 };
-use crate::layer::Layer;
-use crate::llm::ChatMessage;
-
-fn runtime_input(tools_prompt: &str) -> RuntimeInput {
-    RuntimeInput::from_agent_task(
-        AgentTask {
-            kind: AgentTaskKind::Conversation,
-            session_id: "session-governor".into(),
-            user_text: "raw prompt should not become governance metadata".into(),
-            messages: vec![ChatMessage {
-                role: "user".into(),
-                content: "raw prompt should not become governance metadata".into(),
-            }],
-            layer: Layer::L2,
-        },
-        None,
-        tools_prompt,
-        RuntimePolicyContext::fail_closed(),
-        AgentExecutionBudget::default(),
-    )
-}
 
 #[test]
 fn external_write_tool_requires_proposal() {
@@ -50,19 +28,6 @@ fn read_only_tool_is_allowed() {
     });
 
     assert_eq!(decision.kind, GovernanceDecisionKind::Allow);
-}
-
-#[test]
-fn broad_tools_prompt_does_not_create_write_governance_decision() {
-    let governor = LifeModelGovernor;
-    let input = runtime_input("Available tools: file.write, calendar.create_event, email.send");
-    let decision = governor.govern_runtime_input(&input, true);
-
-    assert_eq!(decision.kind, GovernanceDecisionKind::Allow);
-    assert!(!decision
-        .metadata_safe_summary
-        .to_string()
-        .contains("calendar.create_event"));
 }
 
 #[test]

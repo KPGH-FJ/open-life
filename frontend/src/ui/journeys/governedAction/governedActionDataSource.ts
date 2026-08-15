@@ -144,8 +144,6 @@ async function dispatchReviewAction(action: ReviewAction): Promise<void> {
       throw new Error("review_apply_command_unavailable");
     case "revoke":
       throw new Error("review_revoke_command_unavailable");
-    case "resume":
-      throw new Error("review_resume_requires_task_control_contract");
     case "view_evidence":
       throw new Error("review_evidence_requires_navigation_handler");
   }

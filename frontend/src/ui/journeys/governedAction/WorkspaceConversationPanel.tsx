@@ -11,7 +11,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { FoundationActionButton, FoundationDialog, FoundationNotice } from "@/ui/foundation";
 import type { WorkspaceConversationController } from "./useWorkspaceConversation";
 import { WorkspaceMessageContent } from "./WorkspaceMessageContent";
@@ -403,10 +403,12 @@ export function WorkspaceConversationPanel({
   controller,
   onOpenLifeModel,
   disabledReason,
+  inlineCheckpoint,
 }: {
   controller: WorkspaceConversationController;
   onOpenLifeModel: (itemRef: string) => void;
   disabledReason?: string;
+  inlineCheckpoint?: ReactNode;
 }) {
   const [sessionDialog, setSessionDialog] = useState<"rename" | "delete" | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
@@ -587,6 +589,7 @@ export function WorkspaceConversationPanel({
       )}
 
       {turnFeedback(controller)}
+      {inlineCheckpoint}
       {sourceBoundBasisFeedback(controller)}
       {lifeModelInfluenceFeedback(controller, onOpenLifeModel)}
 
@@ -831,21 +834,21 @@ export function WorkspaceConversationPanel({
                   <FoundationActionButton
                     label="追加指令"
                     icon={<Send size={16} aria-hidden="true" />}
-                    disabled={!controller.draft.trim() || !controller.activeTaskSessionId}
+                    disabled={!controller.draft.trim() || !controller.activeTaskId}
                     disabledReason={
-                      !controller.activeTaskSessionId
+                      !controller.activeTaskId
                         ? "后端尚未返回当前 Work Task 身份。"
                         : !controller.draft.trim()
                           ? "先输入要追加的指令。"
                           : undefined
                     }
                     data-action-category="product"
-                    data-action-id={`workspace.steer:${controller.activeTaskSessionId ?? "unknown"}`}
+                    data-action-id={`workspace.steer:${controller.activeTaskId ?? "unknown"}`}
                     data-action-kind="continue"
                     data-action-enabled={String(
-                      Boolean(controller.draft.trim() && controller.activeTaskSessionId)
+                      Boolean(controller.draft.trim() && controller.activeTaskId)
                     )}
-                    data-action-target-ref={controller.activeTaskSessionId ?? "unknown"}
+                    data-action-target-ref={controller.activeTaskId ?? "unknown"}
                     type="button"
                     onClick={() => void controller.steer()}
                   />

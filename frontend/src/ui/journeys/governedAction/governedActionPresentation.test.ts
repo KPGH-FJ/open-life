@@ -43,7 +43,6 @@ function activeTask(): TaskViewModelItem {
     canonicalTaskId: "task-1",
     relatedRunIds: [],
     title: "Prepare interview synthesis",
-    strategy: "react",
     lifecycleStatus: "waiting_permission",
     terminalDeliveryStatus: "not_terminal",
     finalDeliveryEvidencePresent: false,

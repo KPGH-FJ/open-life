@@ -215,26 +215,6 @@ pub(crate) async fn get_system_diagnostics_with_state(
             0
         }
     };
-    let (agent_run_count, agent_run_store_status) = {
-        if state
-            .persistence_coordinator
-            .require_trusted_read("AgentRunStore")
-            .is_err()
-        {
-            (0, "unavailable".to_string())
-        } else if let Some(ref agent_run_store_arc) = state.agent_run_store {
-            let store = agent_run_store_arc.lock().await;
-            match crate::terminal_owner_write_gateway::register_agent_run_store_result(
-                state,
-                store.run_count().map_err(|error| error.to_string()),
-            ) {
-                Ok(count) => (count as usize, "ok".to_string()),
-                Err(_) => (0, "error".to_string()),
-            }
-        } else {
-            (0, "unavailable".to_string())
-        }
-    };
     let mut readiness_issues = Vec::new();
     if !ollama_online && !cloud_api_configured {
         readiness_issues
@@ -439,8 +419,6 @@ pub(crate) async fn get_system_diagnostics_with_state(
         usage_ready,
         usage_readiness_issues,
         ollama_models,
-        agent_run_count,
-        agent_run_store_status,
         pending_proposal_count,
         high_risk_pending_proposal_count,
         proposal_store_status,

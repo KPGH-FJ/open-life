@@ -1,7 +1,7 @@
 //! Proactive check-in engine: generates suggestions for daily briefs,
 //! weekly reviews, stale goal reminders, pending proposal alerts,
 //! and state check-in prompts. All outputs are declarative suggestions
-//! — the actual AgentLoop execution is handled by the Tauri shell.
+//! — actual execution is handled by the canonical Work runtime in the Tauri shell.
 
 use crate::agent::evidence_store::{
     EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord, EvidenceSourceRef,
@@ -324,12 +324,12 @@ impl ProactiveEngine {
         if let Some(run_id) = proposal.run_id.as_deref() {
             draft = draft
                 .with_source_ref(EvidenceSourceRef::from_payload(
-                    EvidenceSourceType::AgentRun,
+                    EvidenceSourceType::WorkRun,
                     run_id,
                     Some("proactive_reminder_run"),
                     &payload_text,
                 ))
-                .with_linked_agent_run(run_id.to_string());
+                .with_linked_work_run(run_id.to_string());
         }
 
         if let Some(action_id) = proposal
@@ -804,7 +804,7 @@ mod tests {
         );
         assert!(evidence.linked_proposal_ids.contains(&proposal.id));
         assert!(evidence
-            .linked_agent_run_ids
+            .linked_work_run_ids
             .contains(&"run-reminder-1".to_string()));
         assert!(evidence
             .source_refs
@@ -813,7 +813,7 @@ mod tests {
         assert!(evidence
             .source_refs
             .iter()
-            .any(|source| source.source_type == EvidenceSourceType::AgentRun));
+            .any(|source| source.source_type == EvidenceSourceType::WorkRun));
 
         let serialized = serde_json::to_string(&evidence).unwrap();
         assert!(!serialized.contains("raw rejected reminder text"));

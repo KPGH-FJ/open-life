@@ -1,4 +1,4 @@
-use crate::main_chat_react_tool_selection::{
+use crate::main_chat_tool_selection::{
     main_chat_governed_mcp_read_tool_candidates, main_chat_manifest_has_write_like_surface,
     main_chat_manifest_is_governed_read_candidate, main_chat_surface_contains_write_like_term,
 };
@@ -26,7 +26,7 @@ fn manifest_product_available(manifest: &SkillManifest) -> bool {
         && manifest
             .capability_flags
             .iter()
-            .any(|flag| flag == "main_chat_turn_runtime_native")
+            .any(|flag| flag == "canonical_chat_work_native")
 }
 
 fn manifest_source_kind(manifest: &SkillManifest) -> &'static str {
@@ -120,7 +120,7 @@ pub struct MainChatToolFailureRecovery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MainChatToolCandidateList {
-    pub task_session_id: Option<String>,
+    pub task_id: Option<String>,
     pub candidates: Vec<MainChatToolCandidate>,
     pub blocked_tools: Vec<MainChatBlockedTool>,
     pub failure_recovery: Option<MainChatToolFailureRecovery>,
@@ -274,7 +274,7 @@ pub(crate) async fn select_main_chat_skill_with_state(
     }
     state
         .persistence_coordinator
-        .require_effects_allowed()
+        .require_effects_for_stores(&["ConversationStore"])
         .map_err(|error| error.to_string())?;
     state
         .conversation_store
@@ -300,7 +300,7 @@ pub(crate) async fn clear_main_chat_skill_with_state(
         sanitize_session_id(session_id).ok_or_else(|| "invalid_session_id".to_string())?;
     state
         .persistence_coordinator
-        .require_effects_allowed()
+        .require_effects_for_stores(&["ConversationStore"])
         .map_err(|error| error.to_string())?;
     state
         .conversation_store
@@ -329,9 +329,9 @@ pub(crate) async fn clear_main_chat_skill_with_state(
 
 pub(crate) async fn list_main_chat_tool_candidates_with_state(
     state: &Arc<AppState>,
-    task_session_id: Option<&str>,
+    task_id: Option<&str>,
 ) -> Result<MainChatToolCandidateList, String> {
-    let task_session_id = task_session_id.and_then(sanitize_optional_id);
+    let task_id = task_id.and_then(sanitize_optional_id);
     let registry = state.mcp_registry.lock().await;
     let safe_candidates = main_chat_governed_mcp_read_tool_candidates(&registry, "", 12)
         .into_iter()
@@ -368,20 +368,20 @@ pub(crate) async fn list_main_chat_tool_candidates_with_state(
     blocked_tools.truncate(64);
     drop(registry);
 
-    let failure_recovery = tool_failure_recovery(state, task_session_id.as_deref()).await;
+    let failure_recovery = tool_failure_recovery(state, task_id.as_deref()).await;
     let mut controls = Vec::new();
     if failure_recovery.is_some() {
         controls.extend(["retry_task".into(), "choose_another_registered_tool".into()]);
     }
     let evidence_digest = digest_label_for_value(&json!({
-        "taskSessionId": task_session_id,
+        "taskId": task_id,
         "candidateCount": safe_candidates.len(),
         "blockedToolCount": blocked_tools.len(),
         "failureRecovery": failure_recovery,
         "directWritesExecuted": false,
     }));
     Ok(MainChatToolCandidateList {
-        task_session_id,
+        task_id,
         candidates: safe_candidates,
         blocked_tools,
         failure_recovery,
@@ -935,7 +935,16 @@ mod tests {
 
     #[tokio::test]
     async fn product_skill_selection_uses_the_conversation_store_as_owner() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let persistence = Arc::new(
+            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
+        );
+        persistence.register_read_write("ConversationStore");
+        persistence.seal();
+        assert!(persistence.require_effects_allowed().is_err());
+        Arc::get_mut(&mut state)
+            .expect("test state has one outer owner")
+            .persistence_coordinator = persistence;
         let conversation_id = uuid::Uuid::new_v4().to_string();
         state
             .conversation_store
@@ -984,7 +993,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_failure_recovery_reads_canonical_attempts_not_action_queue() {
+    async fn tool_failure_recovery_reads_canonical_attempts() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let task_id = uuid::Uuid::new_v4().to_string();
         let conversation_id = uuid::Uuid::new_v4().to_string();

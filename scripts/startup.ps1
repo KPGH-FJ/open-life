@@ -4,11 +4,10 @@
 # 使用方法:
 #   1. 打开 PowerShell（推荐 PowerShell 7+）
 #   2. 进入项目目录: cd C:\path\to\openlife
-#   3. 执行: .\startup.ps1 [dev|a2a|check]
+#   3. 执行: .\startup.ps1 [dev|check]
 #
 # 命令说明:
 #   .\startup.ps1 dev    - 启动 Tauri 桌面应用开发模式（默认）
-#   .\startup.ps1 a2a    - 启动独立 A2A 服务器
 #   .\startup.ps1 check  - 仅检查环境依赖，不启动应用
 #
 # 前提条件:
@@ -37,7 +36,7 @@
 
 param(
     [Parameter(Position = 0)]
-    [ValidateSet("dev", "a2a", "check")]
+    [ValidateSet("dev", "check")]
     [string]$Command = "dev"
 )
 
@@ -50,7 +49,6 @@ $RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
 $FrontendDir = Join-Path $RepoRoot "frontend"
 $TauriDir = Join-Path $RepoRoot "src-tauri"
 $EnvFile = Join-Path $RepoRoot ".env"
-$A2aPort = if ($env:A2A_PORT) { $env:A2A_PORT } else { "" }
 $VitePort = if ($env:PORT) { $env:PORT } else { "" }
 
 # =============================================================================
@@ -160,7 +158,7 @@ function Get-OpenLifeAppDirName {
 }
 
 function Set-RuntimeProfile($commandName) {
-    if ($commandName -eq "dev" -or $commandName -eq "a2a") {
+    if ($commandName -eq "dev") {
         if ($env:OPENLIFE_DATA_DIR -and $env:OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR -ne "1") {
             Write-Error "dev-extensions 拒绝使用 OPENLIFE_DATA_DIR；请使用隔离 dev profile"
             Write-Info "如确需隔离的自定义目录，请显式设置 OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CUSTOM_DATA_DIR=1"
@@ -175,10 +173,6 @@ function Set-RuntimeProfile($commandName) {
     if (-not $script:VitePort) {
         $script:VitePort = if ($env:PORT) { $env:PORT } else { "5173" }
     }
-    if (-not $script:A2aPort) {
-        $script:A2aPort = if ($env:OPENLIFE_PROFILE -eq "dev") { "8766" } else { "8765" }
-    }
-    $env:A2A_PORT = $script:A2aPort
 }
 
 function New-TauriConfigOverride {
@@ -421,7 +415,6 @@ function Start-Dev {
     Write-Host ""
     Write-Info "Profile: $($env:OPENLIFE_PROFILE)"
     Write-Info "Vite: $($env:OPENLIFE_DEV_URL)"
-    Write-Info "A2A: 127.0.0.1:$A2aPort"
 
     # 检查 pnpm
     $corepack = Get-Command "corepack" -ErrorAction SilentlyContinue
@@ -440,15 +433,6 @@ function Start-Dev {
         Write-Error "cargo 不可用"
         exit 1
     }
-    if ($env:OPENLIFE_DEV_AUTOSTART_A2A -eq "1") {
-        if ($env:OPENLIFE_ENABLE_DEV_A2A -ne "1" -or -not $env:OPENLIFE_A2A_PAIRED_TOKEN -or $env:OPENLIFE_A2A_PAIRED_TOKEN.Length -lt 32) {
-            Write-Error "A2A autostart requires OPENLIFE_ENABLE_DEV_A2A=1 and a 32+ character OPENLIFE_A2A_PAIRED_TOKEN"
-            exit 1
-        }
-        Write-Info "构建显式启用的开发 A2A sidecar..."
-        cargo build --manifest-path (Join-Path $RepoRoot "Cargo.toml") -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
-    }
-
     # 检查使用哪种方式启动 Tauri
     $localTauri = Join-Path $FrontendDir "node_modules\.bin\tauri.cmd"
     $globalTauri = Get-Command "tauri" -ErrorAction SilentlyContinue
@@ -468,37 +452,6 @@ function Start-Dev {
             Write-Info "请先运行: corepack pnpm --dir `"$FrontendDir`" install"
             exit 1
         }
-    }
-    finally {
-        Pop-Location
-    }
-}
-
-function Start-A2A {
-    Write-Step "启动 A2A 独立服务器"
-
-    if ($env:OPENLIFE_ENABLE_DEV_A2A -ne "1" -or -not $env:OPENLIFE_A2A_PAIRED_TOKEN -or $env:OPENLIFE_A2A_PAIRED_TOKEN.Length -lt 32) {
-        Write-Error "A2A 默认关闭；启动需要显式启用并配置强配对凭据"
-        Write-Info "设置 OPENLIFE_ENABLE_DEV_A2A=1 和 32+ 字符 OPENLIFE_A2A_PAIRED_TOKEN"
-        exit 1
-    }
-    $env:OPENLIFE_PROFILE = "dev"
-
-    # 检查端口
-    if (-not (Test-Port $A2aPort)) {
-        Write-Error "A2A 端口 $A2aPort 被占用"
-        Write-Info "可设置环境变量: `$env:A2A_PORT = '9999'; .\startup.ps1 a2a"
-        exit 1
-    }
-
-    Write-Info "A2A 服务器将监听: http://127.0.0.1:$A2aPort"
-    Write-Info "API 端点:"
-    Write-Info "  GET  http://127.0.0.1:$A2aPort/agent.json"
-    Write-Info "  POST http://127.0.0.1:$A2aPort/tasks/send"
-
-    Push-Location $TauriDir
-    try {
-        cargo run -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
     }
     finally {
         Pop-Location
@@ -535,11 +488,5 @@ switch ($Command) {
         Install-Dependencies
         Initialize-Database
         Start-Dev
-    }
-    "a2a" {
-        Test-Environment
-        Set-Environment
-        Set-RuntimeProfile $Command
-        Start-A2A
     }
 }

@@ -21,7 +21,7 @@ pub enum AppError {
     PermissionDenied { message: String },
     /// Operation timed out
     Timeout { message: String },
-    /// External service error (LLM API, MCP, A2A, network)
+    /// External service error (LLM API, MCP, network)
     ExternalService {
         message: String,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -188,14 +188,6 @@ impl From<openlife_core::life_model::patch::PatchError> for AppError {
     fn from(e: openlife_core::life_model::patch::PatchError) -> Self {
         AppError::Serialization {
             message: format!("LifeModel patch error: {:?}", e),
-        }
-    }
-}
-
-impl From<openlife_core::agent::AgentRuntimeError> for AppError {
-    fn from(e: openlife_core::agent::AgentRuntimeError) -> Self {
-        AppError::Internal {
-            message: e.to_string(),
         }
     }
 }

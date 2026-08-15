@@ -712,6 +712,105 @@ pub(crate) fn main_chat_evidence_check_json_schema() -> serde_json::Value {
     })
 }
 
+/// Provider-side grammar for the model-authored Work plan. This schema is
+/// intentionally broader than the per-turn Policy decision: it guarantees the
+/// complete typed shape and prevents fixed capabilities from carrying a model
+/// minted target, while `StructuredWorkPlan::validate` still narrows kinds and
+/// exact MCP target ids to the current authorized scope.
+pub(crate) fn main_chat_work_plan_json_schema() -> serde_json::Value {
+    let common_properties = json!({
+        "id": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_]{0,31}$"
+        },
+        "required": { "type": "boolean" },
+        "dependsOn": {
+            "type": "array",
+            "maxItems": 8,
+            "items": { "type": "string" }
+        }
+    });
+    let mut fixed_properties = common_properties.clone();
+    fixed_properties
+        .as_object_mut()
+        .expect("schema object")
+        .insert(
+            "kind".into(),
+            json!({
+                "type": "string",
+                "enum": [
+                    "analyze",
+                    "read_imported_document",
+                    "read_workspace_file",
+                    "web_search",
+                    "web_fetch",
+                    "use_selected_skill",
+                    "draft_artifact",
+                    "verify",
+                    "deliver_result"
+                ]
+            }),
+        );
+    let mut mcp_properties = common_properties;
+    let mcp_properties = mcp_properties.as_object_mut().expect("schema object");
+    mcp_properties.insert(
+        "kind".into(),
+        json!({ "type": "string", "const": "read_mcp" }),
+    );
+    mcp_properties.insert("targetId".into(), json!({ "type": "string" }));
+
+    json!({
+        "type": "object",
+        "properties": {
+            "schemaVersion": {
+                "type": "string",
+                "const": "openlife.work-plan.v2"
+            },
+            "steps": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 8,
+                "items": {
+                    "oneOf": [
+                        {
+                            "type": "object",
+                            "properties": fixed_properties,
+                            "required": ["id", "kind", "required", "dependsOn"],
+                            "additionalProperties": false
+                        },
+                        {
+                            "type": "object",
+                            "properties": mcp_properties,
+                            "required": [
+                                "id",
+                                "kind",
+                                "required",
+                                "dependsOn",
+                                "targetId"
+                            ],
+                            "additionalProperties": false
+                        }
+                    ]
+                }
+            },
+            "completion": {
+                "type": "object",
+                "properties": {
+                    "resultKind": {
+                        "type": "string",
+                        "enum": ["answer", "artifact"]
+                    },
+                    "requiresVerification": { "type": "boolean" }
+                },
+                "required": ["resultKind", "requiresVerification"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["schemaVersion", "steps", "completion"],
+        "additionalProperties": false
+    })
+}
+
 pub(crate) async fn chat_with_ollama_raw_at_endpoint_with_start_observer<F>(
     endpoint: &str,
     model: &str,
@@ -1649,6 +1748,34 @@ mod tests {
         assert_eq!(
             body["format"]["properties"]["claims"]["items"]["properties"]["draft_id"]["pattern"],
             "^D[1-9][0-9]*$"
+        );
+        assert_eq!(body["options"]["temperature"], 0.0);
+    }
+
+    #[test]
+    fn work_plan_request_uses_typed_json_schema_without_fixed_targets() {
+        let schema = main_chat_work_plan_json_schema();
+        let body = ollama_chat_request_body(
+            "llama3.1:latest",
+            vec![json!({"role": "user", "content": "plan this work"})],
+            Some(schema),
+            true,
+        );
+
+        assert_eq!(body["format"]["type"], "object");
+        assert_eq!(
+            body["format"]["required"],
+            json!(["schemaVersion", "steps", "completion"])
+        );
+        let alternatives = body["format"]["properties"]["steps"]["items"]["oneOf"]
+            .as_array()
+            .expect("step alternatives");
+        assert_eq!(alternatives.len(), 2);
+        assert!(alternatives[0]["properties"].get("targetId").is_none());
+        assert_eq!(alternatives[1]["properties"]["kind"]["const"], "read_mcp");
+        assert_eq!(
+            alternatives[1]["required"],
+            json!(["id", "kind", "required", "dependsOn", "targetId"])
         );
         assert_eq!(body["options"]["temperature"], 0.0);
     }

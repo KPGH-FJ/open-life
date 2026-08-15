@@ -171,7 +171,7 @@ pub(crate) fn model_visible_factual_context(candidate: &ContextSourceCandidate) 
         | ContextSourceKind::HsSummary => Some(candidate.content.clone()),
         ContextSourceKind::StableCore
         | ContextSourceKind::RuntimePolicy
-        | ContextSourceKind::StrategyContract
+        | ContextSourceKind::PolicyDisposition
         | ContextSourceKind::SessionState
         | ContextSourceKind::ToolManifest
         | ContextSourceKind::WorkspaceInstruction
@@ -240,7 +240,11 @@ pub(crate) fn validate_agent_memory_evidence_binding(
     Ok(())
 }
 
-fn requested_count_before_suffix(text: &str, suffixes: &[&str]) -> Option<usize> {
+fn requested_count_before_suffix_where(
+    text: &str,
+    suffixes: &[&str],
+    mut accepts_match: impl FnMut(&str, usize, usize) -> bool,
+) -> Option<usize> {
     let compact = text
         .chars()
         .filter(|character| !character.is_whitespace())
@@ -262,23 +266,63 @@ fn requested_count_before_suffix(text: &str, suffixes: &[&str]) -> Option<usize>
         suffixes
             .iter()
             .any(|suffix| {
-                [count.to_string(), (*chinese).to_string()]
-                    .iter()
-                    .any(|label| {
-                        let needle = format!("{label}{suffix}");
-                        compact.match_indices(&needle).any(|(offset, _)| {
-                            match compact[..offset].chars().next_back() {
-                                None => true,
-                                Some(preceding) => {
-                                    !preceding.is_ascii_digit()
-                                        && !"一二三四五六七八九十".contains(preceding)
-                                }
+                let mut count_labels = vec![count.to_string(), (*chinese).to_string()];
+                if *count == 2 {
+                    count_labels.push("两".to_string());
+                }
+                count_labels.iter().any(|label| {
+                    let needle = format!("{label}{suffix}");
+                    compact.match_indices(&needle).any(|(offset, _)| {
+                        let count_boundary_is_valid = match compact[..offset].chars().next_back() {
+                            None => true,
+                            Some(preceding) => {
+                                !preceding.is_ascii_digit()
+                                    && !"一二三四五六七八九十".contains(preceding)
                             }
-                        })
+                        };
+                        count_boundary_is_valid
+                            && accepts_match(&compact, offset, offset + needle.len())
                     })
+                })
             })
             .then_some(*count)
     })
+}
+
+fn requested_count_before_suffix(text: &str, suffixes: &[&str]) -> Option<usize> {
+    requested_count_before_suffix_where(text, suffixes, |_, _, _| true)
+}
+
+fn sentence_count_is_scoped_to_each_step(compact: &str, start: usize, end: usize) -> bool {
+    let chinese_before = compact[..start]
+        .chars()
+        .rev()
+        .take(8)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let chinese_after = compact[end..].chars().take(10).collect::<String>();
+    let chinese_context = format!("{chinese_before}{chinese_after}");
+    let chinese_scoped = ["每个步骤", "每一步", "各步骤"]
+        .iter()
+        .any(|marker| chinese_context.contains(marker));
+
+    let english_before = compact[..start]
+        .chars()
+        .rev()
+        .take(16)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    let english_after = compact[end..].chars().take(16).collect::<String>();
+    let english_context = format!("{english_before}{english_after}");
+    let english_scoped = ["eachstep", "foreachstep", "perstep"]
+        .iter()
+        .any(|marker| english_context.contains(marker));
+
+    chinese_scoped || english_scoped
 }
 
 pub(crate) fn direct_answer_structure_contract(current_user_text: &str) -> Option<String> {
@@ -304,9 +348,10 @@ pub(crate) fn direct_answer_structure_contract(current_user_text: &str) -> Optio
 }
 
 pub(crate) fn requested_direct_answer_sentence_count(current_user_text: &str) -> Option<usize> {
-    requested_count_before_suffix(
+    requested_count_before_suffix_where(
         current_user_text,
         &["句话", "个句子", "句", "sentences", "sentence"],
+        |compact, start, end| !sentence_count_is_scoped_to_each_step(compact, start, end),
     )
 }
 

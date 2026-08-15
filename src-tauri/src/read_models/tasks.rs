@@ -2,10 +2,10 @@ use crate::state::AppState;
 use openlife_core::agent::{
     build_tasks_view_model, build_workspace_view_model, BackendEntityKind, BackendEntityRef,
     EvidenceRef, EvidenceSensitivity, EvidenceSource, ProviderPrivacyBoundarySummary, ReviewItem,
-    ReviewItemDecisionStatus, TaskArtifactChangeKind, TaskArtifactChangeViewModel,
-    TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel, TaskArtifactUndoViewModel,
-    TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel, TaskArtifactViewModel,
-    TaskItemViewModel, TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelTaskInput,
+    TaskArtifactChangeKind, TaskArtifactChangeViewModel, TaskArtifactPreviewStatus,
+    TaskArtifactPreviewViewModel, TaskArtifactUndoViewModel, TaskArtifactVerificationStatus,
+    TaskArtifactVerificationViewModel, TaskArtifactViewModel, TaskItemViewModel,
+    TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelTaskInput,
     TaskWorkPlanStepViewModel, TaskWorkPlanViewModel, TasksViewModel, TasksViewModelBuildInput,
     ViewModelEnvelope, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
     WorkspaceActivityItem, WorkspaceViewModel, WorkspaceViewModelBuildInput,
@@ -58,16 +58,10 @@ async fn load_tasks_read_model_snapshot(
     let mut warnings = Vec::new();
     let (review_items, review_projection_authoritative) =
         load_review_items(state, &mut warnings).await;
-    let loaded_tasks = load_canonical_task_inputs(
-        state,
-        &review_items,
-        review_projection_authoritative,
-        &mut warnings,
-    )
-    .await;
+    let loaded_tasks =
+        load_canonical_task_inputs(state, review_projection_authoritative, &mut warnings).await;
     let model = build_tasks_view_model(TasksViewModelBuildInput {
         task_inputs: loaded_tasks.task_inputs,
-        run_inputs: Vec::new(),
         source_refs: vec![
             source_ref(
                 "canonical_task_runtime_store",
@@ -206,7 +200,6 @@ struct LoadedTaskInputs {
 
 async fn load_canonical_task_inputs(
     state: &Arc<AppState>,
-    review_items: &[ReviewItem],
     review_projection_authoritative: bool,
     warnings: &mut Vec<ViewModelWarning>,
 ) -> LoadedTaskInputs {
@@ -255,19 +248,13 @@ async fn load_canonical_task_inputs(
                 None
             }
         };
-        let (input, activity) = canonical_task_input(
-            state,
-            review_items,
-            review_projection_authoritative,
-            snapshot,
-            plan,
-        )
-        .await;
+        let (input, activity) =
+            canonical_task_input(state, review_projection_authoritative, snapshot, plan).await;
         loaded.activity_by_task.insert(
             input
                 .canonical_task_id
                 .clone()
-                .unwrap_or_else(|| input.task_session_id.clone()),
+                .unwrap_or_else(|| input.task_id.clone()),
             activity,
         );
         loaded.task_inputs.push(input);
@@ -277,7 +264,6 @@ async fn load_canonical_task_inputs(
 
 async fn canonical_task_input(
     state: &Arc<AppState>,
-    review_items: &[ReviewItem],
     review_projection_authoritative: bool,
     snapshot: CanonicalTaskSnapshot,
     work_plan: Option<CanonicalWorkPlanRecord>,
@@ -314,7 +300,7 @@ async fn canonical_task_input(
     } else {
         canonical_general_delivery_status(&snapshot)
     };
-    let mut pending_review_item_refs = snapshot
+    let pending_review_item_refs = snapshot
         .artifacts
         .iter()
         .filter(|artifact| artifact.artifact.status == CanonicalArtifactStatus::WaitingReview)
@@ -328,7 +314,6 @@ async fn canonical_task_input(
             href: None,
         })
         .collect::<Vec<_>>();
-    pending_review_item_refs.extend(review_refs_for_task(review_items, &snapshot.task.id));
     let blockers = snapshot
         .items
         .iter()
@@ -386,12 +371,10 @@ async fn canonical_task_input(
     let needs_attention = !attention_reason_codes.is_empty();
     (
         TaskViewModelTaskInput {
-            task_session_id: snapshot.task.id.clone(),
+            task_id: snapshot.task.id.clone(),
             canonical_task_id: Some(snapshot.task.id.clone()),
             conversation_id: Some(snapshot.task.conversation_id),
             title: title.into(),
-            strategy: None,
-            session_status: None,
             related_run_ids: run_ids,
             final_delivery_present: false,
             final_delivery_status: None,
@@ -1099,33 +1082,6 @@ async fn load_review_items(
     }
 }
 
-fn review_refs_for_task(
-    review_items: &[ReviewItem],
-    task_session_id: &str,
-) -> Vec<BackendEntityRef> {
-    let mut refs = Vec::new();
-    for item in review_items {
-        if item.status != ReviewItemDecisionStatus::Pending {
-            continue;
-        }
-        if item
-            .task_resume_relation
-            .as_ref()
-            .is_some_and(|relation| relation.task_session_id == task_session_id)
-        {
-            refs.push(BackendEntityRef {
-                id: item.id.clone(),
-                kind: BackendEntityKind::ReviewItem,
-                label: format!("{:?}", item.item_type),
-                href: None,
-            });
-        }
-    }
-    refs.sort_by(|left, right| left.id.cmp(&right.id));
-    refs.dedup_by(|left, right| left.id == right.id);
-    refs
-}
-
 fn source_ref(id: impl Into<String>, label: impl Into<String>) -> EvidenceRef {
     EvidenceRef {
         id: id.into(),
@@ -1146,64 +1102,9 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        get_tasks_view_model_with_state, review_refs_for_task, workspace_composition_status,
-    };
-    use openlife_core::agent::{
-        build_review_center_view_model, AgentProposal, ProposalSource, ProposalType,
-        ReviewCenterBuildInput, RiskLevel, ViewModelStatus,
-    };
-    use serde_json::json;
-    use std::collections::BTreeMap;
+    use super::{get_tasks_view_model_with_state, workspace_composition_status};
+    use openlife_core::agent::ViewModelStatus;
     use std::sync::Arc;
-
-    fn pending_chat_proposal() -> AgentProposal {
-        let mut proposal = AgentProposal::new(
-            ProposalType::MemoryWrite,
-            "memory.preference",
-            json!({ "value": "concise" }),
-            "Remember an explicit preference.",
-            0.9,
-            RiskLevel::Medium,
-            ProposalSource::ChatConversation,
-        );
-        proposal.run_id = Some("forged-run".into());
-        proposal.source_detail = Some("forged-task".into());
-        proposal
-    }
-
-    #[test]
-    fn task_review_refs_ignore_descriptive_source_and_run_fields() {
-        let proposal = pending_chat_proposal();
-        let model = build_review_center_view_model(ReviewCenterBuildInput {
-            proposals: vec![proposal],
-            ..Default::default()
-        });
-
-        assert!(
-            review_refs_for_task(&model.items, "forged-task").is_empty(),
-            "TasksViewModel cannot infer review ownership from source_detail or run_id"
-        );
-    }
-
-    #[test]
-    fn task_review_refs_accept_only_canonical_terminal_origin_projection() {
-        let proposal = pending_chat_proposal();
-        let proposal_id = proposal.id.clone();
-        let model = build_review_center_view_model(ReviewCenterBuildInput {
-            proposals: vec![proposal],
-            terminal_owner_task_session_ids: BTreeMap::from([(
-                proposal_id.clone(),
-                "canonical-task".into(),
-            )]),
-            ..Default::default()
-        });
-
-        let refs = review_refs_for_task(&model.items, "canonical-task");
-        assert_eq!(refs.len(), 1);
-        assert_eq!(refs[0].id, proposal_id);
-        assert!(review_refs_for_task(&model.items, "forged-task").is_empty());
-    }
 
     #[test]
     fn workspace_composition_preserves_upstream_failure_states() {
@@ -1438,10 +1339,7 @@ mod tests {
         assert_eq!(waiting.items.len(), 1);
         let task = &waiting.items[0];
         assert_eq!(task.canonical_task_id, prepared.task_id);
-        assert_eq!(
-            task.task_session_id.as_deref(),
-            Some(prepared.task_id.as_str())
-        );
+        assert_eq!(task.canonical_task_id, prepared.task_id);
         assert_eq!(
             task.lifecycle_status,
             openlife_core::agent::TaskLifecycleStatus::WaitingReview

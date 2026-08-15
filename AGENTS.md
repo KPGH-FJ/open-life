@@ -28,7 +28,7 @@ runtime owner:
 frontend/src/tauri.ts
   -> src-tauri/src/lib.rs
   -> main_chat_send.rs | main_chat_streaming.rs
-  -> main_chat_turn_runtime.rs
+  -> canonical_chat_runtime.rs | canonical_work_runtime.rs
   -> main_chat_kernel.rs
   -> openlife-core/src/agent/main_chat_agent_v1.rs
 ```

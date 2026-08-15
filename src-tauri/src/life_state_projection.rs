@@ -1,8 +1,8 @@
 use crate::commands::diagnostics::get_system_diagnostics_with_state;
 use crate::AppState;
 use chrono::Utc;
-use openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStatus;
 use openlife_core::agent::{ProposalStatus, RiskLevel};
+use openlife_core::task_runtime::CanonicalTaskStatus;
 use openlife_core::tool_permissions::ToolPermissionPolicy;
 use serde::Serialize;
 use std::sync::Arc;
@@ -155,7 +155,7 @@ pub(crate) async fn get_life_state_projection_with_state(
         source_refs: vec![
             "diagnostics".into(),
             "proposal_store:pending_and_edited".into(),
-            "main_chat_agent_session_store".into(),
+            "canonical_task_runtime_store".into(),
             "tool_permission_store".into(),
             "config:safe_paths".into(),
             "bootstrap:credential_snapshot".into(),
@@ -232,7 +232,7 @@ fn pending_projection_from_counts(
 async fn build_task_state_projection(state: &Arc<AppState>) -> LifeTaskStateProjection {
     if state
         .persistence_coordinator
-        .require_trusted_read("MainChatAgentSessionStore")
+        .require_trusted_read("CanonicalTaskRuntimeStore")
         .is_err()
     {
         return LifeTaskStateProjection {
@@ -240,7 +240,7 @@ async fn build_task_state_projection(state: &Arc<AppState>) -> LifeTaskStateProj
             ..LifeTaskStateProjection::default()
         };
     }
-    let Some(store_arc) = state.main_chat_agent_session_store.as_ref() else {
+    let Some(store_arc) = state.canonical_task_runtime_store.as_ref() else {
         return LifeTaskStateProjection {
             task_store_status: "unavailable".into(),
             ..LifeTaskStateProjection::default()
@@ -248,23 +248,27 @@ async fn build_task_state_projection(state: &Arc<AppState>) -> LifeTaskStateProj
     };
 
     let store = store_arc.lock().await;
-    let sessions = store.list_sessions(None, 200, 0).unwrap_or_default();
-    let latest = sessions.first();
+    let snapshots = store.list_task_snapshots(200).unwrap_or_default();
+    let latest = snapshots.first();
     let mut projection = LifeTaskStateProjection {
         task_store_status: "ok".into(),
-        latest_task_id: latest.map(|session| session.id.clone()),
-        latest_task_status: latest.map(|session| session.status.as_str().to_string()),
+        latest_task_id: latest.map(|snapshot| snapshot.task.id.clone()),
+        latest_task_status: latest.map(|snapshot| snapshot.task.status.as_str().to_string()),
         ..LifeTaskStateProjection::default()
     };
 
-    for session in sessions {
-        match session.status {
-            AgentTaskSessionStatus::Running => projection.running_count += 1,
-            AgentTaskSessionStatus::WaitingPermission => projection.waiting_permission_count += 1,
-            AgentTaskSessionStatus::Blocked => projection.blocked_count += 1,
-            AgentTaskSessionStatus::Failed => projection.failed_count += 1,
-            AgentTaskSessionStatus::Cancelled => projection.cancelled_count += 1,
-            AgentTaskSessionStatus::Completed => projection.completed_count += 1,
+    for snapshot in snapshots {
+        match snapshot.task.status {
+            CanonicalTaskStatus::Running => projection.running_count += 1,
+            CanonicalTaskStatus::WaitingReview => projection.waiting_permission_count += 1,
+            CanonicalTaskStatus::Blocked | CanonicalTaskStatus::EffectUnknown => {
+                projection.blocked_count += 1
+            }
+            CanonicalTaskStatus::Failed | CanonicalTaskStatus::Interrupted => {
+                projection.failed_count += 1
+            }
+            CanonicalTaskStatus::Cancelled => projection.cancelled_count += 1,
+            CanonicalTaskStatus::Completed => projection.completed_count += 1,
         }
     }
     projection.active_count = projection

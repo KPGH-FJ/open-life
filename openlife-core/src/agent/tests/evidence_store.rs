@@ -127,15 +127,15 @@ fn proposal_output_maps_to_candidate_evidence_without_raw_payload_or_fact_accept
 }
 
 #[test]
-fn evidence_can_link_proposals_agent_runs_and_run_metadata() {
+fn evidence_can_link_proposals_work_runs_and_run_metadata() {
     let store = EvidenceStore::new_in_memory().unwrap();
     let record = store.create_evidence(test_draft()).unwrap();
 
     let linked = store.link_proposal(&record.id, "proposal-1").unwrap();
     assert_eq!(linked.linked_proposal_ids, vec!["proposal-1"]);
 
-    let linked = store.link_agent_run(&record.id, "run-1").unwrap();
-    assert_eq!(linked.linked_agent_run_ids, vec!["run-1"]);
+    let linked = store.link_work_run(&record.id, "run-1").unwrap();
+    assert_eq!(linked.linked_work_run_ids, vec!["run-1"]);
 
     let linked = store
         .merge_run_metadata(

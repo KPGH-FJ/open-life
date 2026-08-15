@@ -1652,14 +1652,6 @@ fn gateway_request_for_caller(
                 risk_acknowledged: false,
             }
         }
-        (
-            LifeModelMaterializerCallerKind::AcceptedProposalApply,
-            LifeModelMaterializerCallerPurpose::AcceptedProposalApplySourceSpecificPatchMappingComplete,
-        ) => {
-            return Err(AppError::permission(
-                "accepted proposal LifeModel writes must use the v2 typed-diff or governed migration materializer",
-            ))
-        }
         _ => {
             return Err(AppError::permission(format!(
                 "LifeModelWriteGateway does not allow caller {} to persist LifeModel",

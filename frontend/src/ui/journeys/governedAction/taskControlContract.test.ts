@@ -22,7 +22,6 @@ function task(overrides: Partial<TaskViewModelItem> = {}): TaskViewModelItem {
     canonicalTaskId: "task-1",
     relatedRunIds: [],
     title: "整理访谈",
-    strategy: "react",
     lifecycleStatus: "running",
     terminalDeliveryStatus: "not_terminal",
     finalDeliveryEvidencePresent: false,

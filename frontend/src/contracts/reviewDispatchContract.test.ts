@@ -127,22 +127,9 @@ describe("review dispatch contract", () => {
         requiresConfirmation: false,
       }),
     });
-    const resume = reviewDispatchReducer(initialReviewDispatchState, {
-      type: "request",
-      action: approveAction({
-        kind: "resume",
-        effect: "task_resume_request",
-        requiresConfirmation: false,
-      }),
-    });
-
     expect(evidence).toMatchObject({
       phase: "blocked",
       reason: "evidence_action_requires_navigation_handler",
-    });
-    expect(resume).toMatchObject({
-      phase: "blocked",
-      reason: "resume_action_requires_task_refresh_contract",
     });
   });
 

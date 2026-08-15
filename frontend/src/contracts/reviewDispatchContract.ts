@@ -49,7 +49,6 @@ const expectedEffects: Record<ReviewAction["kind"], ReviewAction["effect"]> = {
   later: "decision_only",
   revoke: "decision_only",
   apply: "materialization_request",
-  resume: "task_resume_request",
   view_evidence: "evidence_only",
 };
 
@@ -71,9 +70,6 @@ function actionContractBlocker(action: ReviewAction): string | null {
   }
   if (action.effect === "evidence_only") {
     return "evidence_action_requires_navigation_handler";
-  }
-  if (action.effect === "task_resume_request") {
-    return "resume_action_requires_task_refresh_contract";
   }
   if (action.kind === "revoke") {
     return "revoke_action_requires_backend_status_contract";

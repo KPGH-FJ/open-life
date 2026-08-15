@@ -1,4 +1,5 @@
 import { Eye, RefreshCw } from "lucide-react";
+import type { ReactNode } from "react";
 import { FoundationActionButton, FoundationNotice } from "@/ui/foundation";
 import type { GovernedActionSnapshot } from "./governedActionDataSource";
 import { WorkspaceConversationPanel } from "./WorkspaceConversationPanel";
@@ -11,6 +12,7 @@ export function WorkspaceGovernedView({
   onOpenInspector,
   onOpenLifeModel,
   conversation,
+  inlineCheckpoint,
 }: {
   snapshot: GovernedActionSnapshot | null;
   refreshing: boolean;
@@ -18,6 +20,7 @@ export function WorkspaceGovernedView({
   onOpenInspector: () => void;
   onOpenLifeModel: (itemRef: string) => void;
   conversation?: WorkspaceConversationController;
+  inlineCheckpoint?: ReactNode;
 }) {
   const envelope = snapshot?.workspaceEnvelope;
   const model = envelope && ["ready", "stale"].includes(envelope.status) ? envelope.data : null;
@@ -89,8 +92,10 @@ export function WorkspaceGovernedView({
           controller={conversation}
           onOpenLifeModel={onOpenLifeModel}
           disabledReason={conversationDisabledReason}
+          inlineCheckpoint={inlineCheckpoint}
         />
       )}
+      {!conversation && inlineCheckpoint}
     </section>
   );
 }

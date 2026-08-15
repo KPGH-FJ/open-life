@@ -192,13 +192,6 @@ function permissionItem(stage: FixtureStage, incomplete: boolean): ReviewItem {
       { id: taskId, kind: "task", label: "客户访谈整理任务" },
       { id: "workspace/interview-notes", kind: "external_resource", label: "访谈记录目录" },
     ],
-    taskResumeRelation: {
-      taskSessionId: taskId,
-      resumeRequiresMaterialization: false,
-      canRequestResume: status === "approved",
-      resumeActionId: status === "approved" ? `${taskId}:resume` : undefined,
-      blockedReason: status === "approved" ? undefined : "权限决定尚未批准，任务不能继续。",
-    },
   };
 }
 
@@ -211,7 +204,6 @@ function activeTask(stage: FixtureStage): TaskViewModelItem {
     relatedRunIds: ["run-interview-notes-01"],
     conversationId: "conversation-research-plan",
     title: "整理三次客户访谈，归纳下周要验证的问题",
-    strategy: "react",
     lifecycleStatus: running ? "running" : rejected ? "blocked" : "waiting_permission",
     terminalDeliveryStatus: rejected ? "blocked" : "not_terminal",
     finalDeliveryEvidencePresent: false,
@@ -575,18 +567,29 @@ export function workbenchJourneyFixtureDataSource(
     async restoreMemory() {},
     async rollbackMemory() {},
     async privacyEraseMemory() {},
-    async listSessions() {
+    async loadConversation(conversationId) {
       if (readStatus(id) === "error") throw new Error("fixture_conversation_store_unavailable");
-      return sessions.map(session => ({ ...session }));
-    },
-    async loadHistory(sessionId) {
-      if (readStatus(id) === "error") throw new Error("fixture_conversation_store_unavailable");
-      const history = histories.get(sessionId);
-      if (!history) throw new Error("fixture_conversation_session_missing");
-      return history.map(message => ({ ...message }));
-    },
-    async loadLifeModelInfluence() {
-      return null;
+      const conversations = sessions.map(session => ({ ...session }));
+      const selectedConversationId =
+        conversationId && histories.has(conversationId)
+          ? conversationId
+          : (conversations[0]?.session_id ?? null);
+      return {
+        status: conversations.length > 0 ? "ready" : "empty",
+        conversations,
+        projects: [],
+        selectedProjectId: null,
+        selectedConversationId,
+        messages: selectedConversationId
+          ? (histories.get(selectedConversationId) ?? []).map(message => ({ ...message }))
+          : [],
+        latestTurn: null,
+        providerStatus: "ready",
+        providerProfiles: [],
+        selectedProviderProfileId: null,
+        providerErrorCode: null,
+        workStatus: "ready",
+      };
     },
     async createSession(sessionId, title) {
       if (readStatus(id) !== "ready") throw new Error("fixture_workspace_read_model_not_ready");

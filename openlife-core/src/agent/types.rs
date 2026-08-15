@@ -1,6 +1,15 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+fn metadata_digest(value: &str) -> String {
+    let digest = ring::digest::digest(&ring::digest::SHA256, value.as_bytes());
+    let hex = digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -83,7 +92,7 @@ impl std::fmt::Display for AgentTaskStatus {
     }
 }
 
-/// A task submitted to the AgentRuntime for execution.
+/// Typed task input used by policy classification and scheduled work.
 #[derive(Debug, Clone)]
 pub struct AgentTask {
     pub kind: AgentTaskKind,
@@ -91,77 +100,6 @@ pub struct AgentTask {
     pub user_text: String,
     pub messages: Vec<crate::llm::ChatMessage>,
     pub layer: crate::layer::Layer,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentRunStatus {
-    Running,
-    WaitingPermission,
-    Completed,
-    Failed,
-    RemoteUnknown,
-    Cancelled,
-}
-
-impl std::fmt::Display for AgentRunStatus {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AgentRunStatus::Running => write!(f, "running"),
-            AgentRunStatus::WaitingPermission => write!(f, "waiting_permission"),
-            AgentRunStatus::Completed => write!(f, "completed"),
-            AgentRunStatus::Failed => write!(f, "failed"),
-            AgentRunStatus::RemoteUnknown => write!(f, "remote_unknown"),
-            AgentRunStatus::Cancelled => write!(f, "cancelled"),
-        }
-    }
-}
-
-/// Phase of the AgentLoop execution for real-time status streaming.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AgentLoopPhase {
-    /// Understanding the task and planning next step
-    Thinking,
-    /// Model has decided to use a tool, preparing the call
-    PlanningTool,
-    /// Tool is being executed
-    ExecutingTool,
-    /// Tool result received, processing observation
-    Observing,
-    /// Waiting for user permission confirmation
-    WaitingPermission,
-    /// Generating the final answer
-    GeneratingFinal,
-    /// Execution completed successfully
-    Completed,
-    /// Execution failed
-    Failed,
-}
-
-impl std::fmt::Display for AgentLoopPhase {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            AgentLoopPhase::Thinking => write!(f, "thinking"),
-            AgentLoopPhase::PlanningTool => write!(f, "planning_tool"),
-            AgentLoopPhase::ExecutingTool => write!(f, "executing_tool"),
-            AgentLoopPhase::Observing => write!(f, "observing"),
-            AgentLoopPhase::WaitingPermission => write!(f, "waiting_permission"),
-            AgentLoopPhase::GeneratingFinal => write!(f, "generating_final"),
-            AgentLoopPhase::Completed => write!(f, "completed"),
-            AgentLoopPhase::Failed => write!(f, "failed"),
-        }
-    }
-}
-
-/// A single status update emitted during AgentLoop execution.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentLoopStatusUpdate {
-    pub phase: AgentLoopPhase,
-    pub message: String,
-    pub step_index: u32,
-    pub tool_call_index: Option<u32>,
-    pub timestamp: DateTime<Utc>,
 }
 
 /// Trace of which model was chosen and why.
@@ -232,129 +170,22 @@ pub struct ToolActionScope {
 }
 
 pub(crate) const MAX_OBSERVED_CONTENT_RECEIPT_BYTES: usize = 16 * 1024 * 1024;
-pub const AGENT_RUN_RECEIPT_KEY_BYTES: usize = 32;
-
-/// Purpose-scoped key material for AgentRun content minimization receipts.
-///
-/// The key is deliberately non-serializable and its debug representation is
-/// redacted. Production callers must load stable random bytes from the secret
-/// store and inject them into `AgentRunStore`; no release default exists.
-#[derive(Clone)]
-pub struct AgentRunReceiptKey([u8; AGENT_RUN_RECEIPT_KEY_BYTES]);
+pub const CANONICAL_TASK_RECEIPT_KEY_BYTES: usize = 32;
 
 /// Purpose-scoped receipt authority for the canonical Task/Run/Item store.
-/// It intentionally has a distinct type and derivation domain from the
-/// retired AgentRun lifecycle authority.
+/// The key is deliberately non-serializable and its debug representation is
+/// redacted. Production callers load stable random bytes from the secret store
+/// and bind them to the canonical runtime database slot.
 #[derive(Clone)]
-pub struct CanonicalTaskReceiptKey([u8; AGENT_RUN_RECEIPT_KEY_BYTES]);
+pub struct CanonicalTaskReceiptKey([u8; CANONICAL_TASK_RECEIPT_KEY_BYTES]);
 
 pub(crate) trait ContentReceiptAuthorityKey {
     fn sign_receipt(&self, purpose: &str, material: &str) -> String;
     fn verify_receipt(&self, purpose: &str, material: &str, encoded_tag: &str) -> bool;
 }
 
-impl AgentRunReceiptKey {
-    pub fn from_bytes(bytes: [u8; AGENT_RUN_RECEIPT_KEY_BYTES]) -> anyhow::Result<Self> {
-        if bytes.iter().all(|byte| *byte == 0) {
-            anyhow::bail!("agent_run_receipt_key_must_not_be_all_zero");
-        }
-        Ok(Self(bytes))
-    }
-
-    pub(crate) fn sign(&self, purpose: &str, material: &str) -> String {
-        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.0);
-        let message = Self::signing_message(purpose, material);
-        let tag = ring::hmac::sign(&key, message.as_bytes());
-        let hex = tag
-            .as_ref()
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        format!("hmac-sha256:{hex}")
-    }
-
-    pub(crate) fn verify(&self, purpose: &str, material: &str, encoded_tag: &str) -> bool {
-        let Some(hex) = encoded_tag.strip_prefix("hmac-sha256:") else {
-            return false;
-        };
-        if hex.len() != 64 {
-            return false;
-        }
-        let mut tag = [0u8; 32];
-        for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
-            let Ok(pair) = std::str::from_utf8(pair) else {
-                return false;
-            };
-            let Ok(byte) = u8::from_str_radix(pair, 16) else {
-                return false;
-            };
-            tag[index] = byte;
-        }
-        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.0);
-        ring::hmac::verify(
-            &key,
-            Self::signing_message(purpose, material).as_bytes(),
-            &tag,
-        )
-        .is_ok()
-    }
-
-    /// Derive a purpose- and filesystem-slot-scoped key without exposing the
-    /// installation key bytes. A copied database therefore cannot retain
-    /// receipt authority at a different canonical path, even when both
-    /// processes receive the same installation secret.
-    pub(crate) fn derive_for_canonical_database_slot(
-        &self,
-        canonical_path: &std::path::Path,
-    ) -> anyhow::Result<Self> {
-        let mut material = b"openlife-agent-run-database-slot-key-v1\0".to_vec();
-        #[cfg(unix)]
-        {
-            use std::os::unix::ffi::OsStrExt;
-            material.extend_from_slice(b"unix\0");
-            material.extend_from_slice(canonical_path.as_os_str().as_bytes());
-        }
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-            material.extend_from_slice(b"windows-utf16le\0");
-            for unit in canonical_path.as_os_str().encode_wide() {
-                material.extend_from_slice(&unit.to_le_bytes());
-            }
-        }
-        #[cfg(not(any(unix, windows)))]
-        {
-            material.extend_from_slice(b"portable-lossy\0");
-            material.extend_from_slice(canonical_path.to_string_lossy().as_bytes());
-        }
-        let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.0);
-        let tag = ring::hmac::sign(&key, &material);
-        let bytes: [u8; AGENT_RUN_RECEIPT_KEY_BYTES] = tag
-            .as_ref()
-            .try_into()
-            .map_err(|_| anyhow::anyhow!("agent_run_database_slot_key_derivation_failed"))?;
-        Self::from_bytes(bytes)
-    }
-
-    fn signing_message(purpose: &str, material: &str) -> String {
-        format!(
-            "openlife-agent-run-receipt-v1\0purpose\0{}:{}\0material\0{}:{}",
-            purpose.len(),
-            purpose,
-            material.len(),
-            material
-        )
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    #[doc(hidden)]
-    pub fn test_key() -> Self {
-        Self([0xA7; AGENT_RUN_RECEIPT_KEY_BYTES])
-    }
-}
-
 impl CanonicalTaskReceiptKey {
-    pub fn from_bytes(bytes: [u8; AGENT_RUN_RECEIPT_KEY_BYTES]) -> anyhow::Result<Self> {
+    pub fn from_bytes(bytes: [u8; CANONICAL_TASK_RECEIPT_KEY_BYTES]) -> anyhow::Result<Self> {
         if bytes.iter().all(|byte| *byte == 0) {
             anyhow::bail!("canonical_task_receipt_key_must_not_be_all_zero");
         }
@@ -387,7 +218,7 @@ impl CanonicalTaskReceiptKey {
         }
         let key = ring::hmac::Key::new(ring::hmac::HMAC_SHA256, &self.0);
         let tag = ring::hmac::sign(&key, &material);
-        let bytes: [u8; AGENT_RUN_RECEIPT_KEY_BYTES] = tag
+        let bytes: [u8; CANONICAL_TASK_RECEIPT_KEY_BYTES] = tag
             .as_ref()
             .try_into()
             .map_err(|_| anyhow::anyhow!("canonical_task_database_slot_key_derivation_failed"))?;
@@ -407,17 +238,7 @@ impl CanonicalTaskReceiptKey {
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
     pub fn test_key() -> Self {
-        Self([0xC7; AGENT_RUN_RECEIPT_KEY_BYTES])
-    }
-}
-
-impl ContentReceiptAuthorityKey for AgentRunReceiptKey {
-    fn sign_receipt(&self, purpose: &str, material: &str) -> String {
-        self.sign(purpose, material)
-    }
-
-    fn verify_receipt(&self, purpose: &str, material: &str, encoded_tag: &str) -> bool {
-        self.verify(purpose, material, encoded_tag)
+        Self([0xC7; CANONICAL_TASK_RECEIPT_KEY_BYTES])
     }
 }
 
@@ -461,21 +282,9 @@ impl ContentReceiptAuthorityKey for CanonicalTaskReceiptKey {
     }
 }
 
-impl Drop for AgentRunReceiptKey {
-    fn drop(&mut self) {
-        self.0.fill(0);
-    }
-}
-
 impl Drop for CanonicalTaskReceiptKey {
     fn drop(&mut self) {
         self.0.fill(0);
-    }
-}
-
-impl std::fmt::Debug for AgentRunReceiptKey {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("AgentRunReceiptKey([REDACTED])")
     }
 }
 
@@ -512,9 +321,8 @@ impl ContentReceiptBinding {
         observation: &AgentObservation,
         field: BoundContentField,
     ) -> anyhow::Result<Self> {
-        if ["agent_run_store:", "canonical_task_runtime_store:"]
-            .into_iter()
-            .find_map(|prefix| canonical_store_identity.strip_prefix(prefix))
+        if canonical_store_identity
+            .strip_prefix("canonical_task_runtime_store:")
             .and_then(|value| Uuid::parse_str(value).ok())
             .is_none()
         {
@@ -537,7 +345,7 @@ impl ContentReceiptBinding {
         field: BoundContentField,
     ) -> anyhow::Result<Self> {
         let trace = action
-            .react_trace
+            .tool_trace
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("bound_content_binding_action_trace_missing"))?;
         let scope = action
@@ -605,7 +413,7 @@ impl ContentReceiptBinding {
                 "finishedAt": action.finished_at,
                 "timestamp": action.timestamp,
                 "toolScope": action.tool_scope,
-                "reactTrace": trace_without_receipt,
+                "toolTrace": trace_without_receipt,
             },
             "observation": {
                 "id": observation.id,
@@ -770,7 +578,7 @@ pub struct BoundContentReceipt {
     /// Recomputable from the canonical persisted action/observation semantics.
     binding_receipt: String,
     /// Keyed receipt over the original adapter binding and body. The body is
-    /// not retained by AgentRunStore.
+    /// not retained by the canonical Work runtime store.
     body_receipt: String,
     authority_tag: String,
 }
@@ -833,20 +641,21 @@ impl BoundContentReceipt {
             authority_tag: String::new(),
         };
         durable.binding_receipt = key.sign_receipt(
-            "agent_run_bound_content_binding_v2",
+            "canonical_task_bound_content_binding_v2",
             &canonical_binding.material(),
         );
         let body_material = durable.body_material(observed_binding, observed_body);
-        durable.body_receipt = key.sign_receipt("agent_run_bound_content_body_v2", &body_material);
+        durable.body_receipt =
+            key.sign_receipt("canonical_task_bound_content_body_v2", &body_material);
         if !key.verify_receipt(
-            "agent_run_bound_content_body_v2",
+            "canonical_task_bound_content_body_v2",
             &body_material,
             &durable.body_receipt,
         ) {
             anyhow::bail!("bound_content_receipt_body_issue_failed");
         }
         durable.authority_tag = key.sign_receipt(
-            "agent_run_bound_content_authority_v2",
+            "canonical_task_bound_content_authority_v2",
             &durable.canonical_material(),
         );
         if !durable.verify_durable(key, canonical_binding) {
@@ -873,22 +682,6 @@ impl BoundContentReceipt {
         )
     }
 
-    pub(crate) fn verify_observed_body<K: ContentReceiptAuthorityKey>(
-        &self,
-        key: &K,
-        observed_binding: &ContentReceiptBinding,
-        observed_body: &str,
-    ) -> bool {
-        self.version == BOUND_CONTENT_RECEIPT_VERSION_CURRENT
-            && self.byte_count == observed_body.len()
-            && observed_binding.same_graph_owner_identity(self)
-            && key.verify_receipt(
-                "agent_run_bound_content_body_v2",
-                &self.body_material(observed_binding, observed_body),
-                &self.body_receipt,
-            )
-    }
-
     pub(crate) fn verify_durable<K: ContentReceiptAuthorityKey>(
         &self,
         key: &K,
@@ -902,12 +695,12 @@ impl BoundContentReceipt {
             && is_exact_hmac_sha256(&self.body_receipt)
             && is_exact_hmac_sha256(&self.authority_tag)
             && key.verify_receipt(
-                "agent_run_bound_content_binding_v2",
+                "canonical_task_bound_content_binding_v2",
                 &canonical_binding.material(),
                 &self.binding_receipt,
             )
             && key.verify_receipt(
-                "agent_run_bound_content_authority_v2",
+                "canonical_task_bound_content_authority_v2",
                 &self.canonical_material(),
                 &self.authority_tag,
             )
@@ -957,32 +750,8 @@ impl BoundContentReceipt {
         .join("\0")
     }
 
-    pub(crate) fn receipt_id(&self) -> &str {
-        &self.receipt_id
-    }
-
-    pub(crate) fn issuance_id(&self) -> &str {
-        &self.issuance_id
-    }
-
     pub fn public_digest(&self) -> String {
         metadata_digest(&self.authority_tag)
-    }
-
-    pub(crate) fn run_id(&self) -> &str {
-        &self.run_id
-    }
-
-    pub(crate) fn action_id(&self) -> &str {
-        &self.action_id
-    }
-
-    pub(crate) fn observation_id(&self) -> &str {
-        &self.observation_id
-    }
-
-    pub(crate) fn field(&self) -> BoundContentField {
-        self.field
     }
 
     pub fn kind(&self) -> ContentReceiptKind {
@@ -999,21 +768,6 @@ impl BoundContentReceipt {
 
     pub fn version(&self) -> u8 {
         self.version
-    }
-
-    #[cfg(test)]
-    pub(crate) fn digest(&self) -> &str {
-        &self.authority_tag
-    }
-
-    #[cfg(test)]
-    pub(crate) fn observed_body_receipt(&self) -> &str {
-        &self.body_receipt
-    }
-
-    #[cfg(test)]
-    pub(crate) fn binding_receipt(&self) -> &str {
-        &self.binding_receipt
     }
 }
 
@@ -1091,7 +845,7 @@ impl<'de> Deserialize<'de> for BoundContentReceipt {
                     .canonical_store_identity
                     .filter(|value| {
                         value
-                            .strip_prefix("agent_run_store:")
+                            .strip_prefix("canonical_task_runtime_store:")
                             .and_then(|identity| Uuid::parse_str(identity).ok())
                             .is_some()
                     })
@@ -1192,7 +946,7 @@ fn is_exact_hmac_sha256(value: &str) -> bool {
 
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ReactActionTraceEnvelope {
+pub struct ToolActionTraceEnvelope {
     #[serde(default)]
     pub run_id: Option<String>,
     pub action_id: String,
@@ -1226,10 +980,10 @@ pub struct ReactActionTraceEnvelope {
     pub metadata_safe: bool,
 }
 
-impl std::fmt::Debug for ReactActionTraceEnvelope {
+impl std::fmt::Debug for ToolActionTraceEnvelope {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
-            .debug_struct("ReactActionTraceEnvelope")
+            .debug_struct("ToolActionTraceEnvelope")
             .field("action_id", &self.action_id)
             .field("step_index", &self.step_index)
             .field("tool_call_index", &self.tool_call_index)
@@ -1265,7 +1019,7 @@ pub struct AgentAction {
     #[serde(default)]
     pub tool_scope: Option<ToolActionScope>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub react_trace: Option<ReactActionTraceEnvelope>,
+    pub tool_trace: Option<ToolActionTraceEnvelope>,
     /// In-process-only execution authority. JSON/SQLite projections may carry
     /// receipt-shaped metadata, but deserialization must never recreate this
     /// runtime sidecar or its authenticity seal.
@@ -1284,7 +1038,7 @@ impl std::fmt::Debug for AgentAction {
             .field("output", &"[REDACTED]")
             .field("error", &self.error.as_ref().map(|_| "[REDACTED]"))
             .field("tool_scope_present", &self.tool_scope.is_some())
-            .field("react_trace_present", &self.react_trace.is_some())
+            .field("tool_trace_present", &self.tool_trace.is_some())
             .field(
                 "runtime_execution_receipt_present",
                 &self.runtime_execution_receipt.is_some(),
@@ -1305,7 +1059,7 @@ pub struct AgentObservation {
     pub structured_result: Option<serde_json::Value>,
     pub timestamp: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub react_trace: Option<ReactActionTraceEnvelope>,
+    pub tool_trace: Option<ToolActionTraceEnvelope>,
 }
 
 impl std::fmt::Debug for AgentObservation {
@@ -1321,265 +1075,8 @@ impl std::fmt::Debug for AgentObservation {
                 "structured_result_present",
                 &self.structured_result.is_some(),
             )
-            .field("react_trace_present", &self.react_trace.is_some())
+            .field("tool_trace_present", &self.tool_trace.is_some())
             .finish()
-    }
-}
-
-/// Error information when a run fails.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentRunError {
-    pub message: String,
-    pub phase: String, // "preprocess" | "model" | "stream" | "fallback" | "reasoning"
-    pub recoverable: bool,
-}
-
-impl std::fmt::Debug for AgentRunError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("AgentRunError")
-            .field("phase", &self.phase)
-            .field("recoverable", &self.recoverable)
-            .field("message", &"[REDACTED]")
-            .finish()
-    }
-}
-
-/// A single traceable execution of an Agent task.
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AgentRun {
-    pub id: String,
-    pub task_id: String,
-    pub session_id: Option<String>,
-    pub status: AgentRunStatus,
-    pub kind: AgentTaskKind,
-    /// Transient execution input. AgentRunStore never persists or rehydrates it.
-    #[serde(skip)]
-    pub user_input: Option<String>,
-    pub input_ref: Option<String>,
-    pub input_digest: Option<String>,
-    pub context_summary: Option<ContextSummary>,
-    pub model_route: Option<ModelRouteTrace>,
-    pub output_preview: Option<String>,
-    pub error: Option<AgentRunError>,
-    #[serde(default)]
-    pub generated_proposals: Vec<String>,
-    #[serde(default)]
-    pub actions: Vec<AgentAction>,
-    #[serde(default)]
-    pub observations: Vec<AgentObservation>,
-    /// Reasoning strategy used (e.g., "layered", "direct")
-    pub reasoning_strategy: Option<String>,
-    /// Trace from the reasoning process (e.g., LayeredReasoner phases)
-    pub reasoning_trace: Option<crate::agent::reasoning::ReasoningTrace>,
-    pub reasoning_trace_digest: Option<String>,
-    /// True only for rows migrated from a payload version that could not prove
-    /// receipt provenance. Product surfaces must not present its metadata as
-    /// current observed execution truth.
-    #[serde(default)]
-    pub legacy_payload_unverified: bool,
-    /// Read-only compatibility metadata from historical HS-selected runs.
-    /// Current runtime never creates this selection authority.
-    #[serde(default)]
-    pub hs_selection_audit: Option<crate::agent::legacy_hs_audit::HSSelectionAudit>,
-    /// Metadata-safe deterministic behavior checks relevant to selected HS assets.
-    #[serde(default)]
-    pub behavior_checks: Vec<crate::agent::legacy_hs_audit::HSBehaviorCheckSummary>,
-    /// Warnings generated during execution (e.g., parse warnings, budget warnings)
-    #[serde(default)]
-    pub warnings: Vec<String>,
-    /// Status updates emitted during AgentLoop execution
-    #[serde(default)]
-    pub status_updates: Vec<AgentLoopStatusUpdate>,
-    /// Number of steps executed
-    #[serde(default)]
-    pub step_count: u32,
-    /// Number of tool calls made
-    #[serde(default)]
-    pub tool_call_count: u32,
-    pub deleted_at: Option<DateTime<Utc>>,
-    pub delete_reason: Option<String>,
-    pub started_at: DateTime<Utc>,
-    pub finished_at: Option<DateTime<Utc>>,
-}
-
-impl std::fmt::Debug for AgentRun {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("AgentRun")
-            .field("id", &self.id)
-            .field("task_id", &self.task_id)
-            .field("status", &self.status)
-            .field("kind", &self.kind)
-            .field("user_input", &"[REDACTED]")
-            .field("context_summary_present", &self.context_summary.is_some())
-            .field("model_route_present", &self.model_route.is_some())
-            .field("output_preview", &"[REDACTED]")
-            .field("error_present", &self.error.is_some())
-            .field("generated_proposal_count", &self.generated_proposals.len())
-            .field("action_count", &self.actions.len())
-            .field("observation_count", &self.observations.len())
-            .field("reasoning_trace", &"[REDACTED]")
-            .field("legacy_payload_unverified", &self.legacy_payload_unverified)
-            .field("step_count", &self.step_count)
-            .field("tool_call_count", &self.tool_call_count)
-            .finish()
-    }
-}
-
-fn metadata_digest(value: &str) -> String {
-    let digest = ring::digest::digest(&ring::digest::SHA256, value.as_bytes());
-    let hex = digest
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sha256:{hex}")
-}
-
-impl AgentRun {
-    pub fn new_chat_run(session_id: &str, user_input: &str) -> Self {
-        let now = Utc::now();
-        Self {
-            id: Uuid::new_v4().to_string(),
-            task_id: Uuid::new_v4().to_string(),
-            session_id: Some(session_id.to_string()),
-            status: AgentRunStatus::Running,
-            kind: AgentTaskKind::Conversation,
-            user_input: Some(user_input.to_string()),
-            // The canonical conversation owner assigns the message id. A
-            // content digest is evidence, not an address, so this constructor
-            // deliberately leaves the reference unresolved until the caller
-            // has committed the message through MemoryGateway.
-            input_ref: None,
-            // The persistent AgentRunStore owns the purpose-isolated receipt
-            // key, so constructors cannot mint a durable digest.
-            input_digest: None,
-            context_summary: None,
-            model_route: None,
-            output_preview: None,
-            error: None,
-            generated_proposals: Vec::new(),
-            actions: Vec::new(),
-            observations: Vec::new(),
-            reasoning_strategy: None,
-            reasoning_trace: None,
-            reasoning_trace_digest: None,
-            legacy_payload_unverified: false,
-            hs_selection_audit: None,
-            behavior_checks: Vec::new(),
-            warnings: Vec::new(),
-            status_updates: Vec::new(),
-            step_count: 0,
-            tool_call_count: 0,
-            deleted_at: None,
-            delete_reason: None,
-            started_at: now,
-            finished_at: None,
-        }
-    }
-
-    pub fn new_builder_run(session_id: &str) -> Self {
-        let now = Utc::now();
-        Self {
-            id: Uuid::new_v4().to_string(),
-            task_id: Uuid::new_v4().to_string(),
-            session_id: Some(session_id.to_string()),
-            status: AgentRunStatus::Running,
-            kind: AgentTaskKind::Builder,
-            user_input: None,
-            input_ref: None,
-            input_digest: None,
-            context_summary: None,
-            model_route: None,
-            output_preview: None,
-            error: None,
-            generated_proposals: Vec::new(),
-            actions: Vec::new(),
-            observations: Vec::new(),
-            reasoning_strategy: None,
-            reasoning_trace: None,
-            reasoning_trace_digest: None,
-            legacy_payload_unverified: false,
-            hs_selection_audit: None,
-            behavior_checks: Vec::new(),
-            warnings: Vec::new(),
-            status_updates: Vec::new(),
-            step_count: 0,
-            tool_call_count: 0,
-            deleted_at: None,
-            delete_reason: None,
-            started_at: now,
-            finished_at: None,
-        }
-    }
-
-    pub fn new_tool_execution_run(tool_name: &str) -> Self {
-        let now = Utc::now();
-        let input = format!("Direct tool call: {}", tool_name);
-        Self {
-            id: Uuid::new_v4().to_string(),
-            task_id: Uuid::new_v4().to_string(),
-            session_id: None,
-            status: AgentRunStatus::Running,
-            kind: AgentTaskKind::ToolExecution,
-            user_input: Some(input),
-            // Direct tool execution currently has no canonical input-body
-            // owner. Keep the digest but do not manufacture a resolvable URI.
-            input_ref: None,
-            input_digest: None,
-            context_summary: None,
-            model_route: None,
-            output_preview: None,
-            error: None,
-            generated_proposals: Vec::new(),
-            actions: Vec::new(),
-            observations: Vec::new(),
-            reasoning_strategy: None,
-            reasoning_trace: None,
-            reasoning_trace_digest: None,
-            legacy_payload_unverified: false,
-            hs_selection_audit: None,
-            behavior_checks: Vec::new(),
-            warnings: Vec::new(),
-            status_updates: Vec::new(),
-            step_count: 0,
-            tool_call_count: 0,
-            deleted_at: None,
-            delete_reason: None,
-            started_at: now,
-            finished_at: None,
-        }
-    }
-
-    pub fn complete(
-        &mut self,
-        output_preview: &str,
-        model_route: ModelRouteTrace,
-        context_summary: ContextSummary,
-    ) {
-        self.status = AgentRunStatus::Completed;
-        self.output_preview = Some(output_preview.to_string());
-        self.model_route = Some(model_route);
-        self.context_summary = Some(context_summary);
-        self.finished_at = Some(Utc::now());
-    }
-
-    pub fn fail(&mut self, error: AgentRunError) {
-        self.status = AgentRunStatus::Failed;
-        self.error = Some(error);
-        self.finished_at = Some(Utc::now());
-    }
-
-    pub fn cancel(&mut self) {
-        self.status = AgentRunStatus::Cancelled;
-        self.finished_at = Some(Utc::now());
-    }
-
-    pub fn add_generated_proposal(&mut self, proposal_id: &str) {
-        self.generated_proposals.push(proposal_id.to_string());
     }
 }
 

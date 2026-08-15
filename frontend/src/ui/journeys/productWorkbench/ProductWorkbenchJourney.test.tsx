@@ -3,7 +3,10 @@ import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { workbenchJourneyFixtureDataSource } from "@/test/fixtures/workbench/governedAction";
-import { createSettingsPrivacyFixture } from "@/test/fixtures/workbench/settingsPrivacy";
+import {
+  createSettingsPrivacyFixture,
+  providerTestReviewItemId,
+} from "@/test/fixtures/workbench/settingsPrivacy";
 import { ProductWorkbenchJourney } from "./ProductWorkbenchJourney";
 
 describe("OpenLife product shell", () => {
@@ -28,7 +31,14 @@ describe("OpenLife product shell", () => {
     expect(screen.queryByRole("button", { name: /^任务/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^审核中心/ })).not.toBeInTheDocument();
 
-    expect(await screen.findByRole("heading", { name: "Work 进度与结果" })).toBeInTheDocument();
+    const resultsHeading = await screen.findByRole("heading", { name: "Work 进度与结果" });
+    expect(resultsHeading).toBeInTheDocument();
+    const inlineCheckpoint = await screen.findByRole("region", {
+      name: "当前 Work 的决定节点",
+    });
+    expect(
+      inlineCheckpoint.compareDocumentPosition(resultsHeading) & Node.DOCUMENT_POSITION_FOLLOWING
+    ).toBeTruthy();
     expect(await screen.findByTestId("canonical-work-contract")).toHaveTextContent("交付最终回答");
     expect(
       await screen.findByRole("heading", { name: "读取本地客户访谈记录", level: 2 })
@@ -168,5 +178,81 @@ describe("OpenLife product shell", () => {
 
     await user.click(screen.getByRole("button", { name: /^产品诊断/ }));
     expect(screen.getByRole("heading", { name: "产品诊断", level: 1 })).toBeInTheDocument();
+  });
+
+  it("reloads the effective provider when returning from settings", async () => {
+    const user = userEvent.setup();
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const loadConversation = vi.fn(fixture.loadConversation);
+    const dataSource = { ...fixture, loadConversation };
+
+    render(
+      <ProductWorkbenchJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+        settingsPrivacyDataSource={createSettingsPrivacyFixture("fixture-ready").dataSource}
+      />
+    );
+
+    await waitFor(() => expect(loadConversation.mock.calls.length).toBeGreaterThan(0));
+    const callsBeforeSettingsReturn = loadConversation.mock.calls.length;
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.click(await screen.findByRole("button", { name: "返回工作台" }));
+
+    await waitFor(() =>
+      expect(loadConversation.mock.calls.length).toBeGreaterThan(callsBeforeSettingsReturn)
+    );
+  });
+
+  it("refreshes governed truth before opening a review created from settings", async () => {
+    const user = userEvent.setup();
+    const fixture = workbenchJourneyFixtureDataSource("fixture-settings-review-required");
+    let providerReviewCreated = false;
+    const load = vi.fn(async (...args: Parameters<typeof fixture.load>) => {
+      const snapshot = await fixture.load(...args);
+      if (providerReviewCreated || !snapshot.reviewEnvelope.data) return snapshot;
+      return {
+        ...snapshot,
+        reviewEnvelope: {
+          ...snapshot.reviewEnvelope,
+          data: {
+            ...snapshot.reviewEnvelope.data,
+            batches: snapshot.reviewEnvelope.data.batches.filter(batch =>
+              batch.itemIds.every(itemId => itemId !== providerTestReviewItemId)
+            ),
+            items: snapshot.reviewEnvelope.data.items.filter(
+              item => item.id !== providerTestReviewItemId
+            ),
+          },
+        },
+      };
+    });
+    const testProviderConnection = vi.fn(
+      async (...args: Parameters<typeof fixture.testProviderConnection>) => {
+        const outcome = await fixture.testProviderConnection(...args);
+        providerReviewCreated = true;
+        return outcome;
+      }
+    );
+    const dataSource = { ...fixture, load, testProviderConnection };
+
+    render(
+      <ProductWorkbenchJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        settingsPrivacyDataSource={dataSource}
+      />
+    );
+
+    await user.click(await screen.findByRole("button", { name: "设置" }));
+    await user.click(screen.getByRole("button", { name: "测试连接" }));
+    await user.click(screen.getByRole("button", { name: "确认并测试" }));
+    await user.click(await screen.findByRole("button", { name: "查看并决定" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "允许一次模型连接测试", level: 2 })
+    ).toBeInTheDocument();
+    expect(load).toHaveBeenCalledTimes(2);
   });
 });

@@ -63,6 +63,5 @@ OpenLife 需要一种机制来更新用户的 LifeModel（人生模型）。Life
 ## 相关
 
 - [ADR 0002: Proposal 统一层](./0002-proposal-unified.md)
-- [ADR 0003: AgentRun 追踪](./0003-agent-run-tracking.md)
 - `openlife-core/src/agent/proposal_store.rs`
 - `src-tauri/src/commands/proposal.rs`

@@ -77,8 +77,6 @@ pub enum ToolSource {
     BuiltIn,
     /// Tool provided by an MCP server.
     Mcp { server_name: String },
-    /// Tool exposed by an A2A agent or bridge.
-    A2A { agent_name: String },
     /// Tool declared by a local plugin manifest.
     Plugin { plugin_id: String },
 }
@@ -88,7 +86,6 @@ impl std::fmt::Display for ToolSource {
         match self {
             ToolSource::BuiltIn => write!(f, "builtin"),
             ToolSource::Mcp { server_name } => write!(f, "mcp:{}", server_name),
-            ToolSource::A2A { agent_name } => write!(f, "a2a:{}", agent_name),
             ToolSource::Plugin { plugin_id } => write!(f, "plugin:{}", plugin_id),
         }
     }

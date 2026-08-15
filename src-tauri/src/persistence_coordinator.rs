@@ -25,15 +25,10 @@ pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
     "ConversationStore",
     "FeedbackStore",
     "VectorStore",
-    "AgentRunStore",
     "CanonicalTaskRuntimeStore",
     "EvidenceStore",
-    "LifeEventStore",
     "ProposalStore",
     "MemoryLifecycleStore",
-    "MainChatAgentSessionStore",
-    "MainChatActionQueueStore",
-    "MainChatAgentEventStore",
     "PatchStore",
     "McpAuditStore",
     "ToolPermissionStore",
@@ -158,12 +153,11 @@ pub(crate) enum GovernedDataImportRecoveryOwner {
 }
 
 /// Exact local canonical owner identity carried by commit admissions. Import
-/// recovery remains a closed subset; AgentRun lifecycle writes are normal-only
+/// recovery remains a closed subset; canonical Work lifecycle writes are normal-only
 /// and cannot be smuggled through a governed-import capability.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum CanonicalWriteOwner {
     GovernedDataImport(GovernedDataImportRecoveryOwner),
-    AgentRunStore,
 }
 
 impl From<GovernedDataImportRecoveryOwner> for CanonicalWriteOwner {
@@ -190,14 +184,12 @@ impl CanonicalWriteOwner {
             // import fixture/runtime owner, so requiring a second registry
             // entry here would reject an otherwise available canonical store.
             Self::GovernedDataImport(GovernedDataImportRecoveryOwner::StateStore) => &[],
-            Self::AgentRunStore => &["AgentRunStore"],
         }
     }
 
     fn governed_data_import_store_name(self) -> Option<&'static str> {
         match self {
             Self::GovernedDataImport(owner) => Some(owner.store_name()),
-            Self::AgentRunStore => None,
         }
     }
 }
@@ -240,14 +232,6 @@ pub(crate) struct CanonicalWriteAdmission<'journal> {
     generation: u64,
     owners: BTreeSet<CanonicalWriteOwner>,
     kind: CanonicalWriteAdmissionKind<'journal>,
-}
-
-/// Non-cloneable, non-serializable proof that this operation was admitted for
-/// exactly the AgentRun canonical owner. It deliberately has no import-recovery
-/// constructor or conversion from a generic admission.
-#[must_use = "exchange the AgentRun admission after the task fence and before the owner transaction"]
-pub(crate) struct AgentRunCanonicalWriteAdmission {
-    inner: CanonicalWriteAdmission<'static>,
 }
 
 enum CanonicalWriteAdmissionKind<'journal> {
@@ -303,7 +287,7 @@ pub struct PersistenceCoordinator {
     canonical_write_barrier: tokio::sync::RwLock<()>,
     canonical_outbox_worker_started: AtomicBool,
     canonical_outbox_notify: tokio::sync::Notify,
-    agent_run_causal_locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+    work_run_causal_locks: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
 }
 
 impl Default for PersistenceCoordinator {
@@ -319,7 +303,7 @@ impl PersistenceCoordinator {
             canonical_write_barrier: tokio::sync::RwLock::new(()),
             canonical_outbox_worker_started: AtomicBool::new(false),
             canonical_outbox_notify: tokio::sync::Notify::new(),
-            agent_run_causal_locks: Mutex::new(HashMap::new()),
+            work_run_causal_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -336,12 +320,13 @@ impl PersistenceCoordinator {
             canonical_write_barrier: tokio::sync::RwLock::new(()),
             canonical_outbox_worker_started: AtomicBool::new(false),
             canonical_outbox_notify: tokio::sync::Notify::new(),
-            agent_run_causal_locks: Mutex::new(HashMap::new()),
+            work_run_causal_locks: Mutex::new(HashMap::new()),
         }
     }
 
     /// Explicit fixture mode. It permits isolated mechanics to execute but is
     /// never eligible for durable, live-provider, or product-trial credit.
+    #[cfg(test)]
     pub(crate) fn isolated_evaluation() -> Self {
         Self {
             state: RwLock::new(PersistenceCoordinatorState {
@@ -352,7 +337,7 @@ impl PersistenceCoordinator {
             canonical_write_barrier: tokio::sync::RwLock::new(()),
             canonical_outbox_worker_started: AtomicBool::new(false),
             canonical_outbox_notify: tokio::sync::Notify::new(),
-            agent_run_causal_locks: Mutex::new(HashMap::new()),
+            work_run_causal_locks: Mutex::new(HashMap::new()),
         }
     }
 
@@ -377,9 +362,9 @@ impl PersistenceCoordinator {
     /// Process-local serialization only. The durable canonical aggregate
     /// revision remains the source of truth across crashes/restarts; this lock
     /// merely closes the in-process read-head/apply-target TOCTOU window.
-    pub fn agent_run_causal_lock(&self, run_id: &str) -> Arc<tokio::sync::Mutex<()>> {
+    pub fn work_run_causal_lock(&self, run_id: &str) -> Arc<tokio::sync::Mutex<()>> {
         let mut locks = self
-            .agent_run_causal_locks
+            .work_run_causal_locks
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         locks.retain(|_, lock| lock.strong_count() > 0);
@@ -804,71 +789,6 @@ impl PersistenceCoordinator {
         })
     }
 
-    /// Normal product admission for exactly one AgentRun canonical mutation.
-    /// This is intentionally separate from governed-import recovery ownership.
-    pub(crate) fn admit_agent_run_write(
-        &self,
-    ) -> Result<AgentRunCanonicalWriteAdmission, PersistenceGateError> {
-        let state = self
-            .state
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mode = runtime_mode(
-            &state.stores.values().cloned().collect::<Vec<_>>(),
-            &state.global_reason_codes,
-            state.sealed,
-            state.isolated_evaluation,
-        );
-        if !matches!(
-            mode,
-            PersistenceRuntimeMode::ReadWrite | PersistenceRuntimeMode::IsolatedEvaluation
-        ) {
-            return Err(PersistenceGateError::EffectsBlocked { mode });
-        }
-        if let Some(error) = canonical_owner_write_error(
-            &state,
-            &[CanonicalWriteOwner::AgentRunStore].into_iter().collect(),
-        ) {
-            return Err(error);
-        }
-        Ok(AgentRunCanonicalWriteAdmission {
-            inner: CanonicalWriteAdmission {
-                generation: state.admission_generation,
-                owners: [CanonicalWriteOwner::AgentRunStore].into_iter().collect(),
-                kind: CanonicalWriteAdmissionKind::Normal,
-            },
-        })
-    }
-
-    /// Pre-seal startup reconciliation admission for exactly one AgentRun
-    /// canonical mutation. AgentRun intentionally remains outside
-    /// `GovernedDataImportRecoveryOwner`: startup repair is a bounded lifecycle
-    /// projection, not a data-import recovery capability.
-    pub(crate) fn admit_startup_agent_run_write(
-        &self,
-    ) -> Result<AgentRunCanonicalWriteAdmission, PersistenceGateError> {
-        let state = self
-            .state
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let mode = runtime_mode(
-            &state.stores.values().cloned().collect::<Vec<_>>(),
-            &state.global_reason_codes,
-            state.sealed,
-            state.isolated_evaluation,
-        );
-        if !startup_reconciliation_state_is_safe(&state) {
-            return Err(PersistenceGateError::EffectsBlocked { mode });
-        }
-        Ok(AgentRunCanonicalWriteAdmission {
-            inner: CanonicalWriteAdmission {
-                generation: state.admission_generation,
-                owners: [CanonicalWriteOwner::AgentRunStore].into_iter().collect(),
-                kind: CanonicalWriteAdmissionKind::StartupReconciliation,
-            },
-        })
-    }
-
     /// Revalidates a synchronous admission inside the shared canonical-write
     /// barrier. This method must be called before taking an owner mutex or
     /// opening its transaction. The returned guard is intentionally opaque.
@@ -962,21 +882,6 @@ impl PersistenceCoordinator {
         }
 
         Ok(CanonicalCommitPermit { _barrier: barrier })
-    }
-
-    /// Revalidates an AgentRun-only admission at the lifecycle operation's
-    /// linearization point. The caller must already hold the per-task fence and
-    /// must keep the returned permit across the complete AgentRun transaction,
-    /// including its canonical outbox mutation.
-    pub(crate) async fn acquire_agent_run_commit_permit<'coordinator>(
-        &'coordinator self,
-        admission: &AgentRunCanonicalWriteAdmission,
-    ) -> Result<CanonicalCommitPermit<'coordinator>, PersistenceGateError> {
-        debug_assert_eq!(
-            admission.inner.owners,
-            [CanonicalWriteOwner::AgentRunStore].into_iter().collect()
-        );
-        self.acquire_canonical_commit_permit(&admission.inner).await
     }
 
     /// Enters the exclusive cross-owner recovery fence. It may transition a
@@ -1573,9 +1478,11 @@ mod tests {
 
     #[test]
     fn optional_personalization_store_failure_does_not_disable_base_agent_effects() {
-        let coordinator =
-            PersistenceCoordinator::with_expected_stores(["AgentRunStore", "LifeModelFileStore"]);
-        coordinator.register_read_write("AgentRunStore");
+        let coordinator = PersistenceCoordinator::with_expected_stores([
+            "CanonicalTaskRuntimeStore",
+            "LifeModelFileStore",
+        ]);
+        coordinator.register_read_write("CanonicalTaskRuntimeStore");
         coordinator.register_read_write("LifeModelFileStore");
         coordinator.seal();
 
@@ -1606,28 +1513,24 @@ mod tests {
     }
 
     #[test]
-    fn scoped_agent_admission_ignores_unrelated_retired_store_health() {
+    fn scoped_agent_admission_ignores_unrelated_optional_store_health() {
         let coordinator = PersistenceCoordinator::with_expected_stores([
             "ConversationStore",
             "CanonicalTaskRuntimeStore",
-            "AgentRunStore",
-            "MainChatAgentSessionStore",
+            "LifeModelFileStore",
         ]);
         coordinator.register_read_write("ConversationStore");
         coordinator.register_read_write("CanonicalTaskRuntimeStore");
         coordinator.register_unavailable(
-            "AgentRunStore",
-            "retired_store_unavailable",
-            "retired receipt key missing",
-        );
-        coordinator.register_unavailable(
-            "MainChatAgentSessionStore",
-            "retired_store_unavailable",
-            "retired receipt key missing",
+            "LifeModelFileStore",
+            "optional_store_unavailable",
+            "optional personalization store is unavailable",
         );
         coordinator.seal();
 
-        assert!(coordinator.require_effects_allowed().is_err());
+        coordinator
+            .require_effects_allowed()
+            .expect("optional personalization health does not block canonical Chat or Work");
         coordinator
             .require_effects_for_stores(&["ConversationStore"])
             .expect("canonical Chat ignores unrelated retired stores");
@@ -1831,33 +1734,6 @@ mod tests {
             .acquire_canonical_commit_permit(&stale)
             .await
             .is_err());
-    }
-
-    #[tokio::test]
-    async fn agent_run_admission_is_exact_normal_only_and_generation_bound() {
-        let coordinator = PersistenceCoordinator::for_release_bootstrap();
-        for store in EXPECTED_BOOTSTRAP_STORES {
-            coordinator.register_read_write(*store);
-        }
-        coordinator.seal();
-        let admission = coordinator
-            .admit_agent_run_write()
-            .expect("healthy sealed runtime admits exactly AgentRunStore");
-
-        coordinator.degrade_globally("agent_run_admission_counterfactual");
-        assert!(matches!(
-            coordinator
-                .acquire_agent_run_commit_permit(&admission)
-                .await,
-            Err(PersistenceGateError::AdmissionInvalidated { .. })
-        ));
-        assert!(coordinator.admit_agent_run_write().is_err());
-
-        let import_recovery = governed_import_recovery_coordinator();
-        assert!(
-            import_recovery.admit_agent_run_write().is_err(),
-            "governed import recovery must never grant AgentRun owner authority"
-        );
     }
 
     #[test]
@@ -2380,103 +2256,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn d067_audit_commit_failure_degrades_and_blocks_later_effects() {
-        use openlife_core::agent::ToolAuditPersistenceObserver;
-
-        let coordinator = PersistenceCoordinator::with_expected_stores(["McpAuditStore"]);
-        coordinator.register_read_write("McpAuditStore");
-        coordinator.seal();
-        assert!(coordinator.require_effects_allowed().is_ok());
-
-        let mut registry = openlife_core::mcp::McpRegistry::new();
-        registry.register_builtin(
-            openlife_core::tool_manifest::ToolManifest {
-                id: "d067.read".into(),
-                name: "d067.read".into(),
-                description: "D067 persistence failure fixture.".into(),
-                parameters: serde_json::json!({"type": "object"}),
-                permission_level: "low".into(),
-                risk_level: "low".into(),
-                version: "1.0.0".into(),
-                source: openlife_core::tool_manifest::ToolSource::BuiltIn,
-                capabilities: vec!["read".into()],
-                requires_confirmation: false,
-                enabled: true,
-                declarative_only: false,
-                action_type: "read".into(),
-                idempotency_contract:
-                    openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
-                tags: vec![],
-            },
-            Box::new(|_| Ok(serde_json::json!({"ok": true}).to_string())),
-        );
-        let permission_store =
-            openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
-        let audit_store = openlife_core::mcp_audit::McpAuditStore::unavailable_sentinel(
-            "d067_injected_audit_failure",
-        );
-        let privacy_engine = openlife_core::privacy::PrivacyEngine::new();
-        let owner_store = openlife_core::agent::AgentRunStore::new_in_memory().unwrap();
-        let owner_run = openlife_core::agent::AgentRun::new_tool_execution_run("d067.read");
-        owner_store.create_run(&owner_run).unwrap();
-        let context = openlife_core::agent::ActionExecutionContext::new(
-            &registry,
-            &permission_store,
-            &audit_store,
-            &privacy_engine,
-            &[],
-        )
-        .with_agent_run_store(&owner_store)
-        .with_tool_audit_persistence_observer(&coordinator);
-
-        let result = openlife_core::agent::ToolGateway::from_executor_config(Default::default())
-            .execute(
-                openlife_core::agent::AgentActionRequest {
-                    action_type: "builtin_tool".into(),
-                    target: "d067.read".into(),
-                    input: serde_json::json!({}),
-                    source_run_id: Some(owner_run.id),
-                    step_index: 0,
-                },
-                &context,
-            )
-            .await
-            .expect("tool outcome remains available after audit failure");
-
-        assert_eq!(
-            result.status,
-            openlife_core::agent::ActionExecutionStatus::Succeeded
-        );
-        assert_eq!(
-            result.execution_receipt.audit_persistence_status,
-            openlife_core::agent::ToolAuditPersistenceStatus::Failed
-        );
-        assert_eq!(
-            coordinator.snapshot().mode,
-            PersistenceRuntimeMode::UnavailableDegraded
-        );
-        assert!(coordinator.require_effects_allowed().is_err());
-        assert!(coordinator.snapshot().stores.iter().any(|health| {
-            health.store == "McpAuditStore"
-                && health.reason_code.as_deref() == Some("runtime_audit_commit_failed")
-        }));
-
-        let forged_non_failure =
-            openlife_core::agent::ToolExecutionReceipt::test_gateway_failed_before_dispatch(
-                None,
-                None,
-                "d067-non-failure-callback".into(),
-                openlife_core::agent::ToolActionEffect::ReadOnly,
-                openlife_core::tool_manifest::ToolIdempotencyContract::Idempotent,
-            );
-        let fresh = PersistenceCoordinator::with_expected_stores(["McpAuditStore"]);
-        fresh.register_read_write("McpAuditStore");
-        fresh.seal();
-        fresh.audit_persistence_failed(&forged_non_failure);
-        assert_eq!(fresh.snapshot().mode, PersistenceRuntimeMode::ReadWrite);
-    }
-
-    #[tokio::test]
     async fn canonical_outbox_worker_is_single_owner_and_notifications_coalesce() {
         let coordinator = PersistenceCoordinator::isolated_evaluation();
         assert!(coordinator.claim_canonical_outbox_worker());
@@ -2496,38 +2275,5 @@ mod tests {
         )
         .await
         .is_err());
-    }
-
-    #[test]
-    fn shipped_effect_entrypoints_consult_the_same_persistence_gate() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        for relative in [
-            "main_chat_send.rs",
-            "main_chat_streaming.rs",
-            "scheduler_runner.rs",
-            "memory_gateway.rs",
-            "life_model_write_gateway.rs",
-            "commands/proposal.rs",
-            "commands/execution.rs",
-        ] {
-            let source = std::fs::read_to_string(root.join(relative)).unwrap();
-            assert!(
-                source.contains("require_effects_allowed"),
-                "{relative} must fail closed through PersistenceCoordinator"
-            );
-        }
-        let lib = std::fs::read_to_string(root.join("lib.rs")).unwrap();
-        let direct_tool = lib
-            .split("async fn execute_tool_call")
-            .nth(1)
-            .expect("dev tool entrypoint")
-            .split("async fn inspect_mcp_call")
-            .next()
-            .unwrap();
-        assert!(direct_tool.contains("require_effects_allowed"));
-        let bootstrap = std::fs::read_to_string(root.join("bootstrap.rs")).unwrap();
-        assert!(!bootstrap.contains("process::exit"));
-        assert!(bootstrap.contains("required_store_or_unavailable"));
-        assert!(bootstrap.contains("unavailable_sentinel"));
     }
 }

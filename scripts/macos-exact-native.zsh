@@ -4,7 +4,23 @@ set -euo pipefail
 repo_root="${0:A:h:h}"
 cd "$repo_root"
 
-expected_bundle_id="ai.openlife.desktop"
+native_profile="${OPENLIFE_NATIVE_PROFILE:-release}"
+case "$native_profile" in
+  release)
+    expected_bundle_id="ai.openlife.desktop"
+    expected_product_name="OpenLife"
+    profile_config=""
+    ;;
+  qa)
+    expected_bundle_id="ai.openlife.desktop.qa"
+    expected_product_name="OpenLife QA"
+    profile_config="$repo_root/src-tauri/tauri.qa.conf.json"
+    ;;
+  *)
+    print -u2 "OPENLIFE_NATIVE_PROFILE must be release or qa"
+    exit 64
+    ;;
+esac
 signing_identity="${OPENLIFE_CODESIGN_IDENTITY:-}"
 verify_only=0
 
@@ -31,11 +47,20 @@ if ! security find-identity -v -p codesigning | grep -Fq '"'"$signing_identity"'
 fi
 
 target_dir="$(cargo metadata --format-version=1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
-app_path="$target_dir/release/bundle/macos/OpenLife.app"
+app_path="$target_dir/release/bundle/macos/$expected_product_name.app"
 
 if [[ $verify_only -eq 0 ]]; then
   signing_config="$(OPENLIFE_CODESIGN_IDENTITY="$signing_identity" python3 -c 'import json,os; print(json.dumps({"bundle":{"macOS":{"signingIdentity":os.environ["OPENLIFE_CODESIGN_IDENTITY"]}}}))')"
-  frontend/node_modules/.bin/tauri build --bundles app --config "$signing_config"
+  if [[ -n "$profile_config" ]]; then
+    OPENLIFE_BUILD_PROFILE="$native_profile" frontend/node_modules/.bin/tauri build \
+      --bundles app \
+      --config "$profile_config" \
+      --config "$signing_config"
+  else
+    OPENLIFE_BUILD_PROFILE="$native_profile" frontend/node_modules/.bin/tauri build \
+      --bundles app \
+      --config "$signing_config"
+  fi
 fi
 
 if [[ ! -d "$app_path" ]]; then
@@ -62,8 +87,16 @@ if ! grep -Fq "Authority=$signing_identity" <<<"$codesign_output"; then
 fi
 
 codesign --verify --deep --strict --verbose=2 "$app_path"
+designated_requirement="$(codesign -dr - "$app_path" 2>&1)"
+if ! grep -Fq "identifier \"$expected_bundle_id\"" <<<"$designated_requirement"; then
+  print -u2 "designated requirement does not bind the expected bundle identifier"
+  print -u2 "$designated_requirement"
+  exit 65
+fi
 
 print "OPENLIFE_EXACT_NATIVE_BUNDLE=$app_path"
+print "OPENLIFE_EXACT_NATIVE_PROFILE=$native_profile"
 print "OPENLIFE_EXACT_NATIVE_BUNDLE_ID=$actual_bundle_id"
 print "OPENLIFE_EXACT_NATIVE_SIGNING_AUTHORITY=$signing_identity"
+print "OPENLIFE_EXACT_NATIVE_DESIGNATED_REQUIREMENT=$designated_requirement"
 print "OPENLIFE_EXACT_NATIVE_RESOURCE_SEAL=verified"

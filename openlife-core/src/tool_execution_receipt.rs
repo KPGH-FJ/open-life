@@ -90,7 +90,6 @@ pub enum ToolDispatchKind {
     Local,
     Network,
     McpStdio,
-    A2a,
     Simulated,
     Unknown,
 }
@@ -102,17 +101,13 @@ impl ToolDispatchKind {
             Self::Local => "local",
             Self::Network => "network",
             Self::McpStdio => "mcp_stdio",
-            Self::A2a => "a2a",
             Self::Simulated => "simulated",
             Self::Unknown => "unknown",
         }
     }
 
     fn may_outlive_local_wait(self) -> bool {
-        matches!(
-            self,
-            Self::Network | Self::McpStdio | Self::A2a | Self::Unknown
-        )
+        matches!(self, Self::Network | Self::McpStdio | Self::Unknown)
     }
 }
 
@@ -976,17 +971,6 @@ impl ToolExecutionReceiptRegistration {
             ToolIdempotencyContract::NonIdempotent,
         ))
     }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn test_mark_a2a_dispatch_attempted(&self) {
-        self.tracker.mark_a2a_dispatch_attempted();
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn test_mark_a2a_response_observed(&self) {
-        self.tracker.mark_a2a_dispatch_observed();
-        self.tracker.mark_response_observed();
-    }
 }
 
 /// Shared state survives a timed-out or dropped execution future, allowing the
@@ -1114,19 +1098,6 @@ impl ToolExecutionReceiptTracker {
 
     pub(crate) fn mark_mcp_dispatched(&self) {
         self.mark_typed_dispatched(ToolDispatchKind::McpStdio);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn mark_a2a_dispatched(&self) {
-        self.mark_typed_dispatched(ToolDispatchKind::A2a);
-    }
-
-    pub(crate) fn mark_a2a_dispatch_attempted(&self) {
-        self.mark_typed_dispatch_attempt(ToolDispatchKind::A2a);
-    }
-
-    pub(crate) fn mark_a2a_dispatch_observed(&self) {
-        self.mark_typed_dispatch_observed(ToolDispatchKind::A2a);
     }
 
     pub(crate) fn mark_simulated_dispatched(&self) {
@@ -1435,7 +1406,6 @@ mod tests {
 
         tracker.mark_local_dispatched();
         tracker.mark_mcp_dispatched();
-        tracker.mark_a2a_dispatched();
         tracker.mark_simulated_dispatched();
         tracker.mark_response_observed();
         tracker.mark_execution_succeeded();

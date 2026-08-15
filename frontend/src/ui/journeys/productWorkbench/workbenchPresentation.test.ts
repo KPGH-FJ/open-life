@@ -50,7 +50,6 @@ function task(overrides: Partial<TaskViewModelItem> = {}): TaskViewModelItem {
     canonicalTaskId: "task-test",
     relatedRunIds: [],
     title: "Test task",
-    strategy: "react",
     lifecycleStatus: "completed",
     terminalDeliveryStatus: "delivered",
     finalDeliveryEvidencePresent: true,

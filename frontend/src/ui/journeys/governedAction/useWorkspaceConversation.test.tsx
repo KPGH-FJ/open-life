@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { StreamMessageDonePayload } from "@/tauri";
+import type { ChatSession, ConversationViewModel, StreamMessageDonePayload } from "@/tauri";
 import type { ChatMessage } from "@/types";
 import type { WorkspaceConversationDataSource } from "./workspaceConversationDataSource";
 import { useWorkspaceConversation } from "./useWorkspaceConversation";
@@ -14,7 +14,7 @@ function turnResult(status: StreamMessageDonePayload["status"]): StreamMessageDo
   return {
     session_id: "conversation-1",
     operation_id: "operation-1",
-    task_session_id: "task-1",
+    task_id: "task-1",
     run_id: "run-1",
     reply: "我会先拆分步骤。",
     status,
@@ -24,18 +24,51 @@ function turnResult(status: StreamMessageDonePayload["status"]): StreamMessageDo
   } as StreamMessageDonePayload;
 }
 
-function source(overrides: Partial<WorkspaceConversationDataSource> = {}) {
-  const dataSource: WorkspaceConversationDataSource = {
-    listSessions: vi.fn().mockResolvedValue([
+type WorkspaceConversationTestSource = WorkspaceConversationDataSource & {
+  listSessions(): Promise<ChatSession[]>;
+  loadHistory(sessionId: string): Promise<ChatMessage[]>;
+};
+
+function source(overrides: Partial<WorkspaceConversationTestSource> = {}) {
+  const listSessions =
+    overrides.listSessions ??
+    vi.fn().mockResolvedValue([
       {
         session_id: "conversation-1",
         title: "访谈整理",
         created_at: "2026-07-21T00:00:00Z",
         updated_at: "2026-07-21T00:01:00Z",
       },
-    ]),
-    loadHistory: vi.fn().mockResolvedValue(existingMessages),
-    loadLifeModelInfluence: vi.fn().mockResolvedValue(null),
+    ]);
+  const loadHistory = overrides.loadHistory ?? vi.fn().mockResolvedValue(existingMessages);
+  const loadConversation =
+    overrides.loadConversation ??
+    vi.fn(async (conversationId?: string): Promise<ConversationViewModel> => {
+      const conversations = await listSessions();
+      const selectedConversationId =
+        conversationId &&
+        conversations.some((item: ChatSession) => item.session_id === conversationId)
+          ? conversationId
+          : (conversations[0]?.session_id ?? null);
+      return {
+        status: conversations.length > 0 ? "ready" : "empty",
+        conversations,
+        projects: [],
+        selectedProjectId: null,
+        selectedConversationId,
+        messages: selectedConversationId ? await loadHistory(selectedConversationId) : [],
+        latestTurn: null,
+        providerStatus: "ready",
+        providerProfiles: [],
+        selectedProviderProfileId: null,
+        providerErrorCode: null,
+        workStatus: "ready",
+      };
+    });
+  const dataSource: WorkspaceConversationTestSource = {
+    loadConversation,
+    listSessions,
+    loadHistory,
     createSession: vi.fn().mockResolvedValue(undefined),
     renameSession: vi.fn().mockResolvedValue(undefined),
     deleteSession: vi.fn().mockResolvedValue(undefined),
@@ -126,87 +159,6 @@ describe("workspace conversation journey", () => {
     });
   });
 
-  it("restores the durable Life Model influence receipt after switching conversations", async () => {
-    const receipt = {
-      status: "applied_context_building",
-      sourceId: "lifemodel.v2.runtime",
-      modelVersion: 3,
-      selectedItems: [
-        {
-          itemRef: "collaboration_preferences:communication-direct",
-          statement: "沟通保持简洁直接",
-          sourceRefs: ["message:user:send-stream-parity"],
-          confirmedAt: "2026-08-09T00:00:00Z",
-          reasonCode: "task intent matches collaboration_preferences",
-        },
-      ],
-      appliedSurfaces: ["context_building", "communication_style"],
-      currentInstructionPriorityPreserved: true,
-      policyPriorityPreserved: true,
-      permissionGranted: false,
-      durableWriteAuthorized: false,
-    };
-    const dataSource = source({
-      listSessions: vi.fn().mockResolvedValue([
-        {
-          session_id: "conversation-1",
-          title: "有个性化说明",
-          created_at: "2026-07-21T00:00:00Z",
-          updated_at: "2026-07-21T00:02:00Z",
-        },
-        {
-          session_id: "conversation-2",
-          title: "普通对话",
-          created_at: "2026-07-21T00:00:00Z",
-          updated_at: "2026-07-21T00:01:00Z",
-        },
-      ]),
-      loadLifeModelInfluence: vi.fn(async sessionId =>
-        sessionId === "conversation-1"
-          ? { status: "completed" as const, lifeModelInfluence: receipt }
-          : null
-      ),
-    });
-    const { result } = renderHook(() =>
-      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
-    );
-
-    await act(async () => expect(await result.current.reload()).toBe(true));
-    expect(result.current.turnState).toMatchObject({
-      phase: "resolved",
-      lifeModelInfluence: receipt,
-    });
-
-    act(() => result.current.selectSession("conversation-2"));
-    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-2"));
-    expect(result.current.turnState).toEqual({ phase: "idle" });
-
-    act(() => result.current.selectSession("conversation-1"));
-    await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-1"));
-    expect(result.current.turnState).toMatchObject({
-      phase: "resolved",
-      lifeModelInfluence: receipt,
-    });
-  });
-
-  it("keeps canonical chat history visible when the influence receipt cannot be verified", async () => {
-    const dataSource = source({
-      loadLifeModelInfluence: vi.fn().mockRejectedValue(new Error("canonical_state_unknown")),
-    });
-    const { result } = renderHook(() =>
-      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
-    );
-
-    await act(async () => expect(await result.current.reload()).toBe(true));
-
-    expect(result.current.messages).toEqual(existingMessages);
-    expect(result.current.loadStatus).toBe("ready");
-    expect(result.current.turnState).toMatchObject({
-      phase: "failed",
-      stage: "refresh",
-    });
-  });
-
   it("keeps Markdown Memory changes pending until the backend returns a Review receipt", async () => {
     const loadMarkdownMemory = vi.fn().mockResolvedValue({
       roots: [
@@ -239,6 +191,10 @@ describe("workspace conversation journey", () => {
     const { result } = renderHook(() =>
       useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
     );
+    await act(async () => {
+      await result.current.reload();
+      result.current.setMode("work");
+    });
     await waitFor(() => expect(result.current.markdownMemory.phase).toBe("ready"));
 
     await act(async () =>
@@ -296,7 +252,7 @@ describe("workspace conversation journey", () => {
         events.onStart({
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: options.operationId,
+          task_id: options.operationId,
           conversation_id: sessionId,
           turn_id: options.operationId,
           reasoning_trace: {},
@@ -306,7 +262,7 @@ describe("workspace conversation journey", () => {
           ...turnResult("completed"),
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: options.operationId,
+          task_id: options.operationId,
           conversation_id: sessionId,
           turn_id: options.operationId,
         };
@@ -432,11 +388,12 @@ describe("workspace conversation journey", () => {
 
   it("directs failed Work to its durable Results or Needs Attention state", async () => {
     const announce = vi.fn();
+    const onAfterTurn = vi.fn().mockResolvedValue(undefined);
     const dataSource = source({
       streamTurn: vi.fn().mockRejectedValue(new Error("read_tool_blocked")),
     });
     const { result } = renderHook(() =>
-      useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+      useWorkspaceConversation(dataSource, announce, onAfterTurn)
     );
     await act(async () => result.current.reload());
     act(() => result.current.setMode("work"));
@@ -447,6 +404,7 @@ describe("workspace conversation journey", () => {
     expect(announce).toHaveBeenCalledWith(
       "这项工作未完成；请在结果或需处理中核对后端记录的任务状态。"
     );
+    expect(onAfterTurn).toHaveBeenCalledTimes(1);
   });
 
   it("fails closed when an attachment turn returns a foreign terminal identity", async () => {
@@ -455,7 +413,7 @@ describe("workspace conversation journey", () => {
         ...turnResult("completed"),
         session_id: "conversation-1",
         operation_id: "foreign-operation",
-        task_session_id: "foreign-task",
+        task_id: "foreign-task",
       }),
     });
     const { result } = renderHook(() =>
@@ -486,7 +444,7 @@ describe("workspace conversation journey", () => {
         events.onStart({
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: "foreign-task",
+          task_id: "foreign-task",
           run_id: "foreign-run",
           reasoning_trace: {},
           tool_calls: [],
@@ -495,7 +453,7 @@ describe("workspace conversation journey", () => {
           ...turnResult("completed"),
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: options.operationId,
+          task_id: options.operationId,
           run_id: options.operationId,
         };
       }
@@ -529,7 +487,7 @@ describe("workspace conversation journey", () => {
         events.onStart({
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: options.operationId,
+          task_id: options.operationId,
           run_id: options.operationId,
           reasoning_trace: {},
           tool_calls: [],
@@ -537,7 +495,7 @@ describe("workspace conversation journey", () => {
         events.onChunk({
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: "foreign-task",
+          task_id: "foreign-task",
           run_id: "foreign-run",
           chunk: "不应显示的内容",
         });
@@ -545,7 +503,7 @@ describe("workspace conversation journey", () => {
           ...turnResult("completed"),
           session_id: sessionId,
           operation_id: options.operationId,
-          task_session_id: options.operationId,
+          task_id: options.operationId,
           run_id: options.operationId,
         };
       }
@@ -800,7 +758,7 @@ describe("workspace conversation journey", () => {
         events.onStart({
           session_id: "conversation-1",
           operation_id: "operation-1",
-          task_session_id: "task-1",
+          task_id: "task-1",
           run_id: "run-1",
           reasoning_trace: {},
           tool_calls: [],
@@ -808,7 +766,7 @@ describe("workspace conversation journey", () => {
         events.onChunk({
           session_id: "conversation-1",
           operation_id: "operation-1",
-          task_session_id: "task-1",
+          task_id: "task-1",
           run_id: "run-1",
           chunk: "正在整理",
         });
@@ -828,7 +786,7 @@ describe("workspace conversation journey", () => {
 
     await waitFor(() => expect(result.current.turnState.phase).toBe("streaming"));
     expect(result.current.streamingReply).toBe("正在整理");
-    expect(result.current.activeTaskSessionId).toBe("task-1");
+    expect(result.current.activeTaskId).toBe("task-1");
 
     await act(async () => finishTurn(turnResult("completed")));
     await waitFor(() => expect(result.current.turnState.phase).toBe("resolved"));
@@ -869,7 +827,7 @@ describe("workspace conversation journey", () => {
     await act(async () => result.current.reload());
     act(() => result.current.setDraft("生成访谈报告"));
     act(() => void result.current.send());
-    await waitFor(() => expect(result.current.activeTaskSessionId).toBe("task-steer"));
+    await waitFor(() => expect(result.current.activeTaskId).toBe("task-steer"));
 
     act(() => result.current.setDraft("把风险结论放在最前面"));
     await act(async () => result.current.steer());
@@ -990,7 +948,7 @@ describe("workspace conversation journey", () => {
     act(() => result.current.setMode("work"));
     act(() => result.current.setDraft("继续"));
     act(() => void result.current.send());
-    await waitFor(() => expect(result.current.activeTaskSessionId).toBe(emittedTaskId));
+    await waitFor(() => expect(result.current.activeTaskId).toBe(emittedTaskId));
 
     await act(async () => result.current.cancel());
 
@@ -1047,7 +1005,7 @@ describe("workspace conversation journey", () => {
         conversation_id: "conversation-1",
         turn_id: turnId,
         operation_id: turnId,
-        task_session_id: undefined,
+        task_id: undefined,
         run_id: undefined,
       })
     );
@@ -1093,7 +1051,7 @@ describe("workspace conversation journey", () => {
     act(() => result.current.setMode("work"));
     act(() => result.current.setDraft("继续"));
     act(() => void result.current.send());
-    await waitFor(() => expect(result.current.activeTaskSessionId).not.toBeNull());
+    await waitFor(() => expect(result.current.activeTaskId).not.toBeNull());
 
     let cancelPromise!: Promise<void>;
     act(() => {

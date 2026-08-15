@@ -24,50 +24,11 @@ fn isolated_eval_mcp_audit_store(
     .expect("isolated eval audit key material")
 }
 
-#[cfg(test)]
-pub(crate) fn isolated_mcp_audit_store_for_test(
-    path: std::path::PathBuf,
-) -> openlife_core::mcp_audit::McpAuditStore {
-    isolated_eval_mcp_audit_store(path)
-}
-
 pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
     let config = AppConfig::default();
     let base =
         std::env::temp_dir().join(format!("openlife-main-chat-eval-{}", uuid::Uuid::new_v4()));
     let memory_store = openlife_core::memory::MemoryStore::new_in_memory().unwrap();
-    let agent_run_receipt_key = loop {
-        if let Ok(key) =
-            openlife_core::agent::AgentRunReceiptKey::from_bytes(rand::random::<[u8; 32]>())
-        {
-            break key;
-        }
-    };
-    let agent_run_store = openlife_core::agent::AgentRunStore::new_in_memory_with_receipt_key(
-        agent_run_receipt_key.clone(),
-    )
-    .unwrap();
-    agent_run_store
-        .bind_canonical_memory_store(&memory_store)
-        .expect("isolated eval AgentRunStore must bind canonical MemoryStore");
-    let main_chat_agent_session_store =
-        openlife_core::agent::main_chat_agent_v1::AgentTaskSessionStore::new_in_memory_with_receipt_key(
-            agent_run_receipt_key.clone(),
-        )
-        .unwrap();
-    main_chat_agent_session_store
-        .bind_canonical_memory_store(&memory_store)
-        .expect("isolated eval task sessions must bind canonical MemoryStore");
-    let main_chat_action_queue_store =
-        openlife_core::agent::main_chat_agent_v1::ActionQueueStore::new_in_memory().unwrap();
-    let main_chat_agent_event_store =
-        crate::main_chat_event_stream::MainChatAgentEventStore::new_in_memory().unwrap();
-    let reconciliation_public_key = main_chat_agent_event_store
-        .reconciliation_attestation_public_key()
-        .expect("isolated eval EventStore reconciliation public key");
-    main_chat_action_queue_store
-        .install_event_store_reconciliation_public_key(&reconciliation_public_key)
-        .expect("isolated eval ActionQueue must trust its EventStore");
     let life_model_manager =
         openlife_core::life_model::LifeModelManager::new(base.join("life-model").join("current"));
     // Mirror release bootstrap ordering because both metadata owners share one
@@ -121,14 +82,10 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
             openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
         )),
         vector_persistence_mode: crate::state::VectorPersistenceMode::EvalDisabled,
-        a2a_sidecar: Arc::new(Mutex::new(crate::a2a_sidecar::A2ASidecar::new(
-            crate::a2a_server::configured_a2a_port(),
-        ))),
         last_snapshot_date: Arc::new(Mutex::new(None)),
         mcp_audit_store: Arc::new(Mutex::new(isolated_eval_mcp_audit_store(
             base.join("mcp_audit.db"),
         ))),
-        agent_run_store: Some(Arc::new(Mutex::new(agent_run_store))),
         canonical_task_runtime_store: Some(Arc::new(Mutex::new(
             openlife_core::task_runtime::CanonicalTaskRuntimeStore::new_in_memory_with_receipt_key(
                 openlife_core::agent::CanonicalTaskReceiptKey::from_bytes([0xC7; 32]).unwrap(),
@@ -138,12 +95,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         evidence_store: Arc::new(Mutex::new(
             openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
         )),
-        life_event_store: Some(Arc::new(Mutex::new(
-            openlife_core::agent::LifeEventStore::new_in_memory_with_receipt_key(
-                agent_run_receipt_key,
-            )
-            .unwrap(),
-        ))),
         policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
         proposal_store: Some(Arc::new(Mutex::new(
             openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
@@ -154,9 +105,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         life_model_learning_store: Some(Arc::new(Mutex::new(
             openlife_core::agent::LifeModelLearningStore::new_in_memory().unwrap(),
         ))),
-        main_chat_agent_session_store: Some(Arc::new(Mutex::new(main_chat_agent_session_store))),
-        main_chat_action_queue_store: Some(Arc::new(Mutex::new(main_chat_action_queue_store))),
-        main_chat_agent_event_store: Some(Arc::new(Mutex::new(main_chat_agent_event_store))),
         main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
         patch_store: Some(Arc::new(Mutex::new(
             openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
@@ -176,9 +124,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         credential_bootstrap_snapshot: Default::default(),
         provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_store: Arc::new(openlife_core::tasks::TaskStore::new_in_memory().unwrap()),
-        runtime_clock_source: Arc::new(tokio::sync::Mutex::new(
-            crate::main_chat_runtime_facts::MainChatRuntimeClockSource::default(),
-        )),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         resource_runtime: None,
         state_store: Some(Arc::new(

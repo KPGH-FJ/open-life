@@ -59,14 +59,6 @@ if [ -n "${OPENLIFE_DATA_DIR:-}" ] && [ "${OPENLIFE_ALLOW_DEV_EXTENSIONS_WITH_CU
 fi
 OPENLIFE_PROFILE="dev"
 export OPENLIFE_PROFILE
-if [ -z "${A2A_PORT:-}" ]; then
-    if [ "$OPENLIFE_PROFILE" = "dev" ]; then
-        A2A_PORT="8766"
-    else
-        A2A_PORT="8765"
-    fi
-    export A2A_PORT
-fi
 VITE_PORT="${PORT:-5173}"
 OPENLIFE_DEV_URL="http://127.0.0.1:$VITE_PORT"
 OPENLIFE_FRONTEND_DIST="$DEV_FRONTEND_DIST"
@@ -135,7 +127,6 @@ echo -e "${BLUE}OpenLife - 开发模式启动${NC}"
 echo -e "${BLUE}[INFO]${NC} Profile: $OPENLIFE_PROFILE"
 echo -e "${BLUE}[INFO]${NC} Vite: $OPENLIFE_DEV_URL"
 echo -e "${BLUE}[INFO]${NC} Dev frontendDist placeholder: $OPENLIFE_FRONTEND_DIST"
-echo -e "${BLUE}[INFO]${NC} A2A: 127.0.0.1:$A2A_PORT"
 echo ""
 echo -e "${GREEN}╔══════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${GREEN}║  🚀 正在启动 OpenLife 开发服务器...                           ║${NC}"
@@ -158,15 +149,6 @@ fi
 if ! command -v cargo &>/dev/null; then
     echo -e "${YELLOW}[ERROR]${NC} cargo 不可用"
     exit 1
-fi
-
-if [ "${OPENLIFE_DEV_AUTOSTART_A2A:-0}" = "1" ]; then
-    if [ "${OPENLIFE_ENABLE_DEV_A2A:-0}" != "1" ] || [ "${#OPENLIFE_A2A_PAIRED_TOKEN}" -lt 32 ]; then
-        echo -e "${YELLOW}[ERROR]${NC} A2A autostart requires OPENLIFE_ENABLE_DEV_A2A=1 and a 32+ character OPENLIFE_A2A_PAIRED_TOKEN"
-        exit 1
-    fi
-    echo -e "${BLUE}[INFO]${NC} 构建显式启用的开发 A2A sidecar..."
-    cargo build -p openlife-a2a-server --bin openlife-a2a-server --features dev-extensions
 fi
 
 # 自动检测 Tauri CLI 启动方式

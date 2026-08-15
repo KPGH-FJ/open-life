@@ -105,7 +105,7 @@ async fn prepare_scheduled_request(
     let authorization = ProviderPolicyAuthorization::from_scheduled_claim(claim)
         .and_then(|authorization| {
             authorization.authorize_derived_payload(
-                ProviderPayloadPurpose::AgentLoopStep,
+                ProviderPayloadPurpose::ScheduledTaskStep,
                 &claim.task().description,
                 &messages,
                 &[],
@@ -539,6 +539,8 @@ fn pre_v13_task_store_quarantines_all_product_truth_without_copying_sensitive_pa
             attempt_count INTEGER NOT NULL DEFAULT 0, claim_token TEXT,
             lease_expires_at TEXT, last_error TEXT, result_digest TEXT, eligible_at TEXT
          );
+         -- This fixture intentionally preserves the historical column name so
+         -- the migration proves it can ingest an existing pre-v10 database.
          CREATE TABLE scheduler_attempts (
             attempt_id TEXT PRIMARY KEY, task_id TEXT NOT NULL, claim_token TEXT NOT NULL UNIQUE,
             attempt_number INTEGER NOT NULL, status TEXT NOT NULL,

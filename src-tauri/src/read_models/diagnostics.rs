@@ -289,7 +289,9 @@ mod tests {
         assert_eq!(diagnostics.counts.active_task_count, Some(1));
         assert_eq!(
             diagnostics.runtime_build.bundle_identifier,
-            "ai.openlife.desktop"
+            crate::runtime_build_info::bundle_identifier_for_profile(
+                &crate::storage::openlife_profile()
+            )
         );
     }
 
@@ -310,7 +312,7 @@ mod tests {
             let conversations = state.conversation_store.as_ref().unwrap().lock().await;
             for (ordinal, (conversation_id, _, _, _)) in identities.iter().enumerate() {
                 conversations
-                    .create_conversation(&conversation_id, &format!("Diagnostics {ordinal}"))
+                    .create_conversation(conversation_id, &format!("Diagnostics {ordinal}"))
                     .unwrap();
             }
         }

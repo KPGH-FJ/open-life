@@ -640,7 +640,7 @@ mod tests {
             .collect::<Vec<_>>();
         let challenge = authority
             .create_challenge(
-                "agent_run_bulk_delete",
+                "mcp_audit_cleanup",
                 &target_ids,
                 affected_count,
                 &session,
@@ -660,7 +660,7 @@ mod tests {
     ) -> GrantConsumptionRequest<'a> {
         GrantConsumptionRequest {
             challenge_id,
-            action_type: "agent_run_bulk_delete",
+            action_type: "mcp_audit_cleanup",
             requested_target,
             expected_affected_count,
             arguments_digest,
@@ -906,7 +906,6 @@ mod tests {
     #[test]
     fn shipped_privileged_commands_do_not_accept_client_phrase_as_authority() {
         let settings = include_str!("commands/settings.rs");
-        let agent = include_str!("commands/agent.rs");
         let memory = include_str!("commands/memory.rs");
         let proposal = include_str!("commands/proposal.rs");
         let lib = include_str!("lib.rs");
@@ -919,7 +918,6 @@ mod tests {
         assert!(!settings.contains("danger_action_preflight_id("));
         assert!(settings.contains("issue_danger_action_challenge("));
         assert!(settings.contains("require_native_danger_action_confirmation("));
-        assert!(agent.contains("require_danger_action_confirmation("));
         assert!(memory.contains("require_danger_action_confirmation("));
         assert!(proposal.contains("require_native_danger_action_confirmation("));
         assert!(proposal.contains("#[cfg(test)]\npub(crate) async fn accept_proposal_with_state"));

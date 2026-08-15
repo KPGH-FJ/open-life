@@ -2,7 +2,7 @@
 //!
 //! This store owns stable Task identity, Run membership, typed Items, and
 //! Artifact versions. Reports use the full Artifact lifecycle; ordinary plans
-//! use Instruction + Plan Items without a parallel PlanExecute session.
+//! use Instruction + Plan Items without a parallel planning lifecycle.
 //! Work execution identity and terminal state are owned here. Capability
 //! adapters may retain their own typed receipts, but they do not own Task or
 //! Run lifecycle state.
@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 15;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -908,7 +908,6 @@ impl CanonicalTaskRuntimeStore {
                 max_tool_attempts INTEGER NOT NULL CHECK(max_tool_attempts > 0),
                 max_total_items INTEGER NOT NULL CHECK(max_total_items > 0),
                 created_at TEXT NOT NULL,
-                UNIQUE(task_id, plan_revision),
                 FOREIGN KEY(task_id, run_id)
                     REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
              ) WITHOUT ROWID;
@@ -1065,7 +1064,7 @@ impl CanonicalTaskRuntimeStore {
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '15')
+             VALUES ('schema_version', '16')
              ON CONFLICT(key) DO NOTHING;
              INSERT INTO canonical_task_runtime_metadata(key, value)
              VALUES ('store_identity', 'canonical_task_runtime_store:' || lower(hex(randomblob(16))))
@@ -1112,6 +1111,9 @@ impl CanonicalTaskRuntimeStore {
         }
         if Self::schema_version(&conn)? == 14 {
             Self::migrate_v14_to_v15(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 15 {
+            Self::migrate_v15_to_v16(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -2051,6 +2053,64 @@ impl CanonicalTaskRuntimeStore {
         )?;
         if foreign_key_violation {
             anyhow::bail!("canonical_task_runtime_v15_foreign_key_violation");
+        }
+        Ok(())
+    }
+
+    fn migrate_v15_to_v16(conn: &mut Connection) -> Result<()> {
+        // Plan revision is scoped to one Run. The old task-wide UNIQUE
+        // constraint made a second Run of the same Task collide at revision
+        // one, so a user-visible Retry could never persist its own plan.
+        let foreign_keys_enabled: bool =
+            conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+        if foreign_keys_enabled {
+            conn.pragma_update(None, "foreign_keys", "OFF")?;
+        }
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "CREATE TABLE canonical_work_plans_v16 (
+                    run_id TEXT PRIMARY KEY,
+                    task_id TEXT NOT NULL,
+                    plan_revision INTEGER NOT NULL CHECK(plan_revision > 0),
+                    schema_version TEXT NOT NULL,
+                    plan_json TEXT NOT NULL,
+                    plan_digest TEXT NOT NULL,
+                    max_plan_attempts INTEGER NOT NULL CHECK(max_plan_attempts > 0),
+                    max_provider_attempts INTEGER NOT NULL CHECK(max_provider_attempts > 0),
+                    max_tool_attempts INTEGER NOT NULL CHECK(max_tool_attempts > 0),
+                    max_total_items INTEGER NOT NULL CHECK(max_total_items > 0),
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(task_id, run_id)
+                        REFERENCES canonical_task_runs(task_id, run_id) ON DELETE RESTRICT
+                 ) WITHOUT ROWID;
+                 INSERT INTO canonical_work_plans_v16 (
+                    run_id, task_id, plan_revision, schema_version, plan_json,
+                    plan_digest, max_plan_attempts, max_provider_attempts,
+                    max_tool_attempts, max_total_items, created_at
+                 ) SELECT run_id, task_id, plan_revision, schema_version, plan_json,
+                          plan_digest, max_plan_attempts, max_provider_attempts,
+                          max_tool_attempts, max_total_items, created_at
+                     FROM canonical_work_plans;
+                 DROP TABLE canonical_work_plans;
+                 ALTER TABLE canonical_work_plans_v16 RENAME TO canonical_work_plans;
+                 UPDATE canonical_task_runtime_metadata SET value = '16'
+                  WHERE key = 'schema_version' AND value = '15';",
+            )?;
+            tx.commit()?;
+            Ok(())
+        })();
+        if foreign_keys_enabled {
+            conn.pragma_update(None, "foreign_keys", "ON")?;
+        }
+        migration?;
+        let foreign_key_violation: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_foreign_key_check LIMIT 1)",
+            [],
+            |row| row.get(0),
+        )?;
+        if foreign_key_violation {
+            anyhow::bail!("canonical_task_runtime_v16_foreign_key_violation");
         }
         Ok(())
     }
@@ -6034,7 +6094,7 @@ impl crate::agent::action_executor::BoundContentReceiptIssuer for CanonicalTaskR
         let evidence = admission.into_issue_evidence();
         let field = crate::agent::types::BoundContentField::for_kind(evidence.kind());
         let run_id = action
-            .react_trace
+            .tool_trace
             .as_ref()
             .and_then(|trace| trace.run_id.as_deref())
             .ok_or_else(|| anyhow::anyhow!("bound_content_receipt_run_identity_missing"))?;
@@ -7246,6 +7306,10 @@ mod tests {
         assert_eq!(store.list_items(&begun.task_id).unwrap().len(), 2);
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "test fixture names each persisted artifact fact explicitly"
+    )]
     fn prepare_artifact_with_facts(
         store: &CanonicalTaskRuntimeStore,
         conversation: &str,
@@ -9457,7 +9521,7 @@ mod tests {
             project_revision: None,
             scope_digest: None,
         };
-        let first = store.begin_general_task_run(input.clone()).unwrap();
+        let first = store.begin_general_task_run(input).unwrap();
         let replay = store.begin_general_task_run(input).unwrap();
         assert_eq!(replay.run_id, first.run_id);
 
@@ -9544,6 +9608,98 @@ mod tests {
             })
             .unwrap();
         assert_eq!(retried.ordinal, 2);
+    }
+
+    #[test]
+    fn retry_runs_each_own_plan_revision_one() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let instruction_digest = digest_of("retry a planned Work task");
+        let plan = StructuredWorkPlan {
+            schema_version: crate::work_orchestration::WORK_PLAN_SCHEMA_VERSION.into(),
+            steps: vec![crate::work_orchestration::WorkPlanStep {
+                id: "deliver".into(),
+                kind: crate::work_orchestration::WorkPlanStepKind::DeliverResult,
+                required: true,
+                depends_on: Vec::new(),
+                target_id: None,
+                target_contract_digest: None,
+            }],
+            completion: crate::work_orchestration::WorkCompletionContract {
+                result_kind: crate::work_orchestration::WorkResultKind::Answer,
+                requires_verification: false,
+            },
+        };
+
+        let first_run = uuid::Uuid::new_v4().to_string();
+        let first = store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &first_run,
+                execution_session_id: &first_run,
+                instruction_digest: &instruction_digest,
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+        store
+            .persist_work_plan(
+                &task_id,
+                &first_run,
+                first.plan_revision,
+                &plan,
+                WorkRunBudgetPolicy::default(),
+            )
+            .unwrap();
+        store
+            .terminalize_general_run(&task_id, &first_run, CanonicalTaskStatus::Blocked)
+            .unwrap();
+
+        let retry_run = uuid::Uuid::new_v4().to_string();
+        let retry = store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &retry_run,
+                execution_session_id: &retry_run,
+                instruction_digest: &instruction_digest,
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+        assert_eq!(retry.ordinal, 2);
+        assert_eq!(retry.plan_revision, 1);
+        store
+            .persist_work_plan(
+                &task_id,
+                &retry_run,
+                retry.plan_revision,
+                &plan,
+                WorkRunBudgetPolicy::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .load_work_plan(&first_run)
+                .unwrap()
+                .unwrap()
+                .plan_revision,
+            1
+        );
+        assert_eq!(
+            store
+                .load_work_plan(&retry_run)
+                .unwrap()
+                .unwrap()
+                .plan_revision,
+            1
+        );
     }
 
     #[test]

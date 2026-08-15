@@ -15,15 +15,20 @@ Use this checklist whenever a Tauri command is added, renamed, removed, or chang
 
 - Rust internals may remain snake_case.
 - Tauri invoke payloads used by the frontend should expose camelCase fields in TypeScript.
-- If the backend temporarily accepts both camelCase and snake_case for compatibility, tests should still assert the canonical frontend wrapper contract.
+- Do not add dual camelCase/snake_case payload fallbacks. Update the Rust
+  command, TypeScript wrapper, mock, and contract tests together.
 
 ## Proposal-Sensitive Commands
 
 For commands that can mutate `LifeModel`, `Memory`, tool permissions, external state, or user data:
 
-- Prefer creating an `AgentProposal` instead of direct mutation.
-- Link generated proposals back to the originating `AgentRun`.
-- Direct-write commands must be clearly marked legacy, migration, or debug-only.
+- Use the typed domain gateway. A governed effect links to the canonical
+  Conversation/Turn or Task/Run/Item/ItemAttempt owner that requested it.
+- Review checkpoints must bind the exact proposal, capability, target, and
+  expected effect; approval alone is not materialization proof.
+- An explicit low-risk reversible Memory write may use its dedicated typed
+  lane. Other durable or external effects require the applicable confirmation
+  or Review contract.
 - Safe Mode behavior must be explicit and tested.
 
 ## CI Guardrail

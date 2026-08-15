@@ -1,13 +1,10 @@
 pub mod action_executor;
-pub mod agent_loop;
 pub mod canonical_write_admission;
 pub mod context_assembler;
 pub mod conversation_context;
 pub mod evidence_graph;
 pub mod evidence_store;
 pub mod governor;
-pub mod legacy_hs_audit;
-pub mod life_event_store;
 pub mod life_model_explicit_read;
 pub mod life_model_learning;
 pub mod life_model_runtime_context;
@@ -15,14 +12,12 @@ pub mod life_model_view_model;
 pub mod main_chat_agent_v1;
 pub mod main_chat_governance_intent;
 pub mod main_chat_memory_candidate;
-pub mod main_chat_runtime_contract;
 pub mod memory_lifecycle;
 pub mod memory_service;
 pub mod memory_view_model;
 pub mod metadata_safe;
 pub mod metrics;
 pub mod model_router;
-pub mod plan_execute;
 pub mod policy_store;
 pub mod product_read_model;
 pub mod proposal_store;
@@ -31,13 +26,8 @@ pub mod reasoning;
 pub mod review_decision_context;
 pub mod review_item;
 pub mod review_workflow;
-pub mod runtime;
-pub mod runtime_contract;
-mod runtime_strategy_contract;
-pub mod store;
-pub mod strategy_runtime;
+pub mod runtime_policy_context;
 pub mod tasks_view_model;
-pub mod tool_execution_owner;
 pub mod tool_gateway;
 pub mod types;
 
@@ -50,14 +40,10 @@ pub use crate::tool_execution_receipt::{
     ToolTransportStatus,
 };
 pub use action_executor::{
-    A2AOutboundAuthorization, ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus,
-    ActionExecutorConfig, AgentActionRequest, CanonicalStateSnapshot, DurableStoreFailureObserver,
+    ActionExecutionContext, ActionExecutionResult, ActionExecutionStatus, ActionExecutorConfig,
+    AgentActionRequest, CanonicalStateSnapshot, DurableStoreFailureObserver,
     DurableToolExecutionOwner, ToolAuditPersistenceObserver, ToolDispatchAttempt,
     ToolDispatchObserver, ToolStartedTransitionObserver,
-};
-pub use agent_loop::{
-    AgentLoop, AgentLoopAllowedToolAction, AgentLoopConfig, AgentLoopResult, AgentLoopRunRequest,
-    AgentLoopTerminalDisposition, StreamingCallback,
 };
 pub use canonical_write_admission::{
     CanonicalWriteAdmission, CanonicalWriteAdmissionRejection, CanonicalWriteAdmissionRequest,
@@ -81,14 +67,6 @@ pub use governor::{
     ExternalWriteGovernanceInput, GovernanceDecision, GovernanceDecisionClassification,
     GovernanceDecisionKind, GovernanceSubject, GovernorDecisionReport, LifeModelGovernor,
     MemoryWriteGovernanceInput, ToolGovernanceInput,
-};
-pub use legacy_hs_audit::{HSBehaviorCheckSummary, HSSelectionAudit};
-#[cfg(any(test, feature = "test-utils"))]
-pub use life_event_store::CanonicalLifeEventSourceProof;
-pub use life_event_store::{
-    CanonicalLifeEventOwnerKind, CanonicalLifeEventOwnerRef, LifeDomain, LifeEvent,
-    LifeEventPrivacyLevel, LifeEventSourceRef, LifeEventSourceType, LifeEventSourceVerification,
-    LifeEventStore,
 };
 pub use life_model_explicit_read::{
     is_explicit_lifemodel_read_intent, LifeModelExplicitReadAnswer, LifeModelExplicitReadFact,
@@ -146,12 +124,6 @@ pub use model_router::{
     ModelRouteDecision, ModelRouteScore, ModelRouter, PrivacyRequirement, ProviderAvailability,
     TaskType,
 };
-pub use plan_execute::{
-    PlanDraft, PlanExecuteInput, PlanExecuteLifeModelHint, PlanExecuteProductAuthorityReport,
-    PlanExecuteProductContract, PlanExecuteProductContractReport, PlanExecuteProductScenario,
-    PlanExecuteReport, PlanExecuteService, PlanExecutionOutput, PlanGovernanceDecisionSummary,
-    PlanObservationSummary, PlanStep, PlanStepStatus, PlanStepTrace,
-};
 pub use policy_store::{
     build_runtime_policy_context, ContextPolicyDecision, ModelRoutePolicy, PolicyEvaluationRequest,
     PolicyRecord, PolicyStore, PolicyTopic, RuntimePolicyContextBuildInput, ToolPolicyDecision,
@@ -165,10 +137,7 @@ pub use product_read_model::{
     ReviewActionKind, ReviewItemMaterializationStatus, ViewModelActions, ViewModelEnvelope,
     ViewModelSource, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
 };
-pub use proposal_store::{
-    ArtifactEffectRecord, ArtifactEffectState, ProposalStore, ProposalTerminalRelationKind,
-    ProposalTerminalRelationProjectionProof, TerminalOwnerOriginBinding,
-};
+pub use proposal_store::{ArtifactEffectRecord, ArtifactEffectState, ProposalStore};
 pub use provider_privacy_boundary::{
     build_provider_privacy_boundary_summary, ProviderPrivacyBoundaryBuildInput,
 };
@@ -187,49 +156,24 @@ pub use review_item::{
     build_review_center_view_model, build_review_item, ReviewBatch, ReviewBatchDomain,
     ReviewCenterBuildInput, ReviewCenterSummary, ReviewCenterViewModel, ReviewItem,
     ReviewItemArtifactEvidence, ReviewItemDecisionStatus, ReviewItemSource, ReviewItemSourceKind,
-    ReviewItemTaskResumeRelation, ReviewItemType,
+    ReviewItemType,
 };
 pub use review_workflow::{
     proposal_status_semantics, DurableWriteDecision, DurableWriteDecisionKind, DurableWriteRequest,
     DurableWriteSource, DurableWriteSubject, FinalDeliveryWordingContract,
     MaterializedReviewAcceptanceSnapshot, ReviewWorkflow, ReviewWorkflowOutcome,
-    TerminalOwnerReviewOriginProof, TerminalOwnerReviewSubmission,
 };
-pub use runtime::{AgentRuntime, AgentRuntimeConfig, AgentRuntimeError, AgentRuntimeOutput};
-pub use runtime_contract::{
-    AgentRuntimeParams, LifeEventDraft, RuntimeInput, RuntimeOutput, RuntimePolicyContext,
-};
-pub use runtime_strategy_contract::{
-    RuntimeStrategyKind, StrategyCandidateEvaluation, StrategySelection, StrategySelectionInput,
-    StrategySelectionReport,
-};
-pub use store::{
-    issue_agent_run_review_relation_projection_lane, AgentRunReviewRelationProjectionLane,
-    AgentRunReviewRelationProjectionLaneAdmission, AgentRunReviewRelationProjectionOutcome,
-    AgentRunStore, AgentRunTerminalRelationTargetIntentAdmission,
-};
-pub use strategy_runtime::{
-    PlanExecuteRuntimeStrategy, ReActRuntimeStrategy, RuntimeStrategy,
-    RuntimeStrategyDeclarativeDescriptor, RuntimeStrategyDescriptor,
-    RuntimeStrategyExecutionReport, RuntimeStrategyInput, RuntimeStrategyOutput,
-    RuntimeStrategyPayload, RuntimeStrategyPayloadKind, RuntimeStrategyRegistry,
-    RuntimeStrategyRegistryReadinessReport, RuntimeStrategySideEffectBudget,
-};
+pub use runtime_policy_context::RuntimePolicyContext;
 pub use tasks_view_model::{
     build_tasks_view_model, build_workspace_view_model, TaskArtifactChangeKind,
     TaskArtifactChangeViewModel, TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel,
     TaskArtifactUndoViewModel, TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel,
     TaskArtifactViewModel, TaskControl, TaskControlEffect, TaskControlKind, TaskItemViewModel,
     TaskLatestResultPreview, TaskLifecycleStatus, TaskTerminalDeliveryStatus,
-    TaskViewModelContractError, TaskViewModelItem, TaskViewModelRunInput, TaskViewModelTaskInput,
+    TaskViewModelContractError, TaskViewModelItem, TaskViewModelTaskInput,
     TaskWorkPlanStepViewModel, TaskWorkPlanViewModel, TasksViewModel, TasksViewModelBuildInput,
     TasksViewModelSummary, WorkspaceActivityItem, WorkspaceActivityKind, WorkspaceActivityStatus,
     WorkspaceViewModel, WorkspaceViewModelBuildInput,
-};
-#[cfg(any(test, feature = "test-utils"))]
-pub use tool_execution_owner::AgentRunToolExecutionFaultPoint;
-pub use tool_execution_owner::{
-    AgentRunA2AToolExecutionOwner, AgentRunToolExecutionRecord, AgentRunToolExecutionState,
 };
 pub use tool_gateway::{
     validate_manifest_execution_contract, ToolGateway, ToolGatewayContractEvidence,

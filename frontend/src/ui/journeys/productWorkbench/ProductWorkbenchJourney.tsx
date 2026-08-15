@@ -120,8 +120,7 @@ const settingsCopy: Record<string, { title: string; reason: string }> = {
   },
   diagnostics: {
     title: "产品诊断暂不可用",
-    reason:
-      "需要后端提供 canonical 产品诊断；页面不会从旧 AgentRun、日志或兼容 store 推断健康状态。",
+    reason: "需要后端提供 canonical 产品诊断；页面不会从日志或非产品状态推断健康状态。",
   },
 };
 
@@ -314,7 +313,16 @@ export function ProductWorkbenchJourney({
   const announceSettings = useCallback((message: string) => {
     if (modeRef.current === "settings") setAnnouncement(message);
   }, []);
-  const governed = useGovernedActionJourney(governedActionDataSource, setAnnouncement);
+  const conversationReloadRef = useRef<() => Promise<boolean>>(async () => true);
+  const refreshConversationAfterGovernedMutation = useCallback(async () => {
+    const reloaded = await conversationReloadRef.current();
+    if (!reloaded) throw new Error("conversation_refresh_after_governed_mutation_failed");
+  }, []);
+  const governed = useGovernedActionJourney(
+    governedActionDataSource,
+    setAnnouncement,
+    refreshConversationAfterGovernedMutation
+  );
   const selectedConversationIdRef = useRef<string | null>(null);
   const refreshGovernedAfterTurn = useCallback(async () => {
     if (governedActionDataSource) {
@@ -327,6 +335,7 @@ export function ProductWorkbenchJourney({
     refreshGovernedAfterTurn,
     null
   );
+  conversationReloadRef.current = conversation.reload;
   const durable = useDurableTruthJourney(durableTruthDataSource, setAnnouncement);
   const settingsPrivacy = useSettingsPrivacyJourney(settingsPrivacyDataSource, announceSettings);
   const focusSequenceRef = useRef(0);
@@ -497,7 +506,16 @@ export function ProductWorkbenchJourney({
     setInspectorOpen(false);
     setSelectedEvidence("");
     onRouteChange?.({ mode: "product", surface: settingsReturnSurface });
-    setAnnouncement("已返回之前的产品工作区。 ");
+    setAnnouncement("已返回之前的产品工作区，正在重新读取已生效设置。 ");
+    void loadBoundary(false);
+    if (settingsReturnSurface === "workspace") {
+      if (workspaceConversationDataSource) void conversation.reload();
+      if (governedActionDataSource) {
+        void governed.load(false, conversation.selectedSessionId ?? "");
+      }
+    } else if (durableTruthDataSource) {
+      void durable.load(false);
+    }
   }
 
   function navigateSettings(id: string): void {
@@ -640,17 +658,43 @@ export function ProductWorkbenchJourney({
 
   function openReviewItem(item: ReviewItem): void {
     setReviewOrigin({ mode, surface: activeSurface, settingsId: activeSettingsId });
-    governed.selectReviewItem(item);
-    setExplicitReviewItemId(item.id);
     setWorkspaceInspectorContext("review");
     setMode("product");
     setActiveSurface("workspace");
     setSelectedTask(null);
     setInspectorOpen(false);
     setSelectedEvidence("");
-    requestFocus(`review-${item.id}`);
-    setAnnouncement(`已打开“${item.decisionContext.title}”；查看没有记录任何决定。`);
-    if (!governed.snapshot && governedActionDataSource) void governed.load(false);
+    const currentReviewItems =
+      governed.snapshot && ["ready", "stale"].includes(governed.snapshot.reviewEnvelope.status)
+        ? (governed.snapshot.reviewEnvelope.data?.items ?? [])
+        : [];
+    if (currentReviewItems.some(candidate => candidate.id === item.id)) {
+      governed.selectReviewItem(item.id);
+      setExplicitReviewItemId(item.id);
+      requestFocus(`review-${item.id}`);
+      setAnnouncement(`已打开“${item.decisionContext.title}”；查看没有记录任何决定。`);
+      return;
+    }
+
+    setExplicitReviewItemId(null);
+    setAnnouncement(`正在从后端核对“${item.decisionContext.title}”。`);
+    if (!governedActionDataSource) {
+      setAnnouncement("当前无法读取决定节点；没有记录任何决定。");
+      return;
+    }
+    void governed.load(false).then(refreshed => {
+      const refreshedItem = ["ready", "stale"].includes(refreshed.reviewEnvelope.status)
+        ? refreshed.reviewEnvelope.data?.items.find(candidate => candidate.id === item.id)
+        : null;
+      if (!refreshedItem) {
+        setAnnouncement("刷新后的后端读模型没有返回这个决定节点；没有跳转到其他审核项。");
+        return;
+      }
+      governed.selectReviewItem(refreshedItem.id);
+      setExplicitReviewItemId(refreshedItem.id);
+      requestFocus(`review-${refreshedItem.id}`);
+      setAnnouncement(`已打开“${refreshedItem.decisionContext.title}”；查看没有记录任何决定。`);
+    });
   }
 
   function openEvidence(evidence: WorkbenchEvidenceReference): void {
@@ -694,6 +738,58 @@ export function ProductWorkbenchJourney({
     const selectedWorkReview = pendingWorkReviews.find(
       item => item.id === governed.selectedItem?.id
     );
+    const inlineCheckpoint =
+      visibleReviews.length > 0 ? (
+        <section className="ol-conversation-checkpoints" aria-label="当前 Work 的决定节点">
+          <ReviewGovernedView
+            snapshot={governed.snapshot}
+            visibleItems={visibleReviews}
+            embedded
+            selectedItem={explicitReviewItem ?? selectedWorkReview ?? pendingWorkReviews[0] ?? null}
+            refreshing={governed.refreshing}
+            dispatchState={governed.reviewState}
+            onRefresh={() => void governed.load(true)}
+            onSelectItem={item => {
+              governed.selectReviewItem(item);
+              if (explicitReviewItem) setExplicitReviewItemId(item.id);
+              setWorkspaceInspectorContext("review");
+              setSelectedEvidence("");
+              setAnnouncement(`已选择“${item.decisionContext.title}”；没有记录任何决定。`);
+            }}
+            onRequestAction={governed.requestReviewAction}
+            onConfirmAction={governed.confirmReviewAction}
+            onCancelConfirmation={governed.cancelReviewConfirmation}
+            onEditLifeModelLearning={governed.editLifeModelLearning}
+            onBackWorkspace={() => {
+              setExplicitReviewItemId(null);
+              setWorkspaceInspectorContext("workspace");
+              if (reviewOrigin?.mode === "settings") {
+                setMode("settings");
+                setActiveSurface(reviewOrigin.surface);
+                setActiveSettingsId(reviewOrigin.settingsId);
+                setReviewOrigin(null);
+                requestFocus("review-back-settings");
+                setAnnouncement("已返回打开决定节点的设置上下文。");
+              } else if (reviewOrigin?.surface === "life-model") {
+                navigateProduct("life-model");
+              } else {
+                setReviewOrigin(null);
+              }
+            }}
+            backLabel={
+              reviewOrigin?.mode === "settings"
+                ? "返回设置"
+                : reviewOrigin?.surface === "life-model"
+                  ? "返回个人智能"
+                  : "返回 Workbench"
+            }
+            onOpenInspector={() => {
+              setWorkspaceInspectorContext("review");
+              openInspector();
+            }}
+          />
+        </section>
+      ) : undefined;
     content = (
       <div className="ol-conversation-workbench-layout" data-testid="conversation-workbench">
         <WorkspaceGovernedView
@@ -706,6 +802,7 @@ export function ProductWorkbenchJourney({
           }}
           onOpenLifeModel={itemRef => navigateProduct("life-model", itemRef)}
           conversation={workspaceConversationDataSource ? conversation : undefined}
+          inlineCheckpoint={inlineCheckpoint}
         />
         {scopedTasks.length > 0 && (
           <WorkbenchResultsView
@@ -737,59 +834,6 @@ export function ProductWorkbenchJourney({
               await governed.load(true);
             }}
           />
-        )}
-        {visibleReviews.length > 0 && (
-          <section className="ol-conversation-checkpoints" aria-label="当前 Work 的决定节点">
-            <ReviewGovernedView
-              snapshot={governed.snapshot}
-              visibleItems={visibleReviews}
-              embedded
-              selectedItem={
-                explicitReviewItem ?? selectedWorkReview ?? pendingWorkReviews[0] ?? null
-              }
-              refreshing={governed.refreshing}
-              dispatchState={governed.reviewState}
-              onRefresh={() => void governed.load(true)}
-              onSelectItem={item => {
-                governed.selectReviewItem(item);
-                if (explicitReviewItem) setExplicitReviewItemId(item.id);
-                setWorkspaceInspectorContext("review");
-                setSelectedEvidence("");
-                setAnnouncement(`已选择“${item.decisionContext.title}”；没有记录任何决定。`);
-              }}
-              onRequestAction={governed.requestReviewAction}
-              onConfirmAction={governed.confirmReviewAction}
-              onCancelConfirmation={governed.cancelReviewConfirmation}
-              onEditLifeModelLearning={governed.editLifeModelLearning}
-              onBackWorkspace={() => {
-                setExplicitReviewItemId(null);
-                setWorkspaceInspectorContext("workspace");
-                if (reviewOrigin?.mode === "settings") {
-                  setMode("settings");
-                  setActiveSurface(reviewOrigin.surface);
-                  setActiveSettingsId(reviewOrigin.settingsId);
-                  setReviewOrigin(null);
-                  requestFocus("review-back-settings");
-                  setAnnouncement("已返回打开决定节点的设置上下文。");
-                } else if (reviewOrigin?.surface === "life-model") {
-                  navigateProduct("life-model");
-                } else {
-                  setReviewOrigin(null);
-                }
-              }}
-              backLabel={
-                reviewOrigin?.mode === "settings"
-                  ? "返回设置"
-                  : reviewOrigin?.surface === "life-model"
-                    ? "返回个人智能"
-                    : "返回 Workbench"
-              }
-              onOpenInspector={() => {
-                setWorkspaceInspectorContext("review");
-                openInspector();
-              }}
-            />
-          </section>
         )}
       </div>
     );

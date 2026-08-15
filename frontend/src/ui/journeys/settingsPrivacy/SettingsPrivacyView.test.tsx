@@ -68,11 +68,11 @@ function credentialSettingsSource(
               version: "credential_bootstrap_v1",
               digest: "a".repeat(64),
               purposes: [
-                { purpose: "agent_run_receipts", status },
-                { purpose: "main_chat_events", status },
-                { purpose: "action_queue", status },
+                { purpose: "canonical_task_receipts", status },
                 { purpose: "task_store", status },
                 { purpose: "mcp_audit", status },
+                { purpose: "provider_api_key", status },
+                { purpose: "search_provider_api_key", status },
               ],
             },
       diagnostics: [
@@ -114,11 +114,7 @@ describe("SettingsPrivacyView", () => {
           devUrl: "",
           frontendDist: "frontend/dist",
           dataDir: "/tmp/openlife",
-          a2aPort: 0,
-          a2aStatus: "disabled_by_build",
           devExtensionsEnabled: false,
-          authenticatedDevA2aEnabled: false,
-          unauthenticatedDevA2aEnabled: false,
           arbitraryMcpRegistrationEnabled: false,
           bundleIdentifier: "ai.openlife.desktop",
           productName: "OpenLife",
@@ -141,15 +137,19 @@ describe("SettingsPrivacyView", () => {
       },
     });
 
-    render(<SafeModeSettings source={source} surface="diagnostics" />);
+    const diagnosticsView = render(<SafeModeSettings source={source} surface="diagnostics" />);
 
     expect(await screen.findByRole("heading", { name: "产品诊断" })).toBeInTheDocument();
     expect(screen.getByText("部分能力降级")).toBeInTheDocument();
     expect(screen.getByText("ai.openlife.desktop")).toBeInTheDocument();
+    expect(screen.getByText("隔离的本地 profile 文件（0600）")).toBeInTheDocument();
     expect(
       screen.getByText("store:CanonicalTaskRuntimeStore:runtime_io_failure")
     ).toBeInTheDocument();
-    expect(screen.queryByText(/AgentRun/)).not.toBeInTheDocument();
+    diagnosticsView.unmount();
+    render(<SafeModeSettings source={source} />);
+    expect(await screen.findByText("开发凭据与正式产品隔离")).toBeInTheDocument();
+    expect(screen.getByText(/不会从正式 profile 自动复制/)).toBeInTheDocument();
   });
 
   it("shows explicit Search Provider controls and fail-closed artifact output state", async () => {
@@ -300,7 +300,7 @@ describe("SettingsPrivacyView", () => {
     fireEvent.click(action);
 
     expect(source.initializeRequiredCredentials).toHaveBeenCalledTimes(1);
-    expect(await screen.findByText("访问恢复完成，需要重启")).toBeInTheDocument();
+    expect(await screen.findByText("已请求访问，等待重启验证")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "等待重启" })).toBeDisabled();
   });
 
@@ -312,11 +312,11 @@ describe("SettingsPrivacyView", () => {
       credentialBootstrap: {
         ...snapshot.credentialBootstrap!,
         purposes: [
-          { purpose: "agent_run_receipts", status: "unavailable" },
-          { purpose: "main_chat_events", status: "unavailable" },
-          { purpose: "action_queue", status: "initialization_required" },
+          { purpose: "canonical_task_receipts", status: "unavailable" },
           { purpose: "task_store", status: "initialization_required" },
           { purpose: "mcp_audit", status: "initialization_required" },
+          { purpose: "provider_api_key", status: "unavailable" },
+          { purpose: "search_provider_api_key", status: "initialization_required" },
         ],
       },
     });

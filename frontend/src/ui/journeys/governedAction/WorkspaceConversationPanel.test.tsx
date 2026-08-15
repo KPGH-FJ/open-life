@@ -15,7 +15,7 @@ function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationContr
     loadError: null,
     turnState: { phase: "idle" },
     streamingReply: "",
-    activeTaskSessionId: null,
+    activeTaskId: null,
     mode: "work",
     provider: {
       status: "ready",
@@ -148,12 +148,12 @@ describe("WorkspaceConversationPanel Markdown Memory", () => {
   it("keeps the composer visible while Work offers steering and stop", () => {
     const controller = controllerWhileMarkdownMemoryIsSubmitting();
     controller.draft = "把风险结论放在最前面";
-    controller.activeTaskSessionId = "task-steer";
+    controller.activeTaskId = "task-steer";
     controller.turnState = {
       phase: "streaming",
       sessionId: "conversation-1",
       turnId: "turn-steer",
-      taskSessionId: "task-steer",
+      taskId: "task-steer",
       runId: "run-steer",
     };
 

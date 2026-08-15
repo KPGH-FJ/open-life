@@ -1,10 +1,9 @@
 use crate::agent::action_executor::helpers::{
-    call_a2a_agent, canonical_tool_source, ensure_external_write_content_size,
-    external_write_content_preview, extract_host_from_url, fetch_url_async,
-    filesystem_access_error, is_direct_external_write_tool, is_path_in_safe_paths_async,
-    is_path_lexically_in_safe_paths, policy_requires_external_write_proposal,
-    prepare_web_content_observation, reserve_web_search_rate_limit, search_web_async,
-    ToolCallInternalResult,
+    canonical_tool_source, ensure_external_write_content_size, external_write_content_preview,
+    extract_host_from_url, fetch_url_async, filesystem_access_error, is_direct_external_write_tool,
+    is_path_in_safe_paths_async, is_path_lexically_in_safe_paths,
+    policy_requires_external_write_proposal, prepare_web_content_observation,
+    reserve_web_search_rate_limit, search_web_async, ToolCallInternalResult,
 };
 use crate::agent::review_workflow::{DurableWriteRequest, DurableWriteSource, DurableWriteSubject};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
@@ -986,42 +985,6 @@ impl super::ActionExecutor {
                         error: Some("ProposalStore not available in execution context".to_string()),
                     })
                 }
-            }
-            "a2a.call_agent" => {
-                let agent_url = args
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .ok_or_else(|| anyhow::anyhow!("Missing 'url' argument for a2a.call_agent"))?;
-                let task_text = args
-                    .get("task")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("Perform the requested task");
-                let session_id = args
-                    .get("session_id")
-                    .and_then(|v| v.as_str())
-                    .or(request.source_run_id.as_deref());
-                let request_id = args.get("request_id").and_then(|v| v.as_str());
-
-                // Validate URL scheme and block private IPs
-                if !agent_url.starts_with("http://") && !agent_url.starts_with("https://") {
-                    return Ok(ToolCallInternalResult {
-                        success: false,
-                        output: None,
-                        error: Some(format!("Invalid A2A URL scheme: {}", agent_url)),
-                    });
-                }
-                let admission = ctx
-                    .authorize_tool_dispatch(manifest, request, args, &receipt_tracker)
-                    .await?;
-                call_a2a_agent(
-                    agent_url,
-                    task_text,
-                    session_id,
-                    request_id,
-                    admission,
-                    ctx.a2a_outbound_authorization,
-                )
-                .await
             }
             _ => Ok(ToolCallInternalResult {
                 success: false,
