@@ -72,4 +72,3 @@ Task/Run/Item/Attempt identity and do not retain an old lifecycle owner.
 LifeModel and Agent Memory remain narrow typed ports so their later evolution,
 including possible AI-assisted maintenance, does not require rewriting the
 Agent harness.
-
