@@ -14,14 +14,13 @@ working tree.
 - Do not build ledgers, task-packet systems, approval chains, append-only
   registries, or validators for the planning process itself.
 
-## Active Product Development Program
+## Current Development Status
 
-[`openlife_product_development_program.md`](openlife_product_development_program.md)
-is the single active implementation plan. It records the current objective,
-scope, acceptance evidence, stop condition, and next pointer. Product direction
-lives in `PRODUCT.md`; accepted architecture lives in ADRs. Git history retains
-the superseded S0-S7 and completed R0-R8 programs. The active plan is the H0-H6
-capable-Agent reconstruction.
+There is no active implementation plan. The H0-H6 capable-Agent reconstruction
+is complete and retained in Git history together with the earlier S0-S7 and
+R0-R8 programs. Product direction lives in `PRODUCT.md`; accepted architecture
+lives in ADRs. Add one small active Markdown plan only after the next concrete
+development objective is accepted.
 
 ## Accepted Decisions
 

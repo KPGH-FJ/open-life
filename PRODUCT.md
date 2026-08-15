@@ -60,18 +60,18 @@ require a separate top-level product page.
 - Local, scripted, mock, browser-shell, native-Tauri, and external-live evidence
   are different evidence levels.
 
-## Current Development Priority
+## Current Development Baseline
 
-Reconstruct the product from a stable local baseline into one capable Agent
-harness. Migrate complete vertical product capabilities, delete each replaced
-legacy owner and frontend consumer, and prove completion at the required unit,
-integration, browser, exact-native, and external-live evidence level.
+H0-H6 completed the canonical capable-Agent harness baseline: complete vertical
+product capabilities moved to one Chat/Work spine, and the replaced backend and
+frontend owners were deleted. This is an engineering baseline, not a claim of
+market readiness or complete future capability coverage.
 
-S0-S7 are historical exploration. R0-R8 is the completed reconstruction
-baseline, not completion of the capable general Agent. The active H0-H6
-sequence is defined by the single plan in `plans/`, ADR 0018, and ADR 0019.
+S0-S7, R0-R8, and H0-H6 are retained in Git history. ADR 0018 and ADR 0019
+remain the accepted reconstruction and harness contracts. There is no active
+implementation objective until the next bounded product capability is agreed.
 
-Repository governance remains small and conventional: one active plan, normal
+Repository governance remains small and conventional: at most one active plan, normal
 source tests, normal CI, and concise architecture and decision records.
 OpenLife must not grow a second internal platform for planning or evaluating
 its own development.

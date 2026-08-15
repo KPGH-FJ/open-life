@@ -2,9 +2,9 @@
 
 ## Status
 
-Stable source map for the completed R0-R8 baseline and the accepted H0-H6
-capable-Agent direction. Current source and accepted ADRs remain authoritative;
-the active plan defines the migration order.
+Stable source map for the completed R0-R8 and H0-H6 capable-Agent baselines.
+Current source and accepted ADRs remain authoritative; there is no active
+implementation plan until the next bounded objective is accepted.
 
 ## Current product path
 
