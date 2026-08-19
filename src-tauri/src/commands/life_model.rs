@@ -623,14 +623,10 @@ mod tests {
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
         let config = openlife_core::config::AppConfig::default();
-        let hot_cache: openlife_core::memory_cache::SharedHotCache = Arc::new(
-            tokio::sync::RwLock::new(openlife_core::memory_cache::HotMemoryCache::default()),
-        );
         Arc::new(AppState {
             persistence_coordinator: Arc::new(
                 crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
             ),
-            governed_data_import_journal: None,
             config: Arc::new(tokio::sync::Mutex::new(config.clone())),
             life_model_manager: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::LifeModelManager::new(
@@ -673,16 +669,11 @@ mod tests {
             vector_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
-            vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
             last_snapshot_date: Arc::new(tokio::sync::Mutex::new(None)),
             mcp_audit_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp_audit::McpAuditStore::new(temp_dir.path().join("mcp_audit.db")),
             )),
             canonical_task_runtime_store: None,
-            evidence_store: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
-            )),
-            policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
             proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
             ))),
@@ -696,27 +687,20 @@ mod tests {
             patch_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
-            rollout_metrics_store: None,
             tool_permission_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
             )),
             skill_registry: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::skills::SkillRegistry::built_in(),
             )),
-            plugin_registry: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::plugins::PluginRegistry::new(temp_dir.path().join("plugins")),
-            )),
-            hot_cache,
             startup_warnings: vec![],
             credential_bootstrap_snapshot: Default::default(),
-            provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
             scheduled_task_store: Arc::new(
                 openlife_core::tasks::TaskStore::new_in_memory().unwrap(),
             ),
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
             resource_runtime: None,
             state_store: None,
-            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
 

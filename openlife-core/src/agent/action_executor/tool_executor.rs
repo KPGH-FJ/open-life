@@ -245,46 +245,6 @@ impl super::ActionExecutor {
             });
         }
 
-        if let Some(m) = manifest
-            .as_ref()
-            .filter(|m| matches!(m.source, ToolSource::Plugin { .. }))
-        {
-            let forced_decision = ToolPermissionDecision {
-                allowed: false,
-                requires_confirmation: false,
-                decision: "blocked".into(),
-                reason:
-                    "tool source has no governed executor and remains disabled/declarative-only"
-                        .into(),
-                policy_id: None,
-            };
-            let (action, observation) = self.build_blocked_action_observation(
-                tool_name,
-                &args,
-                &inspection,
-                &forced_decision,
-                manifest.as_ref(),
-                &request,
-            );
-            let report = LifeModelGovernor
-                .govern_unsupported_tool_source(
-                    &m.name,
-                    manifest_risk_level(m),
-                    request.source_run_id.as_deref(),
-                    "unsupported_tool_source",
-                )
-                .to_report();
-            return Ok(ActionExecutionResult {
-                action,
-                observation,
-                status: ActionExecutionStatus::Blocked,
-                stop_reason: Some("unsupported_tool_source".into()),
-                governance_report: Some(report),
-                execution_receipt: receipt_tracker.snapshot(),
-                observed_body_admission: None,
-            });
-        }
-
         // Network policy is an execution authorization, not a post-dispatch
         // transport error. Resolve it before generic tool permission handling,
         // dispatch observers, and receipt mutation. An `ask` decision must

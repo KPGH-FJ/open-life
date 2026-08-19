@@ -1585,7 +1585,7 @@ mod tests {
     #[test]
     fn mixed_document_and_web_work_request_is_open_ended() {
         let request = MainChatContextRequest::from_user_text(
-            "读取我添加的 h5-source.md，并使用 web.search 搜索 IANA Example Domains 的官方说明。最终回答分两段：1）本地文档事实，必须包含项目代号和验证标记；2）外部来源事实，必须带来源。不要创建或修改文件。",
+            "读取我添加的 selected-source.md，并使用 web.search 搜索 IANA Example Domains 的官方说明。最终回答分两段：1）本地文档事实，必须包含项目代号和验证标记；2）外部来源事实，必须带来源。不要创建或修改文件。",
         );
 
         assert_eq!(request.task_mode, MainChatContextTaskMode::OpenEnded);

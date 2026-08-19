@@ -4,9 +4,7 @@ use crate::life_model_materializer_guard::{
     LifeModelMaterializerCallerKind, LifeModelMaterializerCallerPurpose,
     STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID,
 };
-use crate::persistence_coordinator::{
-    CanonicalCommitPermit, GovernedDataImportRecoveryAdmission, GovernedDataImportRecoveryOwner,
-};
+use crate::persistence_coordinator::{CanonicalCommitPermit, CanonicalWriteOwner};
 use crate::AppState;
 use openlife_core::agent::AgentProposal;
 use openlife_core::life_model::patch::{LifeModelPatch, PatchApplyResult};
@@ -22,7 +20,6 @@ use openlife_core::life_model_write_gateway::{
 use openlife_core::persistence_outbox::{
     FileMutationJournal, FileMutationState, FileProjectionDelivery,
 };
-use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
@@ -40,14 +37,6 @@ const PROJECTION_DAILY_SNAPSHOT: &str = "daily_snapshot";
 const PROJECTION_PATCH_AFTER_SNAPSHOT: &str = "patch_after_snapshot";
 const PROJECTION_PATCH_STORE: &str = "patch_store";
 const LIFEMODEL_FILE_RECONCILIATION_BATCH: usize = 256;
-
-fn governed_import_file_mutation_kind(
-    operation_id: &str,
-    payload_digest: &str,
-    request_digest: &str,
-) -> String {
-    format!("governed_import_recovery:{operation_id}:{payload_digest}:{request_digest}")
-}
 
 fn serialized_field_changed<T: serde::Serialize>(before: &T, after: &T) -> Result<bool, String> {
     let before = serde_json::to_value(before)
@@ -116,9 +105,8 @@ struct LifeModelFileCommit {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LifeModelFilePostCommitPolicy<'a> {
+enum LifeModelFilePostCommitPolicy {
     ReconcileProjections,
-    GovernedImportCanonicalOnly { mutation_kind: &'a str },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -386,125 +374,6 @@ async fn ensure_no_lifemodel_file_backlog_unlocked(state: &Arc<AppState>) -> Res
     Ok(())
 }
 
-/// Governed import recovery owns only the LifeModel canonical file and its
-/// file-mutation journal. Unlike the normal preflight above, this check never
-/// reconciles or dispatches an existing PatchStore/VersionManager delivery.
-/// Unrelated backlog therefore blocks recovery. The only mutation admitted is
-/// digest observation for this exact outer-import-bound, zero-projection file
-/// journal attempt, which is necessary to recover a pre-rename crash.
-async fn ensure_no_unrelated_lifemodel_file_backlog_for_recovery_unlocked(
-    state: &Arc<AppState>,
-    recovery_mutation_kind: &str,
-) -> Result<(), String> {
-    let journal_path = state
-        .life_model_manager
-        .lock()
-        .await
-        .mutation_journal_path();
-    let unresolved = if journal_path.exists() {
-        let connection = rusqlite::Connection::open_with_flags(
-            &journal_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-        )
-        .map_err(|error| {
-            format!(
-                "open LifeModel file journal read-only {}: {error}",
-                journal_path.display()
-            )
-        })?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|error| error.to_string())?;
-        connection
-            .query_row(
-                "SELECT mutations.operation_id, mutations.state,
-                        mutations.mutation_kind,
-                        (SELECT COUNT(*)
-                         FROM canonical_file_projection_deliveries deliveries
-                         WHERE deliveries.operation_id = mutations.operation_id)
-                 FROM canonical_file_mutations mutations
-                 WHERE mutations.aggregate_kind = ?1
-                   AND mutations.aggregate_id = ?2
-                   AND (
-                       mutations.state IN ('prepared', 'degraded')
-                       OR (
-                           mutations.state = 'committed'
-                           AND EXISTS (
-                               SELECT 1 FROM canonical_file_projection_deliveries deliveries
-                               WHERE deliveries.operation_id = mutations.operation_id
-                                 AND deliveries.state IN ('pending', 'degraded')
-                           )
-                       )
-                   )
-                 ORDER BY mutations.created_at ASC
-                 LIMIT 1",
-                [LIFEMODEL_FILE_AGGREGATE_KIND, LIFEMODEL_FILE_AGGREGATE_ID],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                },
-            )
-            .optional()
-            .map_err(|error| error.to_string())?
-    } else {
-        None
-    };
-    if let Some((operation_id, state_name, mutation_kind, projection_count)) = unresolved.as_ref() {
-        if mutation_kind != recovery_mutation_kind || *projection_count != 0 {
-            let degraded = matches!(state_name.as_str(), "prepared" | "degraded");
-            return Err(format!(
-                "LifeModel canonical write blocked by degraded projection recovery: degraded={}, backlog=true",
-                usize::from(degraded)
-            ));
-        }
-
-        // This is not general backlog reconciliation. The metadata binding
-        // proves that the zero-projection file mutation belongs to the exact
-        // governed import operation admitted by the outer durable journal.
-        // Observing its canonical digest closes only that interrupted
-        // LifeModel owner attempt; no PatchStore or VersionManager dispatch is
-        // reachable from this path.
-        let canonical_digest = {
-            let manager = state.life_model_manager.lock().await;
-            let canonical = manager.load().map_err(|error| error.to_string())?;
-            hash_life_model(&canonical).map_err(|error| error.to_string())?
-        };
-        let journal = FileMutationJournal::new(&journal_path).map_err(|error| error.to_string())?;
-        match journal
-            .observe_canonical_digest(operation_id, &canonical_digest)
-            .map_err(|error| error.to_string())?
-        {
-            FileMutationState::Committed | FileMutationState::NotCommitted => {}
-            FileMutationState::Prepared | FileMutationState::Degraded => {
-                return Err(
-                    "LifeModel governed import file mutation canonical digest is unknown".into(),
-                )
-            }
-        }
-    }
-    let patch_backlog = if let Some(store) = state.patch_store.as_ref() {
-        !store
-            .lock()
-            .await
-            .list_open_materialization_operations(1)
-            .map_err(|error| error.to_string())?
-            .is_empty()
-    } else {
-        false
-    };
-    if patch_backlog {
-        return Err(format!(
-            "LifeModel canonical write blocked by degraded projection recovery: degraded={}, backlog=true",
-            0
-        ));
-    }
-    Ok(())
-}
-
 pub(crate) async fn persist_life_model_with_gateway_expected(
     state: &Arc<AppState>,
     life_model: LifeModel,
@@ -512,94 +381,18 @@ pub(crate) async fn persist_life_model_with_gateway_expected(
     caller_context: LifeModelMaterializerCallerContext,
     expected_before_hash: Option<&str>,
 ) -> Result<LifeModel, String> {
-    persist_life_model_with_gateway_expected_inner(
-        state,
-        life_model,
-        create_daily_snapshot,
-        caller_context,
-        expected_before_hash,
-        None,
-    )
-    .await
-}
-
-pub(crate) async fn persist_life_model_with_gateway_expected_for_import_recovery(
-    state: &Arc<AppState>,
-    life_model: LifeModel,
-    create_daily_snapshot: bool,
-    caller_context: LifeModelMaterializerCallerContext,
-    expected_before_hash: Option<&str>,
-    recovery: (&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str),
-) -> Result<LifeModel, String> {
-    persist_life_model_with_gateway_expected_inner(
-        state,
-        life_model,
-        create_daily_snapshot,
-        caller_context,
-        expected_before_hash,
-        Some(recovery),
-    )
-    .await
-}
-
-async fn persist_life_model_with_gateway_expected_inner(
-    state: &Arc<AppState>,
-    life_model: LifeModel,
-    create_daily_snapshot: bool,
-    caller_context: LifeModelMaterializerCallerContext,
-    expected_before_hash: Option<&str>,
-    recovery: Option<(&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str)>,
-) -> Result<LifeModel, String> {
-    let governed_import_recovery = recovery.is_some();
-    let write_admission =
-        if let Some((token, operation_id, payload_digest, request_digest)) = recovery {
-            state
-                .persistence_coordinator
-                .admit_normal_or_governed_data_import_writes(
-                    &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-                    Some(token),
-                    operation_id,
-                    payload_digest,
-                    request_digest,
-                )
-                .map_err(|error| error.to_string())?
-        } else {
-            state
-                .persistence_coordinator
-                .admit_normal_or_governed_data_import_writes(
-                    &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-                    None,
-                    "",
-                    "",
-                    "",
-                )
-                .map_err(|error| error.to_string())?
-        };
+    let write_admission = state
+        .persistence_coordinator
+        .admit_canonical_writes(&[CanonicalWriteOwner::LifeModelFileStore])
+        .map_err(|error| error.to_string())?;
     let commit_permit = state
         .persistence_coordinator
         .acquire_canonical_commit_permit(&write_admission)
         .await
         .map_err(|error| error.to_string())?;
-    let recovery_mutation_kind =
-        recovery.map(|(_, operation_id, payload_digest, request_digest)| {
-            governed_import_file_mutation_kind(operation_id, payload_digest, request_digest)
-        });
     ensure_lifemodel_materializer_caller_restriction(&caller_context, "persist_life_model")?;
-    if governed_import_recovery && create_daily_snapshot {
-        return Err(
-            "governed data-import recovery cannot request LifeModel snapshot projection".into(),
-        );
-    }
     let _coordinator = state.life_model_write_coordinator.lock().await;
-    if governed_import_recovery {
-        let mutation_kind = recovery_mutation_kind
-            .as_deref()
-            .ok_or_else(|| "governed import recovery mutation binding is missing".to_string())?;
-        ensure_no_unrelated_lifemodel_file_backlog_for_recovery_unlocked(state, mutation_kind)
-            .await?;
-    } else {
-        ensure_no_lifemodel_file_backlog_unlocked(state).await?;
-    }
+    ensure_no_lifemodel_file_backlog_unlocked(state).await?;
     let previous_model = {
         let manager = state.life_model_manager.lock().await;
         manager.load().map_err(|error| error.to_string())?
@@ -640,12 +433,7 @@ async fn persist_life_model_with_gateway_expected_inner(
             &previous_model,
             &life_model,
             commit_permit,
-            recovery_mutation_kind.as_deref().map_or(
-                LifeModelFilePostCommitPolicy::ReconcileProjections,
-                |mutation_kind| LifeModelFilePostCommitPolicy::GovernedImportCanonicalOnly {
-                    mutation_kind,
-                },
-            ),
+            LifeModelFilePostCommitPolicy::ReconcileProjections,
         )
         .await
         .map_err(|error| error.to_string())?;
@@ -657,32 +445,25 @@ async fn persist_life_model_with_gateway_expected_inner(
             life_model,
             create_daily_snapshot,
             commit_permit,
-            recovery_mutation_kind.as_deref().map_or(
-                LifeModelFilePostCommitPolicy::ReconcileProjections,
-                |mutation_kind| LifeModelFilePostCommitPolicy::GovernedImportCanonicalOnly {
-                    mutation_kind,
-                },
-            ),
+            LifeModelFilePostCommitPolicy::ReconcileProjections,
         )
         .await?
     };
-    if !governed_import_recovery {
-        record_lifemodel_gateway_audit(
-            state,
-            "lifemodel_gateway_persist",
-            None,
-            None,
-            None,
-            &decision.reason_code,
-            None,
-            decision.base_hash.as_deref(),
-            decision.current_hash.as_deref(),
-            decision.before_hash.as_deref(),
-            decision.after_hash.as_deref(),
-            &decision.lane,
-        )
-        .await;
-    }
+    record_lifemodel_gateway_audit(
+        state,
+        "lifemodel_gateway_persist",
+        None,
+        None,
+        None,
+        &decision.reason_code,
+        None,
+        decision.base_hash.as_deref(),
+        decision.current_hash.as_deref(),
+        decision.before_hash.as_deref(),
+        decision.after_hash.as_deref(),
+        &decision.lane,
+    )
+    .await;
     Ok(written)
 }
 
@@ -721,13 +502,7 @@ pub(crate) async fn materialize_accepted_lifemodel_v2_typed_diff_with_state(
 
     let write_admission = state
         .persistence_coordinator
-        .admit_normal_or_governed_data_import_writes(
-            &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-            None,
-            "",
-            "",
-            "",
-        )
+        .admit_canonical_writes(&[CanonicalWriteOwner::LifeModelFileStore])
         .map_err(|error| error.to_string())?;
     let commit_permit = state
         .persistence_coordinator
@@ -941,13 +716,7 @@ pub(crate) async fn materialize_accepted_legacy_lifemodel_migration_with_state(
 
     let write_admission = state
         .persistence_coordinator
-        .admit_normal_or_governed_data_import_writes(
-            &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-            None,
-            "",
-            "",
-            "",
-        )
+        .admit_canonical_writes(&[CanonicalWriteOwner::LifeModelFileStore])
         .map_err(|error| error.to_string())?;
     let commit_permit = state
         .persistence_coordinator
@@ -1075,170 +844,6 @@ pub(crate) async fn materialize_accepted_legacy_lifemodel_migration_with_state(
     })
 }
 
-pub(crate) async fn restore_life_model_with_gateway(
-    state: &Arc<AppState>,
-    restored_model: &LifeModel,
-    caller_context: LifeModelMaterializerCallerContext,
-    expected_before_hash: Option<&str>,
-) -> Result<(), AppError> {
-    restore_life_model_with_gateway_inner(
-        state,
-        restored_model,
-        caller_context,
-        expected_before_hash,
-        None,
-    )
-    .await
-}
-
-pub(crate) async fn restore_life_model_with_gateway_for_import_recovery(
-    state: &Arc<AppState>,
-    restored_model: &LifeModel,
-    caller_context: LifeModelMaterializerCallerContext,
-    expected_before_hash: Option<&str>,
-    recovery: (&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str),
-) -> Result<(), AppError> {
-    restore_life_model_with_gateway_inner(
-        state,
-        restored_model,
-        caller_context,
-        expected_before_hash,
-        Some(recovery),
-    )
-    .await
-}
-
-async fn restore_life_model_with_gateway_inner(
-    state: &Arc<AppState>,
-    restored_model: &LifeModel,
-    caller_context: LifeModelMaterializerCallerContext,
-    expected_before_hash: Option<&str>,
-    recovery: Option<(&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str)>,
-) -> Result<(), AppError> {
-    let governed_import_recovery = recovery.is_some();
-    let write_admission =
-        if let Some((token, operation_id, payload_digest, request_digest)) = recovery {
-            state
-                .persistence_coordinator
-                .admit_normal_or_governed_data_import_writes(
-                    &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-                    Some(token),
-                    operation_id,
-                    payload_digest,
-                    request_digest,
-                )
-                .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?
-        } else {
-            state
-                .persistence_coordinator
-                .admit_normal_or_governed_data_import_writes(
-                    &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-                    None,
-                    "",
-                    "",
-                    "",
-                )
-                .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?
-        };
-    let commit_permit = state
-        .persistence_coordinator
-        .acquire_canonical_commit_permit(&write_admission)
-        .await
-        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
-    let recovery_mutation_kind =
-        recovery.map(|(_, operation_id, payload_digest, request_digest)| {
-            governed_import_file_mutation_kind(operation_id, payload_digest, request_digest)
-        });
-    ensure_lifemodel_materializer_caller_restriction(&caller_context, "LifeModelManager::save")
-        .map_err(AppError::from)?;
-    if !matches!(
-        (caller_context.kind, caller_context.purpose),
-        (
-            LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
-            LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
-        )
-    ) {
-        return Err(AppError::permission(
-            "LifeModel restore requires the governed restore/import caller lane",
-        ));
-    }
-    let _coordinator = state.life_model_write_coordinator.lock().await;
-    if governed_import_recovery {
-        let mutation_kind = recovery_mutation_kind.as_deref().ok_or_else(|| {
-            AppError::internal("governed import recovery mutation binding is missing")
-        })?;
-        ensure_no_unrelated_lifemodel_file_backlog_for_recovery_unlocked(state, mutation_kind)
-            .await
-            .map_err(AppError::from)?;
-    } else {
-        ensure_no_lifemodel_file_backlog_unlocked(state)
-            .await
-            .map_err(AppError::from)?;
-    }
-    let current_model = {
-        let manager = state.life_model_manager.lock().await;
-        manager.load().map_err(AppError::from)?
-    };
-    let current_hash = hash_life_model(&current_model).map_err(AppError::from)?;
-    if expected_before_hash.is_some_and(|expected| expected != current_hash) {
-        return Err(AppError::internal(
-            "LifeModel changed after required pre-restore snapshot",
-        ));
-    }
-    validate_lifemodel_field_authority(&current_model, restored_model, false)
-        .map_err(AppError::permission)?;
-    let request = LifeModelWriteGatewayRequest {
-        intent: LifeModelWriteIntentKind::RestoreImportOverride,
-        proposal_id: None,
-        run_id: None,
-        evidence_id: None,
-        base_hash: None,
-        current_hash: None,
-        before_hash: Some(current_hash),
-        after_hash: hash_life_model(restored_model).ok(),
-        explicit_manual_override: true,
-        risk_acknowledged: true,
-    };
-    let decision = LifeModelWriteGateway::decide(request);
-    if !decision.allowed {
-        return Err(AppError::permission(format!(
-            "LifeModelWriteGateway blocked restore: {}",
-            decision.reason_code
-        )));
-    }
-    write_life_model_without_prepare(
-        state,
-        &current_model,
-        restored_model,
-        commit_permit,
-        recovery_mutation_kind.as_deref().map_or(
-            LifeModelFilePostCommitPolicy::ReconcileProjections,
-            |mutation_kind| LifeModelFilePostCommitPolicy::GovernedImportCanonicalOnly {
-                mutation_kind,
-            },
-        ),
-    )
-    .await?;
-    if !governed_import_recovery {
-        record_lifemodel_gateway_audit(
-            state,
-            "lifemodel_gateway_restore",
-            None,
-            None,
-            None,
-            &decision.reason_code,
-            None,
-            decision.base_hash.as_deref(),
-            decision.current_hash.as_deref(),
-            decision.before_hash.as_deref(),
-            decision.after_hash.as_deref(),
-            &decision.lane,
-        )
-        .await;
-    }
-    Ok(())
-}
-
 pub(crate) async fn stamp_lifemodel_proposal_base_hash_with_state(
     state: &Arc<AppState>,
     proposal: &mut AgentProposal,
@@ -1272,7 +877,7 @@ async fn write_life_model(
     mut life_model: LifeModel,
     create_daily_snapshot: bool,
     commit_permit: CanonicalCommitPermit<'_>,
-    post_commit_policy: LifeModelFilePostCommitPolicy<'_>,
+    post_commit_policy: LifeModelFilePostCommitPolicy,
 ) -> Result<LifeModel, String> {
     let expected_hash = hash_life_model(previous_model).map_err(|error| error.to_string())?;
     openlife_core::versioning::prepare_model_for_save(Some(previous_model), &mut life_model);
@@ -1343,13 +948,7 @@ async fn write_life_model_compare_and_swap_with_snapshot_fault(
 ) -> Result<Option<(LifeModel, bool)>, String> {
     let write_admission = state
         .persistence_coordinator
-        .admit_normal_or_governed_data_import_writes(
-            &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-            None,
-            "",
-            "",
-            "",
-        )
+        .admit_canonical_writes(&[CanonicalWriteOwner::LifeModelFileStore])
         .map_err(|error| error.to_string())?;
     let commit_permit = state
         .persistence_coordinator
@@ -1400,7 +999,7 @@ async fn write_prepared_life_model_compare_and_swap(
     commit_permit: CanonicalCommitPermit<'_>,
     _write_fault: FileWriteFaultInjection,
     snapshot_fault: DailySnapshotFaultInjection,
-    post_commit_policy: LifeModelFilePostCommitPolicy<'_>,
+    _post_commit_policy: LifeModelFilePostCommitPolicy,
 ) -> Result<Option<LifeModelFileCommit>, String> {
     let after_digest = hash_life_model(&life_model).map_err(|error| error.to_string())?;
     if after_digest == expected_hash {
@@ -1436,19 +1035,7 @@ async fn write_prepared_life_model_compare_and_swap(
     };
     let journal = FileMutationJournal::new(journal_path).map_err(|error| error.to_string())?;
     let targets = projection_plan.targets();
-    if matches!(
-        post_commit_policy,
-        LifeModelFilePostCommitPolicy::GovernedImportCanonicalOnly { .. }
-    ) && !targets.is_empty()
-    {
-        return Err("governed data-import recovery file mutation cannot own projections".into());
-    }
-    let mutation_kind = match post_commit_policy {
-        LifeModelFilePostCommitPolicy::ReconcileProjections => "updated",
-        LifeModelFilePostCommitPolicy::GovernedImportCanonicalOnly { mutation_kind } => {
-            mutation_kind
-        }
-    };
+    let mutation_kind = "updated";
     let receipt = journal
         .prepare(
             LIFEMODEL_FILE_AGGREGATE_KIND,
@@ -1562,20 +1149,21 @@ async fn write_prepared_life_model_compare_and_swap(
 
     drop(commit_permit);
 
-    let projection_degraded = match post_commit_policy {
-        LifeModelFilePostCommitPolicy::ReconcileProjections => {
-            match reconcile_lifemodel_file_mutations_unlocked(state, snapshot_fault, false).await {
-                Ok(report) => report.degraded > 0 || report.backlog_may_remain,
-                Err(error) => {
-                    log::warn!(
-                        "[LifeModelWriteGateway] canonical commit succeeded but projection reconciliation failed: {}",
-                        error
-                    );
-                    true
-                }
-            }
+    let projection_degraded = match reconcile_lifemodel_file_mutations_unlocked(
+        state,
+        snapshot_fault,
+        false,
+    )
+    .await
+    {
+        Ok(report) => report.degraded > 0 || report.backlog_may_remain,
+        Err(error) => {
+            log::warn!(
+                "[LifeModelWriteGateway] canonical commit succeeded but projection reconciliation failed: {}",
+                error
+            );
+            true
         }
-        LifeModelFilePostCommitPolicy::GovernedImportCanonicalOnly { .. } => false,
     };
     Ok(Some(LifeModelFileCommit {
         life_model,
@@ -1588,7 +1176,7 @@ async fn write_life_model_without_prepare(
     previous_model: &LifeModel,
     life_model: &LifeModel,
     commit_permit: CanonicalCommitPermit<'_>,
-    post_commit_policy: LifeModelFilePostCommitPolicy<'_>,
+    post_commit_policy: LifeModelFilePostCommitPolicy,
 ) -> Result<(), AppError> {
     let expected_hash = hash_life_model(previous_model).map_err(AppError::from)?;
     write_prepared_life_model_compare_and_swap(
@@ -1615,21 +1203,6 @@ fn gateway_request_for_caller(
     let before_hash = previous_model.and_then(|model| hash_life_model(model).ok());
     let after_hash = hash_life_model(after).ok();
     let request = match (caller_context.kind, caller_context.purpose) {
-        (
-            LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
-            LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
-        ) => LifeModelWriteGatewayRequest {
-            intent: LifeModelWriteIntentKind::RestoreImportOverride,
-            proposal_id: None,
-            run_id: None,
-            evidence_id: None,
-            base_hash: None,
-            current_hash: None,
-            before_hash,
-            after_hash,
-            explicit_manual_override: true,
-            risk_acknowledged: true,
-        },
         (
             LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
             LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
@@ -1746,61 +1319,19 @@ mod tests {
     use super::*;
     use openlife_core::agent::types::RiskLevel;
     use openlife_core::life_model::patch::{PatchOp, PatchSource, PatchStatus};
-    use openlife_core::persistence_outbox::{
-        metadata_digest, GovernedDataImportJournal, GovernedDataImportOwnerPlan,
-        GovernedDataImportPrepare, GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON,
-    };
-
-    fn with_governed_import_recovery_coordinator(state: &Arc<AppState>) -> Arc<AppState> {
-        let coordinator =
-            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap();
-        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
-            coordinator.register_read_write(*store);
-        }
-        coordinator.degrade_globally(GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON);
-        coordinator.seal();
-
-        let mut recovery_state = (**state).clone();
-        recovery_state.persistence_coordinator = Arc::new(coordinator);
-        Arc::new(recovery_state)
-    }
 
     async fn isolated_lifemodel_commit_permit<'state>(
         state: &'state Arc<AppState>,
     ) -> CanonicalCommitPermit<'state> {
         let admission = state
             .persistence_coordinator
-            .admit_normal_or_governed_data_import_writes(
-                &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-                None,
-                "",
-                "",
-                "",
-            )
+            .admit_canonical_writes(&[CanonicalWriteOwner::LifeModelFileStore])
             .expect("isolated evaluation must admit a bounded LifeModel write");
         state
             .persistence_coordinator
             .acquire_canonical_commit_permit(&admission)
             .await
             .expect("isolated evaluation admission must become a commit permit")
-    }
-
-    fn governed_lifemodel_recovery_prepare(
-        before_digest: String,
-        target_digest: String,
-    ) -> GovernedDataImportPrepare {
-        GovernedDataImportPrepare {
-            operation_id: uuid::Uuid::new_v4().to_string(),
-            payload_digest: metadata_digest("lifemodel-recovery-payload"),
-            request_digest: metadata_digest("lifemodel-recovery-request"),
-            owners: vec![GovernedDataImportOwnerPlan {
-                owner: "LifeModelFileStore".into(),
-                import_target: "life_model".into(),
-                before_digest,
-                target_digest,
-                item_count: 1,
-            }],
-        }
     }
 
     fn prepared_name_patch(
@@ -1891,13 +1422,7 @@ mod tests {
 
         let stale_admission = state
             .persistence_coordinator
-            .admit_normal_or_governed_data_import_writes(
-                &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-                None,
-                "",
-                "",
-                "",
-            )
+            .admit_canonical_writes(&[CanonicalWriteOwner::LifeModelFileStore])
             .expect("healthy runtime must issue a normal admission");
         state
             .persistence_coordinator
@@ -1919,523 +1444,6 @@ mod tests {
             hash_life_model(&state.life_model_manager.lock().await.load().unwrap()).unwrap(),
             baseline_hash,
             "a rejected late admission must leave canonical LifeModel unchanged"
-        );
-    }
-
-    #[tokio::test]
-    async fn governed_import_recovery_fails_closed_without_dispatching_existing_projection_backlog()
-    {
-        let initial_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let baseline = LifeModel::default();
-        initial_state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&baseline)
-            .unwrap();
-        let baseline_hash = hash_life_model(&baseline).unwrap();
-        let (committed_model, patch) = prepared_name_patch(
-            &baseline,
-            "recovery-scope-backlog",
-            "committed-before-recovery",
-        );
-        let committed_hash = hash_life_model(&committed_model).unwrap();
-
-        let file_journal_path = initial_state
-            .life_model_manager
-            .lock()
-            .await
-            .mutation_journal_path();
-        let file_journal = FileMutationJournal::new(file_journal_path).unwrap();
-        let file_receipt = file_journal
-            .prepare(
-                LIFEMODEL_FILE_AGGREGATE_KIND,
-                LIFEMODEL_FILE_AGGREGATE_ID,
-                "updated",
-                &baseline_hash,
-                &committed_hash,
-                &[PROJECTION_PATCH_STORE, PROJECTION_PATCH_AFTER_SNAPSHOT],
-            )
-            .unwrap();
-        initial_state
-            .patch_store
-            .as_ref()
-            .unwrap()
-            .lock()
-            .await
-            .stage_materialization_patches(
-                &file_receipt.operation_id,
-                &baseline_hash,
-                &committed_hash,
-                std::slice::from_ref(&patch),
-            )
-            .unwrap();
-        initial_state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&committed_model)
-            .unwrap();
-        assert_eq!(
-            file_journal
-                .observe_canonical_digest(&file_receipt.operation_id, &committed_hash)
-                .unwrap(),
-            FileMutationState::Committed
-        );
-
-        let state = with_governed_import_recovery_coordinator(&initial_state);
-        let mut recovery_target = committed_model.clone();
-        recovery_target.identity.name = "must-not-overwrite-with-backlog".into();
-        let recovery_target_hash = hash_life_model(&recovery_target).unwrap();
-        let recovery_directory = tempfile::tempdir().unwrap();
-        let recovery_journal =
-            GovernedDataImportJournal::new(recovery_directory.path().join("journal.db")).unwrap();
-        let prepare =
-            governed_lifemodel_recovery_prepare(committed_hash.clone(), recovery_target_hash);
-        let receipt = recovery_journal.prepare(prepare.clone()).unwrap().receipt;
-        let token = state
-            .persistence_coordinator
-            .mint_governed_data_import_recovery_admission(
-                &recovery_journal,
-                &receipt,
-                &prepare.operation_id,
-                &prepare.payload_digest,
-                &prepare.request_digest,
-            )
-            .unwrap();
-
-        let audit_before = state
-            .feedback_store
-            .lock()
-            .await
-            .count_event_today("lifemodel_gateway_restore")
-            .unwrap();
-        let snapshots_before = state
-            .version_manager
-            .lock()
-            .await
-            .get_patch_snapshots("recovery-scope-backlog")
-            .unwrap()
-            .len();
-        let error = restore_life_model_with_gateway_for_import_recovery(
-            &state,
-            &recovery_target,
-            LifeModelMaterializerCallerContext::new(
-                "governed-import-recovery-scope-test",
-                LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
-                LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
-            ),
-            Some(&committed_hash),
-            (
-                &token,
-                &prepare.operation_id,
-                &prepare.payload_digest,
-                &prepare.request_digest,
-            ),
-        )
-        .await
-        .expect_err("recovery must fail closed while unrelated projection backlog exists");
-
-        assert!(error
-            .message()
-            .contains("blocked by degraded projection recovery"));
-        assert_eq!(
-            hash_life_model(&state.life_model_manager.lock().await.load().unwrap()).unwrap(),
-            committed_hash,
-            "the recovery target must not commit while backlog exists"
-        );
-        assert_eq!(
-            state
-                .patch_store
-                .as_ref()
-                .unwrap()
-                .lock()
-                .await
-                .get_patch(&patch.id)
-                .unwrap()
-                .unwrap()
-                .status,
-            PatchStatus::Pending,
-            "recovery admission must not dispatch PatchStore projection"
-        );
-        assert_eq!(
-            state
-                .version_manager
-                .lock()
-                .await
-                .get_patch_snapshots("recovery-scope-backlog")
-                .unwrap()
-                .len(),
-            snapshots_before,
-            "recovery admission must not dispatch VersionManager projection"
-        );
-        assert_eq!(
-            state
-                .feedback_store
-                .lock()
-                .await
-                .count_event_today("lifemodel_gateway_restore")
-                .unwrap(),
-            audit_before,
-            "failed recovery must not write FeedbackStore audit"
-        );
-    }
-
-    #[tokio::test]
-    async fn governed_import_recovery_commits_canonical_lifemodel_without_feedback_audit() {
-        let initial_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let baseline = LifeModel::default();
-        initial_state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&baseline)
-            .unwrap();
-        let baseline_hash = hash_life_model(&baseline).unwrap();
-        let mut recovery_target = baseline.clone();
-        recovery_target.identity.name = "canonical-recovery-target".into();
-        let recovery_target_hash = hash_life_model(&recovery_target).unwrap();
-        let state = with_governed_import_recovery_coordinator(&initial_state);
-
-        let recovery_directory = tempfile::tempdir().unwrap();
-        let recovery_journal =
-            GovernedDataImportJournal::new(recovery_directory.path().join("journal.db")).unwrap();
-        let prepare = governed_lifemodel_recovery_prepare(
-            baseline_hash.clone(),
-            recovery_target_hash.clone(),
-        );
-        let receipt = recovery_journal.prepare(prepare.clone()).unwrap().receipt;
-        let token = state
-            .persistence_coordinator
-            .mint_governed_data_import_recovery_admission(
-                &recovery_journal,
-                &receipt,
-                &prepare.operation_id,
-                &prepare.payload_digest,
-                &prepare.request_digest,
-            )
-            .unwrap();
-        let audit_before = state
-            .feedback_store
-            .lock()
-            .await
-            .count_event_today("lifemodel_gateway_restore")
-            .unwrap();
-
-        restore_life_model_with_gateway_for_import_recovery(
-            &state,
-            &recovery_target,
-            LifeModelMaterializerCallerContext::new(
-                "governed-import-recovery-canonical-test",
-                LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
-                LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
-            ),
-            Some(&baseline_hash),
-            (
-                &token,
-                &prepare.operation_id,
-                &prepare.payload_digest,
-                &prepare.request_digest,
-            ),
-        )
-        .await
-        .expect("clean recovery must retain canonical LifeModel write authority");
-
-        assert_eq!(
-            hash_life_model(&state.life_model_manager.lock().await.load().unwrap()).unwrap(),
-            recovery_target_hash
-        );
-        assert_eq!(
-            state
-                .feedback_store
-                .lock()
-                .await
-                .count_event_today("lifemodel_gateway_restore")
-                .unwrap(),
-            audit_before,
-            "recovery must not write outside its four-owner capability"
-        );
-    }
-
-    #[tokio::test]
-    async fn governed_import_recovery_persist_forbids_snapshot_projection_and_feedback_audit() {
-        let initial_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let baseline = LifeModel::default();
-        initial_state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&baseline)
-            .unwrap();
-        let baseline_hash = hash_life_model(&baseline).unwrap();
-        let mut recovery_target = baseline.clone();
-        recovery_target.identity.name = "persist-recovery-target".into();
-        let recovery_target_hash = hash_life_model(&recovery_target).unwrap();
-        let state = with_governed_import_recovery_coordinator(&initial_state);
-
-        let recovery_directory = tempfile::tempdir().unwrap();
-        let recovery_journal =
-            GovernedDataImportJournal::new(recovery_directory.path().join("journal.db")).unwrap();
-        let prepare = governed_lifemodel_recovery_prepare(
-            baseline_hash.clone(),
-            recovery_target_hash.clone(),
-        );
-        let receipt = recovery_journal.prepare(prepare.clone()).unwrap().receipt;
-        let token = state
-            .persistence_coordinator
-            .mint_governed_data_import_recovery_admission(
-                &recovery_journal,
-                &receipt,
-                &prepare.operation_id,
-                &prepare.payload_digest,
-                &prepare.request_digest,
-            )
-            .unwrap();
-        let binding = (
-            &token,
-            prepare.operation_id.as_str(),
-            prepare.payload_digest.as_str(),
-            prepare.request_digest.as_str(),
-        );
-        let caller = LifeModelMaterializerCallerContext::new(
-            "governed-import-recovery-persist-test",
-            LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
-            LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
-        );
-        let snapshot_count_before = state
-            .version_manager
-            .lock()
-            .await
-            .list_versions()
-            .unwrap()
-            .len();
-        let audit_before = state
-            .feedback_store
-            .lock()
-            .await
-            .count_event_today("lifemodel_gateway_persist")
-            .unwrap();
-
-        let error = persist_life_model_with_gateway_expected_for_import_recovery(
-            &state,
-            recovery_target.clone(),
-            true,
-            caller.clone(),
-            Some(&baseline_hash),
-            binding,
-        )
-        .await
-        .expect_err("recovery must not request a VersionManager snapshot");
-        assert!(error.contains("cannot request LifeModel snapshot projection"));
-        assert_eq!(
-            hash_life_model(&state.life_model_manager.lock().await.load().unwrap()).unwrap(),
-            baseline_hash
-        );
-
-        let written = persist_life_model_with_gateway_expected_for_import_recovery(
-            &state,
-            recovery_target,
-            false,
-            caller,
-            Some(&baseline_hash),
-            binding,
-        )
-        .await
-        .expect("canonical-only recovery persist must remain available");
-        assert_eq!(written.identity.name, "persist-recovery-target");
-        assert_eq!(
-            state
-                .life_model_manager
-                .lock()
-                .await
-                .load()
-                .unwrap()
-                .identity
-                .name,
-            written.identity.name
-        );
-        assert_eq!(
-            state
-                .version_manager
-                .lock()
-                .await
-                .list_versions()
-                .unwrap()
-                .len(),
-            snapshot_count_before,
-            "recovery persist must not dispatch VersionManager"
-        );
-        assert_eq!(
-            state
-                .feedback_store
-                .lock()
-                .await
-                .count_event_today("lifemodel_gateway_persist")
-                .unwrap(),
-            audit_before,
-            "recovery persist must not write FeedbackStore audit"
-        );
-    }
-
-    #[tokio::test]
-    async fn governed_import_recovery_reconciles_only_its_own_prepared_file_journal_after_crash() {
-        let initial_state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let baseline = LifeModel::default();
-        initial_state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&baseline)
-            .unwrap();
-        let baseline_hash = hash_life_model(&baseline).unwrap();
-        let mut recovery_target = baseline.clone();
-        recovery_target.identity.name = "recovered-after-file-journal-prepare".into();
-        let recovery_target_hash = hash_life_model(&recovery_target).unwrap();
-        let state = with_governed_import_recovery_coordinator(&initial_state);
-
-        let recovery_directory = tempfile::tempdir().unwrap();
-        let recovery_journal =
-            GovernedDataImportJournal::new(recovery_directory.path().join("journal.db")).unwrap();
-        let prepare = governed_lifemodel_recovery_prepare(
-            baseline_hash.clone(),
-            recovery_target_hash.clone(),
-        );
-        let receipt = recovery_journal.prepare(prepare.clone()).unwrap().receipt;
-        let token = state
-            .persistence_coordinator
-            .mint_governed_data_import_recovery_admission(
-                &recovery_journal,
-                &receipt,
-                &prepare.operation_id,
-                &prepare.payload_digest,
-                &prepare.request_digest,
-            )
-            .unwrap();
-        let mutation_kind = governed_import_file_mutation_kind(
-            &prepare.operation_id,
-            &prepare.payload_digest,
-            &prepare.request_digest,
-        );
-        let write_admission = state
-            .persistence_coordinator
-            .admit_normal_or_governed_data_import_writes(
-                &[GovernedDataImportRecoveryOwner::LifeModelFileStore],
-                Some(&token),
-                &prepare.operation_id,
-                &prepare.payload_digest,
-                &prepare.request_digest,
-            )
-            .unwrap();
-        let commit_permit = state
-            .persistence_coordinator
-            .acquire_canonical_commit_permit(&write_admission)
-            .await
-            .unwrap();
-
-        let injected = write_prepared_life_model_compare_and_swap(
-            &state,
-            &baseline_hash,
-            recovery_target.clone(),
-            LifeModelProjectionPlan::default(),
-            commit_permit,
-            FileWriteFaultInjection::StopAfterStageBeforeCanonical,
-            DailySnapshotFaultInjection::None,
-            LifeModelFilePostCommitPolicy::GovernedImportCanonicalOnly {
-                mutation_kind: &mutation_kind,
-            },
-        )
-        .await
-        .expect_err("fault must stop after inner journal prepare and before canonical rename");
-        assert!(injected.contains("injected_stop_after_lifemodel_stage"));
-        assert_eq!(
-            hash_life_model(&state.life_model_manager.lock().await.load().unwrap()).unwrap(),
-            baseline_hash
-        );
-        let file_journal_path = state
-            .life_model_manager
-            .lock()
-            .await
-            .mutation_journal_path();
-        assert!(matches!(
-            FileMutationJournal::new(&file_journal_path)
-                .unwrap()
-                .unresolved_operation(LIFEMODEL_FILE_AGGREGATE_KIND, LIFEMODEL_FILE_AGGREGATE_ID)
-                .unwrap(),
-            Some((_, FileMutationState::Prepared))
-        ));
-
-        restore_life_model_with_gateway_for_import_recovery(
-            &state,
-            &recovery_target,
-            LifeModelMaterializerCallerContext::new(
-                "governed-import-recovery-file-journal-restart-test",
-                LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
-                LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
-            ),
-            Some(&baseline_hash),
-            (
-                &token,
-                &prepare.operation_id,
-                &prepare.payload_digest,
-                &prepare.request_digest,
-            ),
-        )
-        .await
-        .expect("restart recovery must close its own prepared journal and retry canonical CAS");
-
-        assert_eq!(
-            hash_life_model(&state.life_model_manager.lock().await.load().unwrap()).unwrap(),
-            recovery_target_hash
-        );
-        assert!(FileMutationJournal::new(file_journal_path)
-            .unwrap()
-            .unresolved_operation(LIFEMODEL_FILE_AGGREGATE_KIND, LIFEMODEL_FILE_AGGREGATE_ID)
-            .unwrap()
-            .is_none());
-    }
-
-    #[tokio::test]
-    async fn normal_lifemodel_restore_still_records_gateway_audit() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let baseline = LifeModel::default();
-        state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&baseline)
-            .unwrap();
-        let baseline_hash = hash_life_model(&baseline).unwrap();
-        let mut restored = baseline;
-        restored.identity.name = "normal-governed-restore".into();
-        let audit_before = state
-            .feedback_store
-            .lock()
-            .await
-            .count_event_today("lifemodel_gateway_restore")
-            .unwrap();
-
-        restore_life_model_with_gateway(
-            &state,
-            &restored,
-            LifeModelMaterializerCallerContext::new(
-                "normal-governed-restore-audit-test",
-                LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
-                LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
-            ),
-            Some(&baseline_hash),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            state
-                .feedback_store
-                .lock()
-                .await
-                .count_event_today("lifemodel_gateway_restore")
-                .unwrap(),
-            audit_before + 1,
-            "ordinary governed writes retain their existing audit semantics"
         );
     }
 
@@ -2471,149 +1479,6 @@ mod tests {
                 PROJECTION_PATCH_STORE
             ]
         );
-    }
-
-    #[tokio::test]
-    async fn restore_import_pre_change_snapshot_hash_prevents_stale_overwrite() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let baseline = LifeModel::default();
-        state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&baseline)
-            .unwrap();
-        let snapshotted_hash = hash_life_model(&baseline).unwrap();
-        let mut concurrent = baseline.clone();
-        concurrent.identity.name = "concurrent-writer".into();
-        state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&concurrent)
-            .unwrap();
-        let mut stale_replacement = baseline;
-        stale_replacement.identity.name = "stale-overwrite".into();
-
-        let error = persist_life_model_with_gateway_expected(
-            &state,
-            stale_replacement,
-            false,
-            LifeModelMaterializerCallerContext::new(
-                "stale-restore-import-test",
-                LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
-                LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
-            ),
-            Some(&snapshotted_hash),
-        )
-        .await
-        .expect_err("stale pre-change snapshot must block overwrite");
-        assert!(error.contains("changed after required pre-change snapshot"));
-        assert_eq!(
-            state
-                .life_model_manager
-                .lock()
-                .await
-                .load()
-                .unwrap()
-                .identity
-                .name,
-            "concurrent-writer"
-        );
-    }
-
-    #[tokio::test]
-    async fn governed_restore_import_cannot_replace_statestore_owned_daily_tasks() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let baseline = LifeModel::default();
-        state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&baseline)
-            .unwrap();
-        let baseline_hash = hash_life_model(&baseline).unwrap();
-        let mut replacement = baseline.clone();
-        replacement
-            .goals
-            .daily
-            .push(openlife_core::life_model::DailyGoal {
-                name: "must-not-enter-yaml-as-truth".into(),
-                ..Default::default()
-            });
-
-        let error = persist_life_model_with_gateway_expected(
-            &state,
-            replacement,
-            false,
-            LifeModelMaterializerCallerContext::new(
-                "restore-import-state-owner-test",
-                LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
-                LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
-            ),
-            Some(&baseline_hash),
-        )
-        .await
-        .expect_err("restore import must not create a second daily-task owner");
-
-        assert!(error.contains("statestore_owned_path_changed:goals.daily"));
-        assert!(state
-            .life_model_manager
-            .lock()
-            .await
-            .load()
-            .unwrap()
-            .goals
-            .daily
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn governed_restore_cannot_persist_derived_state_alerts() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let baseline = LifeModel::default();
-        state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&baseline)
-            .unwrap();
-        let baseline_hash = hash_life_model(&baseline).unwrap();
-        let mut replacement = baseline;
-        replacement
-            .state
-            .alerts
-            .push(openlife_core::life_model::StateAlert {
-                dimension_name: "focus".into(),
-                message: "must remain derived".into(),
-                ..Default::default()
-            });
-
-        let error = restore_life_model_with_gateway(
-            &state,
-            &replacement,
-            LifeModelMaterializerCallerContext::new(
-                "restore-derived-alert-test",
-                LifeModelMaterializerCallerKind::GovernedRestoreImportOperation,
-                LifeModelMaterializerCallerPurpose::GovernedRestoreImportOperation,
-            ),
-            Some(&baseline_hash),
-        )
-        .await
-        .expect_err("restore must not persist a derived alert collection");
-
-        assert!(error
-            .message()
-            .contains("derived_projection_path_changed:state.alerts"));
-        assert!(state
-            .life_model_manager
-            .lock()
-            .await
-            .load()
-            .unwrap()
-            .state
-            .alerts
-            .is_empty());
     }
 
     #[tokio::test]
@@ -2692,47 +1557,6 @@ mod tests {
         .expect_err("compatibility privilege must be bound to the exact projector");
 
         assert!(error.contains("StateStore daily-task projector identity"));
-        assert!(state
-            .life_model_manager
-            .lock()
-            .await
-            .load()
-            .unwrap()
-            .identity
-            .name
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn restore_entrypoint_requires_the_governed_restore_import_lane() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let baseline = LifeModel::default();
-        state
-            .life_model_manager
-            .lock()
-            .await
-            .save(&baseline)
-            .unwrap();
-        let baseline_hash = hash_life_model(&baseline).unwrap();
-        let mut replacement = baseline;
-        replacement.identity.name = "must not bypass restore governance".into();
-
-        let error = restore_life_model_with_gateway(
-            &state,
-            &replacement,
-            LifeModelMaterializerCallerContext::new(
-                STATE_STORE_DAILY_TASK_COMPATIBILITY_MATERIALIZER_ID,
-                LifeModelMaterializerCallerKind::SourceDataCompatibilityMaterialization,
-                LifeModelMaterializerCallerPurpose::SourceDataCompatibilityNotAcceptedTruth,
-            ),
-            Some(&baseline_hash),
-        )
-        .await
-        .expect_err("a compatibility context must not enter the restore lane");
-
-        assert!(error
-            .message()
-            .contains("governed restore/import caller lane"));
         assert!(state
             .life_model_manager
             .lock()

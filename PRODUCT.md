@@ -62,14 +62,15 @@ require a separate top-level product page.
 
 ## Current Development Baseline
 
-H0-H6 completed the canonical capable-Agent harness baseline: complete vertical
-product capabilities moved to one Chat/Work spine, and the replaced backend and
-frontend owners were deleted. This is an engineering baseline, not a claim of
-market readiness or complete future capability coverage.
+OpenLife has one canonical Chat/Work spine and one Workbench snapshot boundary.
+Replaced backend, frontend, test, script, and documentation owners have been
+removed from the current source tree without changing that product contract.
+This is an engineering baseline, not a claim of market readiness or complete
+future capability coverage.
 
-S0-S7, R0-R8, and H0-H6 are retained in Git history. ADR 0018 and ADR 0019
+Earlier development programs remain in Git history. ADR 0018 and ADR 0019
 remain the accepted reconstruction and harness contracts. There is no active
-implementation objective until the next bounded product capability is agreed.
+implementation plan.
 
 Repository governance remains small and conventional: at most one active plan, normal
 source tests, normal CI, and concise architecture and decision records.

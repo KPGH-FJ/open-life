@@ -24,7 +24,6 @@ use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
 use openlife_core::mcp_audit::McpAuditStore;
 use openlife_core::memory::MemoryStore;
-use openlife_core::memory_cache::{HotMemoryCache, SharedHotCache};
 use openlife_core::privacy::PrivacyEngine;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::vectors::VectorStore;
@@ -408,42 +407,6 @@ fn init_vector_store(
     }
 }
 
-fn init_evidence_store(
-    db_path: &Path,
-    startup_warnings: &std::cell::RefCell<Vec<String>>,
-) -> Result<openlife_core::agent::EvidenceStore, String> {
-    match openlife_core::agent::EvidenceStore::new(db_path) {
-        Ok(store) => Ok(store),
-        Err(primary_err) => {
-            if !ephemeral_store_fallback_allowed() {
-                return Err(format!(
-                    "evidence.db durable initialization failed: {primary_err}"
-                ));
-            }
-            let fallback = recovery_db_path("evidence.db");
-            startup_warnings.borrow_mut().push(format!(
-                "evidence.db 初始化失败，正在使用临时数据库：{}",
-                primary_err
-            ));
-            match openlife_core::agent::EvidenceStore::new(&fallback) {
-                Ok(store) => Ok(store),
-                Err(fallback_err) => {
-                    startup_warnings.borrow_mut().push(format!(
-                        "临时 evidence.db 初始化也失败，已降级为内存数据库：{}",
-                        fallback_err
-                    ));
-                    openlife_core::agent::EvidenceStore::new_in_memory().map_err(|memory_err| {
-                        format!(
-                            "所有 evidence store 初始化失败: primary={}, fallback={}, in_memory={}",
-                            primary_err, fallback_err, memory_err
-                        )
-                    })
-                }
-            }
-        }
-    }
-}
-
 fn init_proposal_store(
     db_path: &Path,
     startup_warnings: &std::cell::RefCell<Vec<String>>,
@@ -782,53 +745,6 @@ fn bootstrap_with_secret_store(
             &error.to_string(),
         ),
     }
-    let governed_data_import_journal =
-        match openlife_core::persistence_outbox::GovernedDataImportJournal::new(
-            life_model_manager.mutation_journal_path(),
-        ) {
-            Ok(journal) => {
-                let journal = Arc::new(journal);
-                match journal.recovery_requirement() {
-                    Ok(Some(receipt)) => {
-                        persistence.register_read_write("GovernedDataImportJournal");
-                        persistence.degrade_globally(
-                        openlife_core::persistence_outbox::GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON,
-                    );
-                        startup_warnings.borrow_mut().push(format!(
-                        "governed data import recovery required before effects may resume: operation={} stage={}",
-                        receipt.operation_id,
-                        receipt.stage.as_str(),
-                    ));
-                    }
-                    Ok(None) => persistence.register_read_write("GovernedDataImportJournal"),
-                    Err(error) => {
-                        persistence.register_unavailable(
-                            "GovernedDataImportJournal",
-                            "data_import_journal_read_failed",
-                            &error.to_string(),
-                        );
-                        persistence.degrade_globally("data_import_journal_unavailable");
-                        startup_warnings.borrow_mut().push(format!(
-                        "governed data-import journal could not be inspected; effects remain fail-closed: {error}"
-                    ));
-                    }
-                }
-                Some(journal)
-            }
-            Err(error) => {
-                persistence.register_unavailable(
-                    "GovernedDataImportJournal",
-                    "data_import_journal_open_failed",
-                    &error.to_string(),
-                );
-                persistence.degrade_globally("data_import_journal_unavailable");
-                startup_warnings.borrow_mut().push(format!(
-                "governed data-import journal could not be opened; effects remain fail-closed: {error}"
-            ));
-                None
-            }
-        };
-
     let db_path = data_dir.join("memory.db");
     let memory_store = init_store(
         || init_memory_store(&db_path, &startup_warnings),
@@ -981,26 +897,6 @@ fn bootstrap_with_secret_store(
             None
         }
     });
-
-    let evidence_db_path = data_dir.join("evidence.db");
-    let evidence_store = init_store(
-        || init_evidence_store(&evidence_db_path, &startup_warnings),
-        || {
-            openlife_core::agent::EvidenceStore::open_read_only_existing(&evidence_db_path)
-                .map_err(|e| e.to_string())
-        },
-        || openlife_core::agent::EvidenceStore::new_in_memory().map_err(|e| e.to_string()),
-        "EvidenceStore",
-        &startup_warnings,
-        &persistence,
-    );
-    let evidence_store =
-        required_store_or_unavailable(evidence_store, "EvidenceStore", &startup_warnings, || {
-            openlife_core::agent::EvidenceStore::unavailable_sentinel()
-                .map_err(|error| error.to_string())
-        });
-
-    let policy_store = openlife_core::agent::PolicyStore::mvp_builtin();
 
     let proposals_db_path = data_dir.join("proposals.db");
     let proposal_store = init_store(
@@ -1316,14 +1212,6 @@ fn bootstrap_with_secret_store(
         )
     };
 
-    let hot_cache: SharedHotCache = {
-        let initial_cache = match life_model_manager.load_existing() {
-            Ok(Some(model)) => HotMemoryCache::from_life_model(&model),
-            Ok(None) | Err(_) => HotMemoryCache::default(),
-        };
-        Arc::new(tokio::sync::RwLock::new(initial_cache))
-    };
-
     #[cfg(feature = "dev-extensions")]
     let mcp_registry = {
         let mut registry = McpRegistry::new();
@@ -1514,36 +1402,7 @@ fn bootstrap_with_secret_store(
         },
     }
 
-    let mut plugin_registry = openlife_core::plugins::PluginRegistry::new(data_dir.join("plugins"));
-    match plugin_registry.reload() {
-        Ok(_) => persistence.register_read_write("PluginRegistry"),
-        Err(e) => {
-            persistence.register_unavailable(
-                "PluginRegistry",
-                "plugin_registry_reload_failed",
-                &e.to_string(),
-            );
-            startup_warnings
-                .borrow_mut()
-                .push(format!("plugins manifest reload failed: {}", e));
-        }
-    }
-    // Plugin manifests remain inspectable through PluginRegistry, but their skills are not
-    // product-selectable until ToolGateway owns a reviewed plugin executor contract.
     let skill_registry = openlife_core::skills::SkillRegistry::built_in();
-
-    let rollout_metrics_store = {
-        let store_path = data_dir.join("rollout_metrics.db");
-        match openlife_core::agent::RolloutMetricsStore::new(&store_path) {
-            Ok(store) => Some(Arc::new(Mutex::new(store))),
-            Err(e) => {
-                startup_warnings
-                    .borrow_mut()
-                    .push(format!("rollout_metrics.db 初始化失败: {}", e));
-                None
-            }
-        }
-    };
 
     let resource_runtime = {
         let store_path = data_dir.join("resources.db");
@@ -1667,7 +1526,6 @@ fn bootstrap_with_secret_store(
     .with_provider_status(provider_credential_status);
     let app_state = Arc::new(AppState {
         persistence_coordinator: Arc::clone(&persistence),
-        governed_data_import_journal,
         config: Arc::new(Mutex::new(config)),
         life_model_manager: Arc::new(Mutex::new(life_model_manager)),
         life_model_write_coordinator: Arc::new(Mutex::new(())),
@@ -1679,32 +1537,25 @@ fn bootstrap_with_secret_store(
         version_manager: Arc::new(Mutex::new(version_manager)),
         feedback_store: Arc::new(Mutex::new(feedback_store)),
         vector_store: Arc::new(Mutex::new(vector_store)),
-        vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
         last_snapshot_date: Arc::new(Mutex::new(None)),
         mcp_audit_store: Arc::new(Mutex::new(mcp_audit_store)),
         canonical_task_runtime_store: canonical_task_runtime_store
             .map(|store| Arc::new(Mutex::new(store))),
-        evidence_store: Arc::new(Mutex::new(evidence_store)),
-        policy_store: Arc::new(policy_store),
         proposal_store: proposal_store.map(|store| Arc::new(Mutex::new(store))),
         memory_lifecycle_store: memory_lifecycle_store.map(|store| Arc::new(Mutex::new(store))),
         life_model_learning_store: life_model_learning_store
             .map(|store| Arc::new(Mutex::new(store))),
         main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
         patch_store: patch_store.map(|store| Arc::new(Mutex::new(store))),
-        rollout_metrics_store,
         tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),
         skill_registry: Arc::new(Mutex::new(skill_registry)),
-        plugin_registry: Arc::new(Mutex::new(plugin_registry)),
-        hot_cache,
         startup_warnings: startup_warnings.into_inner(),
         credential_bootstrap_snapshot,
-        provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_store: Arc::new(scheduled_task_store),
+        #[cfg(test)]
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         resource_runtime,
         state_store,
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });
 
     BootstrapResult { state: app_state }

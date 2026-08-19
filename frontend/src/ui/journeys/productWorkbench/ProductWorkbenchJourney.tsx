@@ -313,16 +313,7 @@ export function ProductWorkbenchJourney({
   const announceSettings = useCallback((message: string) => {
     if (modeRef.current === "settings") setAnnouncement(message);
   }, []);
-  const conversationReloadRef = useRef<() => Promise<boolean>>(async () => true);
-  const refreshConversationAfterGovernedMutation = useCallback(async () => {
-    const reloaded = await conversationReloadRef.current();
-    if (!reloaded) throw new Error("conversation_refresh_after_governed_mutation_failed");
-  }, []);
-  const governed = useGovernedActionJourney(
-    governedActionDataSource,
-    setAnnouncement,
-    refreshConversationAfterGovernedMutation
-  );
+  const governed = useGovernedActionJourney(governedActionDataSource, setAnnouncement);
   const selectedConversationIdRef = useRef<string | null>(null);
   const refreshGovernedAfterTurn = useCallback(async () => {
     if (governedActionDataSource) {
@@ -333,9 +324,9 @@ export function ProductWorkbenchJourney({
     workspaceConversationDataSource,
     setAnnouncement,
     refreshGovernedAfterTurn,
-    null
+    null,
+    governed.snapshot?.conversationEnvelope.data ?? null
   );
-  conversationReloadRef.current = conversation.reload;
   const durable = useDurableTruthJourney(durableTruthDataSource, setAnnouncement);
   const settingsPrivacy = useSettingsPrivacyJourney(settingsPrivacyDataSource, announceSettings);
   const focusSequenceRef = useRef(0);
@@ -389,11 +380,11 @@ export function ProductWorkbenchJourney({
     setSelectedEvidence("");
     setInspectorOpen(false);
     setAnnouncement(routeEntryAnnouncement(initialSurface));
-    void loadBoundary(false);
     if (governedActionDataSource && initialSurface === "workspace") {
       void governed.load(false, "");
     }
     if (durableTruthDataSource && initialSurface === "life-model") {
+      void loadBoundary(false);
       void durable.load(false);
     }
     return () => {
@@ -410,21 +401,26 @@ export function ProductWorkbenchJourney({
   ]);
 
   useEffect(() => {
-    if (initialSurface === "workspace" && workspaceConversationDataSource) {
-      conversation.ensureLoaded();
-    }
-  }, [conversation.ensureLoaded, initialSurface, workspaceConversationDataSource]);
+    const envelope = governed.snapshot?.boundaryEnvelope;
+    if (initialSurface === "workspace" && envelope) setBoundaryEnvelope(envelope);
+  }, [governed.snapshot?.boundaryEnvelope, initialSurface]);
 
   useEffect(() => {
     if (initialSurface !== "workspace" || !governedActionDataSource) return;
     selectedConversationIdRef.current = conversation.selectedSessionId;
-    if (conversation.loadStatus === "ready") {
+    const projectedConversationId =
+      governed.snapshot?.workspaceEnvelope.data?.selectedConversationId ?? null;
+    if (
+      conversation.loadStatus === "ready" &&
+      projectedConversationId !== conversation.selectedSessionId
+    ) {
       void governed.load(false, conversation.selectedSessionId ?? "");
     }
   }, [
     conversation.loadStatus,
     conversation.selectedSessionId,
     governed.load,
+    governed.snapshot?.workspaceEnvelope.data?.selectedConversationId,
     governedActionDataSource,
     initialSurface,
   ]);
@@ -474,10 +470,7 @@ export function ProductWorkbenchJourney({
     requestFocus(`nav-${next}`);
     setAnnouncement(routeEntryAnnouncement(next));
     if (governedActionDataSource && next === "workspace") {
-      void governed.load(false);
-      if (workspaceConversationDataSource) {
-        conversation.ensureLoaded();
-      }
+      void governed.load(false, conversation.selectedSessionId ?? "");
     } else if (next === "life-model" && durableTruthDataSource) {
       void durable.load(false);
     } else if (next === "workspace" || next === "life-model") {
@@ -507,13 +500,12 @@ export function ProductWorkbenchJourney({
     setSelectedEvidence("");
     onRouteChange?.({ mode: "product", surface: settingsReturnSurface });
     setAnnouncement("已返回之前的产品工作区，正在重新读取已生效设置。 ");
-    void loadBoundary(false);
     if (settingsReturnSurface === "workspace") {
-      if (workspaceConversationDataSource) void conversation.reload();
       if (governedActionDataSource) {
         void governed.load(false, conversation.selectedSessionId ?? "");
       }
     } else if (durableTruthDataSource) {
+      void loadBoundary(false);
       void durable.load(false);
     }
   }

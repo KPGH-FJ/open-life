@@ -3,8 +3,7 @@ use crate::memory_retrieval_filter::{
     filter_canonical_retrievable_memory_results, merge_memory_hits,
 };
 use crate::persistence_coordinator::{
-    CanonicalCommitPermit, CanonicalWriteAdmission, GovernedDataImportRecoveryAdmission,
-    GovernedDataImportRecoveryOwner, PersistenceGateError,
+    CanonicalCommitPermit, CanonicalWriteAdmission, CanonicalWriteOwner, PersistenceGateError,
 };
 use crate::AppState;
 use once_cell::sync::Lazy as LazyLock;
@@ -14,7 +13,7 @@ use openlife_core::agent::main_chat_agent_v1::{
 use openlife_core::agent::{
     AgentProposal, CanonicalMemoryFactDescriptor, ExplicitMemoryWriteInput,
     ExplicitMemoryWriteReceipt, MainChatMemoryCandidate, MemoryLifecycleAcceptanceInput,
-    MemoryLifecycleScope, MemoryMaterializedView, MemoryPrivacyEraseReport, MemoryRollbackReport,
+    MemoryLifecycleScope, MemoryPrivacyEraseReport, MemoryRollbackReport,
 };
 use openlife_core::embedding::{
     execute_embedding, prepare_embedding_request_recorded, EmbeddingInvocationReceipt,
@@ -23,8 +22,7 @@ use openlife_core::embedding::{
 };
 use openlife_core::llm::ChatMessage;
 use openlife_core::memory::{
-    CanonicalMemoryRetrievalState, CanonicalMessageReplaceOutcome, MemoryRetrievalDisposition,
-    MemorySearchHit,
+    CanonicalMemoryRetrievalState, MemoryRetrievalDisposition, MemorySearchHit,
 };
 use openlife_core::memory_gateway::{
     MemoryGateway, MemoryGatewayDecision, MemoryGatewayRequest, MemoryGatewaySubject,
@@ -36,9 +34,8 @@ use openlife_core::persistence_outbox::{
 };
 use openlife_core::vectors::{
     plan_embedding_privacy, CanonicalMemoryRetrievalCandidate, CanonicalVectorOwnerRef,
-    ExportedVectorChunk, MemoryChunk, PortableVectorImportReport, PortableVectorReplaceOutcome,
-    TierStats, VectorRebuildBatchItem, VectorRebuildEvidence, VectorRebuildJob,
-    VectorRebuildJobStatus, VectorSearchOutcome, VECTOR_REBUILD_BATCH_LIMIT,
+    ExportedVectorChunk, MemoryChunk, TierStats, VectorRebuildBatchItem, VectorRebuildEvidence,
+    VectorRebuildJob, VectorRebuildJobStatus, VectorSearchOutcome, VECTOR_REBUILD_BATCH_LIMIT,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
@@ -52,8 +49,6 @@ const BACKGROUND_CANONICAL_OUTBOX_BATCH: usize = 32;
 const BACKGROUND_CANONICAL_OUTBOX_MAX_PASSES: usize = 4;
 const BACKGROUND_CANONICAL_OUTBOX_RETRY_DELAY: std::time::Duration =
     std::time::Duration::from_secs(30);
-static GOVERNED_MEMORY_IMPORT_LOCK: LazyLock<tokio::sync::Mutex<()>> =
-    LazyLock::new(|| tokio::sync::Mutex::new(()));
 static MEMORY_RETRIEVAL_PROJECTION_LOCK: LazyLock<tokio::sync::Mutex<()>> =
     LazyLock::new(|| tokio::sync::Mutex::new(()));
 
@@ -84,46 +79,20 @@ fn require_persistence_write_string(state: &Arc<AppState>) -> Result<(), String>
 }
 
 /// Enter the process-wide canonical commit window before taking any Memory or
-/// Vector owner lock. Recovery terminalization takes the exclusive side of the
-/// same barrier, so an admission that predates degradation is rechecked and
-/// refused instead of committing after the owner was observed.
-fn admit_memory_vector_writes<'journal>(
+/// Vector owner lock.
+fn admit_memory_vector_writes(
     state: &Arc<AppState>,
-    owners: &[GovernedDataImportRecoveryOwner],
-    recovery: Option<(
-        &GovernedDataImportRecoveryAdmission<'journal>,
-        &str,
-        &str,
-        &str,
-    )>,
-) -> Result<CanonicalWriteAdmission<'journal>, AppError> {
-    let (recovery_admission, operation_id, payload_digest, request_digest) = recovery
-        .map(
-            |(admission, operation_id, payload_digest, request_digest)| {
-                (
-                    Some(admission),
-                    operation_id,
-                    payload_digest,
-                    request_digest,
-                )
-            },
-        )
-        .unwrap_or((None, "", "", ""));
+    owners: &[CanonicalWriteOwner],
+) -> Result<CanonicalWriteAdmission, AppError> {
     state
         .persistence_coordinator
-        .admit_normal_or_governed_data_import_writes(
-            owners,
-            recovery_admission,
-            operation_id,
-            payload_digest,
-            request_digest,
-        )
+        .admit_canonical_writes(owners)
         .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))
 }
 
 async fn exchange_memory_vector_commit_admission<'state>(
     state: &'state Arc<AppState>,
-    admission: &CanonicalWriteAdmission<'_>,
+    admission: &CanonicalWriteAdmission,
 ) -> Result<CanonicalCommitPermit<'state>, AppError> {
     #[cfg(test)]
     wait_at_canonical_commit_admission_barrier(state).await;
@@ -136,10 +105,9 @@ async fn exchange_memory_vector_commit_admission<'state>(
 
 async fn acquire_memory_vector_commit_permit<'state>(
     state: &'state Arc<AppState>,
-    owners: &[GovernedDataImportRecoveryOwner],
-    recovery: Option<(&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str)>,
+    owners: &[CanonicalWriteOwner],
 ) -> Result<CanonicalCommitPermit<'state>, AppError> {
-    let admission = admit_memory_vector_writes(state, owners, recovery)?;
+    let admission = admit_memory_vector_writes(state, owners)?;
     exchange_memory_vector_commit_admission(state, &admission).await
 }
 
@@ -174,29 +142,22 @@ async fn wait_at_canonical_commit_admission_barrier(state: &Arc<AppState>) {
 }
 
 /// Run one synchronous VectorStore transaction under a short-lived shared
-/// canonical permit. Rebuild provider/embedding awaits stay outside this
-/// helper, so recovery terminalization never waits on network latency.
+/// canonical permit. Rebuild provider and embedding awaits stay outside this helper.
 async fn commit_vector_store_mutation<T>(
     state: &Arc<AppState>,
     mutation: impl FnOnce() -> anyhow::Result<T>,
 ) -> Result<T, AppError> {
-    let _commit_permit = acquire_memory_vector_commit_permit(
-        state,
-        &[GovernedDataImportRecoveryOwner::VectorStore],
-        None,
-    )
-    .await?;
+    let _commit_permit =
+        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::VectorStore]).await?;
     mutation().map_err(AppError::from)
 }
 
 /// One-shot, generation-bound proof minted immediately before a VectorStore
 /// search. It carries no lock and is safe to retain while the pure search runs;
-/// the later telemetry commit must exchange this exact admission, so an import
-/// completion between read and telemetry cannot authorize an old row id under
-/// a newer healthy generation.
+/// the later telemetry commit must exchange this exact admission, so a generation change between read and telemetry cannot authorize an old row id.
 #[must_use = "mint immediately before the vector read and consume when recording telemetry"]
 pub(crate) struct VectorSearchAccessTelemetryTicket {
-    admission: Result<CanonicalWriteAdmission<'static>, MemoryVectorDegradedEvidence>,
+    admission: Result<CanonicalWriteAdmission, MemoryVectorDegradedEvidence>,
 }
 
 /// MemoryStore counterpart to [`VectorSearchAccessTelemetryTicket`]. Distinct
@@ -204,7 +165,7 @@ pub(crate) struct VectorSearchAccessTelemetryTicket {
 /// MemoryStore telemetry mutation.
 #[must_use = "mint immediately before the memory read and consume when recording telemetry"]
 pub(crate) struct MemorySearchAccessTelemetryTicket {
-    admission: Result<CanonicalWriteAdmission<'static>, MemoryVectorDegradedEvidence>,
+    admission: Result<CanonicalWriteAdmission, MemoryVectorDegradedEvidence>,
 }
 
 fn telemetry_admission_error(reason_code: &str, error: &AppError) -> MemoryVectorDegradedEvidence {
@@ -219,8 +180,8 @@ fn telemetry_admission_error(reason_code: &str, error: &AppError) -> MemoryVecto
 pub(crate) fn prepare_vector_search_access_telemetry(
     state: &Arc<AppState>,
 ) -> VectorSearchAccessTelemetryTicket {
-    let admission: Result<CanonicalWriteAdmission<'static>, AppError> =
-        admit_memory_vector_writes(state, &[GovernedDataImportRecoveryOwner::VectorStore], None);
+    let admission: Result<CanonicalWriteAdmission, AppError> =
+        admit_memory_vector_writes(state, &[CanonicalWriteOwner::VectorStore]);
     VectorSearchAccessTelemetryTicket {
         admission: admission
             .map_err(|error| telemetry_admission_error("vector_access_telemetry_skipped", &error)),
@@ -230,8 +191,8 @@ pub(crate) fn prepare_vector_search_access_telemetry(
 pub(crate) fn prepare_memory_search_access_telemetry(
     state: &Arc<AppState>,
 ) -> MemorySearchAccessTelemetryTicket {
-    let admission: Result<CanonicalWriteAdmission<'static>, AppError> =
-        admit_memory_vector_writes(state, &[GovernedDataImportRecoveryOwner::MemoryStore], None);
+    let admission: Result<CanonicalWriteAdmission, AppError> =
+        admit_memory_vector_writes(state, &[CanonicalWriteOwner::MemoryStore]);
     MemorySearchAccessTelemetryTicket {
         admission: admission
             .map_err(|error| telemetry_admission_error("memory_access_telemetry_skipped", &error)),
@@ -307,13 +268,13 @@ pub(crate) async fn record_text_search_access_telemetry_with_state(
 
 async fn acquire_canonical_projection_commit_permit<'state>(
     state: &'state Arc<AppState>,
-    owner: GovernedDataImportRecoveryOwner,
+    owner: CanonicalWriteOwner,
     lane: CanonicalProjectionCommitLane,
 ) -> Result<CanonicalCommitPermit<'state>, ProjectionReconciliationError> {
     let admission = match lane {
         CanonicalProjectionCommitLane::Normal => state
             .persistence_coordinator
-            .admit_normal_or_governed_data_import_writes(&[owner], None, "", "", ""),
+            .admit_canonical_writes(&[owner]),
         CanonicalProjectionCommitLane::StartupReconciliation => state
             .persistence_coordinator
             .admit_startup_reconciliation_writes(&[owner]),
@@ -870,13 +831,10 @@ pub(crate) async fn save_conversation_message_idempotent_with_state(
     }
     let decision = MemoryGateway::decide(MemoryGatewaySubject::ChatTurn);
     debug_assert_eq!(decision.status, MemoryGatewayWriteStatus::ContextOnly);
-    let _commit_permit = acquire_memory_vector_commit_permit(
-        state,
-        &[GovernedDataImportRecoveryOwner::MemoryStore],
-        None,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let _commit_permit =
+        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore])
+            .await
+            .map_err(|error| error.to_string())?;
     let store = state.memory_store.lock().await;
     let receipt = store
         .save_message_idempotent(session_id, message, operation_id)
@@ -901,13 +859,10 @@ pub(crate) async fn save_turn_user_message_idempotent_with_state(
     }
     let decision = MemoryGateway::decide(MemoryGatewaySubject::ChatTurn);
     debug_assert_eq!(decision.status, MemoryGatewayWriteStatus::ContextOnly);
-    let _commit_permit = acquire_memory_vector_commit_permit(
-        state,
-        &[GovernedDataImportRecoveryOwner::MemoryStore],
-        None,
-    )
-    .await
-    .map_err(|error| error.to_string())?;
+    let _commit_permit =
+        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore])
+            .await
+            .map_err(|error| error.to_string())?;
     let store = state.memory_store.lock().await;
     let commit = store
         .save_message_idempotent_with_proof(session_id, message, operation_id)
@@ -938,12 +893,8 @@ pub(crate) async fn create_chat_session_with_state(
     title: &str,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    let _commit_permit = acquire_memory_vector_commit_permit(
-        state,
-        &[GovernedDataImportRecoveryOwner::MemoryStore],
-        None,
-    )
-    .await?;
+    let _commit_permit =
+        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore]).await?;
     let store = state.memory_store.lock().await;
     store
         .create_chat_session(session_id, title)
@@ -955,12 +906,8 @@ pub(crate) async fn rename_chat_session_with_state(
     title: &str,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    let _commit_permit = acquire_memory_vector_commit_permit(
-        state,
-        &[GovernedDataImportRecoveryOwner::MemoryStore],
-        None,
-    )
-    .await?;
+    let _commit_permit =
+        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore]).await?;
     let store = state.memory_store.lock().await;
     store
         .rename_chat_session(session_id, title)
@@ -972,12 +919,8 @@ pub(crate) async fn delete_chat_session_with_state(
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
     let receipt = {
-        let _commit_permit = acquire_memory_vector_commit_permit(
-            state,
-            &[GovernedDataImportRecoveryOwner::MemoryStore],
-            None,
-        )
-        .await?;
+        let _commit_permit =
+            acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore]).await?;
         let store = state.memory_store.lock().await;
         store
             .delete_chat_session_with_tombstone(
@@ -1276,7 +1219,7 @@ async fn finalize_memory_retrieval_projection(
         CanonicalOutboxOwner::MemoryStore => {
             let _commit_permit = acquire_canonical_projection_commit_permit(
                 state,
-                GovernedDataImportRecoveryOwner::MemoryStore,
+                CanonicalWriteOwner::MemoryStore,
                 commit_lane,
             )
             .await?;
@@ -1485,7 +1428,7 @@ async fn mark_owned_projection_applied(
         CanonicalOutboxOwner::MemoryStore => {
             let _commit_permit = acquire_canonical_projection_commit_permit(
                 state,
-                GovernedDataImportRecoveryOwner::MemoryStore,
+                CanonicalWriteOwner::MemoryStore,
                 commit_lane,
             )
             .await?;
@@ -1518,7 +1461,7 @@ async fn mark_owned_projection_degraded(
         CanonicalOutboxOwner::MemoryStore => {
             let _commit_permit = acquire_canonical_projection_commit_permit(
                 state,
-                GovernedDataImportRecoveryOwner::MemoryStore,
+                CanonicalWriteOwner::MemoryStore,
                 commit_lane,
             )
             .await?;
@@ -1597,7 +1540,7 @@ async fn apply_memory_retrieval_projection(
         .map_err(ProjectionReconciliationError::failed)?;
     let _commit_permit = acquire_canonical_projection_commit_permit(
         state,
-        GovernedDataImportRecoveryOwner::VectorStore,
+        CanonicalWriteOwner::VectorStore,
         commit_lane,
     )
     .await?;
@@ -1671,7 +1614,7 @@ async fn apply_knowledge_note_projection(
     .map_err(ProjectionReconciliationError::failed)?;
     let _commit_permit = acquire_canonical_projection_commit_permit(
         state,
-        GovernedDataImportRecoveryOwner::VectorStore,
+        CanonicalWriteOwner::VectorStore,
         commit_lane,
     )
     .await?;
@@ -1721,7 +1664,7 @@ async fn apply_memory_lifecycle_projection(
             "memory_store" => {
                 let _commit_permit = acquire_canonical_projection_commit_permit(
                     state,
-                    GovernedDataImportRecoveryOwner::MemoryStore,
+                    CanonicalWriteOwner::MemoryStore,
                     commit_lane,
                 )
                 .await?;
@@ -1736,7 +1679,7 @@ async fn apply_memory_lifecycle_projection(
             "vector_store" => {
                 let _commit_permit = acquire_canonical_projection_commit_permit(
                     state,
-                    GovernedDataImportRecoveryOwner::VectorStore,
+                    CanonicalWriteOwner::VectorStore,
                     commit_lane,
                 )
                 .await?;
@@ -1785,7 +1728,7 @@ async fn apply_memory_lifecycle_projection(
             ];
             let _commit_permit = acquire_canonical_projection_commit_permit(
                 state,
-                GovernedDataImportRecoveryOwner::MemoryStore,
+                CanonicalWriteOwner::MemoryStore,
                 commit_lane,
             )
             .await?;
@@ -1826,7 +1769,7 @@ async fn apply_memory_lifecycle_projection(
             .map_err(ProjectionReconciliationError::failed)?;
             let _commit_permit = acquire_canonical_projection_commit_permit(
                 state,
-                GovernedDataImportRecoveryOwner::VectorStore,
+                CanonicalWriteOwner::VectorStore,
                 commit_lane,
             )
             .await?;
@@ -1864,7 +1807,7 @@ async fn apply_conversation_deletion_projection(
     }
     let _commit_permit = acquire_canonical_projection_commit_permit(
         state,
-        GovernedDataImportRecoveryOwner::VectorStore,
+        CanonicalWriteOwner::VectorStore,
         commit_lane,
     )
     .await?;
@@ -1906,12 +1849,8 @@ pub(crate) async fn touch_chat_session_with_state(
     session_id: &str,
     state: &Arc<AppState>,
 ) -> Result<(), AppError> {
-    let _commit_permit = acquire_memory_vector_commit_permit(
-        state,
-        &[GovernedDataImportRecoveryOwner::MemoryStore],
-        None,
-    )
-    .await?;
+    let _commit_permit =
+        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore]).await?;
     let store = state.memory_store.lock().await;
     store.touch_chat_session(session_id).map_err(AppError::from)
 }
@@ -1934,12 +1873,8 @@ pub(crate) async fn create_knowledge_note_with_state(
         ));
     }
     let canonical_write = {
-        let _commit_permit = acquire_memory_vector_commit_permit(
-            state,
-            &[GovernedDataImportRecoveryOwner::MemoryStore],
-            None,
-        )
-        .await?;
+        let _commit_permit =
+            acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore]).await?;
         let store = state.memory_store.lock().await;
         let tags = vec![
             "canonical_owner:knowledge_note".to_string(),
@@ -2165,12 +2100,8 @@ fn lifecycle_source_is_allowed(source: &str, allowed_memory_ids: &HashSet<String
 pub(crate) async fn run_memory_tier_maintenance_with_state(
     state: &Arc<AppState>,
 ) -> Result<(usize, usize), AppError> {
-    let _commit_permit = acquire_memory_vector_commit_permit(
-        state,
-        &[GovernedDataImportRecoveryOwner::VectorStore],
-        None,
-    )
-    .await?;
+    let _commit_permit =
+        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::VectorStore]).await?;
     let store = state.vector_store.lock().await;
     store.run_tier_maintenance().map_err(AppError::from)
 }
@@ -2550,12 +2481,8 @@ async fn set_memory_retrieval_dispositions_with_state(
             .map_err(AppError::from)?;
         (mutations, CanonicalOutboxOwner::MemoryLifecycleStore)
     } else {
-        let _commit_permit = acquire_memory_vector_commit_permit(
-            state,
-            &[GovernedDataImportRecoveryOwner::MemoryStore],
-            None,
-        )
-        .await?;
+        let _commit_permit =
+            acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore]).await?;
         let mutations = memory_store
             .set_memory_retrieval_dispositions(&owners, disposition, reason_code)
             .map_err(AppError::from)?;
@@ -2880,257 +2807,6 @@ pub(crate) async fn cancel_memory_index_rebuild_with_state(
         }
     };
     commit_vector_store_mutation(state, || store.request_rebuild_cancel(&target)).await
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ImportedMemoryReplaceReport {
-    pub messages_targeted: bool,
-    pub vectors_targeted: bool,
-    pub supplied_message_count: usize,
-    pub applied_message_count: usize,
-    pub vectors: PortableVectorImportReport,
-    pub message_outcome: Option<CanonicalMessageReplaceOutcome>,
-    pub vector_outcome: Option<PortableVectorReplaceOutcome>,
-}
-
-/// Owner-local compare-and-swap boundaries captured with the import archive
-/// snapshot. `None` means that owner is not targeted; an empty archive is a
-/// targeted value with the deterministic digest of an empty payload.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ImportedMemoryExpectedDigests {
-    pub messages: Option<String>,
-    pub vectors: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ImportedMemoryReplaceFault {
-    None,
-    #[cfg(test)]
-    BeforeVectorCommit,
-    #[cfg(test)]
-    BeforeVectorCommitAfterConcurrentMessage,
-}
-
-pub(crate) async fn replace_imported_memory_with_state(
-    state: &Arc<AppState>,
-    messages: Option<&[openlife_core::memory::ExportedMessage]>,
-    vectors: Option<&[ExportedVectorChunk]>,
-) -> Result<ImportedMemoryReplaceReport, AppError> {
-    require_persistence_write(state)?;
-    let expected = ImportedMemoryExpectedDigests {
-        messages: if messages.is_some() {
-            Some(
-                state
-                    .memory_store
-                    .lock()
-                    .await
-                    .export_canonical_message_archive()
-                    .map_err(AppError::from)?
-                    .digest,
-            )
-        } else {
-            None
-        },
-        vectors: if vectors.is_some() {
-            Some(
-                state
-                    .vector_store
-                    .lock()
-                    .await
-                    .export_portable_archive()
-                    .map_err(AppError::from)?
-                    .digest,
-            )
-        } else {
-            None
-        },
-    };
-    replace_imported_memory_with_state_inner(
-        state,
-        messages,
-        vectors,
-        expected,
-        ImportedMemoryReplaceFault::None,
-        None,
-    )
-    .await
-}
-
-pub(crate) async fn replace_imported_memory_with_state_guarded(
-    state: &Arc<AppState>,
-    messages: Option<&[openlife_core::memory::ExportedMessage]>,
-    vectors: Option<&[ExportedVectorChunk]>,
-    expected: ImportedMemoryExpectedDigests,
-) -> Result<ImportedMemoryReplaceReport, AppError> {
-    replace_imported_memory_with_state_inner(
-        state,
-        messages,
-        vectors,
-        expected,
-        ImportedMemoryReplaceFault::None,
-        None,
-    )
-    .await
-}
-
-pub(crate) async fn replace_imported_memory_with_state_guarded_for_import_recovery(
-    state: &Arc<AppState>,
-    messages: Option<&[openlife_core::memory::ExportedMessage]>,
-    vectors: Option<&[ExportedVectorChunk]>,
-    expected: ImportedMemoryExpectedDigests,
-    recovery: (&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str),
-) -> Result<ImportedMemoryReplaceReport, AppError> {
-    replace_imported_memory_with_state_inner(
-        state,
-        messages,
-        vectors,
-        expected,
-        ImportedMemoryReplaceFault::None,
-        Some(recovery),
-    )
-    .await
-}
-
-async fn replace_imported_memory_with_state_inner(
-    state: &Arc<AppState>,
-    messages: Option<&[openlife_core::memory::ExportedMessage]>,
-    vectors: Option<&[ExportedVectorChunk]>,
-    expected: ImportedMemoryExpectedDigests,
-    fault: ImportedMemoryReplaceFault,
-    recovery: Option<(&GovernedDataImportRecoveryAdmission<'_>, &str, &str, &str)>,
-) -> Result<ImportedMemoryReplaceReport, AppError> {
-    let decision = MemoryGateway::decide(MemoryGatewaySubject::ImportedArchive);
-    debug_assert!(decision.local_memory_allowed);
-    if messages.is_some() != expected.messages.is_some() {
-        return Err(AppError::internal(
-            "canonical message import target and expected digest must align",
-        ));
-    }
-    if vectors.is_some() != expected.vectors.is_some() {
-        return Err(AppError::internal(
-            "portable vector import target and expected digest must align",
-        ));
-    }
-
-    let mut owners = Vec::with_capacity(2);
-    if messages.is_some() {
-        owners.push(GovernedDataImportRecoveryOwner::MemoryStore);
-    }
-    if vectors.is_some() {
-        owners.push(GovernedDataImportRecoveryOwner::VectorStore);
-    }
-    let _commit_permit = acquire_memory_vector_commit_permit(state, &owners, recovery).await?;
-
-    // This lock serializes coordinator attempts only. Each canonical store
-    // still owns its own SQLite transaction; a vector failure triggers
-    // owner-local Memory compensation, while its CAS refuses to overwrite a
-    // later Memory write. This is deliberately not cross-owner atomicity.
-    let _import_guard = GOVERNED_MEMORY_IMPORT_LOCK.lock().await;
-    let memory_store = state.memory_store.lock().await.clone();
-    let vector_store = state.vector_store.lock().await.clone();
-
-    // Known vector failures must be found before any canonical message write.
-    // The same checks run again inside the vector transaction so a concurrent
-    // tombstone committed after preflight remains authoritative.
-    let vector_preflight = match vectors {
-        Some(vectors) => vector_store
-            .validate_portable_replacement(vectors)
-            .map_err(AppError::from)?,
-        None => PortableVectorImportReport::default(),
-    };
-    let previous_messages = if messages.is_some() && vectors.is_some() {
-        Some(
-            memory_store
-                .export_canonical_message_archive()
-                .map_err(AppError::from)?,
-        )
-    } else {
-        None
-    };
-
-    let message_outcome = messages
-        .map(|messages| {
-            memory_store.replace_all_messages_guarded(
-                messages,
-                expected
-                    .messages
-                    .as_deref()
-                    .expect("target/digest alignment checked above"),
-            )
-        })
-        .transpose()
-        .map_err(AppError::from)?;
-
-    let vector_outcome = if let Some(vectors) = vectors {
-        let vector_result = match fault {
-            ImportedMemoryReplaceFault::None => vector_store.replace_portable_chunks_guarded(
-                vectors,
-                expected
-                    .vectors
-                    .as_deref()
-                    .expect("target/digest alignment checked above"),
-            ),
-            #[cfg(test)]
-            ImportedMemoryReplaceFault::BeforeVectorCommit => Err(anyhow::anyhow!(
-                "injected portable vector replacement failure"
-            )),
-            #[cfg(test)]
-            ImportedMemoryReplaceFault::BeforeVectorCommitAfterConcurrentMessage => {
-                memory_store
-                    .save_message(
-                        "concurrent-import-writer",
-                        &ChatMessage {
-                            role: "user".into(),
-                            content: "LATE_CANONICAL_MESSAGE_MUST_NOT_BE_OVERWRITTEN".into(),
-                        },
-                    )
-                    .map_err(AppError::from)?;
-                Err(anyhow::anyhow!(
-                    "injected portable vector replacement failure after concurrent message"
-                ))
-            }
-        };
-        match vector_result {
-            Ok(outcome) => Some(outcome),
-            Err(vector_error) => {
-                if let (Some(previous_messages), Some(message_outcome)) =
-                    (previous_messages.as_ref(), message_outcome.as_ref())
-                {
-                    if message_outcome.changed() {
-                        if let Err(rollback_error) = memory_store.replace_all_messages_guarded(
-                            &previous_messages.messages,
-                            &message_outcome.after_digest,
-                        ) {
-                            return Err(AppError::internal(format!(
-                                "portable vector replacement failed; canonical message compensation was refused because the Memory owner changed after import. No late write was overwritten. vector: {vector_error}; compensation: {rollback_error}"
-                            )));
-                        }
-                    }
-                }
-                return Err(AppError::from(vector_error));
-            }
-        }
-    } else {
-        None
-    };
-    let vector_report = vector_outcome
-        .as_ref()
-        .map_or_else(PortableVectorImportReport::default, |outcome| {
-            outcome.report
-        });
-    debug_assert!(vectors.is_none() || vector_report == vector_preflight);
-
-    Ok(ImportedMemoryReplaceReport {
-        messages_targeted: messages.is_some(),
-        vectors_targeted: vectors.is_some(),
-        supplied_message_count: messages.map_or(0, |messages| messages.len()),
-        applied_message_count: message_outcome
-            .as_ref()
-            .map_or(0, |outcome| outcome.applied),
-        vectors: vector_report,
-        message_outcome,
-        vector_outcome,
-    })
 }
 
 pub(crate) async fn materialize_memory_proposal_with_state(
@@ -3796,21 +3472,6 @@ pub(crate) async fn rollback_explicit_user_memory_for_turn_with_state(
     })
 }
 
-pub(crate) async fn rebuild_materialized_memory_view_with_state(
-    scope: Option<MemoryLifecycleScope>,
-    state: &Arc<AppState>,
-) -> Result<MemoryMaterializedView, String> {
-    require_persistence_write_string(state)?;
-    let lifecycle_store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(memory_lifecycle_store_missing)?;
-    let store = lifecycle_store.lock().await;
-    store
-        .rebuild_materialized_view(scope)
-        .map_err(|e| e.to_string())
-}
-
 fn memory_lifecycle_store_missing() -> String {
     "MemoryLifecycleStore unavailable; memory lifecycle governance is required.".into()
 }
@@ -4093,9 +3754,8 @@ mod tests {
             .memory_store
             .lock()
             .await
-            .export_canonical_message_archive()
-            .unwrap()
-            .digest;
+            .message_count()
+            .unwrap();
         let (memory_admitted, release_memory) =
             install_canonical_commit_admission_barrier(&memory_state);
         let late_memory_state = Arc::clone(&memory_state);
@@ -4128,9 +3788,8 @@ mod tests {
                 .memory_store
                 .lock()
                 .await
-                .export_canonical_message_archive()
-                .unwrap()
-                .digest,
+                .message_count()
+                .unwrap(),
             before_messages
         );
 
@@ -4139,9 +3798,8 @@ mod tests {
             .vector_store
             .lock()
             .await
-            .export_portable_archive()
-            .unwrap()
-            .digest;
+            .export_all_chunks()
+            .unwrap();
         let (vector_admitted, release_vector) =
             install_canonical_commit_admission_barrier(&vector_state);
         let late_vector_state = Arc::clone(&vector_state);
@@ -4167,9 +3825,8 @@ mod tests {
                 .vector_store
                 .lock()
                 .await
-                .export_portable_archive()
-                .unwrap()
-                .digest,
+                .export_all_chunks()
+                .unwrap(),
             before_vectors
         );
     }
@@ -4205,7 +3862,7 @@ mod tests {
             }
         };
         assert_eq!(matches.len(), 1);
-        let before = store.export_portable_archive().unwrap();
+        let before = store.export_all_chunks().unwrap();
 
         let (telemetry_admitted, release_telemetry) =
             install_canonical_commit_admission_barrier(&state);
@@ -4238,7 +3895,7 @@ mod tests {
             matches[0].0.content,
             "RESULT_MUST_SURVIVE_SKIPPED_TELEMETRY"
         );
-        assert_eq!(store.export_portable_archive().unwrap(), before);
+        assert_eq!(store.export_all_chunks().unwrap(), before);
     }
 
     #[tokio::test]
@@ -4306,241 +3963,6 @@ mod tests {
             before_source
         );
     }
-
-    #[tokio::test]
-    async fn governed_import_completion_invalidates_pre_search_telemetry_tickets() {
-        let mut state = crate::test_utils::test_app_state();
-        let profile = EmbeddingProfile::new(
-            EmbeddingRouteKind::DeterministicHash,
-            "openlife-test",
-            "completion-telemetry-v1",
-            "builtin:test",
-            "completion-telemetry-artifact-v1",
-            4,
-        )
-        .unwrap();
-        let embedding = [1.0, 0.0, 0.0, 0.0];
-        let memory_store = state.memory_store.lock().await.clone();
-        let vector_store = state.vector_store.lock().await.clone();
-        memory_store
-            .save_memory_record(
-                "completion-telemetry-session",
-                "OLD_MEMORY_RESULT_MUST_SURVIVE_IMPORT_COMPLETION",
-                "note",
-                "manual",
-                &[],
-                "private",
-                None,
-            )
-            .unwrap();
-        vector_store
-            .insert(
-                "completion-telemetry-session",
-                "OLD_VECTOR_RESULT_MUST_SURVIVE_IMPORT_COMPLETION",
-                &embedding,
-                &profile,
-                "manual_note",
-            )
-            .unwrap();
-        let coordinator = install_release_like_persistence_coordinator(&mut state);
-
-        // Both tickets are minted before their corresponding pure read. They
-        // retain no lock while the caller performs later provider work.
-        let memory_ticket = prepare_memory_search_access_telemetry(&state);
-        let memory_hits = memory_store
-            .search_text_memories(None, "OLD_MEMORY_RESULT_MUST_SURVIVE_IMPORT_COMPLETION", 5)
-            .unwrap();
-        let vector_ticket = prepare_vector_search_access_telemetry(&state);
-        let vector_matches = match vector_store.search(&embedding, &profile, 5).unwrap() {
-            VectorSearchOutcome::Matches { matches, .. } => matches,
-            VectorSearchOutcome::RebuildRequired(evidence) => {
-                panic!("test vector profile unexpectedly requires rebuild: {evidence:?}")
-            }
-        };
-        assert_eq!(memory_hits.len(), 1);
-        assert_eq!(vector_matches.len(), 1);
-
-        let before_vectors = vector_store.export_portable_archive().unwrap();
-        let mut replacement = before_vectors.chunks[0].clone();
-        replacement.content = "NEW_VECTOR_IMPORTED_AFTER_OLD_SEARCH".into();
-        replacement.access_count = 0;
-        replacement.last_accessed_at.clear();
-        let replacement = vec![replacement];
-        replace_imported_memory_with_state_guarded(
-            &state,
-            None,
-            Some(&replacement),
-            ImportedMemoryExpectedDigests {
-                messages: None,
-                vectors: Some(before_vectors.digest.clone()),
-            },
-        )
-        .await
-        .expect("governed vector replacement commits before terminalization");
-        let imported_vectors = vector_store.export_portable_archive().unwrap();
-        assert_eq!(imported_vectors.chunks.len(), 1);
-        assert_eq!(
-            imported_vectors.chunks[0].content,
-            "NEW_VECTOR_IMPORTED_AFTER_OLD_SEARCH"
-        );
-        assert_eq!(imported_vectors.chunks[0].access_count, 0);
-        let imported_matches = match vector_store.search(&embedding, &profile, 5).unwrap() {
-            VectorSearchOutcome::Matches { matches, .. } => matches,
-            VectorSearchOutcome::RebuildRequired(evidence) => {
-                panic!("imported vector profile unexpectedly requires rebuild: {evidence:?}")
-            }
-        };
-        assert_eq!(imported_matches.len(), 1);
-        assert_eq!(
-            imported_matches[0].0.content,
-            "NEW_VECTOR_IMPORTED_AFTER_OLD_SEARCH"
-        );
-        assert_eq!(imported_matches[0].0.access_count, 0);
-        assert_ne!(
-            imported_matches[0].0.id, vector_matches[0].0.id,
-            "the production AUTOINCREMENT owner does not reuse a removed portable row id"
-        );
-        let memory_before_telemetry =
-            serde_json::to_value(memory_store.export_active_memory_records().unwrap())
-                .expect("serialize Memory rows before late telemetry");
-
-        let directory = tempfile::tempdir().unwrap();
-        let journal = openlife_core::persistence_outbox::GovernedDataImportJournal::new(
-            directory.path().join("telemetry-completion.db"),
-        )
-        .unwrap();
-        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
-        let digest = |value: &str| openlife_core::persistence_outbox::metadata_digest(value);
-        let prepared = journal
-            .prepare(
-                openlife_core::persistence_outbox::GovernedDataImportPrepare {
-                    operation_id: operation_id.clone(),
-                    payload_digest: digest("telemetry-completion-payload"),
-                    request_digest: digest("telemetry-completion-request"),
-                    owners: vec![
-                        openlife_core::persistence_outbox::GovernedDataImportOwnerPlan {
-                            owner: "LifeModelFileStore".into(),
-                            import_target: "life_model".into(),
-                            before_digest: digest("telemetry-lifemodel-before"),
-                            target_digest: digest("telemetry-lifemodel-target"),
-                            item_count: 1,
-                        },
-                        openlife_core::persistence_outbox::GovernedDataImportOwnerPlan {
-                            owner: "VectorStore".into(),
-                            import_target: "vectors".into(),
-                            before_digest: before_vectors.digest.clone(),
-                            target_digest: imported_vectors.digest.clone(),
-                            item_count: 1,
-                        },
-                    ],
-                },
-            )
-            .unwrap()
-            .receipt;
-        let completion_fence = coordinator
-            .acquire_governed_data_import_completion_fence(&journal, &prepared)
-            .await
-            .expect("healthy governed import enters completion fence");
-        journal
-            .transition(
-                &operation_id,
-                openlife_core::persistence_outbox::GovernedDataImportStage::LifeModelApplied,
-                &[openlife_core::persistence_outbox::GovernedDataImportOwnerUpdate {
-                    owner: "LifeModelFileStore".into(),
-                    status:
-                        openlife_core::persistence_outbox::GovernedDataImportOwnerStatus::Applied,
-                }],
-                None,
-            )
-            .unwrap();
-        journal
-            .transition(
-                &operation_id,
-                openlife_core::persistence_outbox::GovernedDataImportStage::MemoryApplied,
-                &[],
-                None,
-            )
-            .unwrap();
-        journal
-            .transition(
-                &operation_id,
-                openlife_core::persistence_outbox::GovernedDataImportStage::VectorApplied,
-                &[openlife_core::persistence_outbox::GovernedDataImportOwnerUpdate {
-                    owner: "VectorStore".into(),
-                    status:
-                        openlife_core::persistence_outbox::GovernedDataImportOwnerStatus::Applied,
-                }],
-                None,
-            )
-            .unwrap();
-        journal
-            .transition(
-                &operation_id,
-                openlife_core::persistence_outbox::GovernedDataImportStage::StateCommitted,
-                &[],
-                None,
-            )
-            .unwrap();
-        let completed = journal
-            .transition(
-                &operation_id,
-                openlife_core::persistence_outbox::GovernedDataImportStage::Completed,
-                &[],
-                None,
-            )
-            .unwrap();
-        drop(completion_fence);
-
-        let memory_evidence =
-            record_text_search_access_telemetry_with_state(&memory_hits, &state, memory_ticket)
-                .await
-                .expect("pre-completion Memory ticket must be rejected");
-        let vector_evidence = record_vector_search_access_telemetry_with_state(
-            &vector_matches,
-            &state,
-            vector_ticket,
-        )
-        .await
-        .expect("pre-completion Vector ticket must be rejected");
-
-        assert_eq!(
-            completed.stage,
-            openlife_core::persistence_outbox::GovernedDataImportStage::Completed
-        );
-        assert_eq!(
-            memory_evidence.reason_code,
-            "memory_access_telemetry_skipped"
-        );
-        assert_eq!(
-            vector_evidence.reason_code,
-            "vector_access_telemetry_skipped"
-        );
-        assert!(memory_evidence.error_digest.is_some());
-        assert!(vector_evidence.error_digest.is_some());
-        assert_eq!(
-            memory_hits[0].chunk.content,
-            "OLD_MEMORY_RESULT_MUST_SURVIVE_IMPORT_COMPLETION"
-        );
-        assert_eq!(
-            vector_matches[0].0.content,
-            "OLD_VECTOR_RESULT_MUST_SURVIVE_IMPORT_COMPLETION"
-        );
-        assert_eq!(
-            serde_json::to_value(memory_store.export_active_memory_records().unwrap())
-                .expect("serialize Memory rows after late telemetry"),
-            memory_before_telemetry
-        );
-        assert_eq!(
-            vector_store.export_portable_archive().unwrap(),
-            imported_vectors
-        );
-        assert_eq!(
-            coordinator.snapshot().mode,
-            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite
-        );
-    }
-
-    #[tokio::test]
     async fn late_memory_retrieval_materializer_rejects_invalidated_commit_admission() {
         let state = crate::test_utils::test_app_state();
         let (_input, owner) =
@@ -4673,229 +4095,6 @@ mod tests {
             ProjectionDeliveryState::Pending
         );
     }
-
-    #[tokio::test]
-    async fn completion_fence_defers_stale_marker_without_degrading_and_retry_applies() {
-        const SENTINEL: &str = "COMPLETION_FENCE_MARKER_SENTINEL";
-        let mut state = crate::test_utils::test_app_state();
-        {
-            let memory = state.memory_store.lock().await;
-            memory
-                .create_chat_session("completion-fence-session", "Completion fence")
-                .unwrap();
-            memory
-                .save_message(
-                    "completion-fence-session",
-                    &ChatMessage {
-                        role: "user".into(),
-                        content: SENTINEL.into(),
-                    },
-                )
-                .unwrap();
-        }
-        state
-            .vector_store
-            .lock()
-            .await
-            .insert(
-                "completion-fence-session",
-                SENTINEL,
-                &[0.1, 0.2, 0.3, 0.4],
-                &deletion_test_profile(),
-                "manual_index",
-            )
-            .unwrap();
-        let deletion = state
-            .memory_store
-            .lock()
-            .await
-            .delete_chat_session_with_tombstone(
-                "completion-fence-session",
-                Some("completion_fence_test"),
-            )
-            .unwrap();
-        {
-            let memory = state.memory_store.lock().await;
-            let deliveries = memory
-                .list_replayable_projection_deliveries_for_event(&deletion.event_id)
-                .unwrap();
-            assert_eq!(deliveries.len(), 1);
-            for delivery in deliveries
-                .iter()
-                .filter(|delivery| delivery.projection_target != "vector_store")
-            {
-                memory
-                    .mark_projection_applied(&delivery.event_id, &delivery.projection_target)
-                    .unwrap();
-            }
-            assert_eq!(
-                memory
-                    .projection_summary(&deletion.event_id)
-                    .unwrap()
-                    .pending,
-                1
-            );
-        }
-
-        let coordinator = Arc::new(
-            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
-        );
-        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
-            coordinator.register_read_write(*store);
-        }
-        coordinator.seal();
-        assert_eq!(
-            coordinator.snapshot().mode,
-            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite
-        );
-        Arc::get_mut(&mut state)
-            .expect("test state must have one outer owner")
-            .persistence_coordinator = Arc::clone(&coordinator);
-
-        let directory = tempfile::tempdir().unwrap();
-        let journal = openlife_core::persistence_outbox::GovernedDataImportJournal::new(
-            directory.path().join("completion-fence.db"),
-        )
-        .unwrap();
-        let operation_id = uuid::Uuid::new_v4().hyphenated().to_string();
-        let digest = |value: &str| openlife_core::persistence_outbox::metadata_digest(value);
-        let prepared = journal
-            .prepare(
-                openlife_core::persistence_outbox::GovernedDataImportPrepare {
-                    operation_id: operation_id.clone(),
-                    payload_digest: digest("completion-fence-payload"),
-                    request_digest: digest("completion-fence-request"),
-                    owners: vec![
-                        openlife_core::persistence_outbox::GovernedDataImportOwnerPlan {
-                            owner: "LifeModelFileStore".into(),
-                            import_target: "life_model".into(),
-                            before_digest: digest("completion-fence-before"),
-                            target_digest: digest("completion-fence-target"),
-                            item_count: 1,
-                        },
-                    ],
-                },
-            )
-            .unwrap()
-            .receipt;
-
-        // The VectorStore target consumes the first admission. Pause the
-        // MemoryStore source marker after its independent old-generation
-        // admission so the completion fence can win exactly that boundary.
-        let (marker_admitted, release_marker) =
-            install_canonical_commit_admission_barrier_after_skips(&state, 1);
-        let late_state = Arc::clone(&state);
-        let event_id = deletion.event_id.clone();
-        let reconciliation = tokio::spawn(async move {
-            reconcile_blocking_canonical_outbox_event_with_state(
-                &late_state,
-                CanonicalOutboxOwner::MemoryStore,
-                &event_id,
-            )
-            .await
-        });
-        tokio::time::timeout(std::time::Duration::from_secs(1), marker_admitted)
-            .await
-            .expect("source marker must pause after target commit")
-            .expect("marker admission signal");
-        assert!(!state
-            .vector_store
-            .lock()
-            .await
-            .export_all_chunks()
-            .unwrap()
-            .iter()
-            .any(|chunk| chunk.content == SENTINEL));
-        assert_eq!(
-            state
-                .memory_store
-                .lock()
-                .await
-                .projection_summary(&deletion.event_id)
-                .unwrap()
-                .pending,
-            1
-        );
-
-        let completion_fence = coordinator
-            .acquire_governed_data_import_completion_fence(&journal, &prepared)
-            .await
-            .expect("healthy runtime completion fence");
-        journal
-            .transition(
-                &operation_id,
-                openlife_core::persistence_outbox::GovernedDataImportStage::LifeModelApplied,
-                &[openlife_core::persistence_outbox::GovernedDataImportOwnerUpdate {
-                    owner: "LifeModelFileStore".into(),
-                    status:
-                        openlife_core::persistence_outbox::GovernedDataImportOwnerStatus::Applied,
-                }],
-                None,
-            )
-            .unwrap();
-        for stage in [
-            openlife_core::persistence_outbox::GovernedDataImportStage::MemoryApplied,
-            openlife_core::persistence_outbox::GovernedDataImportStage::VectorApplied,
-            openlife_core::persistence_outbox::GovernedDataImportStage::StateCommitted,
-        ] {
-            journal.transition(&operation_id, stage, &[], None).unwrap();
-        }
-        let completed = journal
-            .transition(
-                &operation_id,
-                openlife_core::persistence_outbox::GovernedDataImportStage::Completed,
-                &[],
-                None,
-            )
-            .unwrap();
-        drop(completion_fence);
-        release_marker.send(()).unwrap();
-
-        let deferred = reconciliation.await.unwrap().unwrap();
-        assert_eq!(deferred.examined, 1);
-        assert_eq!(deferred.applied, 0);
-        assert!(deferred.backlog_may_remain);
-        assert_eq!(
-            completed.stage,
-            openlife_core::persistence_outbox::GovernedDataImportStage::Completed
-        );
-        assert_eq!(
-            coordinator.snapshot().mode,
-            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite
-        );
-        assert!(coordinator.snapshot().global_reason_codes.is_empty());
-        assert_eq!(
-            state
-                .memory_store
-                .lock()
-                .await
-                .projection_summary(&deletion.event_id)
-                .unwrap()
-                .pending,
-            1
-        );
-
-        let retried = reconcile_blocking_canonical_outbox_event_with_state(
-            &state,
-            CanonicalOutboxOwner::MemoryStore,
-            &deletion.event_id,
-        )
-        .await
-        .unwrap();
-        assert_eq!(retried.examined, 1);
-        assert_eq!(retried.applied, 1);
-        assert_eq!(
-            state
-                .memory_store
-                .lock()
-                .await
-                .projection_summary(&deletion.event_id)
-                .unwrap()
-                .state(),
-            ProjectionDeliveryState::Applied
-        );
-    }
-
     async fn seed_canonical_retrieval_owner(
         state: &Arc<AppState>,
         body: &str,
@@ -5309,26 +4508,6 @@ mod tests {
         assert_eq!(archived.projection_state, ProjectionDeliveryState::Applied);
         assert!(state.vector_store.lock().await.export_all_chunks().unwrap()[0].archived);
 
-        let mut generic = state.vector_store.lock().await.export_all_chunks().unwrap()[0].clone();
-        generic.source = "legacy_portable_archive_flag".into();
-        generic.content = "DERIVED_FLAG_MUST_NOT_COUNT".into();
-        generic.archived = true;
-        state
-            .vector_store
-            .lock()
-            .await
-            .replace_portable_chunks(&[generic])
-            .unwrap();
-        assert_eq!(
-            state
-                .vector_store
-                .lock()
-                .await
-                .tier_stats()
-                .unwrap()
-                .archived,
-            2
-        );
         assert_eq!(
             get_memory_tier_stats_with_state(&state)
                 .await
@@ -5382,321 +4561,6 @@ mod tests {
         .owner()
         .is_err());
     }
-
-    #[tokio::test]
-    async fn imported_memory_vector_failure_compensates_messages_without_half_state() {
-        let state = crate::test_utils::test_app_state();
-        state
-            .memory_store
-            .lock()
-            .await
-            .save_message(
-                "import-compensation-old",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "OLD_CANONICAL_MESSAGE_MUST_SURVIVE".into(),
-                },
-            )
-            .unwrap();
-        let profile = EmbeddingProfile::new(
-            EmbeddingRouteKind::DeterministicHash,
-            "openlife-test",
-            "import-compensation-v1",
-            "builtin:test",
-            "import-compensation-artifact-v1",
-            4,
-        )
-        .unwrap();
-        state
-            .vector_store
-            .lock()
-            .await
-            .insert(
-                "import-compensation-old",
-                "OLD_PORTABLE_VECTOR_MUST_SURVIVE",
-                &[0.1, 0.2, 0.3, 0.4],
-                &profile,
-                "manual_note",
-            )
-            .unwrap();
-        let imported_messages = vec![openlife_core::memory::ExportedMessage {
-            session_id: "import-compensation-new".into(),
-            role: "assistant".into(),
-            content: "NEW_MESSAGE_MUST_ROLL_BACK".into(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-        }];
-        let mut imported_vector = state
-            .vector_store
-            .lock()
-            .await
-            .export_portable_chunks()
-            .unwrap()[0]
-            .clone();
-        imported_vector.session_id = "import-compensation-new".into();
-        imported_vector.content = "NEW_VECTOR_MUST_NOT_COMMIT".into();
-        let imported_vectors = vec![imported_vector];
-
-        let expected = ImportedMemoryExpectedDigests {
-            messages: Some(
-                state
-                    .memory_store
-                    .lock()
-                    .await
-                    .export_canonical_message_archive()
-                    .unwrap()
-                    .digest,
-            ),
-            vectors: Some(
-                state
-                    .vector_store
-                    .lock()
-                    .await
-                    .export_portable_archive()
-                    .unwrap()
-                    .digest,
-            ),
-        };
-
-        let error = replace_imported_memory_with_state_inner(
-            &state,
-            Some(&imported_messages),
-            Some(&imported_vectors),
-            expected,
-            ImportedMemoryReplaceFault::BeforeVectorCommit,
-            None,
-        )
-        .await
-        .expect_err("post-message vector failure must be compensated");
-        assert!(error
-            .message()
-            .contains("injected portable vector replacement failure"));
-
-        let messages = state
-            .memory_store
-            .lock()
-            .await
-            .export_all_messages()
-            .unwrap();
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].content, "OLD_CANONICAL_MESSAGE_MUST_SURVIVE");
-        let vectors = state.vector_store.lock().await.export_all_chunks().unwrap();
-        assert_eq!(vectors.len(), 1);
-        assert_eq!(vectors[0].content, "OLD_PORTABLE_VECTOR_MUST_SURVIVE");
-    }
-
-    #[tokio::test]
-    async fn imported_memory_missing_target_preserves_owner_while_empty_target_replaces_empty() {
-        let state = crate::test_utils::test_app_state();
-        state
-            .memory_store
-            .lock()
-            .await
-            .save_message(
-                "preserved-message",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "MESSAGE_OWNER_MUST_BE_PRESERVED".into(),
-                },
-            )
-            .unwrap();
-        let profile = EmbeddingProfile::new(
-            EmbeddingRouteKind::DeterministicHash,
-            "openlife-test",
-            "empty-target-v1",
-            "builtin:test",
-            "empty-target-artifact-v1",
-            4,
-        )
-        .unwrap();
-        state
-            .vector_store
-            .lock()
-            .await
-            .insert(
-                "vector-to-clear",
-                "VECTOR_EMPTY_TARGET_MUST_CLEAR",
-                &[0.1, 0.2, 0.3, 0.4],
-                &profile,
-                "manual_note",
-            )
-            .unwrap();
-        let vector_before = state
-            .vector_store
-            .lock()
-            .await
-            .export_portable_archive()
-            .unwrap();
-
-        let vector_clear = replace_imported_memory_with_state_guarded(
-            &state,
-            None,
-            Some(&[]),
-            ImportedMemoryExpectedDigests {
-                messages: None,
-                vectors: Some(vector_before.digest),
-            },
-        )
-        .await
-        .unwrap();
-        assert!(!vector_clear.messages_targeted);
-        assert!(vector_clear.vectors_targeted);
-        assert!(vector_clear.vector_outcome.unwrap().changed());
-        assert_eq!(
-            state
-                .memory_store
-                .lock()
-                .await
-                .export_all_messages()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(state
-            .vector_store
-            .lock()
-            .await
-            .export_portable_chunks()
-            .unwrap()
-            .is_empty());
-
-        let message_before = state
-            .memory_store
-            .lock()
-            .await
-            .export_canonical_message_archive()
-            .unwrap();
-        let message_clear = replace_imported_memory_with_state_guarded(
-            &state,
-            Some(&[]),
-            None,
-            ImportedMemoryExpectedDigests {
-                messages: Some(message_before.digest),
-                vectors: None,
-            },
-        )
-        .await
-        .unwrap();
-        assert!(message_clear.messages_targeted);
-        assert!(!message_clear.vectors_targeted);
-        assert!(message_clear.message_outcome.unwrap().changed());
-        assert!(state
-            .memory_store
-            .lock()
-            .await
-            .export_all_messages()
-            .unwrap()
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn vector_failure_compensation_never_overwrites_a_late_memory_owner_write() {
-        let state = crate::test_utils::test_app_state();
-        state
-            .memory_store
-            .lock()
-            .await
-            .save_message(
-                "before",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "OLD_MESSAGE".into(),
-                },
-            )
-            .unwrap();
-        let profile = EmbeddingProfile::new(
-            EmbeddingRouteKind::DeterministicHash,
-            "openlife-test",
-            "late-write-v1",
-            "builtin:test",
-            "late-write-artifact-v1",
-            4,
-        )
-        .unwrap();
-        state
-            .vector_store
-            .lock()
-            .await
-            .insert(
-                "before",
-                "OLD_VECTOR",
-                &[0.1, 0.2, 0.3, 0.4],
-                &profile,
-                "manual_note",
-            )
-            .unwrap();
-        let messages = vec![openlife_core::memory::ExportedMessage {
-            session_id: "imported".into(),
-            role: "assistant".into(),
-            content: "IMPORTED_MESSAGE".into(),
-            created_at: "2026-07-17T00:00:00Z".into(),
-        }];
-        let mut vector = state
-            .vector_store
-            .lock()
-            .await
-            .export_portable_chunks()
-            .unwrap()[0]
-            .clone();
-        vector.content = "IMPORTED_VECTOR_MUST_NOT_COMMIT".into();
-        let vectors = vec![vector];
-        let expected = ImportedMemoryExpectedDigests {
-            messages: Some(
-                state
-                    .memory_store
-                    .lock()
-                    .await
-                    .export_canonical_message_archive()
-                    .unwrap()
-                    .digest,
-            ),
-            vectors: Some(
-                state
-                    .vector_store
-                    .lock()
-                    .await
-                    .export_portable_archive()
-                    .unwrap()
-                    .digest,
-            ),
-        };
-
-        let error = replace_imported_memory_with_state_inner(
-            &state,
-            Some(&messages),
-            Some(&vectors),
-            expected,
-            ImportedMemoryReplaceFault::BeforeVectorCommitAfterConcurrentMessage,
-            None,
-        )
-        .await
-        .expect_err("late owner write must fence compensation");
-        assert!(error.message().contains("No late write was overwritten"));
-
-        let messages_after = state
-            .memory_store
-            .lock()
-            .await
-            .export_all_messages()
-            .unwrap();
-        assert!(messages_after
-            .iter()
-            .any(|message| message.content == "IMPORTED_MESSAGE"));
-        assert!(messages_after.iter().any(|message| {
-            message.content == "LATE_CANONICAL_MESSAGE_MUST_NOT_BE_OVERWRITTEN"
-        }));
-        assert!(!messages_after
-            .iter()
-            .any(|message| message.content == "OLD_MESSAGE"));
-        let vectors_after = state.vector_store.lock().await.export_all_chunks().unwrap();
-        assert!(vectors_after
-            .iter()
-            .any(|chunk| chunk.content == "OLD_VECTOR"));
-        assert!(!vectors_after
-            .iter()
-            .any(|chunk| chunk.content == "IMPORTED_VECTOR_MUST_NOT_COMMIT"));
-    }
-
-    #[tokio::test]
     async fn existing_vector_marker_cannot_hide_lost_canonical_knowledge_note_proof() {
         let state = crate::test_utils::test_app_state();
         state.config.lock().await.llm.embedding_enabled = false;
@@ -6130,7 +4994,7 @@ mod tests {
             .expect("test state must have one outer owner")
             .persistence_coordinator = Arc::clone(&startup_coordinator);
         let stale_startup_admission = startup_coordinator
-            .admit_startup_reconciliation_writes(&[GovernedDataImportRecoveryOwner::MemoryStore])
+            .admit_startup_reconciliation_writes(&[CanonicalWriteOwner::MemoryStore])
             .expect("healthy pre-seal startup admission");
 
         let startup = tokio::time::timeout(
@@ -6175,7 +5039,7 @@ mod tests {
             .await
             .is_err());
         assert!(startup_coordinator
-            .admit_startup_reconciliation_writes(&[GovernedDataImportRecoveryOwner::MemoryStore,])
+            .admit_startup_reconciliation_writes(&[CanonicalWriteOwner::MemoryStore,])
             .is_err());
     }
     #[tokio::test]

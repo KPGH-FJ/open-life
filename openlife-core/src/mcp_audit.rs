@@ -266,6 +266,7 @@ impl Default for AuditKeyConfig {
 }
 
 /// Export payload for audit logs.
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuditExport {
     pub exported_at: String,
@@ -274,6 +275,7 @@ pub struct AuditExport {
     pub entries: Vec<ExportedAuditEntry>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExportedAuditEntry {
     pub id: i64,
@@ -286,6 +288,7 @@ pub struct ExportedAuditEntry {
 }
 
 /// One encrypted MCP audit log entry.
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpLogEntry {
     pub id: i64,
@@ -325,6 +328,7 @@ pub struct McpAuditStore {
     key: [u8; 32],
     key_config: AuditKeyConfig,
     keyring: HashMap<u64, [u8; 32]>,
+    #[cfg(any(test, feature = "test-utils"))]
     key_configs: Vec<AuditKeyConfig>,
 }
 
@@ -780,6 +784,7 @@ impl McpAuditStore {
         }
         let db_path = db_path.into();
         Self::preflight_existing_database_key_materials(&db_path, &materials)?;
+        #[cfg(any(test, feature = "test-utils"))]
         let key_configs = materials
             .iter()
             .map(|material| material.config.clone())
@@ -791,6 +796,7 @@ impl McpAuditStore {
             key: active.key,
             key_config: active.config,
             keyring,
+            #[cfg(any(test, feature = "test-utils"))]
             key_configs,
         };
         store.init_tables()?;
@@ -823,6 +829,7 @@ impl McpAuditStore {
             key: active.key,
             key_config: active.config,
             keyring,
+            #[cfg(any(test, feature = "test-utils"))]
             key_configs: materials
                 .into_iter()
                 .map(|material| material.config)
@@ -838,6 +845,7 @@ impl McpAuditStore {
             key: [0; 32],
             key_config: AuditKeyConfig::default(),
             keyring: HashMap::new(),
+            #[cfg(any(test, feature = "test-utils"))]
             key_configs: Vec::new(),
         }
     }
@@ -921,7 +929,8 @@ impl McpAuditStore {
         self.key_configs.sort_by_key(|config| config.epoch);
     }
 
-    pub fn rotate_key_material(&mut self, material: AuditKeyMaterial) -> Result<()> {
+    #[cfg(test)]
+    fn rotate_key_material(&mut self, material: AuditKeyMaterial) -> Result<()> {
         if material.config.epoch <= self.key_config.epoch {
             anyhow::bail!("MCP audit key epoch must increase monotonically");
         }
@@ -936,16 +945,19 @@ impl McpAuditStore {
         Ok(())
     }
 
-    pub fn key_config(&self) -> &AuditKeyConfig {
+    #[cfg(test)]
+    fn key_config(&self) -> &AuditKeyConfig {
         &self.key_config
     }
 
-    pub fn key_configs(&self) -> &[AuditKeyConfig] {
+    #[cfg(test)]
+    fn key_configs(&self) -> &[AuditKeyConfig] {
         &self.key_configs
     }
 
     /// Export decrypted audit logs for the given time range.
-    pub fn export_logs(&self, days: i64) -> Result<AuditExport> {
+    #[cfg(test)]
+    fn export_logs(&self, days: i64) -> Result<AuditExport> {
         let entries = self.list_logs(10000)?;
         let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
         let filtered: Vec<_> = entries
@@ -974,7 +986,8 @@ impl McpAuditStore {
     }
 
     /// Cleanup strategy: remove logs older than retention_days and return count removed.
-    pub fn cleanup(&self, retention_days: i64) -> Result<usize> {
+    #[cfg(test)]
+    fn cleanup(&self, retention_days: i64) -> Result<usize> {
         self.clear_old_logs(retention_days)
     }
 
@@ -1108,6 +1121,7 @@ impl McpAuditStore {
         decrypt_mcp_audit_ciphertext(combined_b64, key, &[])
     }
 
+    #[cfg(test)]
     fn decrypt_current_receipt_for_epoch(
         &self,
         combined_b64: &str,
@@ -1257,7 +1271,8 @@ impl McpAuditStore {
         Ok(conn.last_insert_rowid())
     }
 
-    pub fn list_logs(&self, limit: usize) -> Result<Vec<McpLogEntry>> {
+    #[cfg(test)]
+    fn list_logs(&self, limit: usize) -> Result<Vec<McpLogEntry>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
             "SELECT id, tool_name, arguments_encrypted, result_encrypted, success, pii_found,
@@ -1339,7 +1354,8 @@ impl McpAuditStore {
         Ok(out)
     }
 
-    pub fn clear_old_logs(&self, days: i64) -> Result<usize> {
+    #[cfg(test)]
+    fn clear_old_logs(&self, days: i64) -> Result<usize> {
         let conn = self.conn()?;
         let cutoff = chrono::Utc::now() - chrono::Duration::days(days);
         let rows = conn.execute(

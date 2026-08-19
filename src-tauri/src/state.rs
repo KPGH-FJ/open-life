@@ -9,7 +9,6 @@ use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
 use openlife_core::mcp_audit::McpAuditStore;
 use openlife_core::memory::MemoryStore;
-use openlife_core::memory_cache::SharedHotCache;
 use openlife_core::privacy::PrivacyEngine;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::vectors::VectorStore;
@@ -130,27 +129,6 @@ impl Default for CredentialBootstrapSnapshot {
     }
 }
 
-/// Cached provider health status from ModelRouter, refreshed periodically.
-pub struct ProviderHealthCache {
-    pub providers: Vec<crate::commands::router::ProviderStatus>,
-    pub checked_at: String,
-    /// Metadata-only digest of provider/base/model/local preference,
-    /// credential version, and the concrete network decision.
-    pub identity_digest: String,
-}
-
-impl ProviderHealthCache {
-    pub fn is_fresh(&self) -> bool {
-        if let Ok(checked) = chrono::DateTime::parse_from_rfc3339(&self.checked_at) {
-            let elapsed =
-                chrono::Utc::now().signed_duration_since(checked.with_timezone(&chrono::Utc));
-            elapsed.num_seconds() < 30
-        } else {
-            false
-        }
-    }
-}
-
 /// One atomically captured provider runtime generation.
 ///
 /// `AppConfig` owns the canonical policy/configuration while
@@ -209,38 +187,17 @@ impl MainChatRuntimeState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum VectorPersistenceMode {
-    #[default]
-    Enabled,
-    EvalDisabled,
-}
-
-impl VectorPersistenceMode {
-    pub fn skip_reason(self) -> Option<&'static str> {
-        match self {
-            Self::Enabled => None,
-            Self::EvalDisabled => Some("eval_disabled"),
-        }
-    }
-}
-
 /// Central application state shared across all Tauri commands.
 #[derive(Clone)]
 pub struct AppState {
     pub persistence_coordinator: Arc<crate::persistence_coordinator::PersistenceCoordinator>,
-    /// Bootstrap-owned governed import journal. Construction performs schema
-    /// migration, so product commands must reuse this instance and fail closed
-    /// when bootstrap could not open it.
-    pub(crate) governed_data_import_journal:
-        Option<Arc<openlife_core::persistence_outbox::GovernedDataImportJournal>>,
     pub config: Arc<Mutex<AppConfig>>,
     pub life_model_manager: Arc<Mutex<LifeModelManager>>,
     /// Operation-level serialization for the file journal, canonical rename,
     /// and derived projection protocol. It never owns product data itself.
     pub life_model_write_coordinator: Arc<Mutex<()>>,
     pub memory_store: Arc<Mutex<MemoryStore>>,
-    /// R1 canonical owner for ordinary Chat Conversation, Turn, and Item
+    /// Canonical owner for ordinary Chat Conversation, Turn, and Item
     /// lifecycle. It is intentionally independent of Memory and Task stores.
     pub conversation_store: Option<Arc<Mutex<ConversationStore>>>,
     pub mcp_registry: Arc<Mutex<McpRegistry>>,
@@ -249,7 +206,6 @@ pub struct AppState {
     pub version_manager: Arc<Mutex<VersionManager>>,
     pub feedback_store: Arc<Mutex<FeedbackStore>>,
     pub vector_store: Arc<Mutex<VectorStore>>,
-    pub vector_persistence_mode: VectorPersistenceMode,
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
     /// Canonical Work owner for Task, Run, Item, ItemAttempt, FinalResult, and
@@ -257,8 +213,6 @@ pub struct AppState {
     /// authority; retired run-store state is not part of this lifecycle.
     pub canonical_task_runtime_store:
         Option<Arc<Mutex<openlife_core::task_runtime::CanonicalTaskRuntimeStore>>>,
-    pub evidence_store: Arc<Mutex<openlife_core::agent::EvidenceStore>>,
-    pub policy_store: Arc<openlife_core::agent::PolicyStore>,
     pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
     pub memory_lifecycle_store: Option<Arc<Mutex<openlife_core::agent::MemoryLifecycleStore>>>,
     /// Bounded Observation/Candidate bridge for LifeModel learning. It does
@@ -266,21 +220,17 @@ pub struct AppState {
     pub life_model_learning_store: Option<Arc<Mutex<openlife_core::agent::LifeModelLearningStore>>>,
     pub main_chat_runtime_state: Arc<Mutex<MainChatRuntimeState>>,
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
-    pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,
     pub tool_permission_store: Arc<Mutex<openlife_core::tool_permissions::ToolPermissionStore>>,
     pub skill_registry: Arc<Mutex<openlife_core::skills::SkillRegistry>>,
-    pub plugin_registry: Arc<Mutex<openlife_core::plugins::PluginRegistry>>,
-    pub hot_cache: SharedHotCache,
     pub startup_warnings: Vec<String>,
     pub credential_bootstrap_snapshot: CredentialBootstrapSnapshot,
-    pub provider_health_cache: Arc<tokio::sync::Mutex<Option<ProviderHealthCache>>>,
     pub scheduled_task_store: Arc<openlife_core::tasks::TaskStore>,
+    #[cfg(test)]
     pub web_search_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
     pub(crate) resource_runtime: Option<Arc<crate::resource_commands::ResourceRuntime>>,
     /// Canonical ADR 0015 owner. Absence is an explicit degraded state; release
     /// bootstrap never replaces it with a temporary or in-memory product store.
     pub(crate) state_store: Option<Arc<openlife_core::state_store::StateStore>>,
-    pub shutdown_notify: Arc<tokio::sync::Notify>,
 }
 
 impl AppState {
@@ -299,9 +249,8 @@ impl AppState {
     }
 
     /// Replace the canonical provider configuration and its executable
-    /// scheduler as one in-process generation.  The cache is invalidated under
-    /// the same lock order, so a status reader observes either the old or the
-    /// new generation, never a mixed pair.
+    /// scheduler as one in-process generation, so readers observe either the
+    /// old or the new route rather than fields from both.
     pub(crate) async fn replace_provider_runtime_config(&self, config: AppConfig) -> String {
         let new_scheduler = InferenceScheduler::new(
             config.local_model.clone(),
@@ -317,10 +266,8 @@ impl AppState {
         let generation = new_scheduler.provider_config_generation().to_string();
         let mut current_config = self.config.lock().await;
         let mut scheduler = self.scheduler.lock().await;
-        let mut provider_health_cache = self.provider_health_cache.lock().await;
         *current_config = config;
         *scheduler = new_scheduler;
-        *provider_health_cache = None;
         generation
     }
 }

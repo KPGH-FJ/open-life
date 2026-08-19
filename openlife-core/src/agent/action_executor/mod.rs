@@ -311,7 +311,6 @@ pub fn tool_dispatch_process_risk_for_manifest(
     let contract_declares_remote_or_external = matches!(
         &manifest.source,
         crate::tool_manifest::ToolSource::Mcp { .. }
-            | crate::tool_manifest::ToolSource::Plugin { .. }
     ) || matches!(
         manifest.action_type.as_str(),
         "network" | "external_side_effect"

@@ -4,26 +4,38 @@ set -euo pipefail
 repo_root="${0:A:h:h}"
 cd "$repo_root"
 
-# H5 controlled behavior matrix. Each row calls a production owner through a
-# focused product test. Passing this script proves controlled behavior only;
-# it is never native or external-live evidence.
+# Current controlled Agent behavior matrix. Each row calls a production owner
+# through a focused product test. Passing this script proves controlled
+# behavior only; it is never native or external-live evidence.
 run_row() {
   local row="$1"
   shift
-  print "H5_MATRIX_ROW_START=$row"
+  print "AGENT_MATRIX_ROW_START=$row"
   "$@"
-  print "H5_MATRIX_ROW_PASS=$row"
+  print "AGENT_MATRIX_ROW_PASS=$row"
 }
 
 run_tauri_row() {
   local row="$1"
   local filter="$2"
+  local test_list
+  test_list="$(cargo test -p openlife-tauri --locked "$filter" -- --list)"
+  if [[ "$test_list" != *"$filter"* ]]; then
+    print -u2 "missing OpenLife Tauri test for matrix row: $row ($filter)"
+    exit 65
+  fi
   run_row "$row" cargo test -p openlife-tauri --locked "$filter"
 }
 
 run_core_row() {
   local row="$1"
   local filter="$2"
+  local test_list
+  test_list="$(cargo test -p openlife-core --locked "$filter" -- --list)"
+  if [[ "$test_list" != *"$filter"* ]]; then
+    print -u2 "missing openlife-core test for matrix row: $row ($filter)"
+    exit 65
+  fi
   run_row "$row" cargo test -p openlife-core --locked "$filter"
 }
 
@@ -33,10 +45,8 @@ run_tauri_row chat_replay \
   completed_turn_replays_without_a_second_provider_request
 run_tauri_row chat_provider_failure \
   unavailable_provider_does_not_create_a_partial_turn
-run_tauri_row chat_scoped_startup_admission \
-  h0_canonical_chat_and_work_boot_without_retired_execution_credentials
 run_tauri_row work_direct_answer \
-  work_owns_task_run_attempt_and_final_result_without_legacy_growth
+  work_owns_task_run_attempt_and_final_result
 run_tauri_row work_document_chinese \
   task_bound_document_read_uses_exact_turn_and_canonical_tool_lifecycle
 run_tauri_row work_web_chinese \
@@ -71,11 +81,23 @@ run_tauri_row work_provider_failure \
   provider_failure_terminalizes_work_without_a_final_result
 run_core_row restart_recovery \
   recovery_interrupts_open_general_run_and_retry_adds_a_new_run
+run_core_row conversation_restart_scope \
+  restart_marks_only_incomplete_turns_interrupted
+run_core_row conversation_schema_migration \
+  v1_store_migrates_projects_and_repeated_steering_without_losing_history
+run_core_row task_runtime_schema_migration \
+  v1_runtime_migrates_without_rewriting_legacy_execution_facts
+run_tauri_row fresh_profile_restart_credentials \
+  credential_access_recovery_restores_existing_keys_without_writes_or_secret_output
+run_tauri_row personal_intelligence_ports \
+  personal_intelligence_ports::tests
+run_tauri_row product_diagnostics_budget \
+  product_diagnostics_reads_two_hundred_canonical_tasks_inside_controlled_budget
 run_row workbench_user_visible_states \
   corepack pnpm --dir frontend test -- --run \
     src/ui/journeys/productWorkbench/ProductWorkbenchJourney.test.tsx \
     src/ui/journeys/governedAction/GovernedActionJourney.test.tsx \
     src/ui/journeys/governedAction/useWorkspaceConversation.test.tsx
 
-print "H5_MATRIX_EVIDENCE_LEVEL=controlled"
-print "H5_MATRIX_RESULT=pass"
+print "AGENT_MATRIX_EVIDENCE_LEVEL=controlled"
+print "AGENT_MATRIX_RESULT=pass"

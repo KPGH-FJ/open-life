@@ -5,9 +5,7 @@ const tauriMocks = vi.hoisted(() => ({
   acceptProposal: vi.fn(),
   cancelWorkTask: vi.fn(),
   editLifeModelLearningProposal: vi.fn(),
-  getReviewCenterViewModel: vi.fn(),
-  getTasksViewModel: vi.fn(),
-  getWorkspaceViewModel: vi.fn(),
+  getWorkbenchViewModel: vi.fn(),
   postponeProposal: vi.fn(),
   rejectProposal: vi.fn(),
   requestArtifactUndo: vi.fn(),
@@ -40,7 +38,7 @@ function action(kind: ReviewAction["kind"]): ReviewAction {
 describe("governed action Tauri data source", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("loads Workspace, Review, and Tasks as separate backend owners", async () => {
+  it("loads all Workbench lanes from one backend-composed snapshot", async () => {
     const envelope = {
       data: null,
       status: "empty",
@@ -50,19 +48,22 @@ describe("governed action Tauri data source", () => {
       warnings: [],
       actions: { primary: [], review: [], debugOnly: [] },
     };
-    tauriMocks.getWorkspaceViewModel.mockResolvedValue(envelope);
-    tauriMocks.getReviewCenterViewModel.mockResolvedValue(envelope);
-    tauriMocks.getTasksViewModel.mockResolvedValue(envelope);
+    tauriMocks.getWorkbenchViewModel.mockResolvedValue({
+      capturedAt: "2026-07-20T00:00:00Z",
+      conversation: envelope,
+      workspace: envelope,
+      review: envelope,
+      tasks: envelope,
+      providerBoundary: envelope,
+    });
 
     const snapshot = await tauriGovernedActionDataSource.load();
 
-    expect(tauriMocks.getWorkspaceViewModel).toHaveBeenCalledOnce();
-    expect(tauriMocks.getReviewCenterViewModel).toHaveBeenCalledOnce();
-    expect(tauriMocks.getTasksViewModel).toHaveBeenCalledOnce();
+    expect(tauriMocks.getWorkbenchViewModel).toHaveBeenCalledOnce();
     expect(snapshot.diagnostics.every(item => item.status === "loaded")).toBe(true);
   });
 
-  it("preserves partial command failure as an error envelope", async () => {
+  it("preserves an independently degraded lane from the aggregate snapshot", async () => {
     const envelope = {
       data: null,
       status: "empty",
@@ -72,9 +73,26 @@ describe("governed action Tauri data source", () => {
       warnings: [],
       actions: { primary: [], review: [], debugOnly: [] },
     };
-    tauriMocks.getWorkspaceViewModel.mockResolvedValue(envelope);
-    tauriMocks.getReviewCenterViewModel.mockRejectedValue(new Error("review unavailable"));
-    tauriMocks.getTasksViewModel.mockResolvedValue(envelope);
+    const reviewError = {
+      ...envelope,
+      status: "error",
+      warnings: [
+        {
+          code: "review_center_view_model_unavailable",
+          message: "review unavailable",
+          severity: "error",
+          evidenceRefs: [],
+        },
+      ],
+    };
+    tauriMocks.getWorkbenchViewModel.mockResolvedValue({
+      capturedAt: "2026-07-20T00:00:00Z",
+      conversation: envelope,
+      workspace: envelope,
+      review: reviewError,
+      tasks: envelope,
+      providerBoundary: envelope,
+    });
 
     const snapshot = await tauriGovernedActionDataSource.load();
 

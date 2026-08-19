@@ -31,25 +31,14 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
     let memory_store = openlife_core::memory::MemoryStore::new_in_memory().unwrap();
     let life_model_manager =
         openlife_core::life_model::LifeModelManager::new(base.join("life-model").join("current"));
-    // Mirror release bootstrap ordering because both metadata owners share one
-    // SQLite file. Recovery preflight opens the file read-only and therefore
-    // requires the canonical file-journal schema to exist before the governed
-    // import journal makes the path observable.
     openlife_core::persistence_outbox::FileMutationJournal::new(
         life_model_manager.mutation_journal_path(),
     )
     .expect("isolated eval LifeModel file-mutation journal");
-    let governed_data_import_journal = Arc::new(
-        openlife_core::persistence_outbox::GovernedDataImportJournal::new(
-            life_model_manager.mutation_journal_path(),
-        )
-        .expect("isolated eval governed data-import journal"),
-    );
     let state = Arc::new(AppState {
         persistence_coordinator: Arc::new(
             crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
         ),
-        governed_data_import_journal: Some(governed_data_import_journal),
         config: Arc::new(Mutex::new(config.clone())),
         life_model_manager: Arc::new(Mutex::new(life_model_manager)),
         life_model_write_coordinator: Arc::new(Mutex::new(())),
@@ -81,7 +70,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         vector_store: Arc::new(Mutex::new(
             openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
         )),
-        vector_persistence_mode: crate::state::VectorPersistenceMode::EvalDisabled,
         last_snapshot_date: Arc::new(Mutex::new(None)),
         mcp_audit_store: Arc::new(Mutex::new(isolated_eval_mcp_audit_store(
             base.join("mcp_audit.db"),
@@ -92,10 +80,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
             )
             .unwrap(),
         ))),
-        evidence_store: Arc::new(Mutex::new(
-            openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
-        )),
-        policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
         proposal_store: Some(Arc::new(Mutex::new(
             openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
         ))),
@@ -109,27 +93,18 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         patch_store: Some(Arc::new(Mutex::new(
             openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
         ))),
-        rollout_metrics_store: None,
         tool_permission_store: Arc::new(Mutex::new(
             openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
         )),
         skill_registry: Arc::new(Mutex::new(openlife_core::skills::SkillRegistry::built_in())),
-        plugin_registry: Arc::new(Mutex::new(openlife_core::plugins::PluginRegistry::new(
-            base.join("plugins"),
-        ))),
-        hot_cache: Arc::new(tokio::sync::RwLock::new(
-            openlife_core::memory_cache::HotMemoryCache::default(),
-        )),
         startup_warnings: vec![],
         credential_bootstrap_snapshot: Default::default(),
-        provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_store: Arc::new(openlife_core::tasks::TaskStore::new_in_memory().unwrap()),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         resource_runtime: None,
         state_store: Some(Arc::new(
             openlife_core::state_store::StateStore::new_in_memory().unwrap(),
         )),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });
 
     {

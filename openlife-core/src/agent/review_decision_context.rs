@@ -861,7 +861,6 @@ fn proposal_title(proposal: &AgentProposal) -> String {
         }
         ProposalType::MemoryArchive => "Archive a memory",
         ProposalType::ToolPermission => "Allow one action",
-        ProposalType::PluginPermission => "Review plugin access",
         ProposalType::ScheduledTask
             if proposal_tool(proposal) == Some("calendar.propose_event") =>
         {
@@ -952,11 +951,9 @@ fn proposal_source_summary(source: ProposalSource) -> &'static str {
         ProposalSource::FeedbackEvolution => "Feedback learning",
         ProposalSource::MemoryGovernance => "Memory governance",
         ProposalSource::SkillRuntime => "Selected skill runtime",
-        ProposalSource::Plugin => "Plugin request",
         ProposalSource::NetworkConsent => "Explicit network consent",
         ProposalSource::Manual => "User or runtime initiated review",
         ProposalSource::ChatConversation => "Current conversation",
-        ProposalSource::ProactiveAgent => "Proactive suggestion",
         ProposalSource::PlanningSession => "Planning session",
     }
 }
@@ -965,9 +962,6 @@ fn impact_summary(proposal: &AgentProposal) -> &'static str {
     match proposal.proposal_type {
         ProposalType::ToolPermission => {
             "Approval creates only a scoped permission decision. Execution and its result require refreshed backend evidence."
-        }
-        ProposalType::PluginPermission => {
-            "No plugin access is granted until a supported backend approval path confirms it."
         }
         ProposalType::ExternalWriteAction => {
             "Approval is not proof that the external effect completed; materialization evidence remains separate."
@@ -1002,7 +996,7 @@ fn affected_object_label(proposal: &AgentProposal) -> String {
     }
     let prefix = match proposal.proposal_type {
         ProposalType::MemoryWrite | ProposalType::MemoryArchive => "Memory",
-        ProposalType::ToolPermission | ProposalType::PluginPermission => "Permission",
+        ProposalType::ToolPermission => "Permission",
         ProposalType::ExternalWriteAction => "External target",
         ProposalType::DataExport => "Export target",
         ProposalType::ScheduledTask | ProposalType::ScheduleCheckin => "Schedule",

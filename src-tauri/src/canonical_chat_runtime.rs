@@ -1,4 +1,4 @@
-//! R1 canonical ordinary Chat runtime.
+//! Canonical ordinary Chat runtime.
 //!
 //! This path owns Conversation -> Turn -> Item. It deliberately has no Task,
 //! retired Work lifecycle stores, Review proposals, or effect writers.
@@ -12,7 +12,7 @@ use crate::provider_invocation_state::ProviderInvocationState;
 use crate::state::AppState;
 use crate::{SendMessageResult, ToolCallResult};
 use openlife_core::agent::main_chat_agent_v1::{AgentIngress, PolicyRouteKind};
-use openlife_core::agent::ReasoningTrace;
+use openlife_core::agent::ProductAgentTrace;
 use openlife_core::conversation::{BeginChatTurn, ProviderBinding, TurnStatus};
 use openlife_core::llm::ChatMessage;
 use serde_json::Value;
@@ -696,14 +696,13 @@ fn output_from_result(
     route: openlife_core::agent::ModelRouteTrace,
     life_model_influence: Option<crate::main_chat_kernel::MainChatLifeModelProductReceipt>,
 ) -> CanonicalChatOutput {
-    let reasoning_trace = ReasoningTrace {
+    let reasoning_trace = ProductAgentTrace {
         generation_result: Some(serde_json::json!({
             "canonicalConversation": true,
             "conversationId": input.conversation_id,
             "turnId": input.turn_id,
             "modelRoute": route,
         })),
-        ..ReasoningTrace::default()
     };
     let result = SendMessageResult {
         reply: reply.clone(),

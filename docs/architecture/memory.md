@@ -15,20 +15,13 @@ Procedural working rules, project context, Reflection, and bounded Markdown
 memory belong here unless an exact supported LifeModel field is proposed and
 accepted through the governed bridge.
 
-## Last verified
-
-2026-08-06 during Phase 5.1F user-control and native interface verification.
-
 ## Source map
 
 - `openlife-core/src/memory.rs`
 - `openlife-core/src/memory_gateway.rs`
-- `openlife-core/src/memory_cache.rs`
-- `openlife-core/src/agent/memory_service.rs`
 - `openlife-core/src/agent/main_chat_memory_candidate.rs`
 - `openlife-core/src/agent/memory_lifecycle.rs`
 - `src-tauri/src/memory_gateway.rs`
-- `src-tauri/src/main_chat_memory_proposals.rs`
 - `src-tauri/src/main_chat_context_loader.rs`
 - `src-tauri/src/markdown_memory.rs`
 - `src-tauri/src/commands/memory.rs`
@@ -46,9 +39,9 @@ messages, memories, snapshots, chat sessions, and state history. It also creates
 FTS support for memory text search. Chat messages are saved as messages and as
 private `chat_message` memory rows.
 
-`src-tauri/src/commands/memory.rs` exposes memory commands for chunk count,
-chunk indexing, search, hot cache, archiving, tier stats, maintenance, and
-rebuild. The rebuild path requires danger-action confirmation.
+`src-tauri/src/commands/memory.rs` owns reviewed correction, archive, stop
+recall, restore, privacy erase, knowledge-note, search, and index-rebuild
+commands. Destructive paths require the applicable confirmation.
 
 `src-tauri/src/memory_gateway.rs` connects those store operations to the app
 state. It desensitizes search queries, uses privacy-aware embeddings, and falls
@@ -107,10 +100,6 @@ Memory area consumes that ViewModel instead of merging raw lifecycle rows and
 vector telemetry in the browser. It labels proposal creation as pending Review,
 not as an applied Memory change.
 
-`src-tauri/src/main_chat_memory_proposals.rs` supports draft edits for pending
-Memory or Preference proposals. The edit report is draft-only, preserves the
-original provenance, and reports that no durable write was executed.
-
 ## Retrieval And Context
 
 The production Main Chat retrieval path is
@@ -151,11 +140,6 @@ Correction, pause and archive create Review proposals. Restore and rollback
 require exact canonical owners and verified projection receipts. Privacy erase
 also requires native confirmation. UI counts never prove a single action was
 materialized.
-
-`openlife-core/src/memory_cache.rs` builds a hot cache from the current
-LifeModel for identity, values, current goals, recent state, refresh time, and
-LifeModel version. The cache is a prompt/context support surface, not a
-canonical truth write path.
 
 `src-tauri/src/main_chat_context_loader.rs` can include bounded accepted
 lifecycle Memory through the typed Personal Intelligence port. It labels the

@@ -48,8 +48,8 @@ ADR 0013's broad LifeModel-HS target is superseded. HeuristicStore and the HS
 asset-authority registry are no longer initialized, reconciled, or attached to
 product state; existing database files remain inert historical data and are not
 deleted during startup. Their selector, lifecycle, materializer and authority
-registry source modules have also been removed. EvidenceStore, StateStore,
-PolicyStore, and audit-event storage remain only under their current narrow
+registry source modules have also been removed. StateStore, PolicyStore, and
+audit-event storage remain only under their current narrow
 product owners. None of them is jointly the canonical LifeModel.
 
 ## Current Model Shape

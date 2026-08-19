@@ -4,7 +4,7 @@ use crate::main_chat_tool_selection::{
 };
 use crate::AppState;
 use chrono::{DateTime, Utc};
-use openlife_core::skills::{SkillExecutionStatus, SkillManifest, SkillSourceKind};
+use openlife_core::skills::{SkillExecutionStatus, SkillManifest};
 use openlife_core::task_runtime::{CanonicalTaskItemKind, CanonicalTaskItemStatus};
 use openlife_core::tool_manifest::ToolManifest;
 use serde::Serialize;
@@ -20,8 +20,7 @@ const SKILL_SURFACE_SCOPE: &str = "session";
 const PRODUCT_SKILL_MARKER: &str = "<!-- openlife-product-skill -->";
 
 fn manifest_product_available(manifest: &SkillManifest) -> bool {
-    manifest.source_kind == SkillSourceKind::BuiltIn
-        && manifest.execution_status == SkillExecutionStatus::ExecutableBuiltIn
+    manifest.execution_status == SkillExecutionStatus::ExecutableBuiltIn
         && !manifest.execution_budget.allow_writes
         && manifest
             .capability_flags
@@ -29,11 +28,8 @@ fn manifest_product_available(manifest: &SkillManifest) -> bool {
             .any(|flag| flag == "canonical_chat_work_native")
 }
 
-fn manifest_source_kind(manifest: &SkillManifest) -> &'static str {
-    match manifest.source_kind {
-        SkillSourceKind::BuiltIn => "bundled",
-        SkillSourceKind::Plugin => "plugin",
-    }
+fn manifest_source_kind(_manifest: &SkillManifest) -> &'static str {
+    "bundled"
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -416,7 +412,7 @@ async fn tool_failure_recovery(
     Some(MainChatToolFailureRecovery {
         failed_candidate_id: tool_name.to_string(),
         failure_reason: "canonical_tool_attempt_failed".into(),
-        // R2 owns retry at Task/Run granularity. A failed Item does not mint a
+        // Canonical Work owns retry at Task/Run granularity. A failed Item does not mint a
         // second hidden retry owner or claim that arbitrary tool fallback is
         // safe.
         retry_available: false,
@@ -904,7 +900,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn product_skill_catalog_excludes_unmarked_repository_fixtures() {
+    async fn product_skill_catalog_includes_packaged_evidence_review() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let conversation_id = uuid::Uuid::new_v4().to_string();
         state
@@ -921,16 +917,6 @@ mod tests {
         assert!(skills
             .iter()
             .any(|skill| skill.skill_id == "evidence_review" && skill.available));
-        for fixture_only in [
-            "planning_review",
-            "unselected_context",
-            "unselected_sensitive",
-        ] {
-            assert!(
-                skills.iter().all(|skill| skill.skill_id != fixture_only),
-                "unmarked repository fixture must not enter the product catalog: {fixture_only}"
-            );
-        }
     }
 
     #[tokio::test]

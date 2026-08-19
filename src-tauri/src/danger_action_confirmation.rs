@@ -524,23 +524,6 @@ async fn show_native_confirmation<R: Runtime>(
     ))
 }
 
-pub(crate) fn issue_danger_action_challenge(
-    window_label: &str,
-    action_type: &str,
-    target_ids: &[String],
-    affected_count: usize,
-) -> Result<String, AppError> {
-    let authority = authority();
-    let local_session_binding = authority.local_session_binding(window_label)?;
-    authority.create_challenge(
-        action_type,
-        target_ids,
-        affected_count,
-        &local_session_binding,
-        monotonic_now_millis(),
-    )
-}
-
 pub(crate) async fn require_native_danger_action_confirmation<R: Runtime>(
     window: &tauri::WebviewWindow<R>,
     request: NativeDangerActionRequest<'_>,
@@ -601,25 +584,6 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    #[test]
-    fn data_import_native_prompt_never_describes_unparsed_scope_as_zero() {
-        let ticket = NativePromptTicket {
-            challenge_id: "danger-challenge:test".into(),
-            ticket_id: "ticket-test".into(),
-            requested_target: SINGLETON_TARGET.into(),
-            action_type: "data_import_overwrite".into(),
-            affected_count: 0,
-            target_count: 0,
-            arguments_digest: "sha256:test".into(),
-        };
-
-        let (affected, targets) = native_prompt_scope_count_labels(&ticket);
-        assert!(affected.contains("未在预检阶段枚举"));
-        assert!(targets.contains("未在预检阶段枚举"));
-        assert_ne!(affected, "0");
-        assert_ne!(targets, "0");
-    }
-
     fn test_authority() -> DangerActionGrantAuthority {
         DangerActionGrantAuthority {
             app_session_nonce: "test-app-session-nonce".to_string(),
@@ -640,7 +604,7 @@ mod tests {
             .collect::<Vec<_>>();
         let challenge = authority
             .create_challenge(
-                "mcp_audit_cleanup",
+                "vector_rebuild",
                 &target_ids,
                 affected_count,
                 &session,
@@ -660,7 +624,7 @@ mod tests {
     ) -> GrantConsumptionRequest<'a> {
         GrantConsumptionRequest {
             challenge_id,
-            action_type: "mcp_audit_cleanup",
+            action_type: "vector_rebuild",
             requested_target,
             expected_affected_count,
             arguments_digest,
@@ -916,22 +880,14 @@ mod tests {
         assert!(!settings.contains("evidence.confirmation_phrase"));
         assert!(!settings.contains("fn danger_action_confirmation_phrase"));
         assert!(!settings.contains("danger_action_preflight_id("));
-        assert!(settings.contains("issue_danger_action_challenge("));
         assert!(settings.contains("require_native_danger_action_confirmation("));
-        assert!(memory.contains("require_danger_action_confirmation("));
+        assert!(memory.contains("require_native_danger_action_confirmation("));
         assert!(proposal.contains("require_native_danger_action_confirmation("));
         assert!(proposal.contains("#[cfg(test)]\npub(crate) async fn accept_proposal_with_state"));
-        assert!(proposal.contains("!proposal_requires_native_confirmation"));
+        assert!(proposal.contains("proposal_requires_native_confirmation(&proposal)"));
+        assert!(proposal.contains("proposal_may_dispatch_effect(state.inner(), &proposal)"));
         assert_eq!(capability["windows"], serde_json::json!(["main"]));
-        for shipped_command in [
-            "accept_proposal,",
-            "export_all_data,",
-            "import_all_data,",
-            "export_mcp_audit_logs,",
-            "rebuild_memory_index,",
-            "cleanup_mcp_audit_logs,",
-            "rotate_mcp_audit_key,",
-        ] {
+        for shipped_command in ["accept_proposal,"] {
             assert!(
                 lib.contains(shipped_command),
                 "expected privileged command {shipped_command} to remain shipped behind the Rust authority"
@@ -946,7 +902,7 @@ mod tests {
             .split("async fn show_native_confirmation")
             .nth(1)
             .and_then(|tail| {
-                tail.split("pub(crate) fn issue_danger_action_challenge")
+                tail.split("pub(crate) async fn require_native_danger_action_confirmation")
                     .next()
             })
             .expect("native confirmation implementation must remain present");

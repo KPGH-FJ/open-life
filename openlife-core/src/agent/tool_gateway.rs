@@ -9,7 +9,7 @@ use crate::tool_execution_receipt::{
     ToolActionEffect, ToolEffectStatus, ToolExecutionReceipt, ToolExecutionReceiptRegistration,
     ToolTransportStatus,
 };
-use crate::tool_manifest::{ToolIdempotencyContract, ToolManifest, ToolSource};
+use crate::tool_manifest::{ToolIdempotencyContract, ToolManifest};
 use anyhow::Result;
 use serde_json::Value;
 use std::sync::Arc;
@@ -292,9 +292,6 @@ pub fn validate_manifest_execution_contract(
     }
     if manifest.name.trim().is_empty() || manifest.id.trim().is_empty() {
         return Err("tool_gateway_manifest_identity_missing".into());
-    }
-    if matches!(manifest.source, ToolSource::Plugin { .. }) {
-        return Err("tool_gateway_source_executor_unavailable".into());
     }
     if !manifest.enabled {
         return Err("tool_gateway_manifest_disabled".into());

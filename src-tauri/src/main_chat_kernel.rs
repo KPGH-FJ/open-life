@@ -846,10 +846,16 @@ impl MainChatKernelReadToolExecutor for AppStateMainChatReadToolExecutor {
             )
         };
 
-        let web_search_fixture_output = self.state.web_search_fixture_output.lock().await.clone();
-        if decision.queue_action_type == "web.search" && web_search_fixture_output.is_some() {
-            decision.fixture_backed_read = true;
-        }
+        #[cfg(test)]
+        let web_search_fixture_output = {
+            let fixture = self.state.web_search_fixture_output.lock().await.clone();
+            if decision.queue_action_type == "web.search" && fixture.is_some() {
+                decision.fixture_backed_read = true;
+            }
+            fixture
+        };
+        #[cfg(not(test))]
+        let web_search_fixture_output: Option<String> = None;
 
         let local_file_permission_store =
             if matches!(decision.tool_name.as_str(), "file.read" | "document.read") {
@@ -3607,9 +3613,9 @@ where
         unreachable!("bounded Agent Memory binding retry returns from every terminal branch")
     }
 
-    /// R1 ordinary Chat path. It deliberately exposes only the policy-governed
+    /// Ordinary Chat path. It deliberately exposes only the policy-governed
     /// DirectAnswer kernel surface. General Work has its own canonical
-    /// coordinator; governed effects continue migrating in R4.
+    /// coordinator and governed effect owners.
     pub(crate) async fn run_canonical_chat<S>(
         &self,
         input: MainChatTurnInput,

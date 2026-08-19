@@ -656,7 +656,7 @@ mod tests {
             .life_model_manager
             .lock()
             .await
-            .materialize_reviewed_v2_typed_diff(&diff, "r6-context-test", &[], &now)
+            .materialize_reviewed_v2_typed_diff(&diff, "context-port-test", &[], &now)
             .unwrap();
         let before_tasks = state
             .canonical_task_runtime_store
@@ -730,7 +730,7 @@ mod tests {
             .unwrap()
             .lock()
             .await
-            .create_conversation(&conversation_id, "R6 suggestion")
+            .create_conversation(&conversation_id, "LifeModel suggestion")
             .unwrap();
         let provider = openlife_core::conversation::ProviderBinding {
             profile_id: "local-test".into(),

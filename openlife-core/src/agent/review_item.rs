@@ -18,7 +18,6 @@ pub enum ReviewItemType {
     MemoryWrite,
     MemoryArchive,
     ToolPermission,
-    PluginPermission,
     ScheduledTask,
     ExternalWriteAction,
     ModelPolicyChange,
@@ -38,7 +37,6 @@ impl From<ProposalType> for ReviewItemType {
             ProposalType::MemoryWrite => Self::MemoryWrite,
             ProposalType::MemoryArchive => Self::MemoryArchive,
             ProposalType::ToolPermission => Self::ToolPermission,
-            ProposalType::PluginPermission => Self::PluginPermission,
             ProposalType::ScheduledTask => Self::ScheduledTask,
             ProposalType::ExternalWriteAction => Self::ExternalWriteAction,
             ProposalType::ModelPolicyChange => Self::ModelPolicyChange,
@@ -289,9 +287,7 @@ fn review_batch_domain(proposal_type: ProposalType) -> ReviewBatchDomain {
         | ProposalType::CapabilityUpdate
         | ProposalType::ModelPolicyChange
         | ProposalType::LifeModelUpdate => ReviewBatchDomain::LifeModel,
-        ProposalType::ToolPermission | ProposalType::PluginPermission => {
-            ReviewBatchDomain::ToolPermission
-        }
+        ProposalType::ToolPermission => ReviewBatchDomain::ToolPermission,
         ProposalType::ScheduledTask
         | ProposalType::ExternalWriteAction
         | ProposalType::DataExport
@@ -583,10 +579,7 @@ fn is_reviewable_status(status: ReviewItemDecisionStatus) -> bool {
 fn is_unsupported_type(proposal_type: ProposalType) -> bool {
     matches!(
         proposal_type,
-        ProposalType::PluginPermission
-            | ProposalType::ModelPolicyChange
-            | ProposalType::ScheduleCheckin
-            | ProposalType::Unsupported
+        ProposalType::ModelPolicyChange | ProposalType::ScheduleCheckin | ProposalType::Unsupported
     )
 }
 
@@ -850,7 +843,7 @@ mod tests {
         let golden: ReviewItemContractGolden =
             serde_json::from_value(parsed.clone()).expect("deserialize Rust contract");
 
-        assert_eq!(golden.schema_version, "openlife.phase4a-contract.v1");
+        assert_eq!(golden.schema_version, "openlife.review-item-contract.v1");
         assert!(golden
             .review_item
             .allowed_actions

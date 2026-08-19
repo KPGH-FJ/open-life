@@ -3312,7 +3312,7 @@ capabilities:
       proficiency: 5
       description: Agent tool capability.
 state:
-  current_focus: Stage 5
+  current_focus: Product cleanup
   recent_reflections:
     - date: 2026-08-08
       content: Keep product work focused.

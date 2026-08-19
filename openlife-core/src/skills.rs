@@ -5,14 +5,6 @@ use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SkillSourceKind {
-    #[default]
-    BuiltIn,
-    Plugin,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
 pub enum SkillExecutionStatus {
     #[default]
     ExecutableBuiltIn,
@@ -34,31 +26,9 @@ pub struct SkillManifest {
     pub output_schema: Value,
     pub proposal_policy: String,
     #[serde(default)]
-    pub source_kind: SkillSourceKind,
-    #[serde(default)]
     pub execution_status: SkillExecutionStatus,
     #[serde(default)]
     pub capability_flags: Vec<String>,
-    #[serde(default)]
-    pub plugin_id: Option<String>,
-}
-
-impl SkillManifest {
-    pub fn as_plugin_declarative_only(mut self, plugin_id: &str) -> Self {
-        self.source_kind = SkillSourceKind::Plugin;
-        self.execution_status = SkillExecutionStatus::DisabledDeclarativeOnly;
-        self.plugin_id = Some(plugin_id.to_string());
-        self.allowed_tools.clear();
-        self.execution_budget.allow_writes = false;
-        if !self
-            .capability_flags
-            .iter()
-            .any(|flag| flag == "plugin_declarative_only")
-        {
-            self.capability_flags.push("plugin_declarative_only".into());
-        }
-        self
-    }
 }
 
 pub struct SkillRegistry {
@@ -185,13 +155,11 @@ impl SkillRegistry {
                 }
             }),
             proposal_policy: "review_required".into(),
-            source_kind: SkillSourceKind::BuiltIn,
             execution_status: SkillExecutionStatus::Blocked,
             capability_flags: vec![
                 "catalog_only".into(),
                 "turn_runtime_contract_missing".into(),
             ],
-            plugin_id: None,
         }
     }
 
@@ -231,13 +199,11 @@ impl SkillRegistry {
                 }
             }),
             proposal_policy: "review_required".into(),
-            source_kind: SkillSourceKind::BuiltIn,
             execution_status: SkillExecutionStatus::Blocked,
             capability_flags: vec![
                 "catalog_only".into(),
                 "turn_runtime_contract_missing".into(),
             ],
-            plugin_id: None,
         }
     }
 
@@ -277,13 +243,11 @@ impl SkillRegistry {
                 }
             }),
             proposal_policy: "review_required".into(),
-            source_kind: SkillSourceKind::BuiltIn,
             execution_status: SkillExecutionStatus::Blocked,
             capability_flags: vec![
                 "catalog_only".into(),
                 "turn_runtime_contract_missing".into(),
             ],
-            plugin_id: None,
         }
     }
 
@@ -311,10 +275,8 @@ impl SkillRegistry {
                 }
             }),
             proposal_policy: "no_writes".into(),
-            source_kind: SkillSourceKind::BuiltIn,
             execution_status: SkillExecutionStatus::ExecutableBuiltIn,
             capability_flags: vec!["canonical_chat_work_native".into(), "read_only".into()],
-            plugin_id: None,
         }
     }
 }
@@ -385,7 +347,6 @@ mod tests {
             .into_iter()
             .filter(|manifest| manifest.id != "evidence_review")
         {
-            assert_eq!(manifest.source_kind, SkillSourceKind::BuiltIn);
             assert_eq!(manifest.execution_status, SkillExecutionStatus::Blocked);
             assert!(!manifest.execution_budget.allow_writes);
             assert!(manifest

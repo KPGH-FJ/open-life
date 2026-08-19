@@ -62,45 +62,6 @@ fn default_embedding_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReasoningConfig {
-    #[serde(default = "default_reasoning_strategy")]
-    pub default_strategy: String,
-    #[serde(default = "default_meaning_timeout_ms")]
-    pub meaning_timeout_ms: u64,
-    #[serde(default = "default_strategy_timeout_ms")]
-    pub strategy_timeout_ms: u64,
-    #[serde(default = "default_generation_timeout_ms")]
-    pub generation_timeout_ms: u64,
-}
-
-impl Default for ReasoningConfig {
-    fn default() -> Self {
-        Self {
-            default_strategy: default_reasoning_strategy(),
-            meaning_timeout_ms: default_meaning_timeout_ms(),
-            strategy_timeout_ms: default_strategy_timeout_ms(),
-            generation_timeout_ms: default_generation_timeout_ms(),
-        }
-    }
-}
-
-fn default_reasoning_strategy() -> String {
-    "layered".to_string()
-}
-
-fn default_meaning_timeout_ms() -> u64 {
-    5000
-}
-
-fn default_strategy_timeout_ms() -> u64 {
-    15000
-}
-
-fn default_generation_timeout_ms() -> u64 {
-    30000
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkPolicy {
     #[serde(default = "default_network_enabled")]
@@ -150,12 +111,6 @@ pub struct SystemConfig {
     /// ICS calendar file paths for calendar.read tool
     #[serde(default)]
     pub calendar_ics_paths: Vec<String>,
-    /// Proactive engine: days before a goal is considered stale
-    #[serde(default = "default_stale_goal_days")]
-    pub stale_goal_days: i64,
-    /// Proactive engine: days before a pending proposal triggers a reminder
-    #[serde(default = "default_proposal_reminder_days")]
-    pub proposal_reminder_days: i64,
     /// Web search provider: "duckduckgo" (default), "brave", "deepseek", or "searxng"
     #[serde(default = "default_search_provider")]
     pub search_provider: String,
@@ -186,8 +141,6 @@ impl Default for SystemConfig {
             safe_paths: Vec::new(),
             network_policy: NetworkPolicy::default(),
             calendar_ics_paths: Vec::new(),
-            stale_goal_days: default_stale_goal_days(),
-            proposal_reminder_days: default_proposal_reminder_days(),
             search_provider: default_search_provider(),
             search_provider_key: String::new(),
             search_provider_key_ref: None,
@@ -207,14 +160,6 @@ fn default_memory_search_top_k() -> usize {
     3
 }
 
-fn default_stale_goal_days() -> i64 {
-    7
-}
-
-fn default_proposal_reminder_days() -> i64 {
-    3
-}
-
 fn default_search_provider() -> String {
     "duckduckgo".to_string()
 }
@@ -228,8 +173,6 @@ pub struct AppConfig {
     #[serde(default = "default_local_model")]
     pub local_model: String,
     #[serde(default)]
-    pub reasoning: ReasoningConfig,
-    #[serde(default)]
     pub system: SystemConfig,
 }
 
@@ -239,7 +182,6 @@ impl Default for AppConfig {
             llm: LlmConfig::default(),
             prefer_local_model: true,
             local_model: default_local_model(),
-            reasoning: ReasoningConfig::default(),
             system: SystemConfig::default(),
         }
     }
@@ -381,7 +323,6 @@ mod tests {
             },
             prefer_local_model: true,
             local_model: "qwen2.5".into(),
-            reasoning: ReasoningConfig::default(),
             system: SystemConfig::default(),
         };
         config.system.search_provider_key = "sk-search-test".into();

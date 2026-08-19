@@ -76,9 +76,9 @@ long-term user collaboration preference supported by a LifeModel field.
   architecture authority.
 - `PolicyStore`, StateStore, regression tests, and audit records are not
   canonical LifeModel assets.
-- Existing EvidenceStore and HeuristicStore code may remain while later slices
-  decide whether to narrow, migrate, or remove it; its existence does not grant
-  ownership.
+- The unconsumed EvidenceStore and HeuristicStore implementations have been
+  removed; historical database files remain inert and are not read or deleted
+  during startup.
 - Generic LifeModel chat requests fail closed with
   `lifemodel_typed_diff_required`; they do not create fake pending proposals.
 - This decision does not implement the full Agent Memory system, redesign the

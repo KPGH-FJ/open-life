@@ -1524,7 +1524,6 @@ impl ProposalStore {
             "memory_write" => ProposalType::MemoryWrite,
             "memory_archive" => ProposalType::MemoryArchive,
             "tool_permission" => ProposalType::ToolPermission,
-            "plugin_permission" => ProposalType::PluginPermission,
             "scheduled_task" => ProposalType::ScheduledTask,
             "external_write_action" => ProposalType::ExternalWriteAction,
             "model_policy_change" => ProposalType::ModelPolicyChange,

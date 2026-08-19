@@ -69,7 +69,7 @@ describe("OpenLife product shell", () => {
     expect(screen.queryByRole("button", { name: /^审核中心/ })).not.toBeInTheDocument();
   });
 
-  it("loads transmission boundary independently of Workbench lifecycle health", async () => {
+  it("uses the transmission boundary from the same Workbench snapshot", async () => {
     const dataSource = workbenchJourneyFixtureDataSource("fixture-ready");
     const loadBoundary = vi.fn(dataSource.loadBoundary);
     render(
@@ -79,7 +79,7 @@ describe("OpenLife product shell", () => {
       />
     );
 
-    await waitFor(() => expect(loadBoundary).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(loadBoundary).not.toHaveBeenCalled());
     expect(await screen.findByText("本地路由，未外传")).toBeInTheDocument();
   });
 
@@ -180,11 +180,11 @@ describe("OpenLife product shell", () => {
     expect(screen.getByRole("heading", { name: "产品诊断", level: 1 })).toBeInTheDocument();
   });
 
-  it("reloads the effective provider when returning from settings", async () => {
+  it("reloads the aggregate Workbench snapshot when returning from settings", async () => {
     const user = userEvent.setup();
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
-    const loadConversation = vi.fn(fixture.loadConversation);
-    const dataSource = { ...fixture, loadConversation };
+    const load = vi.fn(fixture.load);
+    const dataSource = { ...fixture, load };
 
     render(
       <ProductWorkbenchJourney
@@ -195,14 +195,12 @@ describe("OpenLife product shell", () => {
       />
     );
 
-    await waitFor(() => expect(loadConversation.mock.calls.length).toBeGreaterThan(0));
-    const callsBeforeSettingsReturn = loadConversation.mock.calls.length;
+    await waitFor(() => expect(load.mock.calls.length).toBeGreaterThan(0));
+    const callsBeforeSettingsReturn = load.mock.calls.length;
     await user.click(await screen.findByRole("button", { name: "设置" }));
     await user.click(await screen.findByRole("button", { name: "返回工作台" }));
 
-    await waitFor(() =>
-      expect(loadConversation.mock.calls.length).toBeGreaterThan(callsBeforeSettingsReturn)
-    );
+    await waitFor(() => expect(load.mock.calls.length).toBeGreaterThan(callsBeforeSettingsReturn));
   });
 
   it("refreshes governed truth before opening a review created from settings", async () => {

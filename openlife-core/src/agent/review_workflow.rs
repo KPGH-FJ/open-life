@@ -37,7 +37,7 @@ impl DurableWriteSubject {
             | ProposalType::PreferenceUpdate
             | ProposalType::CapabilityUpdate
             | ProposalType::LifeModelUpdate => Self::LifeModel,
-            ProposalType::ToolPermission | ProposalType::PluginPermission => Self::ToolPermission,
+            ProposalType::ToolPermission => Self::ToolPermission,
             ProposalType::ScheduledTask | ProposalType::ScheduleCheckin => Self::Calendar,
             ProposalType::DataExport | ProposalType::ExternalWriteAction => Self::ExternalWrite,
             ProposalType::ModelPolicyChange | ProposalType::Unsupported => Self::LifeModel,

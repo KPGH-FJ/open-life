@@ -14,14 +14,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration as StdDuration;
 use uuid::{Uuid, Version};
 
-const STATE_STORE_SCHEMA_VERSION: i64 = 10;
+const STATE_STORE_SCHEMA_VERSION: i64 = 11;
 const STATE_ASSET_AGGREGATE_KIND: &str = "transient_state_asset";
 const STATE_OBSERVATION_AGGREGATE_KIND: &str = "transient_state_observation";
-const PORTABLE_DAILY_TASK_RESTORE_AGGREGATE_KIND: &str = "portable_daily_task_restore";
-const PORTABLE_DAILY_TASK_RESTORE_AGGREGATE_ID: &str = "daily_tasks";
-const PORTABLE_DAILY_TASK_ARCHIVE_SCHEMA: &str = "openlife.state-store-daily-tasks-portable.v1";
-const PORTABLE_DAILY_TASK_RESTORE_RECEIPT_SCHEMA: &str =
-    "openlife.state-store-daily-task-restore-receipt.v1";
 const LEGACY_DAILY_TASK_IMPORT_AGGREGATE_KIND: &str = "legacy_daily_task_import";
 const LEGACY_DAILY_TASK_IMPORT_AGGREGATE_ID: &str = "legacy_daily_tasks";
 const LEGACY_STATE_HISTORY_IMPORT_AGGREGATE_KIND: &str = "legacy_state_history_import";
@@ -34,11 +29,6 @@ const MAX_OBSERVATION_DIMENSION_CHARS: usize = 32;
 const MAX_OBSERVATION_UNIT_CHARS: usize = 16;
 const MAX_SOURCE_MESSAGE_REF_CHARS: usize = 256;
 const MAX_RESOURCE_TASK_BATCH_ITEMS: usize = 8;
-// Keep portable replacement within the same evidence-backed bound as the
-// existing daily-task migration lane. A replacement can write two item/version
-// facts per current task, so a larger limit requires an explicit benchmark
-// before it can be raised safely.
-const MAX_PORTABLE_DAILY_TASK_ITEMS: usize = 512;
 const MAX_LEGACY_DAILY_TASK_SHADOW_ITEMS: usize = 512;
 const MAX_LEGACY_DAILY_TASK_SHADOW_EVIDENCE: usize = 32;
 const MAX_LEGACY_TIME_BLOCK_CHARS: usize = 64;
@@ -348,97 +338,6 @@ pub struct LegacyDailyTaskImportReceipt {
     pub outbox_event_id: String,
     pub committed_at: DateTime<Utc>,
     pub expires_at: DateTime<Utc>,
-    pub replayed: bool,
-}
-
-/// Portable daily-task status deliberately excludes tombstones. An archive is
-/// a snapshot of product-visible transient state, not a copy of canonical
-/// history or deletion fences.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortableDailyTaskStatusV1 {
-    Pending,
-    Completed,
-}
-
-impl PortableDailyTaskStatusV1 {
-    fn as_daily_task_status(self) -> DailyTaskStatus {
-        match self {
-            Self::Pending => DailyTaskStatus::Pending,
-            Self::Completed => DailyTaskStatus::Completed,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PortableDailyTaskTimeBlockV1 {
-    pub start: String,
-    pub end: String,
-}
-
-/// Versioned portable representation of one canonical daily task. Absolute
-/// lifecycle timestamps are intentional: restoring an old archive must not
-/// extend a transient task's TTL or revive an already expired task.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PortableDailyTaskV1 {
-    pub title: String,
-    pub status: PortableDailyTaskStatusV1,
-    pub due_at: Option<DateTime<Utc>>,
-    pub time_block: Option<PortableDailyTaskTimeBlockV1>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
-}
-
-/// Canonical daily-task backup payload. `canonical_digest` binds the source
-/// owner snapshot for evidence and compensation checks; `payload_digest`
-/// binds only the portable task body and archive metadata.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PortableDailyTaskArchiveV1 {
-    pub schema: String,
-    pub exported_at: DateTime<Utc>,
-    pub canonical_digest: String,
-    pub payload_digest: String,
-    pub skipped_expired_count: usize,
-    pub daily_tasks: Vec<PortableDailyTaskV1>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RestorePortableDailyTasksCommand {
-    /// Stable UUIDv4 owned by the governed import coordinator. Exact retries
-    /// must reuse it; a later intentional restore must use a new operation id.
-    pub operation_id: String,
-    /// Digest of the complete governed import request, not just this category.
-    pub request_digest: String,
-    /// CAS snapshot of the current StateStore before any other import target is
-    /// changed. It prevents an import from overwriting a concurrent task write.
-    pub expected_before_digest: String,
-    pub archive: PortableDailyTaskArchiveV1,
-    pub restored_at: DateTime<Utc>,
-}
-
-/// Metadata-only proof of one atomic portable replacement. Task titles and
-/// archive bodies remain solely in canonical assets / the caller-owned archive.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PortableDailyTaskRestoreReceipt {
-    pub schema: String,
-    pub receipt_id: String,
-    pub operation_id: String,
-    pub request_digest: String,
-    pub payload_digest: String,
-    pub before_canonical_digest: String,
-    pub after_canonical_digest: String,
-    pub replaced_count: usize,
-    pub restored_count: usize,
-    pub skipped_expired_count: usize,
-    pub outbox_event_id: String,
-    pub projection_status: StateProjectionStatus,
-    pub committed_at: DateTime<Utc>,
     pub replayed: bool,
 }
 
@@ -1258,37 +1157,6 @@ impl StateStore {
                 legacy_operation_id TEXT,
                 legacy_operation_digest TEXT,
                 FOREIGN KEY(asset_id) REFERENCES state_assets(asset_id)
-             ) WITHOUT ROWID;
-             CREATE TABLE IF NOT EXISTS state_portable_daily_task_restore_operations (
-                operation_id TEXT PRIMARY KEY,
-                request_digest TEXT NOT NULL,
-                payload_digest TEXT NOT NULL,
-                receipt_id TEXT NOT NULL UNIQUE,
-                before_canonical_digest TEXT NOT NULL,
-                after_canonical_digest TEXT NOT NULL,
-                replaced_count INTEGER NOT NULL CHECK(replaced_count >= 0 AND replaced_count <= 512),
-                restored_count INTEGER NOT NULL CHECK(restored_count >= 0 AND restored_count <= 512),
-                skipped_expired_count INTEGER NOT NULL CHECK(skipped_expired_count >= 0 AND skipped_expired_count <= 512),
-                outbox_event_id TEXT NOT NULL UNIQUE,
-                committed_at TEXT NOT NULL,
-                FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
-             ) WITHOUT ROWID;
-             CREATE TABLE IF NOT EXISTS state_portable_daily_task_restore_items (
-                operation_id TEXT NOT NULL,
-                role TEXT NOT NULL CHECK(role IN ('replaced', 'restored')),
-                ordinal INTEGER NOT NULL CHECK(ordinal >= 0 AND ordinal < 512),
-                asset_id TEXT NOT NULL,
-                asset_version INTEGER NOT NULL CHECK(asset_version > 0),
-                version_operation_id TEXT NOT NULL UNIQUE,
-                payload_digest TEXT NOT NULL,
-                outbox_event_id TEXT NOT NULL UNIQUE,
-                PRIMARY KEY(operation_id, role, ordinal),
-                FOREIGN KEY(operation_id)
-                    REFERENCES state_portable_daily_task_restore_operations(operation_id)
-                    ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-                FOREIGN KEY(asset_id, asset_version)
-                    REFERENCES state_asset_versions(asset_id, version),
-                FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
              ) WITHOUT ROWID;",
         )?;
         let existing_version = tx
@@ -1300,7 +1168,7 @@ impl StateStore {
             .optional()?;
         let needs_observation_history_backfill = !matches!(
             existing_version.as_deref(),
-            None | Some("6") | Some("7") | Some("8") | Some("9") | Some("10")
+            None | Some("6") | Some("7") | Some("8") | Some("9") | Some("10") | Some("11")
         );
         if existing_version.is_some() {
             crate::sqlite_migration::ensure_column(
@@ -1389,9 +1257,17 @@ impl StateStore {
                     [],
                 )?;
             }
-            Some("10") => {}
+            Some("10") | Some("11") => {}
             Some(other) => anyhow::bail!("state_store_schema_version_unsupported:{other}"),
         }
+        tx.execute_batch(
+            "DROP TABLE IF EXISTS state_portable_daily_task_restore_items;
+             DROP TABLE IF EXISTS state_portable_daily_task_restore_operations;",
+        )?;
+        tx.execute(
+            "UPDATE state_store_metadata SET value = ?1 WHERE key = 'schema_version'",
+            [STATE_STORE_SCHEMA_VERSION.to_string()],
+        )?;
         if needs_observation_history_backfill {
             tx.execute(
                 "INSERT OR IGNORE INTO state_observation_history (
@@ -1716,187 +1592,6 @@ impl StateStore {
     ) -> Result<Option<LegacyDailyTaskImportReceipt>> {
         let conn = self.lock_connection()?;
         legacy_daily_task_import_receipt(&conn, replayed)
-    }
-
-    /// Export only the current product-visible daily-task category. Canonical
-    /// tombstones and expired transient tasks remain in StateStore history and
-    /// are not revived through the portable archive.
-    pub fn export_portable_daily_tasks(
-        &self,
-        exported_at: DateTime<Utc>,
-    ) -> Result<PortableDailyTaskArchiveV1> {
-        let conn = self.lock_connection()?;
-        require_daily_task_product_owner_ready(&conn)?;
-        let canonical = load_non_tombstoned_daily_tasks(&conn)?;
-        if canonical.len() > MAX_PORTABLE_DAILY_TASK_ITEMS {
-            anyhow::bail!("state_portable_daily_task_export_item_limit_exceeded");
-        }
-        let canonical_digest = canonical_daily_task_digest(&canonical)?;
-        let skipped_expired_count = canonical
-            .iter()
-            .filter(|asset| asset.expires_at <= exported_at)
-            .count();
-        let portable = canonical
-            .iter()
-            .filter(|asset| asset.expires_at > exported_at)
-            .map(portable_daily_task_from_asset)
-            .collect::<Result<Vec<_>>>()?;
-        let daily_tasks = sort_portable_daily_tasks(portable)?;
-        let payload_digest = portable_daily_task_archive_digest(
-            exported_at,
-            &canonical_digest,
-            skipped_expired_count,
-            &daily_tasks,
-        )?;
-        Ok(PortableDailyTaskArchiveV1 {
-            schema: PORTABLE_DAILY_TASK_ARCHIVE_SCHEMA.into(),
-            exported_at,
-            canonical_digest,
-            payload_digest,
-            skipped_expired_count,
-            daily_tasks,
-        })
-    }
-
-    pub fn restore_portable_daily_tasks(
-        &self,
-        command: RestorePortableDailyTasksCommand,
-    ) -> Result<PortableDailyTaskRestoreReceipt> {
-        self.restore_portable_daily_tasks_guarded(command, || Result::<()>::Ok(()))
-    }
-
-    /// Read-only validation for a coordinated governed import. This lets the
-    /// coordinator reject malformed, drifting, or stale StateStore input
-    /// before another canonical owner commits. The final restore deliberately
-    /// repeats every check inside its IMMEDIATE transaction to close the TOCTOU
-    /// window between preflight and commit.
-    pub fn preflight_portable_daily_task_restore(
-        &self,
-        command: &RestorePortableDailyTasksCommand,
-    ) -> Result<()> {
-        let prepared = PreparedPortableDailyTaskRestore::validate(command.clone())?;
-        let conn = self.lock_connection()?;
-        if let Some(existing) =
-            portable_daily_task_restore_receipt(&conn, &prepared.operation_id, true)?
-        {
-            validate_portable_daily_task_restore_replay(&existing, &prepared)?;
-            return Ok(());
-        }
-        validate_new_portable_daily_task_restore(&conn, &prepared)?;
-        Ok(())
-    }
-
-    pub fn restore_portable_daily_tasks_guarded<F>(
-        &self,
-        command: RestorePortableDailyTasksCommand,
-        before_commit: F,
-    ) -> Result<PortableDailyTaskRestoreReceipt>
-    where
-        F: FnOnce() -> Result<()>,
-    {
-        let prepared = PreparedPortableDailyTaskRestore::validate(command)?;
-        let mut conn = self.lock_connection()?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
-        if let Some(existing) =
-            portable_daily_task_restore_receipt(&tx, &prepared.operation_id, true)?
-        {
-            validate_portable_daily_task_restore_replay(&existing, &prepared)?;
-            tx.rollback()?;
-            return Ok(existing);
-        }
-
-        let current = validate_new_portable_daily_task_restore(&tx, &prepared)?;
-        let before_canonical_digest = prepared.expected_before_digest.clone();
-
-        for (ordinal, asset) in current.iter().enumerate() {
-            replace_daily_task_for_portable_restore(
-                &tx,
-                &prepared.operation_id,
-                &prepared.payload_digest,
-                ordinal,
-                asset,
-                prepared.restored_at,
-            )?;
-        }
-
-        let active_tasks = prepared
-            .daily_tasks
-            .iter()
-            .filter(|task| task.expires_at > prepared.restored_at)
-            .cloned()
-            .collect::<Vec<_>>();
-        let skipped_expired_count = prepared.daily_tasks.len() - active_tasks.len();
-        for (ordinal, task) in active_tasks.iter().enumerate() {
-            insert_daily_task_from_portable_restore(
-                &tx,
-                &prepared.operation_id,
-                &prepared.payload_digest,
-                ordinal,
-                task,
-            )?;
-        }
-
-        let restored = load_non_tombstoned_daily_tasks(&tx)?;
-        let restored_portable = sort_portable_daily_tasks(
-            restored
-                .iter()
-                .map(portable_daily_task_from_asset)
-                .collect::<Result<Vec<_>>>()?,
-        )?;
-        let expected_portable = sort_portable_daily_tasks(active_tasks)?;
-        if restored_portable != expected_portable {
-            anyhow::bail!("state_portable_daily_task_restore_canonical_parity_failed");
-        }
-        let after_canonical_digest = canonical_daily_task_digest(&restored)?;
-        let outbox = crate::persistence_outbox::enqueue_mutation(
-            &tx,
-            PORTABLE_DAILY_TASK_RESTORE_AGGREGATE_KIND,
-            PORTABLE_DAILY_TASK_RESTORE_AGGREGATE_ID,
-            StateMutationKind::RestoreReplace.as_str(),
-            &after_canonical_digest,
-            PROJECTION_TARGETS,
-        )?;
-        let receipt_id = format!("state_portable_restore_receipt:{}", Uuid::new_v4());
-        tx.execute(
-            "INSERT INTO state_portable_daily_task_restore_operations (
-                operation_id, request_digest, payload_digest, receipt_id,
-                before_canonical_digest, after_canonical_digest,
-                replaced_count, restored_count, skipped_expired_count,
-                outbox_event_id, committed_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-            params![
-                prepared.operation_id,
-                prepared.request_digest,
-                prepared.payload_digest,
-                receipt_id,
-                before_canonical_digest,
-                after_canonical_digest,
-                i64::try_from(current.len())?,
-                i64::try_from(restored.len())?,
-                i64::try_from(skipped_expired_count)?,
-                outbox.event_id,
-                prepared.restored_at.to_rfc3339(),
-            ],
-        )?;
-        before_commit()?;
-        tx.commit()?;
-        drop(conn);
-        self.portable_daily_task_restore_receipt(&prepared.operation_id, false)?
-            .context("state_portable_daily_task_restore_receipt_missing_after_commit")
-    }
-
-    pub fn portable_daily_task_restore_receipt(
-        &self,
-        operation_id: &str,
-        replayed: bool,
-    ) -> Result<Option<PortableDailyTaskRestoreReceipt>> {
-        validate_uuid_v4(
-            "state_portable_daily_task_restore_operation_id",
-            operation_id,
-        )?;
-        let conn = self.lock_connection()?;
-        portable_daily_task_restore_receipt(&conn, operation_id, replayed)
     }
 
     pub fn reconcile_legacy_state_history_shadow(
@@ -3229,116 +2924,6 @@ impl StateStore {
     }
 }
 
-struct PreparedPortableDailyTaskRestore {
-    operation_id: String,
-    request_digest: String,
-    expected_before_digest: String,
-    payload_digest: String,
-    daily_tasks: Vec<PortableDailyTaskV1>,
-    restored_at: DateTime<Utc>,
-}
-
-impl PreparedPortableDailyTaskRestore {
-    fn validate(command: RestorePortableDailyTasksCommand) -> Result<Self> {
-        validate_uuid_v4(
-            "state_portable_daily_task_restore_operation_id",
-            &command.operation_id,
-        )?;
-        if !is_sha256_digest(&command.request_digest) {
-            anyhow::bail!("state_portable_daily_task_restore_request_digest_invalid");
-        }
-        if !is_sha256_digest(&command.expected_before_digest) {
-            anyhow::bail!("state_portable_daily_task_restore_before_digest_invalid");
-        }
-        if command.archive.schema != PORTABLE_DAILY_TASK_ARCHIVE_SCHEMA {
-            anyhow::bail!("state_portable_daily_task_archive_schema_unsupported");
-        }
-        if !is_sha256_digest(&command.archive.canonical_digest) {
-            anyhow::bail!("state_portable_daily_task_archive_canonical_digest_invalid");
-        }
-        if !is_sha256_digest(&command.archive.payload_digest) {
-            anyhow::bail!("state_portable_daily_task_archive_payload_digest_invalid");
-        }
-        if command.archive.daily_tasks.len() > MAX_PORTABLE_DAILY_TASK_ITEMS {
-            anyhow::bail!("state_portable_daily_task_archive_item_limit_exceeded");
-        }
-        if command.archive.skipped_expired_count > MAX_PORTABLE_DAILY_TASK_ITEMS {
-            anyhow::bail!("state_portable_daily_task_archive_expired_count_invalid");
-        }
-        for task in &command.archive.daily_tasks {
-            validate_portable_daily_task(task)?;
-            if task.updated_at > command.archive.exported_at
-                || task.expires_at <= command.archive.exported_at
-            {
-                anyhow::bail!("state_portable_daily_task_archive_visibility_invalid");
-            }
-        }
-        if command.restored_at < command.archive.exported_at {
-            anyhow::bail!("state_portable_daily_task_restore_precedes_archive");
-        }
-        let recomputed = portable_daily_task_archive_digest(
-            command.archive.exported_at,
-            &command.archive.canonical_digest,
-            command.archive.skipped_expired_count,
-            &command.archive.daily_tasks,
-        )?;
-        if recomputed != command.archive.payload_digest {
-            anyhow::bail!("state_portable_daily_task_archive_payload_digest_mismatch");
-        }
-        let daily_tasks = sort_portable_daily_tasks(command.archive.daily_tasks)?;
-        Ok(Self {
-            operation_id: command.operation_id,
-            request_digest: command.request_digest,
-            expected_before_digest: command.expected_before_digest,
-            payload_digest: command.archive.payload_digest,
-            daily_tasks,
-            restored_at: command.restored_at,
-        })
-    }
-}
-
-fn validate_portable_daily_task_restore_replay(
-    existing: &PortableDailyTaskRestoreReceipt,
-    prepared: &PreparedPortableDailyTaskRestore,
-) -> Result<()> {
-    if existing.request_digest != prepared.request_digest {
-        anyhow::bail!("state_portable_daily_task_restore_request_drift");
-    }
-    if existing.payload_digest != prepared.payload_digest {
-        anyhow::bail!("state_portable_daily_task_restore_payload_drift");
-    }
-    if existing.before_canonical_digest != prepared.expected_before_digest {
-        anyhow::bail!("state_portable_daily_task_restore_before_digest_drift");
-    }
-    if existing.committed_at != prepared.restored_at {
-        anyhow::bail!("state_portable_daily_task_restore_time_drift");
-    }
-    Ok(())
-}
-
-fn validate_new_portable_daily_task_restore(
-    conn: &Connection,
-    prepared: &PreparedPortableDailyTaskRestore,
-) -> Result<Vec<StateAsset>> {
-    ensure_operation_namespace_available(conn, &prepared.operation_id)?;
-    require_daily_task_product_owner_ready(conn)?;
-    let current = load_non_tombstoned_daily_tasks(conn)?;
-    if current.len() > MAX_PORTABLE_DAILY_TASK_ITEMS {
-        anyhow::bail!("state_portable_daily_task_restore_existing_item_limit_exceeded");
-    }
-    let before_canonical_digest = canonical_daily_task_digest(&current)?;
-    if before_canonical_digest != prepared.expected_before_digest {
-        anyhow::bail!("state_portable_daily_task_restore_before_digest_conflict");
-    }
-    if current
-        .iter()
-        .any(|asset| asset.updated_at > prepared.restored_at)
-    {
-        anyhow::bail!("state_portable_daily_task_restore_precedes_current_state");
-    }
-    Ok(current)
-}
-
 struct PreparedResourceTaskBatch {
     operation_id: String,
     request_digest: String,
@@ -3820,14 +3405,6 @@ fn ensure_operation_namespace_available(conn: &Connection, operation_id: &str) -
                 SELECT 'legacy_daily_task_import' AS owner
                 FROM state_legacy_daily_task_import_items
                 WHERE import_operation_id = ?1
-                UNION ALL
-                SELECT 'portable_daily_task_restore' AS owner
-                FROM state_portable_daily_task_restore_operations
-                WHERE operation_id = ?1
-                UNION ALL
-                SELECT 'portable_daily_task_restore_item' AS owner
-                FROM state_portable_daily_task_restore_items
-                WHERE version_operation_id = ?1
              ) LIMIT 1",
             [operation_id],
             |row| row.get::<_, String>(0),
@@ -4268,334 +3845,6 @@ fn state_asset_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StateAsset>
     })
 }
 
-fn require_daily_task_product_owner_ready(
-    conn: &Connection,
-) -> Result<LegacyDailyTaskImportReceipt> {
-    let receipt = legacy_daily_task_import_receipt(conn, false)?
-        .context("daily_task_product_owner_not_ready")?;
-    if receipt.candidate_digest != receipt.canonical_digest {
-        anyhow::bail!("daily_task_product_owner_receipt_inconsistent");
-    }
-    Ok(receipt)
-}
-
-fn load_non_tombstoned_daily_tasks(conn: &Connection) -> Result<Vec<StateAsset>> {
-    let mut statement = conn.prepare(
-        "SELECT asset_id, kind, version, title, status, due_at,
-                time_block_start, time_block_end, source_message_ref,
-                risk, sensitivity, source_kind, confidence,
-                privacy_class, created_at, updated_at, expires_at,
-                tombstoned_at, tombstone_reason
-         FROM state_assets
-         WHERE kind = 'daily_task' AND status != 'tombstoned'
-         ORDER BY asset_id ASC",
-    )?;
-    let assets = statement
-        .query_map([], state_asset_from_row)?
-        .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(anyhow::Error::from)?;
-    Ok(assets)
-}
-
-fn canonical_daily_task_digest(assets: &[StateAsset]) -> Result<String> {
-    let mut ordered = assets.to_vec();
-    ordered.sort_by(|left, right| left.asset_id.cmp(&right.asset_id));
-    digest_json(&serde_json::json!({
-        "schema": "openlife.state-store-daily-task-canonical-digest.v1",
-        "assets": ordered,
-    }))
-}
-
-fn portable_daily_task_from_asset(asset: &StateAsset) -> Result<PortableDailyTaskV1> {
-    let status = match asset.status {
-        DailyTaskStatus::Pending => PortableDailyTaskStatusV1::Pending,
-        DailyTaskStatus::Completed => PortableDailyTaskStatusV1::Completed,
-        DailyTaskStatus::Tombstoned => {
-            anyhow::bail!("state_portable_daily_task_tombstone_not_exportable")
-        }
-    };
-    let time_block = match (&asset.time_block_start, &asset.time_block_end) {
-        (Some(start), Some(end)) => Some(PortableDailyTaskTimeBlockV1 {
-            start: start.clone(),
-            end: end.clone(),
-        }),
-        (None, None) => None,
-        _ => anyhow::bail!("state_portable_daily_task_canonical_time_block_incomplete"),
-    };
-    let task = PortableDailyTaskV1 {
-        title: asset.title.clone(),
-        status,
-        due_at: asset.due_at,
-        time_block,
-        created_at: asset.created_at,
-        updated_at: asset.updated_at,
-        expires_at: asset.expires_at,
-    };
-    validate_portable_daily_task(&task)?;
-    Ok(task)
-}
-
-fn validate_portable_daily_task(task: &PortableDailyTaskV1) -> Result<()> {
-    if task.title.trim() != task.title
-        || task.title.is_empty()
-        || task.title.chars().count() > MAX_TASK_TITLE_CHARS
-        || task.title.chars().any(char::is_control)
-    {
-        anyhow::bail!("state_portable_daily_task_title_invalid");
-    }
-    if task.created_at > task.updated_at || task.updated_at > task.expires_at {
-        anyhow::bail!("state_portable_daily_task_lifecycle_invalid");
-    }
-    if task.expires_at <= task.created_at {
-        anyhow::bail!("state_portable_daily_task_expiry_invalid");
-    }
-    let ttl = task.expires_at - task.created_at;
-    if ttl < Duration::hours(24) || ttl > Duration::days(7) {
-        anyhow::bail!("state_portable_daily_task_ttl_out_of_range");
-    }
-    if task
-        .due_at
-        .is_some_and(|due_at| due_at < task.created_at || due_at > task.expires_at)
-    {
-        anyhow::bail!("state_portable_daily_task_due_at_out_of_range");
-    }
-    if let Some(time_block) = &task.time_block {
-        for (label, value) in [("start", &time_block.start), ("end", &time_block.end)] {
-            if value.trim() != *value
-                || value.is_empty()
-                || value.chars().count() > MAX_LEGACY_TIME_BLOCK_CHARS
-                || value.chars().any(char::is_control)
-            {
-                anyhow::bail!("state_portable_daily_task_time_block_{label}_invalid");
-            }
-        }
-    }
-    Ok(())
-}
-
-fn sort_portable_daily_tasks(tasks: Vec<PortableDailyTaskV1>) -> Result<Vec<PortableDailyTaskV1>> {
-    let mut keyed = tasks
-        .into_iter()
-        .map(|task| Ok((serde_json::to_string(&task)?, task)))
-        .collect::<Result<Vec<_>>>()?;
-    keyed.sort_by(|left, right| left.0.cmp(&right.0));
-    Ok(keyed.into_iter().map(|(_, task)| task).collect())
-}
-
-fn portable_daily_task_archive_digest(
-    exported_at: DateTime<Utc>,
-    canonical_digest: &str,
-    skipped_expired_count: usize,
-    tasks: &[PortableDailyTaskV1],
-) -> Result<String> {
-    digest_json(&serde_json::json!({
-        "schema": PORTABLE_DAILY_TASK_ARCHIVE_SCHEMA,
-        "exportedAt": exported_at,
-        "canonicalDigest": canonical_digest,
-        "skippedExpiredCount": skipped_expired_count,
-        "dailyTasks": tasks,
-    }))
-}
-
-fn portable_restore_source_ref(payload_digest: &str, role: &str, ordinal: usize) -> Result<String> {
-    let value = format!("restore://{payload_digest}/{role}/{ordinal}");
-    validate_bounded_ref("state_portable_daily_task_restore_source_ref", &value)?;
-    Ok(value)
-}
-
-fn replace_daily_task_for_portable_restore(
-    tx: &Transaction<'_>,
-    restore_operation_id: &str,
-    archive_payload_digest: &str,
-    ordinal: usize,
-    current: &StateAsset,
-    restored_at: DateTime<Utc>,
-) -> Result<()> {
-    if crate::persistence_outbox::has_active_tombstone(
-        tx,
-        STATE_ASSET_AGGREGATE_KIND,
-        &current.asset_id,
-    )? {
-        anyhow::bail!("state_portable_daily_task_restore_live_asset_has_tombstone");
-    }
-    let next_version = current
-        .version
-        .checked_add(1)
-        .context("state_portable_daily_task_restore_version_overflow")?;
-    let version_operation_id = Uuid::new_v4().hyphenated().to_string();
-    ensure_operation_namespace_available(tx, &version_operation_id)?;
-    let source_ref = portable_restore_source_ref(archive_payload_digest, "replaced", ordinal)?;
-    let payload_digest = digest_json(&serde_json::json!({
-        "schema": "openlife.state-portable-daily-task-replace-item.v1",
-        "restoreOperationId": restore_operation_id,
-        "assetId": current.asset_id,
-        "expectedVersion": current.version,
-        "nextVersion": next_version,
-        "title": current.title,
-        "status": current.status,
-        "dueAt": current.due_at,
-        "timeBlockStart": current.time_block_start,
-        "timeBlockEnd": current.time_block_end,
-        "expiresAt": current.expires_at,
-    }))?;
-    let changed = tx.execute(
-        "UPDATE state_assets
-         SET version = ?3, status = 'tombstoned', updated_at = ?4,
-             source_message_ref = ?5, source_kind = 'governed_data_restore',
-             tombstoned_at = ?4, tombstone_reason = 'restore_replace'
-         WHERE asset_id = ?1 AND version = ?2 AND status != 'tombstoned'",
-        params![
-            current.asset_id,
-            i64::try_from(current.version)?,
-            i64::try_from(next_version)?,
-            restored_at.to_rfc3339(),
-            source_ref,
-        ],
-    )?;
-    if changed != 1 {
-        anyhow::bail!("state_portable_daily_task_restore_version_conflict");
-    }
-    tx.execute(
-        "INSERT INTO state_asset_versions (
-            asset_id, version, operation_id, payload_digest, mutation_kind,
-            status, title, due_at, time_block_start, time_block_end,
-            source_message_ref, source_kind, created_at, expires_at,
-            tombstone_reason
-         ) VALUES (?1, ?2, ?3, ?4, 'restore_replace', 'tombstoned', ?5,
-                   ?6, ?7, ?8, ?9, 'governed_data_restore', ?10, ?11,
-                   'restore_replace')",
-        params![
-            current.asset_id,
-            i64::try_from(next_version)?,
-            version_operation_id,
-            payload_digest,
-            current.title,
-            current.due_at.map(|value| value.to_rfc3339()),
-            current.time_block_start,
-            current.time_block_end,
-            source_ref,
-            current.created_at.to_rfc3339(),
-            current.expires_at.to_rfc3339(),
-        ],
-    )?;
-    let outbox = crate::persistence_outbox::enqueue_tombstone(
-        tx,
-        STATE_ASSET_AGGREGATE_KIND,
-        &current.asset_id,
-        Some(StateMutationKind::RestoreReplace.as_str()),
-        &[],
-    )?;
-    tx.execute(
-        "INSERT INTO state_portable_daily_task_restore_items (
-            operation_id, role, ordinal, asset_id, asset_version,
-            version_operation_id, payload_digest, outbox_event_id
-         ) VALUES (?1, 'replaced', ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![
-            restore_operation_id,
-            i64::try_from(ordinal)?,
-            current.asset_id,
-            i64::try_from(next_version)?,
-            version_operation_id,
-            payload_digest,
-            outbox.event_id,
-        ],
-    )?;
-    Ok(())
-}
-
-fn insert_daily_task_from_portable_restore(
-    tx: &Transaction<'_>,
-    restore_operation_id: &str,
-    archive_payload_digest: &str,
-    ordinal: usize,
-    task: &PortableDailyTaskV1,
-) -> Result<()> {
-    validate_portable_daily_task(task)?;
-    let asset_id = Uuid::new_v4().hyphenated().to_string();
-    let version_operation_id = Uuid::new_v4().hyphenated().to_string();
-    ensure_operation_namespace_available(tx, &version_operation_id)?;
-    let source_ref = portable_restore_source_ref(archive_payload_digest, "restored", ordinal)?;
-    let status = task.status.as_daily_task_status();
-    let (time_block_start, time_block_end) = task
-        .time_block
-        .as_ref()
-        .map(|block| (Some(block.start.as_str()), Some(block.end.as_str())))
-        .unwrap_or((None, None));
-    let payload_digest = digest_json(&serde_json::json!({
-        "schema": "openlife.state-portable-daily-task-restored-item.v1",
-        "restoreOperationId": restore_operation_id,
-        "ordinal": ordinal,
-        "task": task,
-    }))?;
-    tx.execute(
-        "INSERT INTO state_assets (
-            asset_id, kind, version, title, status, due_at,
-            time_block_start, time_block_end, source_message_ref, risk,
-            sensitivity, source_kind, confidence, privacy_class, created_at,
-            updated_at, expires_at, tombstoned_at, tombstone_reason
-         ) VALUES (?1, 'daily_task', 1, ?2, ?3, ?4, ?5, ?6, ?7, 'low',
-                   'internal', 'governed_data_restore', 1.0, 'private',
-                   ?8, ?9, ?10, NULL, NULL)",
-        params![
-            asset_id,
-            task.title,
-            status.as_str(),
-            task.due_at.map(|value| value.to_rfc3339()),
-            time_block_start,
-            time_block_end,
-            source_ref,
-            task.created_at.to_rfc3339(),
-            task.updated_at.to_rfc3339(),
-            task.expires_at.to_rfc3339(),
-        ],
-    )?;
-    tx.execute(
-        "INSERT INTO state_asset_versions (
-            asset_id, version, operation_id, payload_digest, mutation_kind,
-            status, title, due_at, time_block_start, time_block_end,
-            source_message_ref, source_kind, created_at, expires_at,
-            tombstone_reason
-         ) VALUES (?1, 1, ?2, ?3, 'create', ?4, ?5, ?6, ?7, ?8, ?9,
-                   'governed_data_restore', ?10, ?11, NULL)",
-        params![
-            asset_id,
-            version_operation_id,
-            payload_digest,
-            status.as_str(),
-            task.title,
-            task.due_at.map(|value| value.to_rfc3339()),
-            time_block_start,
-            time_block_end,
-            source_ref,
-            task.created_at.to_rfc3339(),
-            task.expires_at.to_rfc3339(),
-        ],
-    )?;
-    let outbox = crate::persistence_outbox::enqueue_mutation(
-        tx,
-        STATE_ASSET_AGGREGATE_KIND,
-        &asset_id,
-        StateMutationKind::Create.as_str(),
-        &payload_digest,
-        &[],
-    )?;
-    tx.execute(
-        "INSERT INTO state_portable_daily_task_restore_items (
-            operation_id, role, ordinal, asset_id, asset_version,
-            version_operation_id, payload_digest, outbox_event_id
-         ) VALUES (?1, 'restored', ?2, ?3, 1, ?4, ?5, ?6)",
-        params![
-            restore_operation_id,
-            i64::try_from(ordinal)?,
-            asset_id,
-            version_operation_id,
-            payload_digest,
-            outbox.event_id,
-        ],
-    )?;
-    Ok(())
-}
-
 fn prepare_legacy_daily_task_shadow(
     candidates: Vec<LegacyDailyTaskShadowCandidate>,
 ) -> Result<Vec<LegacyDailyTaskShadowCandidate>> {
@@ -4968,95 +4217,6 @@ fn legacy_daily_task_import_receipt(
         },
     )
     .transpose()
-}
-
-fn portable_daily_task_restore_receipt(
-    conn: &Connection,
-    operation_id: &str,
-    replayed: bool,
-) -> Result<Option<PortableDailyTaskRestoreReceipt>> {
-    let row = conn
-        .query_row(
-            "SELECT receipt_id, request_digest, payload_digest,
-                    before_canonical_digest, after_canonical_digest,
-                    replaced_count, restored_count, skipped_expired_count,
-                    outbox_event_id, committed_at
-             FROM state_portable_daily_task_restore_operations
-             WHERE operation_id = ?1",
-            [operation_id],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, i64>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, i64>(7)?,
-                    row.get::<_, String>(8)?,
-                    row.get::<_, String>(9)?,
-                ))
-            },
-        )
-        .optional()?;
-    let Some((
-        receipt_id,
-        request_digest,
-        payload_digest,
-        before_canonical_digest,
-        after_canonical_digest,
-        replaced_count,
-        restored_count,
-        skipped_expired_count,
-        outbox_event_id,
-        committed_at,
-    )) = row
-    else {
-        return Ok(None);
-    };
-    let outbox = crate::persistence_outbox::mutation_by_event_id(conn, &outbox_event_id)?
-        .context("state_portable_daily_task_restore_outbox_event_missing")?;
-    if outbox.aggregate_kind != PORTABLE_DAILY_TASK_RESTORE_AGGREGATE_KIND
-        || outbox.aggregate_id != PORTABLE_DAILY_TASK_RESTORE_AGGREGATE_ID
-        || outbox.mutation_kind != StateMutationKind::RestoreReplace.as_str()
-        || outbox.payload_digest != after_canonical_digest
-        || outbox.tombstone_id.is_some()
-    {
-        anyhow::bail!("state_portable_daily_task_restore_outbox_event_semantic_mismatch");
-    }
-    let projection_status = match projection_delivery_state_for_event(conn, &outbox_event_id)? {
-        crate::persistence_outbox::ProjectionDeliveryState::Pending => {
-            StateProjectionStatus::Pending
-        }
-        crate::persistence_outbox::ProjectionDeliveryState::Degraded => {
-            StateProjectionStatus::Degraded
-        }
-        crate::persistence_outbox::ProjectionDeliveryState::Applied
-        | crate::persistence_outbox::ProjectionDeliveryState::Superseded
-        | crate::persistence_outbox::ProjectionDeliveryState::Compensated => {
-            StateProjectionStatus::Applied
-        }
-    };
-    Ok(Some(PortableDailyTaskRestoreReceipt {
-        schema: PORTABLE_DAILY_TASK_RESTORE_RECEIPT_SCHEMA.into(),
-        receipt_id,
-        operation_id: operation_id.to_string(),
-        request_digest,
-        payload_digest,
-        before_canonical_digest,
-        after_canonical_digest,
-        replaced_count: usize::try_from(replaced_count)
-            .context("state_portable_daily_task_restore_replaced_count_invalid")?,
-        restored_count: usize::try_from(restored_count)
-            .context("state_portable_daily_task_restore_restored_count_invalid")?,
-        skipped_expired_count: usize::try_from(skipped_expired_count)
-            .context("state_portable_daily_task_restore_expired_count_invalid")?,
-        outbox_event_id,
-        projection_status,
-        committed_at: parse_time(&committed_at)?,
-        replayed,
-    }))
 }
 
 fn projection_delivery_state_for_event(
@@ -5870,67 +5030,6 @@ mod tests {
             )
             .unwrap();
         store.import_legacy_daily_task_shadow(at(8)).unwrap();
-    }
-
-    fn portable_restore_command(
-        archive: PortableDailyTaskArchiveV1,
-        expected_before_digest: String,
-        restored_at: DateTime<Utc>,
-    ) -> RestorePortableDailyTasksCommand {
-        RestorePortableDailyTasksCommand {
-            operation_id: Uuid::new_v4().hyphenated().to_string(),
-            request_digest: digest_json(&serde_json::json!({
-                "governedImport": archive.payload_digest,
-            }))
-            .unwrap(),
-            expected_before_digest,
-            archive,
-            restored_at,
-        }
-    }
-
-    fn portable_archive_fixture(
-        item_count: usize,
-        title_prefix: &str,
-        exported_at: DateTime<Utc>,
-    ) -> PortableDailyTaskArchiveV1 {
-        let daily_tasks = sort_portable_daily_tasks(
-            (0..item_count)
-                .map(|ordinal| PortableDailyTaskV1 {
-                    title: format!("{title_prefix}-{ordinal:03}"),
-                    status: if ordinal % 2 == 0 {
-                        PortableDailyTaskStatusV1::Pending
-                    } else {
-                        PortableDailyTaskStatusV1::Completed
-                    },
-                    due_at: None,
-                    time_block: None,
-                    created_at: exported_at - Duration::hours(1),
-                    updated_at: exported_at - Duration::hours(1),
-                    expires_at: exported_at + Duration::days(1),
-                })
-                .collect(),
-        )
-        .unwrap();
-        let canonical_digest = digest_json(&serde_json::json!({
-            "schema": "openlife.test-portable-daily-task-source.v1",
-            "dailyTasks": &daily_tasks,
-        }))
-        .unwrap();
-        PortableDailyTaskArchiveV1 {
-            schema: PORTABLE_DAILY_TASK_ARCHIVE_SCHEMA.into(),
-            exported_at,
-            canonical_digest: canonical_digest.clone(),
-            payload_digest: portable_daily_task_archive_digest(
-                exported_at,
-                &canonical_digest,
-                0,
-                &daily_tasks,
-            )
-            .unwrap(),
-            skipped_expired_count: 0,
-            daily_tasks,
-        }
     }
 
     fn observation_command(
@@ -7082,570 +6181,6 @@ mod tests {
     }
 
     #[test]
-    fn portable_daily_task_archive_is_strict_and_round_trips_canonical_task_fields() {
-        let source = StateStore::new_in_memory().unwrap();
-        let source_digest = digest_json(&serde_json::json!({"model": "portable-source"})).unwrap();
-        source
-            .reconcile_legacy_daily_task_shadow(
-                source_digest,
-                vec![
-                    LegacyDailyTaskShadowCandidate {
-                        source_ordinal: 0,
-                        title: "检查路演设备".into(),
-                        completed: false,
-                        time_block_start: Some("09:00".into()),
-                        time_block_end: Some("10:00".into()),
-                        due_at: Some(at(17)),
-                        legacy_operation_id: None,
-                        legacy_operation_digest: None,
-                    },
-                    LegacyDailyTaskShadowCandidate {
-                        source_ordinal: 1,
-                        title: "确认演示数据".into(),
-                        completed: false,
-                        time_block_start: None,
-                        time_block_end: None,
-                        due_at: None,
-                        legacy_operation_id: None,
-                        legacy_operation_digest: None,
-                    },
-                ],
-                at(8),
-            )
-            .unwrap();
-        source.import_legacy_daily_task_shadow(at(9)).unwrap();
-        let to_complete = source
-            .get_product_daily_tasks()
-            .unwrap()
-            .into_iter()
-            .find(|task| task.title == "确认演示数据")
-            .unwrap();
-        source
-            .complete_daily_task(transition(
-                &to_complete,
-                StateMutationKind::Complete,
-                at(10),
-            ))
-            .unwrap();
-        let archive = source.export_portable_daily_tasks(at(11)).unwrap();
-        assert_eq!(archive.schema, PORTABLE_DAILY_TASK_ARCHIVE_SCHEMA);
-        assert_eq!(archive.daily_tasks.len(), 2);
-        assert_eq!(archive.skipped_expired_count, 0);
-
-        let mut unknown_field = serde_json::to_value(&archive).unwrap();
-        unknown_field
-            .as_object_mut()
-            .unwrap()
-            .insert("unexpected".into(), serde_json::Value::Bool(true));
-        assert!(serde_json::from_value::<PortableDailyTaskArchiveV1>(unknown_field).is_err());
-
-        let target = StateStore::new_in_memory().unwrap();
-        initialize_daily_task_product_owner(&target);
-        let target_before = target.export_portable_daily_tasks(at(11)).unwrap();
-        let receipt = target
-            .restore_portable_daily_tasks(portable_restore_command(
-                archive.clone(),
-                target_before.canonical_digest,
-                at(12),
-            ))
-            .unwrap();
-        assert_eq!(receipt.replaced_count, 0);
-        assert_eq!(receipt.restored_count, 2);
-        assert_eq!(receipt.skipped_expired_count, 0);
-        assert_eq!(receipt.projection_status, StateProjectionStatus::Pending);
-        let restored_archive = target.export_portable_daily_tasks(at(12)).unwrap();
-        assert_eq!(restored_archive.daily_tasks, archive.daily_tasks);
-        assert!(target
-            .get_product_daily_tasks()
-            .unwrap()
-            .iter()
-            .all(|task| task.source_kind == StateSourceKind::GovernedDataRestore));
-
-        let encoded_receipt = serde_json::to_string(&receipt).unwrap();
-        assert!(!encoded_receipt.contains("检查路演设备"));
-        assert!(!encoded_receipt.contains("确认演示数据"));
-        let conn = target.lock_connection().unwrap();
-        let item_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM state_portable_daily_task_restore_items
-                 WHERE operation_id = ?1",
-                [&receipt.operation_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let aggregate_delivery_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM canonical_outbox_deliveries
-                 WHERE event_id = ?1",
-                [&receipt.outbox_event_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(item_count, 2);
-        assert_eq!(aggregate_delivery_count, 1);
-    }
-
-    #[test]
-    fn portable_daily_task_restore_receipt_rejects_valid_but_unrelated_outbox_event() {
-        let target = StateStore::new_in_memory().unwrap();
-        initialize_daily_task_product_owner(&target);
-        let unrelated = target
-            .create_daily_task(create_command(
-                Uuid::new_v4().hyphenated().to_string(),
-                "无关事件",
-            ))
-            .unwrap();
-        let before = target.export_portable_daily_tasks(at(10)).unwrap();
-        let command = portable_restore_command(
-            portable_archive_fixture(1, "恢复任务", at(10)),
-            before.canonical_digest,
-            at(11),
-        );
-        target
-            .restore_portable_daily_tasks(command.clone())
-            .unwrap();
-
-        {
-            let conn = target.lock_connection().unwrap();
-            conn.execute(
-                "UPDATE state_portable_daily_task_restore_operations
-                 SET outbox_event_id = ?1 WHERE operation_id = ?2",
-                params![unrelated.outbox_event_id, command.operation_id],
-            )
-            .unwrap();
-        }
-
-        let error = target
-            .portable_daily_task_restore_receipt(&command.operation_id, false)
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("state_portable_daily_task_restore_outbox_event_semantic_mismatch"));
-    }
-
-    #[test]
-    fn portable_daily_task_restore_receipt_rejects_missing_required_projection_delivery() {
-        let target = StateStore::new_in_memory().unwrap();
-        initialize_daily_task_product_owner(&target);
-        let before = target.export_portable_daily_tasks(at(10)).unwrap();
-        let command = portable_restore_command(
-            portable_archive_fixture(1, "恢复任务", at(10)),
-            before.canonical_digest,
-            at(11),
-        );
-        let receipt = target
-            .restore_portable_daily_tasks(command.clone())
-            .unwrap();
-
-        {
-            let conn = target.lock_connection().unwrap();
-            conn.execute(
-                "DELETE FROM canonical_outbox_deliveries
-                 WHERE event_id = ?1 AND projection_target = ?2",
-                params![receipt.outbox_event_id, LIFEMODEL_YAML_PROJECTION_TARGET],
-            )
-            .unwrap();
-        }
-
-        let error = target
-            .portable_daily_task_restore_receipt(&command.operation_id, false)
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("state projection delivery missing"));
-    }
-
-    #[test]
-    fn portable_daily_task_restore_replays_one_operation_and_cas_blocks_later_overwrite() {
-        let source = StateStore::new_in_memory().unwrap();
-        initialize_daily_task_product_owner(&source);
-        source
-            .create_daily_task(create_command(
-                Uuid::new_v4().hyphenated().to_string(),
-                "可重放任务",
-            ))
-            .unwrap();
-        let archive = source.export_portable_daily_tasks(at(12)).unwrap();
-
-        let target = StateStore::new_in_memory().unwrap();
-        initialize_daily_task_product_owner(&target);
-        let before = target.export_portable_daily_tasks(at(12)).unwrap();
-        let command = portable_restore_command(archive.clone(), before.canonical_digest, at(13));
-        target
-            .preflight_portable_daily_task_restore(&command)
-            .unwrap();
-        assert!(target
-            .portable_daily_task_restore_receipt(&command.operation_id, false)
-            .unwrap()
-            .is_none());
-        let first = target
-            .restore_portable_daily_tasks(command.clone())
-            .unwrap();
-        target
-            .preflight_portable_daily_task_restore(&command)
-            .unwrap();
-        let replay = target
-            .restore_portable_daily_tasks(command.clone())
-            .unwrap();
-        assert!(!first.replayed);
-        assert!(replay.replayed);
-        assert_eq!(first.receipt_id, replay.receipt_id);
-
-        target
-            .create_daily_task(create_command(
-                Uuid::new_v4().hyphenated().to_string(),
-                "恢复后的新任务",
-            ))
-            .unwrap();
-        target
-            .preflight_portable_daily_task_restore(&command)
-            .unwrap();
-        let replay_after_later_write = target
-            .restore_portable_daily_tasks(command.clone())
-            .unwrap();
-        assert!(replay_after_later_write.replayed);
-        assert_eq!(replay_after_later_write.receipt_id, first.receipt_id);
-        assert_eq!(target.get_product_daily_tasks().unwrap().len(), 2);
-
-        let mut time_drifted = command.clone();
-        time_drifted.restored_at += Duration::minutes(1);
-        let time_drift = target
-            .preflight_portable_daily_task_restore(&time_drifted)
-            .unwrap_err();
-        assert!(time_drift
-            .to_string()
-            .contains("state_portable_daily_task_restore_time_drift"));
-
-        let mut source_drifted = command.clone();
-        source_drifted.archive.canonical_digest =
-            digest_json(&serde_json::json!({"differentCanonicalSource": true})).unwrap();
-        source_drifted.archive.payload_digest = portable_daily_task_archive_digest(
-            source_drifted.archive.exported_at,
-            &source_drifted.archive.canonical_digest,
-            source_drifted.archive.skipped_expired_count,
-            &source_drifted.archive.daily_tasks,
-        )
-        .unwrap();
-        let source_drift = target
-            .preflight_portable_daily_task_restore(&source_drifted)
-            .unwrap_err();
-        assert!(source_drift
-            .to_string()
-            .contains("state_portable_daily_task_restore_payload_drift"));
-
-        let mut drifted = command.clone();
-        drifted.archive.daily_tasks[0].title = "漂移任务".into();
-        drifted.archive.payload_digest = portable_daily_task_archive_digest(
-            drifted.archive.exported_at,
-            &drifted.archive.canonical_digest,
-            drifted.archive.skipped_expired_count,
-            &drifted.archive.daily_tasks,
-        )
-        .unwrap();
-        let preflight_drift = target
-            .preflight_portable_daily_task_restore(&drifted)
-            .unwrap_err();
-        assert!(preflight_drift
-            .to_string()
-            .contains("state_portable_daily_task_restore_payload_drift"));
-        let drift = target.restore_portable_daily_tasks(drifted).unwrap_err();
-        assert!(drift
-            .to_string()
-            .contains("state_portable_daily_task_restore_payload_drift"));
-
-        let stale_command =
-            portable_restore_command(archive, command.expected_before_digest, at(14));
-        let stale_preflight = target
-            .preflight_portable_daily_task_restore(&stale_command)
-            .unwrap_err();
-        assert!(stale_preflight
-            .to_string()
-            .contains("state_portable_daily_task_restore_before_digest_conflict"));
-        let stale = target
-            .restore_portable_daily_tasks(stale_command)
-            .unwrap_err();
-        assert!(stale
-            .to_string()
-            .contains("state_portable_daily_task_restore_before_digest_conflict"));
-    }
-
-    #[test]
-    fn portable_daily_task_restore_fault_rolls_back_assets_versions_receipt_and_outbox() {
-        let source = StateStore::new_in_memory().unwrap();
-        initialize_daily_task_product_owner(&source);
-        source
-            .create_daily_task(create_command(
-                Uuid::new_v4().hyphenated().to_string(),
-                "归档任务",
-            ))
-            .unwrap();
-        let archive = source.export_portable_daily_tasks(at(12)).unwrap();
-
-        let target = StateStore::new_in_memory().unwrap();
-        initialize_daily_task_product_owner(&target);
-        target
-            .create_daily_task(create_command(
-                Uuid::new_v4().hyphenated().to_string(),
-                "必须保留的当前任务",
-            ))
-            .unwrap();
-        let before = target.export_portable_daily_tasks(at(12)).unwrap();
-        let command = portable_restore_command(archive, before.canonical_digest.clone(), at(13));
-        let before_counts: (i64, i64, i64) = {
-            let conn = target.lock_connection().unwrap();
-            (
-                conn.query_row("SELECT COUNT(*) FROM state_assets", [], |row| row.get(0))
-                    .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM state_asset_versions", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM canonical_outbox_events", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-            )
-        };
-        let error = target
-            .restore_portable_daily_tasks_guarded(command.clone(), || {
-                anyhow::bail!("portable_restore_injected_before_commit_failure")
-            })
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("portable_restore_injected_before_commit_failure"));
-        assert!(target
-            .portable_daily_task_restore_receipt(&command.operation_id, false)
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            target
-                .export_portable_daily_tasks(at(13))
-                .unwrap()
-                .canonical_digest,
-            before.canonical_digest
-        );
-        assert_eq!(
-            target.get_product_daily_tasks().unwrap()[0].title,
-            "必须保留的当前任务"
-        );
-        let after_counts: (i64, i64, i64) = {
-            let conn = target.lock_connection().unwrap();
-            (
-                conn.query_row("SELECT COUNT(*) FROM state_assets", [], |row| row.get(0))
-                    .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM state_asset_versions", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM canonical_outbox_events", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-            )
-        };
-        assert_eq!(after_counts, before_counts);
-    }
-
-    #[test]
-    fn portable_daily_task_restore_does_not_revive_archive_items_expired_before_restore() {
-        let source = StateStore::new_in_memory().unwrap();
-        initialize_daily_task_product_owner(&source);
-        source
-            .create_daily_task(create_command(
-                Uuid::new_v4().hyphenated().to_string(),
-                "短期任务",
-            ))
-            .unwrap();
-        let archive = source.export_portable_daily_tasks(at(10)).unwrap();
-        let target = StateStore::new_in_memory().unwrap();
-        initialize_daily_task_product_owner(&target);
-        let before = target.export_portable_daily_tasks(at(10)).unwrap();
-        let receipt = target
-            .restore_portable_daily_tasks(portable_restore_command(
-                archive,
-                before.canonical_digest,
-                at(10) + Duration::days(1),
-            ))
-            .unwrap();
-        assert_eq!(receipt.restored_count, 0);
-        assert_eq!(receipt.skipped_expired_count, 1);
-        assert!(target.get_product_daily_tasks().unwrap().is_empty());
-    }
-
-    #[test]
-    fn portable_daily_task_restore_accepts_512_items_and_rolls_back_full_boundary_fault() {
-        let target = StateStore::new_in_memory().unwrap();
-        initialize_daily_task_product_owner(&target);
-        let before = target.export_portable_daily_tasks(at(10)).unwrap();
-        let archive = portable_archive_fixture(MAX_PORTABLE_DAILY_TASK_ITEMS, "路演任务", at(10));
-        let command = portable_restore_command(archive.clone(), before.canonical_digest, at(11));
-        target
-            .preflight_portable_daily_task_restore(&command)
-            .unwrap();
-        let receipt = target.restore_portable_daily_tasks(command).unwrap();
-        assert_eq!(receipt.restored_count, MAX_PORTABLE_DAILY_TASK_ITEMS);
-        assert_eq!(receipt.replaced_count, 0);
-        assert_eq!(
-            target
-                .export_portable_daily_tasks(at(11))
-                .unwrap()
-                .daily_tasks,
-            archive.daily_tasks
-        );
-
-        let stable = target.export_portable_daily_tasks(at(12)).unwrap();
-        let replacement =
-            portable_archive_fixture(MAX_PORTABLE_DAILY_TASK_ITEMS, "替换任务", at(12));
-        let replacement_command =
-            portable_restore_command(replacement, stable.canonical_digest.clone(), at(13));
-        let before_counts: (i64, i64, i64, i64, i64) = {
-            let conn = target.lock_connection().unwrap();
-            (
-                conn.query_row("SELECT COUNT(*) FROM state_assets", [], |row| row.get(0))
-                    .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM state_asset_versions", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM canonical_outbox_events", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-                conn.query_row(
-                    "SELECT COUNT(*) FROM state_portable_daily_task_restore_operations",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap(),
-                conn.query_row(
-                    "SELECT COUNT(*) FROM state_portable_daily_task_restore_items",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap(),
-            )
-        };
-        let error = target
-            .restore_portable_daily_tasks_guarded(replacement_command.clone(), || {
-                anyhow::bail!("portable_restore_boundary_fault")
-            })
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("portable_restore_boundary_fault"));
-        assert!(target
-            .portable_daily_task_restore_receipt(&replacement_command.operation_id, false)
-            .unwrap()
-            .is_none());
-        assert_eq!(
-            target
-                .export_portable_daily_tasks(at(13))
-                .unwrap()
-                .canonical_digest,
-            stable.canonical_digest
-        );
-        let after_counts: (i64, i64, i64, i64, i64) = {
-            let conn = target.lock_connection().unwrap();
-            (
-                conn.query_row("SELECT COUNT(*) FROM state_assets", [], |row| row.get(0))
-                    .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM state_asset_versions", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM canonical_outbox_events", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-                conn.query_row(
-                    "SELECT COUNT(*) FROM state_portable_daily_task_restore_operations",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap(),
-                conn.query_row(
-                    "SELECT COUNT(*) FROM state_portable_daily_task_restore_items",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap(),
-            )
-        };
-        assert_eq!(after_counts, before_counts);
-    }
-
-    #[test]
-    fn portable_daily_task_restore_rejects_513_item_archive_without_writes() {
-        let target = StateStore::new_in_memory().unwrap();
-        initialize_daily_task_product_owner(&target);
-        let before = target.export_portable_daily_tasks(at(10)).unwrap();
-        let archive =
-            portable_archive_fixture(MAX_PORTABLE_DAILY_TASK_ITEMS + 1, "超限任务", at(10));
-        let command = portable_restore_command(archive, before.canonical_digest.clone(), at(11));
-        let before_counts: (i64, i64, i64, i64) = {
-            let conn = target.lock_connection().unwrap();
-            (
-                conn.query_row("SELECT COUNT(*) FROM state_assets", [], |row| row.get(0))
-                    .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM state_asset_versions", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM canonical_outbox_events", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-                conn.query_row(
-                    "SELECT COUNT(*) FROM state_portable_daily_task_restore_operations",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap(),
-            )
-        };
-        let preflight_error = target
-            .preflight_portable_daily_task_restore(&command)
-            .unwrap_err();
-        assert!(preflight_error
-            .to_string()
-            .contains("state_portable_daily_task_archive_item_limit_exceeded"));
-        let restore_error = target.restore_portable_daily_tasks(command).unwrap_err();
-        assert!(restore_error
-            .to_string()
-            .contains("state_portable_daily_task_archive_item_limit_exceeded"));
-        assert_eq!(
-            target
-                .export_portable_daily_tasks(at(11))
-                .unwrap()
-                .canonical_digest,
-            before.canonical_digest
-        );
-        let after_counts: (i64, i64, i64, i64) = {
-            let conn = target.lock_connection().unwrap();
-            (
-                conn.query_row("SELECT COUNT(*) FROM state_assets", [], |row| row.get(0))
-                    .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM state_asset_versions", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-                conn.query_row("SELECT COUNT(*) FROM canonical_outbox_events", [], |row| {
-                    row.get(0)
-                })
-                .unwrap(),
-                conn.query_row(
-                    "SELECT COUNT(*) FROM state_portable_daily_task_restore_operations",
-                    [],
-                    |row| row.get(0),
-                )
-                .unwrap(),
-            )
-        };
-        assert_eq!(after_counts, before_counts);
-    }
-
-    #[test]
     fn schema_v1_migrates_request_digest_without_losing_operation_truth() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state-v1.db");
@@ -7690,7 +6225,7 @@ mod tests {
             .unwrap()
             .iter()
             .any(|column| column == "request_digest");
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
         assert!(request_digest_column_exists);
     }
 
@@ -7731,7 +6266,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
         assert_eq!(
             tables,
             [
@@ -7778,7 +6313,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
         assert_eq!(
             tables,
             [
@@ -7827,7 +6362,7 @@ mod tests {
             .unwrap()
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
         assert_eq!(
             tables,
             [
@@ -7882,7 +6417,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
         assert_eq!(stored_operation, operation_id);
     }
 
@@ -7919,7 +6454,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
         assert_eq!(table_exists, 1);
     }
 
@@ -7976,7 +6511,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
         assert_eq!(asset_columns, 2);
         assert_eq!(version_columns, 2);
     }
@@ -8065,7 +6600,7 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(version, "10");
+        assert_eq!(version, "11");
         assert_eq!(import_table_count, 2);
         assert!(asset_schema.contains("'legacy_lifemodel_migration'"));
         drop(conn);
@@ -8224,11 +6759,11 @@ mod tests {
                 row.get(0)
             })
             .unwrap();
-        assert_eq!(schema_version, "10");
+        assert_eq!(schema_version, "11");
         assert!(asset_schema.contains("'governed_data_restore'"));
         assert!(asset_schema.contains("'restore_replace'"));
         assert!(version_schema.contains("'restore_replace'"));
-        assert_eq!(restore_table_count, 2);
+        assert_eq!(restore_table_count, 0);
         assert_eq!(foreign_key_violation_count, 0);
     }
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ProviderProfileViewModel,
   ChatSession,
+  ConversationViewModel,
   ImportedResourceReceipt,
   MainChatSkillSummary,
   MainChatLifeModelProductReceipt,
@@ -29,7 +30,7 @@ export type WorkspaceConversationProviderState = {
   selectedProfileId: string | null;
   errorCode: string | null;
 };
-export type WorkspaceConversationWorkStatus = "unknown" | "reconstructing" | "ready";
+export type WorkspaceConversationWorkStatus = "unknown" | "available" | "unavailable";
 export type WorkspaceSessionMutationState =
   | { phase: "idle" }
   | { phase: "renaming"; sessionId: string }
@@ -213,7 +214,8 @@ export function useWorkspaceConversation(
   dataSource: WorkspaceConversationDataSource | undefined,
   announce: Announce,
   onAfterTurn: () => Promise<void>,
-  preferredSessionId?: string | null
+  preferredSessionId?: string | null,
+  canonicalSeed?: ConversationViewModel | null
 ): WorkspaceConversationController {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -305,6 +307,40 @@ export function useWorkspaceConversation(
     };
   }, [dataSource]);
 
+  useEffect(() => {
+    if (!canonicalSeed) return;
+    requestRef.current += 1;
+    setSessions(canonicalSeed.conversations);
+    setProjects(canonicalSeed.projects);
+    setSelectedProjectId(canonicalSeed.selectedProjectId);
+    setSelectedSessionId(canonicalSeed.selectedConversationId);
+    setMessages(canonicalSeed.messages);
+    setProvider({
+      status: canonicalSeed.providerStatus,
+      profiles: canonicalSeed.providerProfiles,
+      selectedProfileId: canonicalSeed.selectedProviderProfileId,
+      errorCode: canonicalSeed.providerErrorCode,
+    });
+    setWorkStatus(canonicalSeed.workStatus);
+    const selectedSession = canonicalSeed.selectedConversationId;
+    const latestTurn = canonicalSeed.latestTurn;
+    setTurnState(
+      !selectedSession || !latestTurn || latestTurn.status === "completed"
+        ? { phase: "idle" }
+        : latestTurn.status === "running"
+          ? { phase: "idle" }
+          : {
+              phase: "resolved",
+              sessionId: selectedSession,
+              status: latestTurn.status,
+              blockers: latestTurn.errorCode ? [latestTurn.errorCode] : [],
+            }
+    );
+    loadedRef.current = true;
+    setLoadError(null);
+    setLoadStatus("ready");
+  }, [canonicalSeed]);
+
   const reloadMarkdownMemory = useCallback(async (): Promise<boolean> => {
     const requestId = ++markdownMemoryRequestRef.current;
     if (!dataSource?.loadMarkdownMemory) {
@@ -333,7 +369,7 @@ export function useWorkspaceConversation(
   }, [dataSource]);
 
   useEffect(() => {
-    if (!dataSource?.loadMarkdownMemory || mode !== "work" || workStatus !== "ready") {
+    if (!dataSource?.loadMarkdownMemory || mode !== "work" || workStatus !== "available") {
       setMarkdownMemory({ phase: "loading", model: null });
       return;
     }
@@ -451,7 +487,7 @@ export function useWorkspaceConversation(
 
     setCapabilityState({ phase: "loading" });
     const shouldLoadWorkTools =
-      mode === "work" && workStatus === "ready" && Boolean(dataSource.listToolCandidates);
+      mode === "work" && workStatus === "available" && Boolean(dataSource.listToolCandidates);
     void Promise.all([
       dataSource.listSkills(selectedSessionId ?? undefined),
       shouldLoadWorkTools
@@ -838,8 +874,8 @@ export function useWorkspaceConversation(
               ? "上一轮仍在发送或核对。"
               : !trimmedDraft
                 ? "先输入要发送的内容。"
-                : mode === "work" && workStatus !== "ready"
-                  ? "Work 正在按新任务架构重建，当前尚不可交办。"
+                : mode === "work" && workStatus !== "available"
+                  ? "Work 的 canonical runtime 当前不可用。"
                   : mode === "chat" && provider.status === "unavailable"
                     ? "当前选择的模型不可用；请先在设置中完成模型配置。"
                     : undefined);

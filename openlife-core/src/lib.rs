@@ -3,11 +3,9 @@ pub mod atomic_file;
 pub mod calendar;
 pub mod config;
 pub mod conversation;
-pub mod core_value_signal_extractor;
 pub mod embedding;
 pub mod feedback;
-// Hermes module removed: replaced by agent::reasoning module
-pub mod json_utils;
+// Agent execution is owned by the canonical Chat and Work runtimes.
 pub mod layer;
 pub mod life_model;
 pub mod life_model_write_gateway;
@@ -15,14 +13,11 @@ pub mod llm;
 pub mod mcp;
 pub mod mcp_audit;
 pub mod memory;
-pub mod memory_cache;
 pub mod memory_gateway;
 pub mod network_client;
 pub mod ollama;
 pub mod persistence_outbox;
-pub mod plugins;
 pub mod privacy;
-pub mod proactive;
 pub mod resource;
 pub mod resource_gateway;
 pub mod resource_parser;

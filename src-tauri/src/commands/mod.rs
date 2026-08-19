@@ -1,12 +1,6 @@
 pub mod chat;
-pub mod diagnostics;
-pub mod execution;
 pub mod life_model;
 pub mod main_chat_tools;
-pub mod mcp;
 pub mod memory;
-pub mod metrics;
 pub mod proposal;
-pub mod router;
 pub mod settings;
-pub mod state;
