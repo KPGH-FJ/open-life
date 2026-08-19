@@ -3,11 +3,9 @@ pub mod atomic_file;
 pub mod calendar;
 pub mod config;
 pub mod conversation;
-pub mod core_value_signal_extractor;
 pub mod embedding;
 pub mod feedback;
 // Hermes module removed: replaced by agent::reasoning module
-pub mod json_utils;
 pub mod layer;
 pub mod life_model;
 pub mod life_model_write_gateway;

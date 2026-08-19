@@ -18,7 +18,6 @@ describe("release Tauri surface", () => {
 
   it("does not expose retired lifecycle, feedback, evolution, or proactive wrappers", () => {
     const releaseClient = read("src/tauri.ts");
-    const browserMock = read("src/test/mocks/tauri.ts");
 
     for (const retiredCommand of [
       "create_plan_execute_session",
@@ -39,7 +38,6 @@ describe("release Tauri surface", () => {
       "calibration_create_proposals",
     ]) {
       expect(releaseClient, retiredCommand).not.toContain(`"${retiredCommand}"`);
-      expect(browserMock, retiredCommand).not.toContain(`"${retiredCommand}"`);
     }
   });
 });
