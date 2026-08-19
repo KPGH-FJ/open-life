@@ -2301,7 +2301,11 @@ mod tests {
 
     fn test_limits() -> McpClientLimits {
         McpClientLimits {
-            handshake_timeout: std::time::Duration::from_secs(2),
+            // Process startup on a loaded Windows runner can exceed two
+            // seconds. Keep initialization aligned with the bounded
+            // production contract while retaining the deliberately short
+            // call timeout used by the transport-failure assertions below.
+            handshake_timeout: MCP_HANDSHAKE_TIMEOUT,
             list_timeout: std::time::Duration::from_secs(2),
             call_timeout: std::time::Duration::from_millis(200),
             max_frame_bytes: 4096,
