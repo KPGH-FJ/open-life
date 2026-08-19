@@ -1,6 +1,7 @@
 import type {
   EvidenceRef,
   ChatSession,
+  ConversationViewModel,
   ProviderPrivacyBoundarySummary,
   ReviewAction,
   ReviewCenterViewModel,
@@ -466,8 +467,41 @@ function buildSnapshot(
       "Only refreshed exact task identity may confirm resume.",
     ],
   };
+  const conversation: ConversationViewModel = {
+    status: empty ? "empty" : "ready",
+    conversations: empty
+      ? []
+      : [
+          {
+            session_id: "conversation-research-plan",
+            title: "整理客户访谈",
+            created_at: "2026-07-20T09:20:00.000Z",
+            updated_at: generatedAt,
+          },
+        ],
+    projects: [],
+    selectedProjectId: null,
+    selectedConversationId: empty ? null : "conversation-research-plan",
+    messages: empty
+      ? []
+      : [
+          { role: "user", content: "帮我整理这三次访谈，找出下周最值得验证的问题。" },
+          {
+            role: "assistant",
+            content: "我已经拆分整理步骤。读取指定记录前需要你确认一次性访问范围。",
+          },
+        ],
+    latestTurn: null,
+    providerStatus: "ready",
+    providerProfiles: [],
+    selectedProviderProfileId: null,
+    providerErrorCode: null,
+    workStatus: "available",
+  };
 
   return {
+    capturedAt: generatedAt,
+    conversationEnvelope: envelope(conversation, status, "conversation"),
     workspaceEnvelope: envelope(workspace, status, "workspace"),
     reviewEnvelope: envelope(
       review,
@@ -475,7 +509,13 @@ function buildSnapshot(
       "review"
     ),
     tasksEnvelope: envelope(tasks, status, "tasks"),
+    boundaryEnvelope: envelope(localBoundary, status, "provider_boundary"),
     diagnostics: [
+      {
+        id: "conversation_view_model",
+        status: status === "error" ? "failed" : "loaded",
+        message: status === "error" ? "Static error fixture." : undefined,
+      },
       {
         id: "workspace_view_model",
         status: status === "error" ? "failed" : "loaded",
@@ -488,6 +528,11 @@ function buildSnapshot(
       },
       {
         id: "tasks_view_model",
+        status: status === "error" ? "failed" : "loaded",
+        message: status === "error" ? "Static error fixture." : undefined,
+      },
+      {
+        id: "provider_privacy_boundary",
         status: status === "error" ? "failed" : "loaded",
         message: status === "error" ? "Static error fixture." : undefined,
       },

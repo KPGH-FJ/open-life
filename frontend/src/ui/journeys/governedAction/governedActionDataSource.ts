@@ -2,15 +2,15 @@ import {
   acceptProposal,
   cancelWorkTask,
   editLifeModelLearningProposal,
-  getReviewCenterViewModel,
-  getTasksViewModel,
-  getWorkspaceViewModel,
+  getWorkbenchViewModel,
   postponeProposal,
   rejectProposal,
   requestArtifactUndo,
   retryWorkTask,
   type ReviewAction,
   type ReviewCenterViewModel,
+  type ConversationViewModel,
+  type ProviderPrivacyBoundarySummary,
   type TaskControl,
   type TasksViewModel,
   type ViewModelEnvelope,
@@ -20,15 +20,23 @@ import { journeyErrorCode as errorText } from "@/ui/journeys/journeyError";
 import { buildReadModelErrorEnvelope } from "@/ui/journeys/productWorkbench/productBoundaryDataSource";
 
 export type GovernedActionDiagnostic = {
-  id: "workspace_view_model" | "review_center_view_model" | "tasks_view_model";
+  id:
+    | "conversation_view_model"
+    | "workspace_view_model"
+    | "review_center_view_model"
+    | "tasks_view_model"
+    | "provider_privacy_boundary";
   status: "loaded" | "failed";
   message?: string;
 };
 
 export type GovernedActionSnapshot = {
+  capturedAt: string | null;
+  conversationEnvelope: ViewModelEnvelope<ConversationViewModel>;
   workspaceEnvelope: ViewModelEnvelope<WorkspaceViewModel>;
   reviewEnvelope: ViewModelEnvelope<ReviewCenterViewModel>;
   tasksEnvelope: ViewModelEnvelope<TasksViewModel>;
+  boundaryEnvelope: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
   diagnostics: GovernedActionDiagnostic[];
 };
 
@@ -43,6 +51,12 @@ export interface GovernedActionDataSource {
 export function buildGovernedActionErrorSnapshot(error: unknown): GovernedActionSnapshot {
   const message = errorText(error);
   return {
+    capturedAt: null,
+    conversationEnvelope: buildReadModelErrorEnvelope(
+      "ConversationViewModel",
+      "conversation_view_model.load_failed",
+      `ConversationViewModel could not be loaded: ${message}`
+    ),
     workspaceEnvelope: buildReadModelErrorEnvelope(
       "WorkspaceViewModel",
       "workspace_view_model.load_failed",
@@ -58,73 +72,50 @@ export function buildGovernedActionErrorSnapshot(error: unknown): GovernedAction
       "tasks_view_model.load_failed",
       `TasksViewModel could not be loaded: ${message}`
     ),
+    boundaryEnvelope: buildReadModelErrorEnvelope(
+      "ProviderPrivacyBoundarySummary",
+      "provider_privacy_boundary.load_failed",
+      `ProviderPrivacyBoundarySummary could not be loaded: ${message}`
+    ),
     diagnostics: [
+      { id: "conversation_view_model", status: "failed", message },
       { id: "workspace_view_model", status: "failed", message },
       { id: "review_center_view_model", status: "failed", message },
       { id: "tasks_view_model", status: "failed", message },
+      { id: "provider_privacy_boundary", status: "failed", message },
     ],
   };
-}
-
-function settledEnvelope<T>(
-  result: PromiseSettledResult<ViewModelEnvelope<T>>,
-  targetRef: string,
-  code: string
-): ViewModelEnvelope<T> {
-  return result.status === "fulfilled"
-    ? result.value
-    : buildReadModelErrorEnvelope<T>(
-        targetRef,
-        code,
-        `${targetRef} could not be loaded: ${errorText(result.reason)}`
-      );
 }
 
 async function loadGovernedActionSnapshot(
   conversationId?: string | null
 ): Promise<GovernedActionSnapshot> {
-  const [workspaceResult, reviewResult, tasksResult] = await Promise.allSettled([
-    getWorkspaceViewModel(conversationId),
-    getReviewCenterViewModel(),
-    getTasksViewModel(),
-  ]);
+  const workbench = await getWorkbenchViewModel(conversationId);
 
   return {
-    workspaceEnvelope: settledEnvelope(
-      workspaceResult,
-      "WorkspaceViewModel",
-      "workspace_view_model.load_failed"
-    ),
-    reviewEnvelope: settledEnvelope(
-      reviewResult,
-      "ReviewCenterViewModel",
-      "review_center_view_model.load_failed"
-    ),
-    tasksEnvelope: settledEnvelope(tasksResult, "TasksViewModel", "tasks_view_model.load_failed"),
+    capturedAt: workbench.capturedAt,
+    conversationEnvelope: workbench.conversation,
+    workspaceEnvelope: workbench.workspace,
+    reviewEnvelope: workbench.review,
+    tasksEnvelope: workbench.tasks,
+    boundaryEnvelope: workbench.providerBoundary,
     diagnostics: [
-      workspaceResult.status === "fulfilled"
-        ? { id: "workspace_view_model", status: "loaded" }
-        : {
-            id: "workspace_view_model",
-            status: "failed",
-            message: errorText(workspaceResult.reason),
-          },
-      reviewResult.status === "fulfilled"
-        ? { id: "review_center_view_model", status: "loaded" }
-        : {
-            id: "review_center_view_model",
-            status: "failed",
-            message: errorText(reviewResult.reason),
-          },
-      tasksResult.status === "fulfilled"
-        ? { id: "tasks_view_model", status: "loaded" }
-        : {
-            id: "tasks_view_model",
-            status: "failed",
-            message: errorText(tasksResult.reason),
-          },
+      laneDiagnostic("conversation_view_model", workbench.conversation),
+      laneDiagnostic("workspace_view_model", workbench.workspace),
+      laneDiagnostic("review_center_view_model", workbench.review),
+      laneDiagnostic("tasks_view_model", workbench.tasks),
+      laneDiagnostic("provider_privacy_boundary", workbench.providerBoundary),
     ],
   };
+}
+
+function laneDiagnostic(
+  id: GovernedActionDiagnostic["id"],
+  envelope: ViewModelEnvelope<unknown>
+): GovernedActionDiagnostic {
+  return envelope.status === "error"
+    ? { id, status: "failed", message: envelope.warnings?.[0]?.message ?? "unknown" }
+    : { id, status: "loaded" };
 }
 
 async function dispatchReviewAction(action: ReviewAction): Promise<void> {

@@ -103,7 +103,7 @@ use read_models::life_model::get_life_model_view_model;
 use read_models::memory::get_memory_view_model;
 use read_models::provider_privacy::get_provider_privacy_boundary_summary;
 use read_models::review_center::get_review_center_view_model;
-use read_models::tasks::{get_tasks_view_model, get_workspace_view_model};
+use read_models::tasks::get_workbench_view_model;
 use storage::app_data_dir;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -693,8 +693,7 @@ pub fn run() {
             draft_markdown_memory_file_proposal,
             deactivate_markdown_memory_file_proposal,
             get_provider_privacy_boundary_summary,
-            get_tasks_view_model,
-            get_workspace_view_model,
+            get_workbench_view_model,
             get_product_diagnostics_view_model,
             get_config,
             save_config,

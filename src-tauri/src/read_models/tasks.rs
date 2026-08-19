@@ -1,11 +1,12 @@
+use crate::commands::chat::{get_conversation_view_model_with_state, ConversationViewModel};
 use crate::state::AppState;
 use openlife_core::agent::{
     build_tasks_view_model, build_workspace_view_model, BackendEntityKind, BackendEntityRef,
-    EvidenceRef, EvidenceSensitivity, EvidenceSource, ProviderPrivacyBoundarySummary, ReviewItem,
-    TaskArtifactChangeKind, TaskArtifactChangeViewModel, TaskArtifactPreviewStatus,
-    TaskArtifactPreviewViewModel, TaskArtifactUndoViewModel, TaskArtifactVerificationStatus,
-    TaskArtifactVerificationViewModel, TaskArtifactViewModel, TaskItemViewModel,
-    TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelTaskInput,
+    EvidenceRef, EvidenceSensitivity, EvidenceSource, ProviderPrivacyBoundarySummary,
+    ReviewCenterViewModel, ReviewItem, TaskArtifactChangeKind, TaskArtifactChangeViewModel,
+    TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel, TaskArtifactUndoViewModel,
+    TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel, TaskArtifactViewModel,
+    TaskItemViewModel, TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelTaskInput,
     TaskWorkPlanStepViewModel, TaskWorkPlanViewModel, TasksViewModel, TasksViewModelBuildInput,
     ViewModelEnvelope, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
     WorkspaceActivityItem, WorkspaceViewModel, WorkspaceViewModelBuildInput,
@@ -25,21 +26,30 @@ use super::review_center::get_review_center_view_model_with_state;
 const TASK_ARTIFACT_PREVIEW_MAX_CHARS: usize = 12_000;
 const TASK_ARTIFACT_READ_MAX_BYTES: u64 = 100 * 1024;
 
-#[tauri::command]
-pub async fn get_tasks_view_model(
-    state: State<'_, Arc<AppState>>,
-) -> Result<ViewModelEnvelope<TasksViewModel>, String> {
-    get_tasks_view_model_with_state(state.inner()).await
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkbenchViewModel {
+    pub captured_at: String,
+    pub conversation: ViewModelEnvelope<ConversationViewModel>,
+    pub workspace: ViewModelEnvelope<WorkspaceViewModel>,
+    pub tasks: ViewModelEnvelope<TasksViewModel>,
+    pub review: ViewModelEnvelope<ReviewCenterViewModel>,
+    pub provider_boundary: ViewModelEnvelope<ProviderPrivacyBoundarySummary>,
 }
 
 #[tauri::command]
-pub async fn get_workspace_view_model(
+pub async fn get_workbench_view_model(
     state: State<'_, Arc<AppState>>,
     conversation_id: Option<String>,
-) -> Result<ViewModelEnvelope<WorkspaceViewModel>, String> {
-    get_workspace_view_model_with_state(state.inner(), conversation_id.as_deref()).await
+) -> Result<WorkbenchViewModel, String> {
+    get_workbench_view_model_with_state(
+        state.inner(),
+        conversation_id.as_deref().filter(|value| !value.is_empty()),
+    )
+    .await
 }
 
+#[cfg(test)]
 pub(crate) async fn get_tasks_view_model_with_state(
     state: &Arc<AppState>,
 ) -> Result<ViewModelEnvelope<TasksViewModel>, String> {
@@ -48,6 +58,7 @@ pub(crate) async fn get_tasks_view_model_with_state(
 
 struct TasksReadModelSnapshot {
     envelope: ViewModelEnvelope<TasksViewModel>,
+    review_envelope: ViewModelEnvelope<ReviewCenterViewModel>,
     review_items: Vec<ReviewItem>,
     activity_by_task: BTreeMap<String, Vec<WorkspaceActivityItem>>,
 }
@@ -56,8 +67,9 @@ async fn load_tasks_read_model_snapshot(
     state: &Arc<AppState>,
 ) -> Result<TasksReadModelSnapshot, String> {
     let mut warnings = Vec::new();
+    let review_envelope = load_review_envelope(state).await;
     let (review_items, review_projection_authoritative) =
-        load_review_items(state, &mut warnings).await;
+        review_items_for_tasks(&review_envelope, &mut warnings);
     let loaded_tasks =
         load_canonical_task_inputs(state, review_projection_authoritative, &mut warnings).await;
     let model = build_tasks_view_model(TasksViewModelBuildInput {
@@ -98,22 +110,87 @@ async fn load_tasks_read_model_snapshot(
     envelope.warnings = warnings;
     Ok(TasksReadModelSnapshot {
         envelope,
+        review_envelope,
         review_items,
         activity_by_task: loaded_tasks.activity_by_task,
     })
 }
 
-pub(crate) async fn get_workspace_view_model_with_state(
+pub(crate) async fn get_workbench_view_model_with_state(
     state: &Arc<AppState>,
-    conversation_id: Option<&str>,
-) -> Result<ViewModelEnvelope<WorkspaceViewModel>, String> {
-    let mut snapshot = load_tasks_read_model_snapshot(state).await?;
-    let tasks_status = snapshot.envelope.status;
-    let tasks = snapshot
-        .envelope
+    requested_conversation_id: Option<&str>,
+) -> Result<WorkbenchViewModel, String> {
+    let captured_at = chrono::Utc::now().to_rfc3339();
+    let conversation = load_conversation_envelope(state, requested_conversation_id).await;
+    let selected_conversation_id = conversation
         .data
-        .take()
-        .ok_or_else(|| "TasksViewModel data unavailable for WorkspaceViewModel".to_string())?;
+        .as_ref()
+        .and_then(|model| model.selected_conversation_id.as_deref());
+    let snapshot = load_tasks_read_model_snapshot(state).await?;
+    let tasks = snapshot.envelope.clone();
+    let review = snapshot.review_envelope.clone();
+    let provider_boundary = load_provider_boundary_envelope(state).await;
+    let workspace = compose_workspace_envelope(
+        snapshot,
+        provider_boundary.clone(),
+        selected_conversation_id,
+    );
+    Ok(WorkbenchViewModel {
+        captured_at,
+        conversation,
+        workspace,
+        tasks,
+        review,
+        provider_boundary,
+    })
+}
+
+async fn load_conversation_envelope(
+    state: &Arc<AppState>,
+    requested_conversation_id: Option<&str>,
+) -> ViewModelEnvelope<ConversationViewModel> {
+    match get_conversation_view_model_with_state(requested_conversation_id, state).await {
+        Ok(model) => {
+            let status = if model.status == "empty" {
+                ViewModelStatus::Empty
+            } else {
+                ViewModelStatus::Ready
+            };
+            let mut envelope = ViewModelEnvelope::backend_read_model(status, Some(model));
+            envelope.last_updated_at = Some(chrono::Utc::now().to_rfc3339());
+            envelope
+        }
+        Err(error) => error_envelope(
+            "conversation_view_model_unavailable",
+            format!("ConversationViewModel could not be loaded: {error}"),
+        ),
+    }
+}
+
+async fn load_provider_boundary_envelope(
+    state: &Arc<AppState>,
+) -> ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
+    match get_provider_privacy_boundary_summary_with_state(state).await {
+        Ok(envelope) => envelope,
+        Err(error) => error_envelope(
+            "provider_privacy_boundary_unavailable",
+            format!("Provider privacy boundary could not be loaded: {error}"),
+        ),
+    }
+}
+
+fn compose_workspace_envelope(
+    mut snapshot: TasksReadModelSnapshot,
+    provider_envelope: ViewModelEnvelope<ProviderPrivacyBoundarySummary>,
+    conversation_id: Option<&str>,
+) -> ViewModelEnvelope<WorkspaceViewModel> {
+    let tasks_status = snapshot.envelope.status;
+    let Some(tasks) = snapshot.envelope.data.take() else {
+        return error_envelope(
+            "tasks_view_model_data_missing",
+            "TasksViewModel data unavailable for WorkspaceViewModel",
+        );
+    };
     let active_task_id = tasks.items.iter().find_map(|item| {
         let in_selected_conversation = conversation_id
             .is_none_or(|selected| item.conversation_id.as_deref() == Some(selected));
@@ -131,7 +208,6 @@ pub(crate) async fn get_workspace_view_model_with_state(
         .as_ref()
         .and_then(|task_id| snapshot.activity_by_task.remove(task_id))
         .unwrap_or_default();
-    let provider_envelope = get_provider_privacy_boundary_summary_with_state(state).await?;
     let provider_status = provider_envelope.status;
     let provider_summary = provider_envelope
         .data
@@ -162,7 +238,14 @@ pub(crate) async fn get_workspace_view_model_with_state(
     envelope.last_updated_at = Some(chrono::Utc::now().to_rfc3339());
     envelope.warnings = snapshot.envelope.warnings;
     envelope.warnings.extend(provider_envelope.warnings);
-    Ok(envelope)
+    envelope
+}
+
+fn error_envelope<T>(code: &str, message: impl Into<String>) -> ViewModelEnvelope<T> {
+    let mut envelope = ViewModelEnvelope::backend_read_model(ViewModelStatus::Error, None);
+    envelope.last_updated_at = Some(chrono::Utc::now().to_rfc3339());
+    envelope.warnings.push(warning(code, message));
+    envelope
 }
 
 fn workspace_composition_status(
@@ -1040,42 +1123,38 @@ fn canonical_task_preview(snapshot: &CanonicalTaskSnapshot) -> String {
     }
 }
 
-async fn load_review_items(
-    state: &Arc<AppState>,
+async fn load_review_envelope(state: &Arc<AppState>) -> ViewModelEnvelope<ReviewCenterViewModel> {
+    match get_review_center_view_model_with_state(state).await {
+        Ok(envelope) => envelope,
+        Err(error) => error_envelope(
+            "review_center_view_model_unavailable",
+            format!("ReviewCenterViewModel could not be loaded: {error}"),
+        ),
+    }
+}
+
+fn review_items_for_tasks(
+    envelope: &ViewModelEnvelope<ReviewCenterViewModel>,
     warnings: &mut Vec<ViewModelWarning>,
 ) -> (Vec<ReviewItem>, bool) {
-    match get_review_center_view_model_with_state(state).await {
-        Ok(envelope)
-            if matches!(
-                envelope.status,
-                ViewModelStatus::Ready | ViewModelStatus::Empty
-            ) =>
-        {
-            match envelope.data {
-                Some(model) => (model.items, true),
-                None => {
-                    warnings.push(warning(
-                        "review_center_view_model_data_missing",
-                        "TasksViewModel could not prove review-item absence because ReviewCenterViewModel returned no data.",
-                    ));
-                    (Vec::new(), false)
-                }
+    match envelope.status {
+        ViewModelStatus::Ready | ViewModelStatus::Empty => match envelope.data.as_ref() {
+            Some(model) => (model.items.clone(), true),
+            None => {
+                warnings.push(warning(
+                    "review_center_view_model_data_missing",
+                    "TasksViewModel could not prove review-item absence because ReviewCenterViewModel returned no data.",
+                ));
+                (Vec::new(), false)
             }
-        }
-        Ok(envelope) => {
+        },
+        _ => {
             warnings.push(warning(
                 "review_center_view_model_not_authoritative",
                 format!(
                     "TasksViewModel could not prove review-item absence because ReviewCenterViewModel status is {:?}.",
                     envelope.status
                 ),
-            ));
-            (Vec::new(), false)
-        }
-        Err(err) => {
-            warnings.push(warning(
-                "review_center_view_model_unavailable",
-                format!("TasksViewModel could not load ReviewCenterViewModel: {err}"),
             ));
             (Vec::new(), false)
         }
@@ -1102,7 +1181,10 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
 
 #[cfg(test)]
 mod tests {
-    use super::{get_tasks_view_model_with_state, workspace_composition_status};
+    use super::{
+        get_tasks_view_model_with_state, get_workbench_view_model_with_state,
+        workspace_composition_status,
+    };
     use openlife_core::agent::ViewModelStatus;
     use std::sync::Arc;
 
@@ -1165,6 +1247,45 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.code.contains("review_center")));
+    }
+
+    #[tokio::test]
+    async fn workbench_snapshot_binds_conversation_and_all_read_lanes_once() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        crate::commands::chat::create_chat_session_with_state(
+            &conversation_id,
+            "Workbench aggregate",
+            &state,
+        )
+        .await
+        .unwrap();
+
+        let snapshot = get_workbench_view_model_with_state(&state, Some(&conversation_id))
+            .await
+            .unwrap();
+
+        assert!(!snapshot.captured_at.is_empty());
+        assert_eq!(snapshot.conversation.status, ViewModelStatus::Ready);
+        assert_eq!(
+            snapshot
+                .conversation
+                .data
+                .as_ref()
+                .and_then(|model| model.selected_conversation_id.as_deref()),
+            Some(conversation_id.as_str())
+        );
+        assert_eq!(
+            snapshot
+                .workspace
+                .data
+                .as_ref()
+                .and_then(|model| model.selected_conversation_id.as_deref()),
+            Some(conversation_id.as_str())
+        );
+        assert!(snapshot.tasks.data.is_some());
+        assert!(snapshot.review.data.is_some());
+        assert!(snapshot.provider_boundary.data.is_some());
     }
 
     #[tokio::test]

@@ -2324,11 +2324,28 @@ export interface ConversationViewModel {
   workStatus: "available" | "unavailable";
 }
 
+export interface WorkbenchViewModel {
+  capturedAt: string;
+  conversation: ViewModelEnvelope<ConversationViewModel>;
+  workspace: ViewModelEnvelope<WorkspaceViewModel>;
+  tasks: ViewModelEnvelope<TasksViewModel>;
+  review: ViewModelEnvelope<ReviewCenterViewModel>;
+  providerBoundary: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
+}
+
 export async function getConversationViewModel(
   conversationId?: string
 ): Promise<ConversationViewModel> {
   return safeInvoke<ConversationViewModel>("get_conversation_view_model", {
     conversationId,
+  });
+}
+
+export async function getWorkbenchViewModel(
+  conversationId?: string | null
+): Promise<WorkbenchViewModel> {
+  return safeInvoke<WorkbenchViewModel>("get_workbench_view_model", {
+    ...(conversationId == null || conversationId === "" ? {} : { conversationId }),
   });
 }
 
@@ -2534,18 +2551,6 @@ export async function getProviderPrivacyBoundarySummary(): Promise<
   return safeInvoke<ViewModelEnvelope<ProviderPrivacyBoundarySummary>>(
     "get_provider_privacy_boundary_summary"
   );
-}
-
-export async function getTasksViewModel(): Promise<ViewModelEnvelope<TasksViewModel>> {
-  return safeInvoke<ViewModelEnvelope<TasksViewModel>>("get_tasks_view_model");
-}
-
-export async function getWorkspaceViewModel(
-  conversationId?: string | null
-): Promise<ViewModelEnvelope<WorkspaceViewModel>> {
-  return safeInvoke<ViewModelEnvelope<WorkspaceViewModel>>("get_workspace_view_model", {
-    ...(conversationId == null ? {} : { conversationId }),
-  });
 }
 
 export interface MemoryLifecycleRecord {

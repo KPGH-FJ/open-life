@@ -300,24 +300,28 @@ describe("Workbench governed action journey", () => {
     const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
     const dataSource = {
       ...fixture,
-      loadConversation: async () => ({
-        status: "empty" as const,
-        conversations: [],
-        projects: [],
-        selectedProjectId: null,
-        selectedConversationId: null,
-        messages: [],
-        latestTurn: null,
-        providerStatus: "ready" as const,
-        providerProfiles: [],
-        selectedProviderProfileId: null,
-        providerErrorCode: null,
-        workStatus: "available" as const,
-      }),
       load: async () => {
         const snapshot = await fixture.load();
         return {
           ...snapshot,
+          conversationEnvelope: {
+            ...snapshot.conversationEnvelope,
+            status: "empty" as const,
+            data: {
+              status: "empty" as const,
+              conversations: [],
+              projects: [],
+              selectedProjectId: null,
+              selectedConversationId: null,
+              messages: [],
+              latestTurn: null,
+              providerStatus: "ready" as const,
+              providerProfiles: [],
+              selectedProviderProfileId: null,
+              providerErrorCode: null,
+              workStatus: "available" as const,
+            },
+          },
           workspaceEnvelope: {
             ...snapshot.workspaceEnvelope,
             status: "empty" as const,

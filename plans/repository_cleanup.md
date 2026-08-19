@@ -2,7 +2,7 @@
 
 Status: active
 
-Current slice: C4 - Workbench read model. C0-C3 are complete.
+Current slice: C5 - documents, tests, and CI. C0-C4 are complete.
 
 ## Objective
 

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ProviderProfileViewModel,
   ChatSession,
+  ConversationViewModel,
   ImportedResourceReceipt,
   MainChatSkillSummary,
   MainChatLifeModelProductReceipt,
@@ -213,7 +214,8 @@ export function useWorkspaceConversation(
   dataSource: WorkspaceConversationDataSource | undefined,
   announce: Announce,
   onAfterTurn: () => Promise<void>,
-  preferredSessionId?: string | null
+  preferredSessionId?: string | null,
+  canonicalSeed?: ConversationViewModel | null
 ): WorkspaceConversationController {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
@@ -304,6 +306,40 @@ export function useWorkspaceConversation(
       loadedRef.current = false;
     };
   }, [dataSource]);
+
+  useEffect(() => {
+    if (!canonicalSeed) return;
+    requestRef.current += 1;
+    setSessions(canonicalSeed.conversations);
+    setProjects(canonicalSeed.projects);
+    setSelectedProjectId(canonicalSeed.selectedProjectId);
+    setSelectedSessionId(canonicalSeed.selectedConversationId);
+    setMessages(canonicalSeed.messages);
+    setProvider({
+      status: canonicalSeed.providerStatus,
+      profiles: canonicalSeed.providerProfiles,
+      selectedProfileId: canonicalSeed.selectedProviderProfileId,
+      errorCode: canonicalSeed.providerErrorCode,
+    });
+    setWorkStatus(canonicalSeed.workStatus);
+    const selectedSession = canonicalSeed.selectedConversationId;
+    const latestTurn = canonicalSeed.latestTurn;
+    setTurnState(
+      !selectedSession || !latestTurn || latestTurn.status === "completed"
+        ? { phase: "idle" }
+        : latestTurn.status === "running"
+          ? { phase: "idle" }
+          : {
+              phase: "resolved",
+              sessionId: selectedSession,
+              status: latestTurn.status,
+              blockers: latestTurn.errorCode ? [latestTurn.errorCode] : [],
+            }
+    );
+    loadedRef.current = true;
+    setLoadError(null);
+    setLoadStatus("ready");
+  }, [canonicalSeed]);
 
   const reloadMarkdownMemory = useCallback(async (): Promise<boolean> => {
     const requestId = ++markdownMemoryRequestRef.current;

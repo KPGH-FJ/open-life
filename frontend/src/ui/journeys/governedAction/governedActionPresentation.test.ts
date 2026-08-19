@@ -102,6 +102,24 @@ function reviewItem(): ReviewItem {
 
 function snapshot(status: ViewModelEnvelope<unknown>["status"] = "ready"): GovernedActionSnapshot {
   return {
+    capturedAt: "2026-07-20T00:00:00Z",
+    conversationEnvelope: envelope(
+      {
+        status: "ready",
+        conversations: [],
+        projects: [],
+        selectedProjectId: null,
+        selectedConversationId: null,
+        messages: [],
+        latestTurn: null,
+        providerStatus: "ready",
+        providerProfiles: [],
+        selectedProviderProfileId: null,
+        providerErrorCode: null,
+        workStatus: "available",
+      },
+      status
+    ),
     workspaceEnvelope: envelope(
       {
         tasks: [activeTask()],
@@ -153,6 +171,7 @@ function snapshot(status: ViewModelEnvelope<unknown>["status"] = "ready"): Gover
       },
       status
     ),
+    boundaryEnvelope: envelope(boundary, status),
     diagnostics: [],
   };
 }
