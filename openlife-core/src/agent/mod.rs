@@ -1,8 +1,6 @@
 pub mod action_executor;
 pub mod canonical_write_admission;
-pub mod context_assembler;
 pub mod conversation_context;
-pub mod evidence_graph;
 pub mod evidence_store;
 pub mod governor;
 pub mod life_model_explicit_read;
@@ -13,15 +11,14 @@ pub mod main_chat_agent_v1;
 pub mod main_chat_governance_intent;
 pub mod main_chat_memory_candidate;
 pub mod memory_lifecycle;
-pub mod memory_service;
 pub mod memory_view_model;
 pub mod metadata_safe;
 pub mod model_router;
 pub mod policy_store;
 pub mod product_read_model;
+pub mod product_trace;
 pub mod proposal_store;
 pub mod provider_privacy_boundary;
-pub mod reasoning;
 pub mod review_decision_context;
 pub mod review_item;
 pub mod review_workflow;
@@ -47,16 +44,6 @@ pub use action_executor::{
 pub use canonical_write_admission::{
     CanonicalWriteAdmission, CanonicalWriteAdmissionRejection, CanonicalWriteAdmissionRequest,
     CanonicalWritePermit,
-};
-pub use context_assembler::{
-    AssembleInput, AssembleOutput, CompositeAssembler, ContextAssembler, MemoryAssembler,
-    MemoryHit, PrivacyAssembler, ToolsAssembler,
-};
-pub use evidence_graph::{
-    build_evidence_timeline, evaluate_evidence_graph, EvidenceClusterSummary,
-    EvidenceConflictState, EvidenceCooldownState, EvidenceDecayState, EvidenceGraphInput,
-    EvidenceGraphLink, EvidenceGraphLinkKind, EvidenceGraphReport, EvidencePolarity,
-    EvidenceSourceWeightSummary, EvidenceTimelineItem, EvidenceTimelineReadModel,
 };
 pub use evidence_store::{
     EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord, EvidenceSourceRef,
@@ -108,7 +95,6 @@ pub use memory_lifecycle::{
     MemoryMaterializationStatus, MemoryMaterializedView, MemoryPrivacyEraseReport,
     MemoryRollbackEvent, MemoryRollbackReport,
 };
-pub use memory_service::{EmbeddingConfig, MemoryContext, MemoryService};
 pub use memory_view_model::{
     build_memory_view_model, MemoryItemView, MemoryLaneSummary, MemoryLifeModelLinkageStatus,
     MemoryLifeModelLinkageSummary, MemoryLifecycleSummary, MemoryTierSummary, MemoryViewModel,
@@ -135,14 +121,10 @@ pub use product_read_model::{
     ReviewActionKind, ReviewItemMaterializationStatus, ViewModelActions, ViewModelEnvelope,
     ViewModelSource, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
 };
+pub use product_trace::ProductAgentTrace;
 pub use proposal_store::{ArtifactEffectRecord, ArtifactEffectState, ProposalStore};
 pub use provider_privacy_boundary::{
     build_provider_privacy_boundary_summary, ProviderPrivacyBoundaryBuildInput,
-};
-pub use reasoning::layered::{SafetyCheckResult, SafetyChecker};
-pub use reasoning::{
-    DirectReasoner, LayeredReasoner, ReasoningConfig, ReasoningError, ReasoningInput,
-    ReasoningOutput, ReasoningPhaseKind, ReasoningStrategy, ReasoningTrace,
 };
 pub use review_decision_context::{
     build_review_decision_context, GovernedActionReviewContract, PermissionDecisionContext,

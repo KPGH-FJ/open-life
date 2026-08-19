@@ -27,7 +27,7 @@ use openlife_core::agent::main_chat_agent_v1::{
     ContextSourceKind, PolicyDecision, PolicyRouteKind,
 };
 use openlife_core::agent::metadata_safe::metadata_safe_text_digest;
-use openlife_core::agent::{ReasoningTrace, ReviewWorkflow};
+use openlife_core::agent::{ProductAgentTrace, ReviewWorkflow};
 use openlife_core::conversation::{BeginChatTurn, ConversationItemKind, TurnStatus};
 use openlife_core::llm::ChatMessage;
 #[cfg(not(test))]
@@ -2198,7 +2198,7 @@ fn output(
         .iter()
         .map(crate::product_agent_dto::ProductToolCallResult::from_internal)
         .collect::<Vec<_>>();
-    let reasoning_trace = ReasoningTrace {
+    let reasoning_trace = ProductAgentTrace {
         generation_result: Some(serde_json::json!({
             "canonicalWork": true,
             "conversationId": input.conversation_id,
@@ -2207,7 +2207,6 @@ fn output(
             "runId": input.run_id,
             "modelRoute": route,
         })),
-        ..ReasoningTrace::default()
     };
     let result = SendMessageResult {
         reply: reply.clone(),

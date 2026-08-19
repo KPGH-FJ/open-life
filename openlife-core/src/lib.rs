@@ -5,7 +5,7 @@ pub mod config;
 pub mod conversation;
 pub mod embedding;
 pub mod feedback;
-// Hermes module removed: replaced by agent::reasoning module
+// Agent execution is owned by the canonical Chat and Work runtimes.
 pub mod layer;
 pub mod life_model;
 pub mod life_model_write_gateway;

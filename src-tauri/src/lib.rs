@@ -216,7 +216,7 @@ pub struct SendMessageResult {
     pub reply: String,
     pub status: String,
     pub blockers: Vec<String>,
-    pub reasoning_trace: openlife_core::agent::ReasoningTrace,
+    pub reasoning_trace: openlife_core::agent::ProductAgentTrace,
     pub tool_calls: Vec<ToolCallResult>,
     pub run_id: Option<String>,
     pub agent_ingress: Option<openlife_core::agent::main_chat_agent_v1::AgentIngressDecision>,

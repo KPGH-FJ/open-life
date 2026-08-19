@@ -474,21 +474,8 @@ export interface ContentReceipt {
   verified: boolean;
 }
 
-export interface ReasoningTrace {
-  input?: string;
-  meaning_result?: any;
-  strategy_result?: any;
+export interface ProductAgentTrace {
   generation_result?: MainChatGenerationResult;
-  output?: string;
-  errors?: string[];
-  tool_plan?: string[];
-  safety_check_result?: {
-    passed?: boolean;
-    warnings?: string[];
-    strict_mode?: boolean;
-  };
-  layer_timings_ms?: Record<string, number>;
-  stable_steps?: string[];
 }
 
 export interface MainChatMemoryCandidateTrace {
@@ -530,7 +517,7 @@ export interface SendMessageResult {
   reply: string;
   status?: MainChatTurnStatus;
   blockers?: string[];
-  reasoning_trace: ReasoningTrace;
+  reasoning_trace: ProductAgentTrace;
   tool_calls: ToolCallResult[];
   run_id?: string;
   agent_ingress?: MainChatAgentIngressDecision;
@@ -627,7 +614,7 @@ export interface StreamMessageStartPayload {
   run_id?: string;
   status?: MainChatTurnStatus;
   blockers?: string[];
-  reasoning_trace?: ReasoningTrace;
+  reasoning_trace?: ProductAgentTrace;
   tool_calls?: ToolCallResult[];
   agent_ingress?: MainChatAgentIngressDecision;
   provider_invocation_status?: ProviderInvocationStatus;
@@ -660,7 +647,7 @@ export interface StreamMessageDonePayload {
   model_invoked?: boolean;
   tool_invoked?: boolean;
   life_model_influence?: MainChatLifeModelProductReceipt;
-  reasoning_trace?: ReasoningTrace;
+  reasoning_trace?: ProductAgentTrace;
   tool_calls?: ToolCallResult[];
   agent_ingress?: MainChatAgentIngressDecision;
 }

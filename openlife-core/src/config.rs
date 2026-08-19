@@ -62,45 +62,6 @@ fn default_embedding_enabled() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReasoningConfig {
-    #[serde(default = "default_reasoning_strategy")]
-    pub default_strategy: String,
-    #[serde(default = "default_meaning_timeout_ms")]
-    pub meaning_timeout_ms: u64,
-    #[serde(default = "default_strategy_timeout_ms")]
-    pub strategy_timeout_ms: u64,
-    #[serde(default = "default_generation_timeout_ms")]
-    pub generation_timeout_ms: u64,
-}
-
-impl Default for ReasoningConfig {
-    fn default() -> Self {
-        Self {
-            default_strategy: default_reasoning_strategy(),
-            meaning_timeout_ms: default_meaning_timeout_ms(),
-            strategy_timeout_ms: default_strategy_timeout_ms(),
-            generation_timeout_ms: default_generation_timeout_ms(),
-        }
-    }
-}
-
-fn default_reasoning_strategy() -> String {
-    "layered".to_string()
-}
-
-fn default_meaning_timeout_ms() -> u64 {
-    5000
-}
-
-fn default_strategy_timeout_ms() -> u64 {
-    15000
-}
-
-fn default_generation_timeout_ms() -> u64 {
-    30000
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NetworkPolicy {
     #[serde(default = "default_network_enabled")]
@@ -228,8 +189,6 @@ pub struct AppConfig {
     #[serde(default = "default_local_model")]
     pub local_model: String,
     #[serde(default)]
-    pub reasoning: ReasoningConfig,
-    #[serde(default)]
     pub system: SystemConfig,
 }
 
@@ -239,7 +198,6 @@ impl Default for AppConfig {
             llm: LlmConfig::default(),
             prefer_local_model: true,
             local_model: default_local_model(),
-            reasoning: ReasoningConfig::default(),
             system: SystemConfig::default(),
         }
     }
@@ -381,7 +339,6 @@ mod tests {
             },
             prefer_local_model: true,
             local_model: "qwen2.5".into(),
-            reasoning: ReasoningConfig::default(),
             system: SystemConfig::default(),
         };
         config.system.search_provider_key = "sk-search-test".into();

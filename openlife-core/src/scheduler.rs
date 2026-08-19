@@ -1854,15 +1854,6 @@ impl ProviderReceiptCollector {
         }
     }
 
-    fn contains(&self, receipt: &ProviderInvocationReceipt) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .terminal_receipts_by_identity
-            .get(&provider_receipt_identity_digest(receipt))
-            .is_some_and(|canonical| canonical == receipt)
-    }
-
     fn terminal_for_attempt(
         &self,
         attempt: &ProviderStartedAttempt,
@@ -2609,48 +2600,6 @@ impl InferenceScheduler {
         };
         request.validate()?;
         Ok(request)
-    }
-
-    /// Verify that provider truth is internally coherent before an orchestrator
-    /// projects the result. A successful real adapter response without a start
-    /// receipt is never allowed to masquerade as completed generation.
-    pub(crate) fn verify_prepared_outcome_receipt(
-        &self,
-        outcome: &PreparedProviderOutcome,
-    ) -> Result<()> {
-        match (outcome.receipt.as_ref(), outcome.terminal_proof.as_ref()) {
-            (Some(receipt), Some(proof))
-                if proof.receipt() != receipt || !proof.is_runtime_adapter_terminal() =>
-            {
-                anyhow::bail!("provider invocation terminal proof does not match its receipt")
-            }
-            (Some(receipt), None)
-                if receipt.simulated && self.scripted_generation_response.is_some() =>
-            {
-                Ok(())
-            }
-            (Some(_), None) => {
-                anyhow::bail!("provider invocation terminal proof is missing")
-            }
-            (None, Some(_)) => {
-                anyhow::bail!("provider invocation terminal proof has no receipt")
-            }
-            (Some(receipt), Some(_))
-                if receipt.policy_evidence.as_ref().is_none_or(|evidence| {
-                    evidence.provider_config_generation != self.provider_config_generation
-                }) =>
-            {
-                anyhow::bail!("provider invocation receipt belongs to another config generation")
-            }
-            (Some(receipt), Some(_)) if self.provider_receipt_collector.contains(receipt) => Ok(()),
-            (Some(_), Some(_)) => anyhow::bail!("provider invocation receipt was not retained"),
-            (None, None)
-                if outcome.result.is_ok() && self.scripted_generation_response.is_none() =>
-            {
-                anyhow::bail!("provider response completed without an adapter-start receipt")
-            }
-            (None, None) => Ok(()),
-        }
     }
 
     /// Resolve one concrete provider/model target and bind it to already
@@ -4233,16 +4182,10 @@ mod tests {
     #[test]
     fn prepared_generation_requires_the_typed_receipt_outcome() {
         let removed_api = ["generate_", "prepared("].concat();
-        let production_consumers = [
-            (
-                "agent/reasoning/layered.rs",
-                include_str!("agent/reasoning/layered.rs") as &str,
-            ),
-            (
-                "agent/main_chat_agent_v1.rs",
-                include_str!("agent/main_chat_agent_v1.rs") as &str,
-            ),
-        ];
+        let production_consumers = [(
+            "agent/main_chat_agent_v1.rs",
+            include_str!("agent/main_chat_agent_v1.rs") as &str,
+        )];
 
         for (path, source) in production_consumers {
             assert!(
@@ -4879,7 +4822,6 @@ mod tests {
 
         let outcome = scheduler.execute_prepared(prepared).await;
 
-        scheduler.verify_prepared_outcome_receipt(&outcome).unwrap();
         assert_eq!(outcome.result.unwrap(), "scripted response");
         assert!(outcome.receipt.is_none());
         assert!(scheduler.provider_receipts_snapshot().is_empty());
@@ -5703,24 +5645,6 @@ mod tests {
         );
         release_provider.notify_one();
         let _ = server.await;
-    }
-
-    #[test]
-    fn successful_real_provider_outcome_cannot_omit_its_start_receipt() {
-        let scheduler = InferenceScheduler::default();
-        let inconsistent = crate::llm::PreparedProviderOutcome {
-            receipt: None,
-            terminal_proof: None,
-            result: Ok("untracked response".into()),
-        };
-
-        let error = scheduler
-            .verify_prepared_outcome_receipt(&inconsistent)
-            .unwrap_err();
-
-        assert!(error
-            .to_string()
-            .contains("without an adapter-start receipt"));
     }
 
     #[tokio::test]
