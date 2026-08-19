@@ -31,25 +31,14 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
     let memory_store = openlife_core::memory::MemoryStore::new_in_memory().unwrap();
     let life_model_manager =
         openlife_core::life_model::LifeModelManager::new(base.join("life-model").join("current"));
-    // Mirror release bootstrap ordering because both metadata owners share one
-    // SQLite file. Recovery preflight opens the file read-only and therefore
-    // requires the canonical file-journal schema to exist before the governed
-    // import journal makes the path observable.
     openlife_core::persistence_outbox::FileMutationJournal::new(
         life_model_manager.mutation_journal_path(),
     )
     .expect("isolated eval LifeModel file-mutation journal");
-    let governed_data_import_journal = Arc::new(
-        openlife_core::persistence_outbox::GovernedDataImportJournal::new(
-            life_model_manager.mutation_journal_path(),
-        )
-        .expect("isolated eval governed data-import journal"),
-    );
     let state = Arc::new(AppState {
         persistence_coordinator: Arc::new(
             crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
         ),
-        governed_data_import_journal: Some(governed_data_import_journal),
         config: Arc::new(Mutex::new(config.clone())),
         life_model_manager: Arc::new(Mutex::new(life_model_manager)),
         life_model_write_coordinator: Arc::new(Mutex::new(())),

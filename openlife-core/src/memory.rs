@@ -216,64 +216,6 @@ fn conversation_content_digest(content: &str) -> String {
     format!("sha256:{hex}")
 }
 
-/// Deterministic semantic digest for the canonical conversation-message
-/// archive. Row ids are deliberately excluded because a portable restore
-/// assigns new SQLite ids; chronological order and the complete exported body
-/// remain covered.
-pub fn canonical_message_archive_digest(messages: &[ExportedMessage]) -> String {
-    let mut ordered = messages.iter().enumerate().collect::<Vec<_>>();
-    ordered.sort_by(|(left_index, left), (right_index, right)| {
-        left.created_at
-            .cmp(&right.created_at)
-            .then_with(|| left_index.cmp(right_index))
-    });
-
-    let mut context = DigestContext::new(&SHA256);
-    update_length_delimited_digest(&mut context, b"openlife:canonical-message-archive:v1");
-    context.update(&(ordered.len() as u64).to_le_bytes());
-    for (_, message) in ordered {
-        update_length_delimited_digest(&mut context, message.session_id.as_bytes());
-        update_length_delimited_digest(&mut context, message.role.as_bytes());
-        update_length_delimited_digest(&mut context, message.content.as_bytes());
-        update_length_delimited_digest(&mut context, message.created_at.as_bytes());
-    }
-    let hash = context.finish();
-    let hex = hash
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sha256:{hex}")
-}
-
-fn validate_canonical_message_archive_digest(value: &str) -> Result<()> {
-    if value.len() != 71
-        || !value.starts_with("sha256:")
-        || !value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        anyhow::bail!("invalid canonical message archive digest");
-    }
-    Ok(())
-}
-
-fn export_messages_from_conn(conn: &Connection) -> Result<Vec<ExportedMessage>> {
-    let mut stmt = conn.prepare(
-        "SELECT session_id, role, content, created_at
-         FROM messages
-         ORDER BY created_at, id",
-    )?;
-    let rows = stmt.query_map([], |row| {
-        Ok(ExportedMessage {
-            session_id: row.get(0)?,
-            role: row.get(1)?,
-            content: row.get(2)?,
-            created_at: row.get(3)?,
-        })
-    })?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .context("failed to export messages")
-}
-
 fn ensure_message_operation_id(operation_id: &str) -> Result<()> {
     if operation_id.trim() != operation_id
         || operation_id.is_empty()
@@ -1464,18 +1406,15 @@ impl MemoryStore {
             .context("failed to collect sessions")
     }
 
-    pub fn export_all_messages(&self) -> Result<Vec<ExportedMessage>> {
-        Ok(self.export_canonical_message_archive()?.messages)
-    }
-
-    pub fn export_canonical_message_archive(&self) -> Result<CanonicalMessageArchiveSnapshot> {
+    pub fn message_count(&self) -> Result<usize> {
         let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let messages = export_messages_from_conn(&conn)?;
-        let digest = canonical_message_archive_digest(&messages);
-        Ok(CanonicalMessageArchiveSnapshot { messages, digest })
+        let count = conn.query_row("SELECT COUNT(*) FROM messages", [], |row| {
+            row.get::<_, i64>(0)
+        })?;
+        usize::try_from(count).context("message count exceeds usize")
     }
 
     pub fn export_active_memory_records(&self) -> Result<Vec<MemoryRecord>> {
@@ -1928,115 +1867,6 @@ impl MemoryStore {
                 })
             })
             .collect()
-    }
-
-    pub fn clear_all_messages(&self) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        conn.execute("DELETE FROM messages", [])?;
-        conn.execute(
-            "DELETE FROM memories WHERE content_type = 'chat_message'",
-            [],
-        )?;
-        Ok(())
-    }
-
-    pub fn import_messages(&self, messages: &[ExportedMessage]) -> Result<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        for session_id in messages
-            .iter()
-            .map(|message| message.session_id.as_str())
-            .collect::<HashSet<_>>()
-        {
-            ensure_conversation_write_allowed(&tx, session_id)?;
-        }
-        for msg in messages {
-            tx.execute(
-                "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![msg.session_id, msg.role, msg.content, msg.created_at],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn replace_all_messages(&self, messages: &[ExportedMessage]) -> Result<()> {
-        let expected_before_digest = self.export_canonical_message_archive()?.digest;
-        self.replace_all_messages_guarded(messages, &expected_before_digest)
-            .map(|_| ())
-    }
-
-    /// Replace the canonical conversation archive under an owner-local CAS.
-    ///
-    /// The digest is re-read after `BEGIN IMMEDIATE`; drift therefore fails
-    /// before any delete. Replaying an already-applied payload is a typed
-    /// no-op, even when the caller still carries the original before digest.
-    pub fn replace_all_messages_guarded(
-        &self,
-        messages: &[ExportedMessage],
-        expected_before_digest: &str,
-    ) -> Result<CanonicalMessageReplaceOutcome> {
-        validate_canonical_message_archive_digest(expected_before_digest)?;
-        let desired_digest = canonical_message_archive_digest(messages);
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        for session_id in messages
-            .iter()
-            .map(|message| message.session_id.as_str())
-            .collect::<HashSet<_>>()
-        {
-            ensure_conversation_write_allowed(&tx, session_id)?;
-        }
-        let before_messages = export_messages_from_conn(&tx)?;
-        let before_digest = canonical_message_archive_digest(&before_messages);
-        if before_digest == desired_digest {
-            tx.commit()?;
-            return Ok(CanonicalMessageReplaceOutcome {
-                disposition: CanonicalMessageReplaceDisposition::AlreadyCurrent,
-                supplied: messages.len(),
-                applied: messages.len(),
-                before_digest: before_digest.clone(),
-                after_digest: before_digest,
-            });
-        }
-        if before_digest != expected_before_digest {
-            anyhow::bail!(
-                "canonical_message_archive_drift expected={expected_before_digest} observed={before_digest}"
-            );
-        }
-        tx.execute("DELETE FROM messages", [])?;
-        tx.execute(
-            "DELETE FROM memories WHERE content_type = 'chat_message'",
-            [],
-        )?;
-        for msg in messages {
-            tx.execute(
-                "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-                params![msg.session_id, msg.role, msg.content, msg.created_at],
-            )?;
-        }
-        let after_messages = export_messages_from_conn(&tx)?;
-        let after_digest = canonical_message_archive_digest(&after_messages);
-        if after_digest != desired_digest {
-            anyhow::bail!("canonical_message_archive_digest_mismatch_after_replace");
-        }
-        tx.commit()?;
-        Ok(CanonicalMessageReplaceOutcome {
-            disposition: CanonicalMessageReplaceDisposition::Applied,
-            supplied: messages.len(),
-            applied: messages.len(),
-            before_digest,
-            after_digest,
-        })
     }
 
     pub fn create_chat_session(&self, session_id: &str, title: &str) -> Result<()> {
@@ -4060,44 +3890,6 @@ fn insert_memory_projection_marker(
     Ok(())
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct ExportedMessage {
-    pub session_id: String,
-    pub role: String,
-    pub content: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanonicalMessageArchiveSnapshot {
-    pub messages: Vec<ExportedMessage>,
-    pub digest: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CanonicalMessageReplaceDisposition {
-    Applied,
-    AlreadyCurrent,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanonicalMessageReplaceOutcome {
-    pub disposition: CanonicalMessageReplaceDisposition,
-    pub supplied: usize,
-    pub applied: usize,
-    pub before_digest: String,
-    pub after_digest: String,
-}
-
-impl CanonicalMessageReplaceOutcome {
-    pub fn changed(&self) -> bool {
-        self.disposition == CanonicalMessageReplaceDisposition::Applied
-    }
-}
-
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChatSession {
     pub session_id: String,
@@ -5328,114 +5120,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_store_export_import_messages() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
-        let msg = ChatMessage {
-            role: "user".into(),
-            content: "hi".into(),
-        };
-        store.save_message("s1", &msg).unwrap();
-        let exported = store.export_all_messages().unwrap();
-        assert_eq!(exported.len(), 1);
-
-        store.clear_all_messages().unwrap();
-        let loaded = store.load_recent_messages("s1", 10).unwrap();
-        assert!(loaded.is_empty());
-
-        store.import_messages(&exported).unwrap();
-        let loaded = store.load_recent_messages("s1", 10).unwrap();
-        assert_eq!(loaded.len(), 1);
-    }
-
-    #[test]
-    fn guarded_message_archive_replace_rejects_owner_drift_before_effect() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        store
-            .save_message(
-                "before",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "canonical before".into(),
-                },
-            )
-            .unwrap();
-        let expected = store.export_canonical_message_archive().unwrap();
-        store
-            .save_message(
-                "concurrent",
-                &ChatMessage {
-                    role: "assistant".into(),
-                    content: "late owner write".into(),
-                },
-            )
-            .unwrap();
-        let replacement = vec![ExportedMessage {
-            session_id: "replacement".into(),
-            role: "user".into(),
-            content: "must not apply".into(),
-            created_at: Utc::now().to_rfc3339(),
-        }];
-
-        let error = store
-            .replace_all_messages_guarded(&replacement, &expected.digest)
-            .expect_err("stale expected digest must fail before delete");
-        assert!(error
-            .to_string()
-            .contains("canonical_message_archive_drift"));
-        let after = store.export_canonical_message_archive().unwrap();
-        assert_eq!(after.messages.len(), 2);
-        assert!(after
-            .messages
-            .iter()
-            .any(|message| message.content == "late owner write"));
-        assert!(!after
-            .messages
-            .iter()
-            .any(|message| message.content == "must not apply"));
-    }
-
-    #[test]
-    fn guarded_message_archive_replace_is_digest_exact_and_replay_safe() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        store
-            .save_message(
-                "before",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "before".into(),
-                },
-            )
-            .unwrap();
-        let before = store.export_canonical_message_archive().unwrap();
-        let replacement = vec![ExportedMessage {
-            session_id: "restored".into(),
-            role: "assistant".into(),
-            content: "portable replacement".into(),
-            created_at: "2026-07-17T00:00:00Z".into(),
-        }];
-        let desired_digest = canonical_message_archive_digest(&replacement);
-
-        let applied = store
-            .replace_all_messages_guarded(&replacement, &before.digest)
-            .unwrap();
-        assert!(applied.changed());
-        assert_eq!(applied.after_digest, desired_digest);
-        let replayed = store
-            .replace_all_messages_guarded(&replacement, &before.digest)
-            .unwrap();
-        assert_eq!(
-            replayed.disposition,
-            CanonicalMessageReplaceDisposition::AlreadyCurrent
-        );
-        assert!(!replayed.changed());
-        assert_eq!(
-            store.export_canonical_message_archive().unwrap().digest,
-            desired_digest
-        );
-    }
-
-    #[test]
     fn memory_store_keeps_chat_body_in_messages_only_but_session_search_still_works() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
@@ -5769,22 +5453,6 @@ mod tests {
             store.touch_chat_session("session-fenced").unwrap_err(),
             store
                 .save_snapshot("session-fenced", &LifeModel::default())
-                .unwrap_err(),
-            store
-                .import_messages(&[ExportedMessage {
-                    session_id: "session-fenced".into(),
-                    role: "user".into(),
-                    content: "LATE_IMPORT_MUST_NOT_RESURRECT".into(),
-                    created_at: Utc::now().to_rfc3339(),
-                }])
-                .unwrap_err(),
-            store
-                .replace_all_messages(&[ExportedMessage {
-                    session_id: "session-fenced".into(),
-                    role: "user".into(),
-                    content: "LATE_REPLACE_MUST_NOT_RESURRECT".into(),
-                    created_at: Utc::now().to_rfc3339(),
-                }])
                 .unwrap_err(),
         ] {
             assert!(error

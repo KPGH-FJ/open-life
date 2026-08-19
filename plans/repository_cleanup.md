@@ -2,7 +2,7 @@
 
 Status: active
 
-Current slice: C2 - retired backend bundles. C0 and C1 are complete.
+Current slice: C3 - release and dev boundaries. C0-C2 are complete.
 
 ## Objective
 

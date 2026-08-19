@@ -782,53 +782,6 @@ fn bootstrap_with_secret_store(
             &error.to_string(),
         ),
     }
-    let governed_data_import_journal =
-        match openlife_core::persistence_outbox::GovernedDataImportJournal::new(
-            life_model_manager.mutation_journal_path(),
-        ) {
-            Ok(journal) => {
-                let journal = Arc::new(journal);
-                match journal.recovery_requirement() {
-                    Ok(Some(receipt)) => {
-                        persistence.register_read_write("GovernedDataImportJournal");
-                        persistence.degrade_globally(
-                        openlife_core::persistence_outbox::GOVERNED_DATA_IMPORT_RECOVERY_REQUIRED_REASON,
-                    );
-                        startup_warnings.borrow_mut().push(format!(
-                        "governed data import recovery required before effects may resume: operation={} stage={}",
-                        receipt.operation_id,
-                        receipt.stage.as_str(),
-                    ));
-                    }
-                    Ok(None) => persistence.register_read_write("GovernedDataImportJournal"),
-                    Err(error) => {
-                        persistence.register_unavailable(
-                            "GovernedDataImportJournal",
-                            "data_import_journal_read_failed",
-                            &error.to_string(),
-                        );
-                        persistence.degrade_globally("data_import_journal_unavailable");
-                        startup_warnings.borrow_mut().push(format!(
-                        "governed data-import journal could not be inspected; effects remain fail-closed: {error}"
-                    ));
-                    }
-                }
-                Some(journal)
-            }
-            Err(error) => {
-                persistence.register_unavailable(
-                    "GovernedDataImportJournal",
-                    "data_import_journal_open_failed",
-                    &error.to_string(),
-                );
-                persistence.degrade_globally("data_import_journal_unavailable");
-                startup_warnings.borrow_mut().push(format!(
-                "governed data-import journal could not be opened; effects remain fail-closed: {error}"
-            ));
-                None
-            }
-        };
-
     let db_path = data_dir.join("memory.db");
     let memory_store = init_store(
         || init_memory_store(&db_path, &startup_warnings),
@@ -1638,7 +1591,6 @@ fn bootstrap_with_secret_store(
     .with_provider_status(provider_credential_status);
     let app_state = Arc::new(AppState {
         persistence_coordinator: Arc::clone(&persistence),
-        governed_data_import_journal,
         config: Arc::new(Mutex::new(config)),
         life_model_manager: Arc::new(Mutex::new(life_model_manager)),
         life_model_write_coordinator: Arc::new(Mutex::new(())),

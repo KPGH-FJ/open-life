@@ -64,7 +64,6 @@ pub enum MemoryGatewaySubject {
     Evidence,
     CanonicalLifeModel,
     KnowledgeNote,
-    ImportedArchive,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -155,14 +154,6 @@ impl MemoryGatewayRequest {
                     Some("knowledge.note".into()),
                     Some("knowledge_note".into()),
                     Some("knowledge_note_materialization".into()),
-                    None,
-                ),
-                MemoryGatewaySubject::ImportedArchive => (
-                    Some("import".into()),
-                    Some("memory_write".into()),
-                    Some("memory.imported_archive".into()),
-                    Some("imported_archive".into()),
-                    Some("governed_import_restore".into()),
                     None,
                 ),
             };

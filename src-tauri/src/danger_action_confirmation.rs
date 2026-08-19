@@ -601,25 +601,6 @@ mod tests {
     use std::sync::Arc;
     use std::thread;
 
-    #[test]
-    fn data_import_native_prompt_never_describes_unparsed_scope_as_zero() {
-        let ticket = NativePromptTicket {
-            challenge_id: "danger-challenge:test".into(),
-            ticket_id: "ticket-test".into(),
-            requested_target: SINGLETON_TARGET.into(),
-            action_type: "data_import_overwrite".into(),
-            affected_count: 0,
-            target_count: 0,
-            arguments_digest: "sha256:test".into(),
-        };
-
-        let (affected, targets) = native_prompt_scope_count_labels(&ticket);
-        assert!(affected.contains("未在预检阶段枚举"));
-        assert!(targets.contains("未在预检阶段枚举"));
-        assert_ne!(affected, "0");
-        assert_ne!(targets, "0");
-    }
-
     fn test_authority() -> DangerActionGrantAuthority {
         DangerActionGrantAuthority {
             app_session_nonce: "test-app-session-nonce".to_string(),
@@ -925,8 +906,6 @@ mod tests {
         assert_eq!(capability["windows"], serde_json::json!(["main"]));
         for shipped_command in [
             "accept_proposal,",
-            "export_all_data,",
-            "import_all_data,",
             "export_mcp_audit_logs,",
             "rebuild_memory_index,",
             "cleanup_mcp_audit_logs,",

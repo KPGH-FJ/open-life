@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { LifeModel, ChatMessage } from "./types";
+import type { ChatMessage } from "./types";
 
 function isTauriEnv(): boolean {
   return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
@@ -131,16 +131,6 @@ function sessionArgs(sessionId: string): { sessionId: string } {
 function selectedSkillArgs(selectedSkillId?: string): { selectedSkillId: string } | undefined {
   const trimmed = selectedSkillId?.trim();
   return trimmed ? { selectedSkillId: trimmed } : undefined;
-}
-
-function manualDataImportRequest(operationId: string) {
-  return {
-    operationId,
-    purpose: "manual_restore",
-    explicitUserIntent: true,
-    createPreChangeSnapshot: true,
-    importTargets: ["life_model", "messages", "vectors", "state_store"],
-  } as const;
 }
 
 export type CloudApiValidationStatus =
@@ -2580,138 +2570,7 @@ export async function searchMemory(
   };
 }
 
-export interface ExportedMessage {
-  session_id: string;
-  role: string;
-  content: string;
-  created_at: string;
-}
-
-export interface ExportedVectorChunk {
-  session_id: string;
-  content: string;
-  embedding: number[];
-  source: string;
-  created_at: string;
-  tier: number;
-  access_count: number;
-  last_accessed_at: string;
-}
-
-export interface PortableDailyTaskV1 {
-  title: string;
-  status: "pending" | "completed";
-  dueAt?: string | null;
-  timeBlock?: { start: string; end: string } | null;
-  createdAt: string;
-  updatedAt: string;
-  expiresAt: string;
-}
-
-export interface PortableDailyTaskArchiveV1 {
-  schema: "openlife.state-store-daily-tasks-portable.v1";
-  exportedAt: string;
-  canonicalDigest: string;
-  payloadDigest: string;
-  skippedExpiredCount: number;
-  dailyTasks: PortableDailyTaskV1[];
-}
-
-interface ExportPayloadBase {
-  app_version?: string;
-  exported_at: string;
-  life_model: LifeModel;
-  messages: ExportedMessage[];
-  vectors: ExportedVectorChunk[];
-}
-
-export interface ExportPayloadV1 extends ExportPayloadBase {
-  version: "1.0";
-}
-
-export interface ExportPayloadV2 extends ExportPayloadBase {
-  version: "2.0";
-  state_store: PortableDailyTaskArchiveV1;
-}
-
-export type ExportPayload = ExportPayloadV1 | ExportPayloadV2;
-
-export const MAX_OPENLIFE_IMPORT_FILE_BYTES = 64 * 1024 * 1024;
-export const MAX_OPENLIFE_IMPORT_MESSAGES = 50_000;
-export const MAX_OPENLIFE_IMPORT_VECTORS = 50_000;
-export const MAX_OPENLIFE_IMPORT_STATE_TASKS = 512;
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isNullableString(value: unknown): value is string | null | undefined {
-  return value === undefined || value === null || typeof value === "string";
-}
-
-function isPortableDailyTask(value: unknown): value is PortableDailyTaskV1 {
-  return (
-    isRecord(value) &&
-    typeof value.title === "string" &&
-    (value.status === "pending" || value.status === "completed") &&
-    isNullableString(value.dueAt) &&
-    (value.timeBlock === undefined ||
-      value.timeBlock === null ||
-      (isRecord(value.timeBlock) &&
-        typeof value.timeBlock.start === "string" &&
-        typeof value.timeBlock.end === "string")) &&
-    typeof value.createdAt === "string" &&
-    typeof value.updatedAt === "string" &&
-    typeof value.expiresAt === "string"
-  );
-}
-
-export function parseOpenLifeExportPayload(text: string): ExportPayload {
-  if (text.length > MAX_OPENLIFE_IMPORT_FILE_BYTES) {
-    throw new Error("OpenLife 备份超过 64 MiB 导入上限");
-  }
-  const value: unknown = JSON.parse(text);
-  if (
-    !isRecord(value) ||
-    (value.version !== "1.0" && value.version !== "2.0") ||
-    typeof value.exported_at !== "string" ||
-    !isRecord(value.life_model) ||
-    !Array.isArray(value.messages) ||
-    !Array.isArray(value.vectors)
-  ) {
-    throw new Error("OpenLife 备份格式无效或版本不受支持");
-  }
-  if (value.messages.length > MAX_OPENLIFE_IMPORT_MESSAGES) {
-    throw new Error("OpenLife 备份超过消息条目导入上限");
-  }
-  if (value.vectors.length > MAX_OPENLIFE_IMPORT_VECTORS) {
-    throw new Error("OpenLife 备份超过向量条目导入上限");
-  }
-  if (value.version === "2.0") {
-    const stateStore = value.state_store;
-    if (
-      !isRecord(stateStore) ||
-      stateStore.schema !== "openlife.state-store-daily-tasks-portable.v1" ||
-      typeof stateStore.exportedAt !== "string" ||
-      typeof stateStore.canonicalDigest !== "string" ||
-      typeof stateStore.payloadDigest !== "string" ||
-      typeof stateStore.skippedExpiredCount !== "number" ||
-      !Array.isArray(stateStore.dailyTasks) ||
-      stateStore.dailyTasks.length > MAX_OPENLIFE_IMPORT_STATE_TASKS ||
-      !stateStore.dailyTasks.every(isPortableDailyTask)
-    ) {
-      throw new Error("OpenLife v2 备份缺少有效的 StateStore portable archive");
-    }
-  } else if ("state_store" in value) {
-    throw new Error("OpenLife v1 备份不得伪装携带 v2 StateStore archive");
-  }
-  return value as unknown as ExportPayload;
-}
-
 export type DangerActionType =
-  | "data_export"
-  | "data_import_overwrite"
-  | "data_import_abandon_recovery"
   | "mcp_audit_export"
   | "mcp_audit_cleanup"
   | "mcp_audit_key_rotation"
@@ -2738,10 +2597,6 @@ export interface DangerActionPreflightView {
   safeModeBlocked: boolean;
   blockingReasons: string[];
   sourceRefs: string[];
-  /** Metadata-only pointer to an interrupted governed import, when one exists. */
-  recoveryOperationId?: string | null;
-  /** Metadata-only durable journal stage for the interrupted import. */
-  recoveryStage?: string | null;
 }
 
 export interface DangerActionConfirmationEvidence {
@@ -2777,125 +2632,6 @@ export async function getDangerActionPreflight(
     safeMode,
     ...(options.targetIds ? { targetIds: options.targetIds } : {}),
     ...(options.affectedCount !== undefined ? { affectedCount: options.affectedCount } : {}),
-  });
-}
-
-export async function exportAllData(): Promise<ExportPayload> {
-  return safeInvoke<ExportPayload>("export_all_data");
-}
-
-export interface DataImportResult {
-  success: boolean;
-  status?:
-    | "completed"
-    | "replayed"
-    | "recovery_completed_restart_required"
-    | "projection_degraded_recovery_required"
-    | string;
-  legacy: boolean;
-  warning: string;
-  metadata_safe: boolean;
-  durable_lifemodel_write: boolean;
-  imported_message_count: number;
-  /** Null on a historical replay when execution-only vector counts were not durably recorded. */
-  imported_vector_count: number | null;
-  state_store_targeted?: boolean;
-  state_store_replayed?: boolean;
-  state_store_restored_count?: number;
-  state_store_skipped_expired_count?: number;
-  state_store_projection_status?: "not_requested" | "pending" | "applied" | "degraded" | string;
-}
-
-export function describeDataImportResult(result: DataImportResult): string {
-  const projectionRecoveryRequired =
-    result.status === "projection_degraded_recovery_required" ||
-    // Older backend builds used this status. Keep it fail-closed while rolling forward.
-    result.status === "completed_with_projection_degraded" ||
-    result.state_store_projection_status === "degraded";
-
-  if (projectionRecoveryRequired) {
-    return "导入未完成：canonical 数据已经写入，但兼容投影处于降级恢复状态；请勿将投影页面视为最新事实，并按诊断提示恢复。";
-  }
-  if (result.status === "recovery_completed_restart_required") {
-    return "中断的导入已恢复完成；当前进程仍处于恢复隔离状态，请重启 OpenLife 后再继续使用数据功能。";
-  }
-  if (result.state_store_replayed || result.status === "replayed") {
-    return "同一导入操作已安全重放，没有重复写入。";
-  }
-  if (result.success && result.status === "completed") {
-    return "导入成功，请刷新页面以查看最新数据";
-  }
-
-  const status = result.status?.trim() || "unknown";
-  return `导入未完成：后端返回 ${status} 状态，请保留原备份并检查数据诊断。`;
-}
-
-export async function importAllData(
-  payload: ExportPayload,
-  confirmationEvidence?: DangerActionConfirmationEvidence,
-  operationId: string = crypto.randomUUID()
-): Promise<DataImportResult> {
-  const importRequest = manualDataImportRequest(operationId);
-  return safeInvoke<DataImportResult>("import_all_data", {
-    payload,
-    importRequest,
-    ...(confirmationEvidence ? { confirmationEvidence } : {}),
-  });
-}
-
-export interface GovernedDataImportAbandonmentResult {
-  success: true;
-  status: "abandoned_preserving_current_restart_required" | "abandoned_preserving_current";
-  operation_id: string;
-  stage: "abandoned_preserving_current";
-  recovery_terminalized: true;
-  original_import_completed: false;
-  rollback_completed: false;
-  preserved_current_canonical_data: boolean;
-  abandonment_mutated_canonical_owners: false;
-  original_import_effect_state: "preserved_current_observed_per_owner";
-  owner_resolution_counts: {
-    before: number;
-    target: number;
-    other: number;
-  };
-  resolution_evidence_count: number;
-  restart_required: boolean;
-}
-
-export interface GovernedDataImportStatusView {
-  status: string;
-  operationId: string | null;
-  stage: string | null;
-  terminal: boolean;
-  terminalAt: string | null;
-  recoveryRequired: boolean;
-  runtimeRecoveryIsolationActive: boolean;
-  restartRequired: boolean;
-  originalImportCompleted: boolean;
-  rollbackCompleted: boolean;
-  preservedCurrent: boolean;
-  ownerCount: number;
-  resolutionEvidenceCount: number;
-  ownerResolutionCounts: {
-    before: number;
-    target: number;
-    other: number;
-  };
-  observedAt: string;
-}
-
-export async function getGovernedDataImportStatus(): Promise<GovernedDataImportStatusView> {
-  return safeInvoke<GovernedDataImportStatusView>("get_governed_data_import_status");
-}
-
-export async function abandonGovernedDataImportRecovery(
-  operationId: string,
-  confirmationEvidence: DangerActionConfirmationEvidence
-): Promise<GovernedDataImportAbandonmentResult> {
-  return safeInvoke<GovernedDataImportAbandonmentResult>("abandon_governed_data_import_recovery", {
-    operationId,
-    confirmationEvidence,
   });
 }
 

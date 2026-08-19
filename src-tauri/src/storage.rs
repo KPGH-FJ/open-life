@@ -82,6 +82,7 @@ pub(crate) fn privacy_policy_path() -> std::path::PathBuf {
     app_data_dir().join("privacy_policy.yaml")
 }
 
+#[cfg(feature = "dev-extensions")]
 pub(crate) fn mcp_audit_keyring_path() -> std::path::PathBuf {
     app_data_dir().join("mcp_audit_keys.json")
 }

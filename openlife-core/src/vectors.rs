@@ -3,8 +3,7 @@ use crate::embedding::{
     UNKNOWN_EMBEDDING_PROFILE_ID,
 };
 use anyhow::{Context, Result};
-use ring::digest::{Context as DigestContext, SHA256};
-use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -1204,199 +1203,6 @@ impl VectorStore {
         export_all_chunks_from_conn(&conn)
     }
 
-    /// Export only vector rows that have no canonical owner elsewhere.
-    /// Canonical Memory and legacy chat rows are derived indexes and must be
-    /// recreated from their owner instead of becoming generic import truth.
-    pub fn export_portable_chunks(&self) -> Result<Vec<ExportedVectorChunk>> {
-        Ok(self.export_portable_archive()?.chunks)
-    }
-
-    pub fn export_portable_archive(&self) -> Result<PortableVectorArchiveSnapshot> {
-        let chunks = self
-            .export_all_chunks()?
-            .into_iter()
-            .filter(|chunk| {
-                matches!(
-                    portable_vector_disposition(&chunk.source),
-                    PortableVectorDisposition::Portable
-                )
-            })
-            .collect::<Vec<_>>();
-        let digest = portable_vector_archive_digest(&chunks);
-        Ok(PortableVectorArchiveSnapshot { chunks, digest })
-    }
-
-    /// Validate the exact replacement payload without mutating the store.
-    /// The same validation is repeated inside `replace_portable_chunks`' SQLite
-    /// transaction so a tombstone committed after this preflight still wins.
-    pub fn validate_portable_replacement(
-        &self,
-        chunks: &[ExportedVectorChunk],
-    ) -> Result<PortableVectorImportReport> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        validate_portable_vector_chunks(&conn, chunks)
-    }
-
-    pub fn clear_all_chunks(&self) -> Result<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM vectors", [])?;
-        rebind_and_validate_materialization_markers(&tx)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn import_chunks(&self, chunks: &[ExportedVectorChunk]) -> Result<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        for chunk in chunks {
-            if vector_session_tombstoned(&tx, &chunk.session_id)? {
-                anyhow::bail!("vector import targets a tombstoned conversation session");
-            }
-            if is_legacy_chat_vector_source(&chunk.source) {
-                continue;
-            }
-            if is_reserved_canonical_vector_source(&chunk.source) {
-                anyhow::bail!("generic vector import cannot claim a canonical owner");
-            }
-            let embedding_blob = encode_embedding_blob(&chunk.embedding);
-            validate_exported_chunk_profile(chunk)?;
-            tx.execute(
-                "INSERT INTO vectors (session_id, content, embedding_json, embedding_blob, embedding_profile_id, embedding_dimension, source, created_at, tier, access_count, last_accessed_at, importance_score, archived, archived_at, summary) VALUES (?1, ?2, '[]', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                params![chunk.session_id, chunk.content, embedding_blob, chunk.embedding_profile_id, chunk.embedding_dimension as i64, chunk.source, chunk.created_at, chunk.tier, chunk.access_count, &chunk.last_accessed_at, chunk.importance_score, chunk.archived as i64, &chunk.archived_at, &chunk.summary],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn replace_all_chunks(&self, chunks: &[ExportedVectorChunk]) -> Result<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        tx.execute("DELETE FROM vectors", [])?;
-        for chunk in chunks {
-            if vector_session_tombstoned(&tx, &chunk.session_id)? {
-                anyhow::bail!("vector replacement targets a tombstoned conversation session");
-            }
-            if is_legacy_chat_vector_source(&chunk.source) {
-                continue;
-            }
-            if is_reserved_canonical_vector_source(&chunk.source) {
-                anyhow::bail!("generic vector replacement cannot claim a canonical owner");
-            }
-            let embedding_blob = encode_embedding_blob(&chunk.embedding);
-            validate_exported_chunk_profile(chunk)?;
-            tx.execute(
-                "INSERT INTO vectors (session_id, content, embedding_json, embedding_blob, embedding_profile_id, embedding_dimension, source, created_at, tier, access_count, last_accessed_at, importance_score, archived, archived_at, summary) VALUES (?1, ?2, '[]', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                params![chunk.session_id, chunk.content, embedding_blob, chunk.embedding_profile_id, chunk.embedding_dimension as i64, chunk.source, chunk.created_at, chunk.tier, chunk.access_count, &chunk.last_accessed_at, chunk.importance_score, chunk.archived as i64, &chunk.archived_at, &chunk.summary],
-            )?;
-        }
-        rebind_and_validate_materialization_markers(&tx)?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    /// Replace only the portable, generic portion of the vector store.
-    ///
-    /// Canonical projection rows and their materialization markers remain in
-    /// place. Canonical or legacy chat rows supplied by old archives are
-    /// counted as skipped rather than replayed. All validation and writes occur
-    /// in one SQLite transaction, so a failed replacement preserves the prior
-    /// portable rows.
-    pub fn replace_portable_chunks(
-        &self,
-        chunks: &[ExportedVectorChunk],
-    ) -> Result<PortableVectorImportReport> {
-        let expected_before_digest = self.export_portable_archive()?.digest;
-        self.replace_portable_chunks_guarded(chunks, &expected_before_digest)
-            .map(|outcome| outcome.report)
-    }
-
-    /// Replace only the portable vector subset under an owner-local CAS.
-    /// The current digest is observed inside `BEGIN IMMEDIATE`, so a writer
-    /// racing a backup snapshot cannot be silently erased.
-    pub fn replace_portable_chunks_guarded(
-        &self,
-        chunks: &[ExportedVectorChunk],
-        expected_before_digest: &str,
-    ) -> Result<PortableVectorReplaceOutcome> {
-        validate_portable_vector_archive_digest(expected_before_digest)?;
-        let desired_digest = portable_vector_archive_digest(chunks);
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let report = validate_portable_vector_chunks(&tx, chunks)?;
-        let before_chunks = export_all_chunks_from_conn(&tx)?;
-        let before_digest = portable_vector_archive_digest(&before_chunks);
-        let has_legacy_chat_projection = before_chunks.iter().any(|chunk| {
-            matches!(
-                portable_vector_disposition(&chunk.source),
-                PortableVectorDisposition::LegacyChatProjection
-            )
-        });
-        if before_digest == desired_digest && !has_legacy_chat_projection {
-            tx.commit()?;
-            return Ok(PortableVectorReplaceOutcome {
-                disposition: PortableVectorReplaceDisposition::AlreadyCurrent,
-                report,
-                before_digest: before_digest.clone(),
-                after_digest: before_digest,
-            });
-        }
-        if before_digest != expected_before_digest {
-            anyhow::bail!(
-                "portable_vector_archive_drift expected={expected_before_digest} observed={before_digest}"
-            );
-        }
-        tx.execute(
-            "DELETE FROM vectors
-             WHERE source NOT GLOB 'memory_lifecycle:*'
-               AND source NOT GLOB 'memory_record:*'
-               AND source NOT GLOB 'knowledge_note:*'",
-            [],
-        )?;
-        for chunk in chunks {
-            if !matches!(
-                portable_vector_disposition(&chunk.source),
-                PortableVectorDisposition::Portable
-            ) {
-                continue;
-            }
-            let embedding_blob = encode_embedding_blob(&chunk.embedding);
-            tx.execute(
-                "INSERT INTO vectors (session_id, content, embedding_json, embedding_blob, embedding_profile_id, embedding_dimension, source, created_at, tier, access_count, last_accessed_at, importance_score, archived, archived_at, summary) VALUES (?1, ?2, '[]', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
-                params![chunk.session_id, chunk.content, embedding_blob, chunk.embedding_profile_id, chunk.embedding_dimension as i64, chunk.source, chunk.created_at, chunk.tier, chunk.access_count, &chunk.last_accessed_at, chunk.importance_score, chunk.archived as i64, &chunk.archived_at, &chunk.summary],
-            )?;
-        }
-        rebind_and_validate_materialization_markers(&tx)?;
-        let after_chunks = export_all_chunks_from_conn(&tx)?;
-        let after_digest = portable_vector_archive_digest(&after_chunks);
-        if after_digest != desired_digest {
-            anyhow::bail!("portable_vector_archive_digest_mismatch_after_replace");
-        }
-        tx.commit()?;
-        Ok(PortableVectorReplaceOutcome {
-            disposition: PortableVectorReplaceDisposition::Applied,
-            report,
-            before_digest,
-            after_digest,
-        })
-    }
-
     pub fn start_or_resume_rebuild(
         &self,
         source_snapshot: &VectorRebuildSourceSnapshot,
@@ -2124,56 +1930,6 @@ pub struct ExportedVectorChunk {
     pub summary: Option<String>,
 }
 
-/// Mechanical accounting for the portable subset of a vector archive.
-///
-/// Canonical Memory vectors and conversation-token vectors are projections of
-/// other canonical owners. They may appear in older backups, but replaying
-/// them through the generic vector import path would create a second truth.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PortableVectorImportReport {
-    pub supplied: usize,
-    pub applied: usize,
-    pub skipped_canonical_projection: usize,
-    pub skipped_legacy_chat_projection: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PortableVectorArchiveSnapshot {
-    pub chunks: Vec<ExportedVectorChunk>,
-    pub digest: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PortableVectorReplaceDisposition {
-    Applied,
-    AlreadyCurrent,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PortableVectorReplaceOutcome {
-    pub disposition: PortableVectorReplaceDisposition,
-    pub report: PortableVectorImportReport,
-    pub before_digest: String,
-    pub after_digest: String,
-}
-
-impl PortableVectorReplaceOutcome {
-    pub fn changed(&self) -> bool {
-        self.disposition == PortableVectorReplaceDisposition::Applied
-    }
-}
-
-impl PortableVectorImportReport {
-    pub fn skipped(self) -> usize {
-        self.skipped_canonical_projection
-            .saturating_add(self.skipped_legacy_chat_projection)
-    }
-}
-
 fn unknown_embedding_profile_id() -> String {
     UNKNOWN_EMBEDDING_PROFILE_ID.into()
 }
@@ -2469,107 +2225,6 @@ fn apply_all_memory_retrieval_fences(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PortableVectorDisposition {
-    Portable,
-    CanonicalProjection,
-    LegacyChatProjection,
-}
-
-fn portable_vector_disposition(source: &str) -> PortableVectorDisposition {
-    if is_reserved_canonical_vector_source(source) {
-        PortableVectorDisposition::CanonicalProjection
-    } else if is_legacy_chat_vector_source(source) {
-        PortableVectorDisposition::LegacyChatProjection
-    } else {
-        PortableVectorDisposition::Portable
-    }
-}
-
-fn append_digest_field(target: &mut Vec<u8>, bytes: &[u8]) {
-    target.extend_from_slice(&(bytes.len() as u64).to_le_bytes());
-    target.extend_from_slice(bytes);
-}
-
-fn portable_vector_digest_record(chunk: &ExportedVectorChunk) -> Vec<u8> {
-    let mut record = Vec::new();
-    append_digest_field(&mut record, chunk.session_id.as_bytes());
-    append_digest_field(&mut record, chunk.content.as_bytes());
-    record.extend_from_slice(&(chunk.embedding.len() as u64).to_le_bytes());
-    for value in &chunk.embedding {
-        record.extend_from_slice(&value.to_bits().to_le_bytes());
-    }
-    append_digest_field(&mut record, chunk.embedding_profile_id.as_bytes());
-    record.extend_from_slice(&(chunk.embedding_dimension as u64).to_le_bytes());
-    append_digest_field(&mut record, chunk.source.as_bytes());
-    append_digest_field(&mut record, chunk.created_at.as_bytes());
-    record.extend_from_slice(&chunk.tier.to_le_bytes());
-    record.extend_from_slice(&chunk.access_count.to_le_bytes());
-    append_digest_field(&mut record, chunk.last_accessed_at.as_bytes());
-    record.extend_from_slice(&chunk.importance_score.to_bits().to_le_bytes());
-    record.push(u8::from(chunk.archived));
-    match &chunk.archived_at {
-        Some(value) => {
-            record.push(1);
-            append_digest_field(&mut record, value.as_bytes());
-        }
-        None => record.push(0),
-    }
-    match &chunk.summary {
-        Some(value) => {
-            record.push(1);
-            append_digest_field(&mut record, value.as_bytes());
-        }
-        None => record.push(0),
-    }
-    record
-}
-
-/// Deterministic digest of the portable Vector owner subset. Derived
-/// canonical-Memory and legacy chat projections are excluded. Records are
-/// sorted by their complete binary representation so SQLite row ids and input
-/// ordering cannot change the digest.
-pub fn portable_vector_archive_digest(chunks: &[ExportedVectorChunk]) -> String {
-    let mut records = chunks
-        .iter()
-        .filter(|chunk| {
-            matches!(
-                portable_vector_disposition(&chunk.source),
-                PortableVectorDisposition::Portable
-            )
-        })
-        .map(portable_vector_digest_record)
-        .collect::<Vec<_>>();
-    records.sort();
-
-    let mut context = DigestContext::new(&SHA256);
-    let domain = b"openlife:portable-vector-archive:v1";
-    context.update(&(domain.len() as u64).to_le_bytes());
-    context.update(domain);
-    context.update(&(records.len() as u64).to_le_bytes());
-    for record in records {
-        context.update(&(record.len() as u64).to_le_bytes());
-        context.update(&record);
-    }
-    let hash = context.finish();
-    let hex = hash
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sha256:{hex}")
-}
-
-fn validate_portable_vector_archive_digest(value: &str) -> Result<()> {
-    if value.len() != 71
-        || !value.starts_with("sha256:")
-        || !value[7..].bytes().all(|byte| byte.is_ascii_hexdigit())
-    {
-        anyhow::bail!("invalid portable vector archive digest");
-    }
-    Ok(())
-}
-
 fn export_all_chunks_from_conn(conn: &Connection) -> Result<Vec<ExportedVectorChunk>> {
     let mut stmt = conn.prepare(
         "SELECT session_id, content, embedding_json, embedding_blob, source,
@@ -2602,37 +2257,6 @@ fn export_all_chunks_from_conn(conn: &Connection) -> Result<Vec<ExportedVectorCh
     })?;
     rows.collect::<Result<Vec<_>, _>>()
         .context("failed to export vectors")
-}
-
-fn validate_portable_vector_chunks(
-    conn: &Connection,
-    chunks: &[ExportedVectorChunk],
-) -> Result<PortableVectorImportReport> {
-    let mut report = PortableVectorImportReport {
-        supplied: chunks.len(),
-        ..PortableVectorImportReport::default()
-    };
-    for chunk in chunks {
-        match portable_vector_disposition(&chunk.source) {
-            PortableVectorDisposition::CanonicalProjection => {
-                report.skipped_canonical_projection =
-                    report.skipped_canonical_projection.saturating_add(1);
-            }
-            PortableVectorDisposition::LegacyChatProjection => {
-                report.skipped_legacy_chat_projection =
-                    report.skipped_legacy_chat_projection.saturating_add(1);
-            }
-            PortableVectorDisposition::Portable => {
-                validate_exported_chunk_profile(chunk)?;
-                if vector_session_tombstoned(conn, &chunk.session_id)? {
-                    anyhow::bail!("vector replacement targets a tombstoned conversation session");
-                }
-                report.applied = report.applied.saturating_add(1);
-            }
-        }
-    }
-    debug_assert_eq!(report.supplied, report.applied + report.skipped());
-    Ok(report)
 }
 
 fn is_legacy_chat_vector_source(source: &str) -> bool {
@@ -3283,15 +2907,6 @@ mod tests {
                 .unwrap();
             assert_eq!((active, archived), (1, 1));
         }
-
-        store.clear_all_chunks().unwrap();
-        let conn = store.conn.lock().unwrap();
-        let summary_rows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM vector_profile_stats", [], |row| {
-                row.get(0)
-            })
-            .unwrap();
-        assert_eq!(summary_rows, 0);
     }
 
     #[test]
@@ -3479,7 +3094,7 @@ mod tests {
     }
 
     #[test]
-    fn vector_searches_are_pure_reads_of_portable_owner_state() {
+    fn vector_searches_are_pure_reads_until_explicit_telemetry() {
         let store = VectorStore::new_in_memory().unwrap();
         let profile = test_profile(4);
         let embedding = [1.0, 0.0, 0.0, 0.0];
@@ -3492,7 +3107,7 @@ mod tests {
                 "manual_note",
             )
             .unwrap();
-        let before = store.export_portable_archive().unwrap();
+        let before = store.export_all_chunks().unwrap();
 
         let global = expect_matches(store.search(&embedding, &profile, 5).unwrap());
         let session = expect_matches(
@@ -3503,7 +3118,7 @@ mod tests {
 
         assert_eq!(global.len(), 1);
         assert_eq!(session.len(), 1);
-        assert_eq!(store.export_portable_archive().unwrap(), before);
+        assert_eq!(store.export_all_chunks().unwrap(), before);
 
         assert_eq!(
             store
@@ -3512,10 +3127,10 @@ mod tests {
             1,
             "duplicate hits from multiple read paths count as one telemetry access"
         );
-        let after_telemetry = store.export_portable_archive().unwrap();
-        assert_ne!(after_telemetry.digest, before.digest);
-        assert_eq!(after_telemetry.chunks[0].access_count, 1);
-        assert!(!after_telemetry.chunks[0].last_accessed_at.is_empty());
+        let after_telemetry = store.export_all_chunks().unwrap();
+        assert_ne!(after_telemetry, before);
+        assert_eq!(after_telemetry[0].access_count, 1);
+        assert!(!after_telemetry[0].last_accessed_at.is_empty());
     }
 
     #[test]
@@ -3638,194 +3253,6 @@ mod tests {
                 .unwrap();
             assert_eq!(tier, 3);
         }
-    }
-
-    #[test]
-    fn vector_store_export_import_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = VectorStore::new(dir.path().join("vectors.db")).unwrap();
-        let emb = dummy_embedding(4);
-        let profile = test_profile(emb.len());
-        store
-            .insert("s1", "content", &emb, &profile, "note")
-            .unwrap();
-        let exported = store.export_all_chunks().unwrap();
-        assert_eq!(exported.len(), 1);
-
-        let dir2 = tempfile::tempdir().unwrap();
-        let store2 = VectorStore::new(dir2.path().join("vectors2.db")).unwrap();
-        store2.import_chunks(&exported).unwrap();
-        assert_eq!(store2.count_all_chunks().unwrap(), 1);
-        let found = expect_matches(
-            store2
-                .search_by_session("s1", &emb, &profile, 5, 100)
-                .unwrap(),
-        );
-        assert_eq!(found[0].0.content, "content");
-    }
-
-    #[test]
-    fn portable_vector_archive_excludes_derived_rows_and_reports_exact_replacement_counts() {
-        let store = VectorStore::new_in_memory().unwrap();
-        let profile = test_profile(4);
-        let owner = test_owner("knowledge_note", "portable-archive-owner");
-        store
-            .project_memory_embedding(
-                "outbox:portable-archive-owner",
-                &owner,
-                "canonical-session",
-                "CANONICAL_CONTENT_MUST_NOT_BE_IMPORTED",
-                &[0.1, 0.2, 0.3, 0.4],
-                &profile,
-            )
-            .unwrap();
-        store
-            .insert(
-                "portable-session",
-                "portable",
-                &[0.4, 0.3, 0.2, 0.1],
-                &profile,
-                "manual_note",
-            )
-            .unwrap();
-        store
-            .insert(
-                "legacy-chat-session",
-                "LEGACY_CHAT_DERIVED",
-                &[0.3, 0.4, 0.1, 0.2],
-                &profile,
-                "user_message",
-            )
-            .unwrap();
-
-        let portable = store.export_portable_chunks().unwrap();
-        assert_eq!(portable.len(), 1);
-        assert_eq!(portable[0].source, "manual_note");
-
-        let mut old_archive = store.export_all_chunks().unwrap();
-        old_archive
-            .iter_mut()
-            .find(|chunk| chunk.source == owner.source())
-            .unwrap()
-            .content = "SPOOFED_CANONICAL_IMPORT".into();
-        let report = store.replace_portable_chunks(&old_archive).unwrap();
-        assert_eq!(report.supplied, 3);
-        assert_eq!(report.applied, 1);
-        assert_eq!(report.skipped_canonical_projection, 1);
-        assert_eq!(report.skipped_legacy_chat_projection, 1);
-        assert_eq!(report.skipped(), 2);
-
-        let active = store.export_all_chunks().unwrap();
-        assert!(active
-            .iter()
-            .any(|chunk| chunk.content == "CANONICAL_CONTENT_MUST_NOT_BE_IMPORTED"));
-        assert!(!active
-            .iter()
-            .any(|chunk| chunk.content == "SPOOFED_CANONICAL_IMPORT"));
-        assert!(!active
-            .iter()
-            .any(|chunk| chunk.content == "LEGACY_CHAT_DERIVED"));
-        assert!(store
-            .projected_materialization_vector_id("outbox:portable-archive-owner", &owner)
-            .unwrap()
-            .is_some());
-    }
-
-    #[test]
-    fn guarded_portable_vector_replace_rejects_owner_drift_before_effect() {
-        let store = VectorStore::new_in_memory().unwrap();
-        let profile = test_profile(4);
-        store
-            .insert(
-                "before",
-                "before",
-                &[0.1, 0.2, 0.3, 0.4],
-                &profile,
-                "manual_note",
-            )
-            .unwrap();
-        let expected = store.export_portable_archive().unwrap();
-        store
-            .insert(
-                "concurrent",
-                "late vector owner write",
-                &[0.4, 0.3, 0.2, 0.1],
-                &profile,
-                "manual_note",
-            )
-            .unwrap();
-        let mut replacement = expected.chunks.clone();
-        replacement[0].content = "must not apply".into();
-
-        let error = store
-            .replace_portable_chunks_guarded(&replacement, &expected.digest)
-            .expect_err("stale vector digest must fail before delete");
-        assert!(error.to_string().contains("portable_vector_archive_drift"));
-        let after = store.export_portable_archive().unwrap();
-        assert_eq!(after.chunks.len(), 2);
-        assert!(after
-            .chunks
-            .iter()
-            .any(|chunk| chunk.content == "late vector owner write"));
-        assert!(!after
-            .chunks
-            .iter()
-            .any(|chunk| chunk.content == "must not apply"));
-    }
-
-    #[test]
-    fn guarded_portable_vector_replace_is_digest_exact_replay_safe_and_empty_is_target() {
-        let store = VectorStore::new_in_memory().unwrap();
-        let profile = test_profile(4);
-        store
-            .insert(
-                "before",
-                "before",
-                &[0.1, 0.2, 0.3, 0.4],
-                &profile,
-                "manual_note",
-            )
-            .unwrap();
-        let before = store.export_portable_archive().unwrap();
-        let mut replacement = before.chunks.clone();
-        replacement[0].session_id = "restored".into();
-        replacement[0].content = "portable replacement".into();
-        let desired_digest = portable_vector_archive_digest(&replacement);
-
-        let applied = store
-            .replace_portable_chunks_guarded(&replacement, &before.digest)
-            .unwrap();
-        assert!(applied.changed());
-        assert_eq!(applied.after_digest, desired_digest);
-        let replayed = store
-            .replace_portable_chunks_guarded(&replacement, &before.digest)
-            .unwrap();
-        assert_eq!(
-            replayed.disposition,
-            PortableVectorReplaceDisposition::AlreadyCurrent
-        );
-        assert!(!replayed.changed());
-
-        let current = store.export_portable_archive().unwrap();
-        let cleared = store
-            .replace_portable_chunks_guarded(&[], &current.digest)
-            .unwrap();
-        assert!(cleared.changed());
-        assert!(store.export_portable_archive().unwrap().chunks.is_empty());
-        assert_eq!(cleared.after_digest, portable_vector_archive_digest(&[]));
-    }
-
-    #[test]
-    fn vector_store_clear_all_chunks() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = VectorStore::new(dir.path().join("vectors.db")).unwrap();
-        let profile = test_profile(4);
-        store
-            .insert("s1", "x", &dummy_embedding(4), &profile, "chat")
-            .unwrap();
-        assert_eq!(store.count_all_chunks().unwrap(), 1);
-        store.clear_all_chunks().unwrap();
-        assert_eq!(store.count_all_chunks().unwrap(), 0);
     }
 
     #[test]
@@ -4283,48 +3710,6 @@ mod tests {
             .is_err());
     }
 
-    #[test]
-    fn vector_import_and_replace_cannot_bypass_conversation_tombstone() {
-        let store = VectorStore::new_in_memory().unwrap();
-        let profile = test_profile(4);
-        store
-            .insert(
-                "safe-session",
-                "SAFE_VECTOR_MUST_SURVIVE_REJECTED_REPLACE",
-                &[1.0, 0.0, 0.0, 0.0],
-                &profile,
-                "manual",
-            )
-            .unwrap();
-        store
-            .project_conversation_tombstone("tombstone-import", "deleted-session")
-            .unwrap();
-        let mut forbidden = store.export_all_chunks().unwrap()[0].clone();
-        forbidden.session_id = "deleted-session".into();
-        forbidden.content = "LATE_IMPORTED_VECTOR_MUST_NOT_APPEAR".into();
-
-        assert!(store.import_chunks(&[forbidden.clone()]).is_err());
-        assert!(store.replace_all_chunks(&[forbidden]).is_err());
-        assert!(store
-            .validate_portable_replacement(&[store.export_all_chunks().unwrap()[0].clone()])
-            .is_ok());
-        let mut forbidden_portable = store.export_all_chunks().unwrap()[0].clone();
-        forbidden_portable.session_id = "deleted-session".into();
-        forbidden_portable.content = "PORTABLE_REPLACE_MUST_NOT_BYPASS_TOMBSTONE".into();
-        assert!(store
-            .validate_portable_replacement(&[forbidden_portable.clone()])
-            .is_err());
-        assert!(store
-            .replace_portable_chunks(&[forbidden_portable])
-            .is_err());
-        let chunks = store.export_all_chunks().unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(
-            chunks[0].content,
-            "SAFE_VECTOR_MUST_SURVIVE_REJECTED_REPLACE"
-        );
-    }
-
     fn staged_rebuild_item(
         memory_id: i64,
         content: &str,
@@ -4728,8 +4113,6 @@ mod tests {
                 )
                 .unwrap();
         }
-        let exported = store.export_all_chunks().unwrap();
-        store.replace_all_chunks(&exported).unwrap();
         assert_eq!(store.count_all_chunks().unwrap(), 2);
     }
 

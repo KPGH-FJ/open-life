@@ -459,7 +459,6 @@ pub async fn rebuild_memory_index(
             arguments_summary: &format!(
                 "扫描 {affected_count} 条 canonical Memory 记录重建本地索引；仅关系证据完整的 KnowledgeNote/Lifecycle 资产会进入向量空间，未验证记录计入 skipped。"
             ),
-            governed_data_import_recovery: None,
         },
         &window,
         state.inner(),
@@ -1045,55 +1044,6 @@ mod tests {
         assert!(hits.hits.is_empty());
         assert_eq!(hits.vector_status, "ready");
         assert_eq!(cloud_call_count.load(Ordering::SeqCst), 0);
-    }
-
-    #[tokio::test]
-    async fn search_memory_returns_legacy_profile_rebuild_evidence() {
-        clear_embedding_cache();
-        let state = crate::test_utils::test_app_state();
-        {
-            let mut cfg = state.config.lock().await;
-            cfg.llm.provider = "openai".into();
-            cfg.llm.openai_key.clear();
-            cfg.llm.embedding_enabled = false;
-        }
-        {
-            let store = state.vector_store.lock().await;
-            store
-                .import_chunks(&[openlife_core::vectors::ExportedVectorChunk {
-                    session_id: "legacy-profile-session".into(),
-                    content: "legacy profiled memory".into(),
-                    embedding: vec![0.1, 0.2, 0.3, 0.4],
-                    embedding_profile_id: openlife_core::embedding::UNKNOWN_EMBEDDING_PROFILE_ID
-                        .into(),
-                    embedding_dimension: 0,
-                    source: "note".into(),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                    tier: 2,
-                    access_count: 0,
-                    last_accessed_at: String::new(),
-                    importance_score: 0.5,
-                    archived: false,
-                    archived_at: None,
-                    summary: None,
-                }])
-                .unwrap();
-        }
-
-        let result = search_memory_with_state("legacy profile".into(), 5, &state)
-            .await
-            .unwrap();
-
-        assert_eq!(result.vector_status, "rebuild_required");
-        assert_eq!(result.rebuild.as_ref().unwrap().unknown_profile_count, 1);
-        assert_eq!(
-            result.embedding_receipt.status,
-            openlife_core::embedding::EmbeddingInvocationStatus::NotAttempted
-        );
-        assert_eq!(
-            result.embedding_receipt.route_reason_code,
-            "configured_deterministic_hash"
-        );
     }
 
     #[tokio::test]

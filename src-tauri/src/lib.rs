@@ -101,14 +101,12 @@ use commands::proposal::{
     get_pending_proposals, list_memory_assets, list_proposals, postpone_proposal, reject_proposal,
     request_artifact_undo, rollback_memory_asset,
 };
-use commands::settings::{
-    abandon_governed_data_import_recovery, export_all_data, get_config,
-    get_danger_action_preflight, get_governed_data_import_status, get_privacy_policy,
-    import_all_data, recover_required_credential_access, save_config, set_privacy_policy,
-    test_llm_connection,
-};
 #[cfg(feature = "dev-extensions")]
 use commands::settings::{cleanup_mcp_audit_logs, export_mcp_audit_logs, rotate_mcp_audit_key};
+use commands::settings::{
+    get_config, get_danger_action_preflight, get_privacy_policy,
+    recover_required_credential_access, save_config, set_privacy_policy, test_llm_connection,
+};
 use life_state_projection::get_life_state_projection;
 use main_chat_memory_proposals::draft_edit_memory_proposal;
 use main_chat_steering::submit_main_chat_task_steering;
@@ -854,11 +852,7 @@ pub fn run() {
             count_memory_chunks,
             create_knowledge_note,
             search_memory,
-            export_all_data,
             get_danger_action_preflight,
-            import_all_data,
-            abandon_governed_data_import_recovery,
-            get_governed_data_import_status,
             test_llm_connection,
             create_chat_session,
             create_project,

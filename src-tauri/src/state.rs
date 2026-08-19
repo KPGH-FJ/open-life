@@ -208,11 +208,6 @@ impl VectorPersistenceMode {
 #[derive(Clone)]
 pub struct AppState {
     pub persistence_coordinator: Arc<crate::persistence_coordinator::PersistenceCoordinator>,
-    /// Bootstrap-owned governed import journal. Construction performs schema
-    /// migration, so product commands must reuse this instance and fail closed
-    /// when bootstrap could not open it.
-    pub(crate) governed_data_import_journal:
-        Option<Arc<openlife_core::persistence_outbox::GovernedDataImportJournal>>,
     pub config: Arc<Mutex<AppConfig>>,
     pub life_model_manager: Arc<Mutex<LifeModelManager>>,
     /// Operation-level serialization for the file journal, canonical rename,
