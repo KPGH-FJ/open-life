@@ -2,9 +2,8 @@
 
 ## Status
 
-Stable source map for the completed R0-R8 and H0-H6 capable-Agent baselines.
-Current source and accepted ADRs remain authoritative; there is no active
-implementation plan until the next bounded objective is accepted.
+Stable source map for the current capable-Agent baseline. Current source,
+accepted ADRs, and the one active implementation plan remain authoritative.
 
 ## Current product path
 
@@ -34,8 +33,9 @@ frontend Conversation ViewModel + Chat composer
 Task, Run, Turn, and Conversation UUIDs and enters `CanonicalWorkRuntime`.
 Neither release branch can fall back to `OpenLifeTurnRuntime`. Historical
 capability fixtures use a `cfg(test)`-only route and provide no product credit.
-The Workbench reads conversation history from `ConversationViewModel` and Work
-lifecycle state from backend canonical Task snapshots.
+The Workbench enters through one backend-composed `WorkbenchViewModel` snapshot
+that binds Conversation, scoped Workspace, Tasks, Review, and Provider Boundary
+lanes at one capture point.
 
 Other product commands, including Review acceptance, Settings persistence, and
 direct Memory controls, use their command-specific gateways rather than passing
@@ -151,15 +151,17 @@ compatibility resume command.
 Approval, effect confirmation, and canonical completion remain separate facts
 even though the product can present one decision.
 
-The backend-owned `TasksViewModel` and `WorkspaceViewModel` now read canonical
-Task snapshots directly. They project Work and report Run membership, typed
+The backend-owned `WorkbenchViewModel` composes Conversation, scoped Workspace,
+Tasks, Review, and Provider Boundary lanes without creating another store. Its
+Tasks and Workspace projections read canonical Task snapshots directly. They
+project Work and report Run membership, typed
 Items, attempts, FinalResult, Artifact versions, Review wait, rejection,
 verified delivery, and effect-unknown states. They do not overlay another
 execution store. Current Work controls use canonical cancel and retry IPCs.
 Unresolved review, blocked, failed, effect-unknown, and stale-scope facts are
 projected as backend-owned Needs Attention state rather than inferred by React.
-`WorkspaceViewModel` accepts the selected Conversation identity and returns only
-that Conversation's Tasks and related Review checkpoints. Each Task projection
+The scoped Workspace lane accepts the selected Conversation identity and
+returns only that Conversation's Tasks and related Review checkpoints. Each Task projection
 also carries the current structured Work plan, completion requirement, and
 immutable budget policy from `canonical_work_plans`; React does not reconstruct
 them from messages or Item labels.
@@ -266,15 +268,16 @@ The shipped product routes are:
 /settings
 ```
 
-Product read state comes from `LifeStateProjection`, backend ViewModels, and
-strict frontend adapters that compose named backend owner outputs. Governed
+Product read state comes from `LifeStateProjection` and backend ViewModels. The
+Workbench uses one aggregate backend snapshot rather than composing overlapping
+frontend reads. Governed
 writes pass through proposal, permission, persistence, and target-domain owners
 rather than page-local state.
 
-R7 reduced the shipped top-level surfaces to Workbench (`/workspace`),
-Personal Intelligence (`/life-model`), and Settings. Task and
-approval status are presented in their Conversation and a Needs Attention
-filter rather than duplicate top-level Task and Review products.
+The shipped top-level surfaces are Workbench (`/workspace`), Personal
+Intelligence (`/life-model`), and Settings. Task and approval status are
+presented in their Conversation and a Needs Attention filter rather than
+duplicate top-level Task and Review products.
 
 ## Domain ownership
 
@@ -335,10 +338,9 @@ updates.
 
 For release Work, `CanonicalTaskRuntimeStore` is the Task, Run, Item,
 ItemAttempt, terminal-state, recovery, and FinalResult owner. Provider and tool
-adapters retain bounded receipts, but cannot declare Task completion. The
-historical report slice remains reusable migration evidence for R3/R4, not a
-fallback: each capability must move into the general coordinator before its
-legacy execution consumer is deleted.
+adapters retain bounded receipts, but cannot declare Task completion. No
+historical report runtime remains as a fallback. Capabilities execute through
+the general coordinator or are unavailable.
 
 ## Personal intelligence boundary
 

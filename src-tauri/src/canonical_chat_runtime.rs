@@ -1,4 +1,4 @@
-//! R1 canonical ordinary Chat runtime.
+//! Canonical ordinary Chat runtime.
 //!
 //! This path owns Conversation -> Turn -> Item. It deliberately has no Task,
 //! retired Work lifecycle stores, Review proposals, or effect writers.

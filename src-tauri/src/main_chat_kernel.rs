@@ -3607,9 +3607,9 @@ where
         unreachable!("bounded Agent Memory binding retry returns from every terminal branch")
     }
 
-    /// R1 ordinary Chat path. It deliberately exposes only the policy-governed
+    /// Ordinary Chat path. It deliberately exposes only the policy-governed
     /// DirectAnswer kernel surface. General Work has its own canonical
-    /// coordinator; governed effects continue migrating in R4.
+    /// coordinator and governed effect owners.
     pub(crate) async fn run_canonical_chat<S>(
         &self,
         input: MainChatTurnInput,

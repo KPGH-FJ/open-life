@@ -1569,7 +1569,7 @@ mod tests {
 
     #[test]
     fn generated_artifact_task_with_dotted_tokens_is_not_user_memory() {
-        let result = routed("使用 web.search 搜索 Example Domain 的公开信息，生成一份带 OpenLife 引用的 Markdown 报告 phase3-web-search-evidence.md，并在我确认后保存。");
+        let result = routed("使用 web.search 搜索 Example Domain 的公开信息，生成一份带 OpenLife 引用的 Markdown 报告 web-search-evidence.md，并在我确认后保存。");
 
         assert!(result.memory_proposal_candidate_ids.is_empty());
         assert!(result.lifemodel_proposal_candidate_ids.is_empty());
@@ -1577,7 +1577,7 @@ mod tests {
 
     #[test]
     fn mixed_document_and_web_task_is_not_user_memory() {
-        let result = routed("读取我添加的 h5-source.md，并使用 web.search 搜索 IANA Example Domains 的官方说明。最终回答分两段：1）本地文档事实，必须包含项目代号和验证标记；2）外部来源事实，必须带来源。不要创建或修改文件。");
+        let result = routed("读取我添加的 selected-source.md，并使用 web.search 搜索 IANA Example Domains 的官方说明。最终回答分两段：1）本地文档事实，必须包含项目代号和验证标记；2）外部来源事实，必须带来源。不要创建或修改文件。");
 
         assert!(result.candidates.is_empty(), "{:#?}", result.candidates);
         assert!(result.memory_proposal_candidate_ids.is_empty());
@@ -1663,7 +1663,7 @@ mod tests {
     }
 
     #[test]
-    fn main_chat_memory_candidate_stage6c_native_weather_prompt_is_not_life_event() {
+    fn main_chat_memory_candidate_audited_weather_prompt_is_not_life_event() {
         let result = routed(
             "请告诉我今天旧金山的天气。必须使用可审计的 web/weather 读取证据；如果当前没有可用外部读取工具，请明确 fail closed，不要猜。",
         );

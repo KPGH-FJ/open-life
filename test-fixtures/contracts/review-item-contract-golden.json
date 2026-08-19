@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "openlife.phase4a-contract.v1",
+  "schemaVersion": "openlife.review-item-contract.v1",
   "reviewItem": {
     "id": "review-permission-1",
     "type": "tool_permission",

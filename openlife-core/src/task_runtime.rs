@@ -7736,7 +7736,7 @@ mod tests {
     #[test]
     fn project_scope_and_attention_survive_restart_and_completion_resolves_attention() {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("r5-runtime.db");
+        let path = directory.path().join("task-runtime-test.db");
         let task_id = uuid::Uuid::new_v4().to_string();
         let run_id = uuid::Uuid::new_v4().to_string();
         let project_id = uuid::Uuid::new_v4().to_string();

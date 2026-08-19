@@ -228,7 +228,7 @@ impl std::fmt::Debug for SendMessageResult {
 #[tauri::command]
 #[expect(
     clippy::too_many_arguments,
-    reason = "owner=canonical-chat-work-ipc; expires=R7; Tauri command keeps explicit wire fields while internal runtime uses typed inputs"
+    reason = "owner=canonical-chat-work-ipc; Tauri command keeps explicit wire fields while internal runtime uses typed inputs"
 )]
 async fn send_message(
     operation_id: String,

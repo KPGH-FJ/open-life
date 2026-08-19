@@ -2,11 +2,9 @@
 
 ## Status
 
-Source-backed description of the current release runtime after H6 cleanup. It
-is an architecture map, not a readiness claim. Controlled tests, exact-native
-evidence, and external-live evidence remain separate.
-
-Last verified: 2026-08-15.
+Source-backed description of the current release runtime. It is an architecture
+map, not a readiness claim. Controlled tests, exact-native evidence, and
+external-live evidence remain separate.
 
 ## Product spine
 
@@ -115,10 +113,12 @@ cancel and retry; approval resumes only the exact waiting Item checkpoint.
 
 ## Workbench projection
 
-`TasksViewModel` and `WorkspaceViewModel` read canonical Task snapshots. They
-project plans, Items, attempts, Needs Attention, inline Review, Results,
-Changes, Preview, Verification, and Undo. React does not reconstruct lifecycle
-truth from messages, Proposal payloads, diagnostics, or local files.
+`WorkbenchViewModel` captures Conversation, scoped Workspace, Tasks, Review,
+and Provider Boundary lanes once. Its Tasks and Workspace lanes read canonical
+Task snapshots and project plans, Items, attempts, Needs Attention, inline
+Review, Results, Changes, Preview, Verification, and Undo. React does not
+reconstruct lifecycle truth from messages, Proposal payloads, diagnostics, or
+local files.
 
 ## Evidence boundary
 

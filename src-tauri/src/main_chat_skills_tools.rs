@@ -412,7 +412,7 @@ async fn tool_failure_recovery(
     Some(MainChatToolFailureRecovery {
         failed_candidate_id: tool_name.to_string(),
         failure_reason: "canonical_tool_attempt_failed".into(),
-        // R2 owns retry at Task/Run granularity. A failed Item does not mint a
+        // Canonical Work owns retry at Task/Run granularity. A failed Item does not mint a
         // second hidden retry owner or claim that arbitrary tool fallback is
         // safe.
         retry_available: false,

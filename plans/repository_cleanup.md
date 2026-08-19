@@ -2,7 +2,7 @@
 
 Status: active
 
-Current slice: C5 - documents, tests, and CI. C0-C4 are complete.
+Current slice: C6 - verification and reverse audit. C0-C5 are complete.
 
 ## Objective
 

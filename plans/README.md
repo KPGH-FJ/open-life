@@ -16,11 +16,9 @@ working tree.
 
 ## Current Development Status
 
-There is no active implementation plan. The H0-H6 capable-Agent reconstruction
-is complete and retained in Git history together with the earlier S0-S7 and
-R0-R8 programs. Product direction lives in `PRODUCT.md`; accepted architecture
-lives in ADRs. Add one small active Markdown plan only after the next concrete
-development objective is accepted.
+`repository_cleanup.md` is the sole active implementation plan. Earlier
+development programs remain in Git history. Product direction lives in
+`PRODUCT.md`; accepted architecture lives in ADRs.
 
 ## Accepted Decisions
 

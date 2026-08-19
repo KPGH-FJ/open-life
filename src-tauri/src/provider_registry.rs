@@ -1,6 +1,6 @@
 //! User-selected provider/model registry for Conversation and Task runtimes.
 //!
-//! R1 deliberately has no automatic cross-provider routing. Settings own the
+//! The runtime deliberately has no automatic cross-provider routing. Settings own the
 //! selection; this registry snapshots the exact executable profile and gives
 //! the Turn an immutable binding before any provider request starts.
 

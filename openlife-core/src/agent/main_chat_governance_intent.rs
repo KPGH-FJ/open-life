@@ -857,7 +857,7 @@ mod tests {
     }
 
     #[test]
-    fn main_chat_governance_intent_classifies_stage6c_native_weather_prompt() {
+    fn main_chat_governance_intent_classifies_audited_weather_prompt() {
         let intent = extract_main_chat_intent_signals(
             "请告诉我今天旧金山的天气。必须使用可审计的 web/weather 读取证据；如果当前没有可用外部读取工具，请明确 fail closed，不要猜。",
         );

@@ -324,7 +324,7 @@ mod tests {
     fn normalized_does_not_grant_inferred_execution_contract() {
         let m = ToolManifest::new(
             "write_file",
-            "A tool without an explicit Phase6 contract",
+            "A tool without an explicit execution contract",
             serde_json::json!({}),
             "low",
             "1.0.0",

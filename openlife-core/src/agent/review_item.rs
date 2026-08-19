@@ -843,7 +843,7 @@ mod tests {
         let golden: ReviewItemContractGolden =
             serde_json::from_value(parsed.clone()).expect("deserialize Rust contract");
 
-        assert_eq!(golden.schema_version, "openlife.phase4a-contract.v1");
+        assert_eq!(golden.schema_version, "openlife.review-item-contract.v1");
         assert!(golden
             .review_item
             .allowed_actions

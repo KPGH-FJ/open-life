@@ -605,9 +605,9 @@ mod tests {
             confirmed_at: "2026-08-03T00:00:00Z".into(),
         });
         let document_digest = document.digest().unwrap();
-        let source_refs = vec!["materialization:phase5-test".into()];
+        let source_refs = vec!["materialization:runtime-context-test".into()];
         let created_at = "2026-08-04T00:00:00Z".to_string();
-        let materialization_id = "materialization-phase5-test".to_string();
+        let materialization_id = "materialization-runtime-context-test".to_string();
         let version_digest = calculate_version_digest(
             "primary",
             1,

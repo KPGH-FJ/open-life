@@ -1796,7 +1796,8 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_rejected_confirmation_result_performs_zero_sets_and_zero_deletes() {
+    fn credential_initialization_rejected_confirmation_result_performs_zero_sets_and_zero_deletes()
+    {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
@@ -1817,7 +1818,8 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_command_source_keeps_native_confirmation_before_the_first_write_owner() {
+    fn credential_initialization_command_source_keeps_native_confirmation_before_the_first_write_owner(
+    ) {
         fn confirmation_precedes_write_owner(source: &str) -> bool {
             let Some(confirmation) = source.find("require_native_danger_action_confirmation(")
             else {
@@ -1848,7 +1850,8 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_native_request_binds_exact_sorted_purpose_scope_and_batch_anchor() {
+    fn credential_initialization_native_request_binds_exact_sorted_purpose_scope_and_batch_anchor()
+    {
         let purposes = vec![
             "canonical_task_receipts".to_string(),
             "mcp_audit".to_string(),
@@ -1879,7 +1882,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_existing_canonical_data_never_becomes_initialization_eligible() {
+    fn credential_initialization_existing_canonical_data_never_becomes_initialization_eligible() {
         let directory = tempfile::tempdir().unwrap();
         for file_name in ["task_runtime.db", "tasks.db"] {
             std::fs::write(directory.path().join(file_name), b"canonical-data-sentinel").unwrap();
@@ -1907,7 +1910,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_invalid_existing_key_material_is_never_replaced() {
+    fn credential_initialization_invalid_existing_key_material_is_never_replaced() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
         for secret_ref in [CANONICAL_TASK_RECEIPT_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF] {
@@ -1931,7 +1934,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_replay_cannot_create_a_second_mcp_epoch() {
+    fn credential_initialization_replay_cannot_create_a_second_mcp_epoch() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
@@ -1953,7 +1956,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_fixed_credential_failure_compensates_every_prior_write() {
+    fn credential_initialization_fixed_credential_failure_compensates_every_prior_write() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
         *store.fail_set_at.lock().unwrap() = Some(3);
@@ -1971,7 +1974,8 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_fixed_post_write_error_retains_ambiguous_secret_and_never_deletes_it() {
+    fn credential_initialization_fixed_post_write_error_retains_ambiguous_secret_and_never_deletes_it(
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
         *store.fail_after_set_at.lock().unwrap() = Some(3);
@@ -1997,7 +2001,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_process_lock_rejects_a_parallel_initialization_owner() {
+    fn credential_initialization_process_lock_rejects_a_parallel_initialization_owner() {
         let directory = tempfile::tempdir().unwrap();
         let first = CredentialRecoveryProcessLock::acquire(directory.path()).unwrap();
         let second = CredentialRecoveryProcessLock::acquire(directory.path());
@@ -2008,7 +2012,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_mcp_pre_write_save_failure_restores_prior_absence() {
+    fn credential_initialization_mcp_pre_write_save_failure_restores_prior_absence() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
@@ -2028,7 +2032,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_mcp_pre_write_save_failure_preserves_exact_prior_bytes() {
+    fn credential_initialization_mcp_pre_write_save_failure_preserves_exact_prior_bytes() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mcp_audit_keys.json");
         let prior = vec![openlife_core::mcp_audit::AuditKeyConfig {
@@ -2052,7 +2056,8 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_mcp_unreadable_final_state_is_cleanup_unknown_and_retains_secret() {
+    fn credential_initialization_mcp_unreadable_final_state_is_cleanup_unknown_and_retains_secret()
+    {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mcp_audit_keys.json");
         let store = RecoverySecretStore::default();
@@ -2068,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_mcp_unreadable_prior_state_never_writes_or_deletes() {
+    fn credential_initialization_mcp_unreadable_prior_state_never_writes_or_deletes() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("mcp_audit_keys.json");
         crate::storage::fail_next_mcp_audit_keyring_read_for_test(&path);
@@ -2082,7 +2087,7 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_mcp_post_write_set_error_retains_ambiguous_secret() {
+    fn credential_initialization_mcp_post_write_set_error_retains_ambiguous_secret() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
         *store.fail_after_set_at.lock().unwrap() = Some(1);
@@ -2097,7 +2102,8 @@ mod tests {
     }
 
     #[test]
-    fn nkr_s2_mcp_ambiguous_post_write_failure_retains_observably_referenced_secret() {
+    fn credential_initialization_mcp_ambiguous_post_write_failure_retains_observably_referenced_secret(
+    ) {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);

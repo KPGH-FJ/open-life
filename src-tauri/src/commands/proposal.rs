@@ -2585,7 +2585,7 @@ mod calendar_projection_tests {
                 "tool": "calendar.propose_event",
                 "title": "Planning Review",
                 "scheduled_at": "2026-08-12T09:00:00+08:00",
-                "description": "Review Phase 4",
+                "description": "Review current proposal",
             }),
             "reviewed local calendar projection",
             0.9,

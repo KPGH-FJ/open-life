@@ -214,7 +214,7 @@ pub struct AppState {
     /// and derived projection protocol. It never owns product data itself.
     pub life_model_write_coordinator: Arc<Mutex<()>>,
     pub memory_store: Arc<Mutex<MemoryStore>>,
-    /// R1 canonical owner for ordinary Chat Conversation, Turn, and Item
+    /// Canonical owner for ordinary Chat Conversation, Turn, and Item
     /// lifecycle. It is intentionally independent of Memory and Task stores.
     pub conversation_store: Option<Arc<Mutex<ConversationStore>>>,
     pub mcp_registry: Arc<Mutex<McpRegistry>>,
