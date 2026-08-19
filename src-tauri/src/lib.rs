@@ -75,8 +75,6 @@ use commands::chat::{
     assign_conversation_project, create_chat_session, create_project, delete_chat_session,
     get_conversation_view_model, rename_chat_session,
 };
-#[cfg(feature = "dev-extensions")]
-use commands::execution::{disable_plugin, enable_plugin, list_plugins, reload_plugins};
 use commands::execution::{list_tool_permissions, revoke_tool_permission};
 use commands::life_model::{
     confirm_lifemodel_learning_candidate, delete_lifemodel_learning_candidate,
@@ -882,14 +880,6 @@ pub fn run() {
             set_privacy_policy,
             list_tool_permissions,
             revoke_tool_permission,
-            #[cfg(feature = "dev-extensions")]
-            list_plugins,
-            #[cfg(feature = "dev-extensions")]
-            reload_plugins,
-            #[cfg(feature = "dev-extensions")]
-            enable_plugin,
-            #[cfg(feature = "dev-extensions")]
-            disable_plugin,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("Tauri build failed: {}", e))

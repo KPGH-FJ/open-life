@@ -46,8 +46,7 @@ pub struct ToolManifest {
     pub requires_confirmation: bool,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
-    /// If true, the tool is only declarative and cannot be executed.
-    /// Used for plugin tools without a real executor.
+    /// If true, the manifest is descriptive only and cannot be executed.
     #[serde(default = "default_declarative_only")]
     pub declarative_only: bool,
     /// Action type: "read" | "write" | "network" | "external_side_effect"
@@ -77,8 +76,6 @@ pub enum ToolSource {
     BuiltIn,
     /// Tool provided by an MCP server.
     Mcp { server_name: String },
-    /// Tool declared by a local plugin manifest.
-    Plugin { plugin_id: String },
 }
 
 impl std::fmt::Display for ToolSource {
@@ -86,7 +83,6 @@ impl std::fmt::Display for ToolSource {
         match self {
             ToolSource::BuiltIn => write!(f, "builtin"),
             ToolSource::Mcp { server_name } => write!(f, "mcp:{}", server_name),
-            ToolSource::Plugin { plugin_id } => write!(f, "plugin:{}", plugin_id),
         }
     }
 }
@@ -325,24 +321,6 @@ mod tests {
     }
 
     #[test]
-    fn declarative_only_tool_is_disabled() {
-        let m = ToolManifest::new(
-            "test_plugin_tool",
-            "A plugin tool without executor",
-            serde_json::json!({}),
-            "low",
-            "1.0.0",
-            ToolSource::Plugin {
-                plugin_id: "test".to_string(),
-            },
-        )
-        .declarative_only();
-
-        assert!(m.declarative_only);
-        assert!(!m.enabled);
-    }
-
-    #[test]
     fn normalized_does_not_grant_inferred_execution_contract() {
         let m = ToolManifest::new(
             "write_file",
@@ -358,22 +336,5 @@ mod tests {
         assert!(m.action_type.is_empty());
         assert_eq!(m.idempotency_contract, ToolIdempotencyContract::Unspecified);
         assert_eq!(m.risk_level, "low");
-    }
-
-    #[test]
-    fn plugin_tool_default_not_declarative() {
-        let m = ToolManifest::new(
-            "test_plugin_tool",
-            "A plugin tool",
-            serde_json::json!({}),
-            "low",
-            "1.0.0",
-            ToolSource::Plugin {
-                plugin_id: "test".to_string(),
-            },
-        );
-
-        assert!(!m.declarative_only);
-        assert!(m.enabled);
     }
 }

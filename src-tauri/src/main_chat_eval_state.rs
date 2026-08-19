@@ -113,9 +113,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
             openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
         )),
         skill_registry: Arc::new(Mutex::new(openlife_core::skills::SkillRegistry::built_in())),
-        plugin_registry: Arc::new(Mutex::new(openlife_core::plugins::PluginRegistry::new(
-            base.join("plugins"),
-        ))),
         hot_cache: Arc::new(tokio::sync::RwLock::new(
             openlife_core::memory_cache::HotMemoryCache::default(),
         )),

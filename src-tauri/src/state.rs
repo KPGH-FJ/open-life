@@ -247,7 +247,6 @@ pub struct AppState {
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub tool_permission_store: Arc<Mutex<openlife_core::tool_permissions::ToolPermissionStore>>,
     pub skill_registry: Arc<Mutex<openlife_core::skills::SkillRegistry>>,
-    pub plugin_registry: Arc<Mutex<openlife_core::plugins::PluginRegistry>>,
     pub hot_cache: SharedHotCache,
     pub startup_warnings: Vec<String>,
     pub credential_bootstrap_snapshot: CredentialBootstrapSnapshot,

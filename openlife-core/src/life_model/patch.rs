@@ -66,9 +66,7 @@ pub enum PatchSource {
     Manual,
     Evolution,
     ChatConversation,
-    ProactiveAgent,
     SkillRuntime,
-    Plugin,
     MemoryGovernance,
     PlanningSession,
 }
@@ -82,9 +80,7 @@ impl std::fmt::Display for PatchSource {
             PatchSource::Manual => write!(f, "manual"),
             PatchSource::Evolution => write!(f, "evolution"),
             PatchSource::ChatConversation => write!(f, "chat_conversation"),
-            PatchSource::ProactiveAgent => write!(f, "proactive_agent"),
             PatchSource::SkillRuntime => write!(f, "skill_runtime"),
-            PatchSource::Plugin => write!(f, "plugin"),
             PatchSource::MemoryGovernance => write!(f, "memory_governance"),
             PatchSource::PlanningSession => write!(f, "planning_session"),
         }

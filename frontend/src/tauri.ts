@@ -1383,7 +1383,6 @@ export type ReviewItemType =
   | "memory_write"
   | "memory_archive"
   | "tool_permission"
-  | "plugin_permission"
   | "scheduled_task"
   | "external_write_action"
   | "model_policy_change"
@@ -2424,10 +2423,7 @@ export interface ToolManifest {
   permission_level: string;
   risk_level: string;
   version: string;
-  source:
-    | { type: "BuiltIn" }
-    | { type: "Mcp"; server_name: string }
-    | { type: "Plugin"; plugin_id: string };
+  source: { type: "BuiltIn" } | { type: "Mcp"; server_name: string };
   capabilities: string[];
   requires_confirmation: boolean;
   enabled: boolean;
@@ -3241,51 +3237,12 @@ export interface SkillManifest {
   inputSchema?: any;
   outputSchema: any;
   proposalPolicy: string;
-  sourceKind?: "built_in" | "plugin";
   executionStatus?:
     | "executable_built_in"
     | "disabled_declarative_only"
     | "model_only_no_tools"
     | "blocked";
   capabilityFlags?: string[];
-  pluginId?: string;
-}
-
-export interface PluginManifest {
-  id: string;
-  name: string;
-  version: string;
-  description: string;
-  author: string;
-  tools: ToolManifest[];
-  skills: SkillManifest[];
-  permissions: string[];
-  settingsSchema?: any;
-  enabled: boolean;
-  trustLevel: string;
-}
-
-export interface PluginRecord {
-  manifest: PluginManifest;
-  path: string;
-  enabled: boolean;
-  error?: string;
-}
-
-export async function listPlugins(): Promise<PluginRecord[]> {
-  return safeInvoke<PluginRecord[]>("list_plugins");
-}
-
-export async function reloadPlugins(): Promise<PluginRecord[]> {
-  return safeInvoke<PluginRecord[]>("reload_plugins");
-}
-
-export async function enablePlugin(pluginId: string): Promise<void> {
-  return safeInvoke("enable_plugin", { pluginId });
-}
-
-export async function disablePlugin(pluginId: string): Promise<void> {
-  return safeInvoke("disable_plugin", { pluginId });
 }
 
 export async function listProposals(
@@ -3434,7 +3391,6 @@ export type ProposalType =
   | "memory_write"
   | "memory_archive"
   | "tool_permission"
-  | "plugin_permission"
   | "scheduled_task"
   | "external_write_action"
   | "model_policy_change"
@@ -3449,10 +3405,8 @@ export type ProposalSource =
   | "feedback_evolution"
   | "memory_governance"
   | "skill_runtime"
-  | "plugin"
   | "manual"
   | "chat_conversation"
-  | "proactive_agent"
   | "planning_session";
 
 export interface AgentProposal {

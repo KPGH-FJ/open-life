@@ -355,9 +355,6 @@ mod tests {
             skill_registry: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::skills::SkillRegistry::built_in(),
             )),
-            plugin_registry: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::plugins::PluginRegistry::new(temp_dir.path().join("plugins")),
-            )),
             hot_cache,
             startup_warnings: vec![],
             credential_bootstrap_snapshot: Default::default(),

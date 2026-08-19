@@ -65,7 +65,6 @@ impl EvidenceType {
             ProposalType::CapabilityUpdate => EvidenceType::Capability,
             ProposalType::MemoryWrite | ProposalType::MemoryArchive => EvidenceType::Memory,
             ProposalType::ToolPermission
-            | ProposalType::PluginPermission
             | ProposalType::ModelPolicyChange
             | ProposalType::DataExport => EvidenceType::Policy,
             ProposalType::ScheduledTask | ProposalType::ExternalWriteAction => {

@@ -1575,11 +1575,6 @@ impl McpRegistry {
             ToolSource::Mcp { .. } => Err(anyhow::anyhow!(
                 "MCP manifest execution requires the asynchronous transport"
             )),
-            ToolSource::Plugin { plugin_id } => Err(anyhow::anyhow!(
-                "Plugin tool '{}' from '{}' requires a configured executor/provider before it can run",
-                manifest.name,
-                plugin_id
-            )),
         }
     }
 
@@ -1649,10 +1644,6 @@ impl McpRegistry {
                 }
                 receipt_tracker.finish();
                 result
-            }
-            ToolSource::Plugin { .. } => {
-                receipt_tracker.finish();
-                self.execute_manifest_after_instance_acquire(manifest, arguments, &instance_lease)
             }
         }
     }
@@ -2220,32 +2211,6 @@ mod tests {
             registry
                 .execute_manifest(&manifest_only, serde_json::json!({}))
                 .expect("manifest-only capability result"),
-        );
-
-        let plugin_manifest = ToolManifest {
-            id: "plugin.example.read".into(),
-            name: "plugin.example.read".into(),
-            description: "Read example data from a configured plugin provider.".into(),
-            parameters: serde_json::json!({"type": "object"}),
-            permission_level: "low".into(),
-            risk_level: "low".into(),
-            version: "1.0.0".into(),
-            source: ToolSource::Plugin {
-                plugin_id: "example-plugin".into(),
-            },
-            capabilities: vec!["read".into()],
-            requires_confirmation: false,
-            enabled: true,
-            declarative_only: true,
-            action_type: "read".into(),
-            idempotency_contract: ToolIdempotencyContract::NonIdempotent,
-            tags: vec!["read".into(), "manifest_only".into()],
-        };
-        copies.push(
-            registry
-                .execute_manifest(&plugin_manifest, serde_json::json!({}))
-                .expect_err("plugin manifest requires configured executor")
-                .to_string(),
         );
 
         let violations = copies

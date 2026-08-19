@@ -18,7 +18,6 @@ pub mod memory_gateway;
 pub mod network_client;
 pub mod ollama;
 pub mod persistence_outbox;
-pub mod plugins;
 pub mod privacy;
 pub mod resource;
 pub mod resource_gateway;

@@ -3005,8 +3005,7 @@ pub(crate) fn validate_proposal_payload(
                 None => Ok(()),
             }
         }
-        ProposalType::PluginPermission
-        | ProposalType::ModelPolicyChange
+        ProposalType::ModelPolicyChange
         | ProposalType::ScheduleCheckin
         | ProposalType::Unsupported => {
             // These types are not yet implemented; validation passes but apply will fail
@@ -3802,8 +3801,7 @@ async fn apply_proposal_to_state(
                 }
             } // end else (non-email DataExport)
         }
-        ProposalType::PluginPermission
-        | ProposalType::ModelPolicyChange
+        ProposalType::ModelPolicyChange
         | ProposalType::ScheduleCheckin
         | ProposalType::Unsupported => Err(format!(
             "{} Proposal 尚未接入应用器，已保持 pending。",
@@ -4029,10 +4027,7 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
     validate_proposal_for_acceptance(&proposal)?;
     if matches!(
         proposal.proposal_type,
-        ProposalType::PluginPermission
-            | ProposalType::ModelPolicyChange
-            | ProposalType::ScheduleCheckin
-            | ProposalType::Unsupported
+        ProposalType::ModelPolicyChange | ProposalType::ScheduleCheckin | ProposalType::Unsupported
     ) {
         return Err(format!(
             "{} Proposal 尚未接入应用器，已保持 pending。",
@@ -4738,7 +4733,6 @@ pub async fn list_proposals(
         "memory_write" => Some(ProposalType::MemoryWrite),
         "memory_archive" => Some(ProposalType::MemoryArchive),
         "tool_permission" => Some(ProposalType::ToolPermission),
-        "plugin_permission" => Some(ProposalType::PluginPermission),
         "scheduled_task" => Some(ProposalType::ScheduledTask),
         "external_write_action" => Some(ProposalType::ExternalWriteAction),
         "model_policy_change" => Some(ProposalType::ModelPolicyChange),
@@ -4849,7 +4843,6 @@ fn proposal_requires_native_confirmation(proposal: &AgentProposal) -> bool {
         || matches!(
             proposal.proposal_type,
             ProposalType::ToolPermission
-                | ProposalType::PluginPermission
                 | ProposalType::ExternalWriteAction
                 | ProposalType::ModelPolicyChange
                 | ProposalType::DataExport

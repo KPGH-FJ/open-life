@@ -4,7 +4,7 @@ use crate::main_chat_tool_selection::{
 };
 use crate::AppState;
 use chrono::{DateTime, Utc};
-use openlife_core::skills::{SkillExecutionStatus, SkillManifest, SkillSourceKind};
+use openlife_core::skills::{SkillExecutionStatus, SkillManifest};
 use openlife_core::task_runtime::{CanonicalTaskItemKind, CanonicalTaskItemStatus};
 use openlife_core::tool_manifest::ToolManifest;
 use serde::Serialize;
@@ -20,8 +20,7 @@ const SKILL_SURFACE_SCOPE: &str = "session";
 const PRODUCT_SKILL_MARKER: &str = "<!-- openlife-product-skill -->";
 
 fn manifest_product_available(manifest: &SkillManifest) -> bool {
-    manifest.source_kind == SkillSourceKind::BuiltIn
-        && manifest.execution_status == SkillExecutionStatus::ExecutableBuiltIn
+    manifest.execution_status == SkillExecutionStatus::ExecutableBuiltIn
         && !manifest.execution_budget.allow_writes
         && manifest
             .capability_flags
@@ -29,11 +28,8 @@ fn manifest_product_available(manifest: &SkillManifest) -> bool {
             .any(|flag| flag == "canonical_chat_work_native")
 }
 
-fn manifest_source_kind(manifest: &SkillManifest) -> &'static str {
-    match manifest.source_kind {
-        SkillSourceKind::BuiltIn => "bundled",
-        SkillSourceKind::Plugin => "plugin",
-    }
+fn manifest_source_kind(_manifest: &SkillManifest) -> &'static str {
+    "bundled"
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

@@ -1514,22 +1514,6 @@ fn bootstrap_with_secret_store(
         },
     }
 
-    let mut plugin_registry = openlife_core::plugins::PluginRegistry::new(data_dir.join("plugins"));
-    match plugin_registry.reload() {
-        Ok(_) => persistence.register_read_write("PluginRegistry"),
-        Err(e) => {
-            persistence.register_unavailable(
-                "PluginRegistry",
-                "plugin_registry_reload_failed",
-                &e.to_string(),
-            );
-            startup_warnings
-                .borrow_mut()
-                .push(format!("plugins manifest reload failed: {}", e));
-        }
-    }
-    // Plugin manifests remain inspectable through PluginRegistry, but their skills are not
-    // product-selectable until ToolGateway owns a reviewed plugin executor contract.
     let skill_registry = openlife_core::skills::SkillRegistry::built_in();
 
     let resource_runtime = {
@@ -1681,7 +1665,6 @@ fn bootstrap_with_secret_store(
         patch_store: patch_store.map(|store| Arc::new(Mutex::new(store))),
         tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),
         skill_registry: Arc::new(Mutex::new(skill_registry)),
-        plugin_registry: Arc::new(Mutex::new(plugin_registry)),
         hot_cache,
         startup_warnings: startup_warnings.into_inner(),
         credential_bootstrap_snapshot,

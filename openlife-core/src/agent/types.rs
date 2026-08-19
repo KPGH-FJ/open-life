@@ -20,13 +20,11 @@ pub enum AgentTaskKind {
     Calibration,
     Evolution,
     ToolExecution,
-    Proactive,
     Planning,
     Review,
     Writing,
     MemoryGovernance,
     Skill,
-    Plugin,
 }
 
 impl std::fmt::Display for AgentTaskKind {
@@ -37,13 +35,11 @@ impl std::fmt::Display for AgentTaskKind {
             AgentTaskKind::Calibration => write!(f, "calibration"),
             AgentTaskKind::Evolution => write!(f, "evolution"),
             AgentTaskKind::ToolExecution => write!(f, "tool_execution"),
-            AgentTaskKind::Proactive => write!(f, "proactive"),
             AgentTaskKind::Planning => write!(f, "planning"),
             AgentTaskKind::Review => write!(f, "review"),
             AgentTaskKind::Writing => write!(f, "writing"),
             AgentTaskKind::MemoryGovernance => write!(f, "memory_governance"),
             AgentTaskKind::Skill => write!(f, "skill"),
-            AgentTaskKind::Plugin => write!(f, "plugin"),
         }
     }
 }
@@ -1114,7 +1110,6 @@ pub enum ProposalType {
     MemoryWrite,
     MemoryArchive,
     ToolPermission,
-    PluginPermission,
     ScheduledTask,
     ExternalWriteAction,
     ModelPolicyChange,
@@ -1137,7 +1132,6 @@ impl std::fmt::Display for ProposalType {
             ProposalType::MemoryWrite => write!(f, "memory_write"),
             ProposalType::MemoryArchive => write!(f, "memory_archive"),
             ProposalType::ToolPermission => write!(f, "tool_permission"),
-            ProposalType::PluginPermission => write!(f, "plugin_permission"),
             ProposalType::ScheduledTask => write!(f, "scheduled_task"),
             ProposalType::ExternalWriteAction => write!(f, "external_write_action"),
             ProposalType::ModelPolicyChange => write!(f, "model_policy_change"),
@@ -1157,12 +1151,9 @@ pub enum ProposalSource {
     FeedbackEvolution,
     MemoryGovernance,
     SkillRuntime,
-    Plugin,
     NetworkConsent,
     Manual,
     ChatConversation,
-    /// Agent 主动发起的提案（如定期检查、触发式建议）
-    ProactiveAgent,
     PlanningSession,
 }
 
@@ -1174,11 +1165,9 @@ impl std::fmt::Display for ProposalSource {
             ProposalSource::FeedbackEvolution => write!(f, "feedback_evolution"),
             ProposalSource::MemoryGovernance => write!(f, "memory_governance"),
             ProposalSource::SkillRuntime => write!(f, "skill_runtime"),
-            ProposalSource::Plugin => write!(f, "plugin"),
             ProposalSource::NetworkConsent => write!(f, "network_consent"),
             ProposalSource::Manual => write!(f, "manual"),
             ProposalSource::ChatConversation => write!(f, "chat_conversation"),
-            ProposalSource::ProactiveAgent => write!(f, "proactive_agent"),
             ProposalSource::PlanningSession => write!(f, "planning_session"),
         }
     }
@@ -1198,11 +1187,9 @@ impl rusqlite::types::FromSql for ProposalSource {
             "feedback_evolution" => Ok(ProposalSource::FeedbackEvolution),
             "memory_governance" => Ok(ProposalSource::MemoryGovernance),
             "skill_runtime" => Ok(ProposalSource::SkillRuntime),
-            "plugin" => Ok(ProposalSource::Plugin),
             "network_consent" => Ok(ProposalSource::NetworkConsent),
             "manual" => Ok(ProposalSource::Manual),
             "chat_conversation" => Ok(ProposalSource::ChatConversation),
-            "proactive_agent" => Ok(ProposalSource::ProactiveAgent),
             "planning_session" => Ok(ProposalSource::PlanningSession),
             _ => Err(rusqlite::types::FromSqlError::InvalidType),
         })
@@ -1289,11 +1276,9 @@ impl AgentProposal {
             ProposalSource::FeedbackEvolution => chrono::Duration::days(7),
             ProposalSource::MemoryGovernance => chrono::Duration::days(7),
             ProposalSource::SkillRuntime => chrono::Duration::days(14),
-            ProposalSource::Plugin => chrono::Duration::days(14),
             ProposalSource::NetworkConsent => chrono::Duration::days(3),
             ProposalSource::Manual => chrono::Duration::days(365),
             ProposalSource::ChatConversation => chrono::Duration::days(3),
-            ProposalSource::ProactiveAgent => chrono::Duration::days(7),
             ProposalSource::PlanningSession => chrono::Duration::days(14),
         };
         Some(Utc::now() + duration)
