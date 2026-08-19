@@ -70,7 +70,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         vector_store: Arc::new(Mutex::new(
             openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
         )),
-        vector_persistence_mode: crate::state::VectorPersistenceMode::EvalDisabled,
         last_snapshot_date: Arc::new(Mutex::new(None)),
         mcp_audit_store: Arc::new(Mutex::new(isolated_eval_mcp_audit_store(
             base.join("mcp_audit.db"),
@@ -81,10 +80,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
             )
             .unwrap(),
         ))),
-        evidence_store: Arc::new(Mutex::new(
-            openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
-        )),
-        policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
         proposal_store: Some(Arc::new(Mutex::new(
             openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
         ))),
@@ -102,9 +97,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
             openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
         )),
         skill_registry: Arc::new(Mutex::new(openlife_core::skills::SkillRegistry::built_in())),
-        hot_cache: Arc::new(tokio::sync::RwLock::new(
-            openlife_core::memory_cache::HotMemoryCache::default(),
-        )),
         startup_warnings: vec![],
         credential_bootstrap_snapshot: Default::default(),
         scheduled_task_store: Arc::new(openlife_core::tasks::TaskStore::new_in_memory().unwrap()),
@@ -113,7 +105,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         state_store: Some(Arc::new(
             openlife_core::state_store::StateStore::new_in_memory().unwrap(),
         )),
-        shutdown_notify: Arc::new(tokio::sync::Notify::new()),
     });
 
     {

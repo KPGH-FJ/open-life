@@ -19,7 +19,6 @@ pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
     "FeedbackStore",
     "VectorStore",
     "CanonicalTaskRuntimeStore",
-    "EvidenceStore",
     "ProposalStore",
     "MemoryLifecycleStore",
     "PatchStore",
@@ -37,7 +36,6 @@ const OPTIONAL_PERSONALIZATION_STORES: &[&str] = &[
     "LifeModelFileJournal",
     "FeedbackStore",
     "VectorStore",
-    "EvidenceStore",
     "MemoryLifecycleStore",
     "PatchStore",
 ];
@@ -46,7 +44,6 @@ const OPTIONAL_PERSONALIZATION_STORES: &[&str] = &[
 pub const EXPLICIT_NON_CANONICAL_BOOTSTRAP_SURFACES: &[(&str, &str)] = &[
     ("VersionManager", "derived rollback snapshots"),
     ("SkillRegistry", "built-in and manifest-derived registry"),
-    ("HotMemoryCache", "rebuildable cache"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

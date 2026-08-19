@@ -63,14 +63,14 @@ require a separate top-level product page.
 ## Current Development Baseline
 
 OpenLife has one canonical Chat/Work spine and one Workbench snapshot boundary.
-The current repository cleanup removes replaced backend, frontend, test,
-script, and documentation owners without changing that product contract. This
-is an engineering baseline, not a claim of market readiness or complete future
-capability coverage.
+Replaced backend, frontend, test, script, and documentation owners have been
+removed from the current source tree without changing that product contract.
+This is an engineering baseline, not a claim of market readiness or complete
+future capability coverage.
 
 Earlier development programs remain in Git history. ADR 0018 and ADR 0019
-remain the accepted reconstruction and harness contracts; the active repository
-cleanup plan is the sole current implementation plan.
+remain the accepted reconstruction and harness contracts. There is no active
+implementation plan.
 
 Repository governance remains small and conventional: at most one active plan, normal
 source tests, normal CI, and concise architecture and decision records.

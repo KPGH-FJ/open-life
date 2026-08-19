@@ -9,7 +9,6 @@ use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
 use openlife_core::mcp_audit::McpAuditStore;
 use openlife_core::memory::MemoryStore;
-use openlife_core::memory_cache::SharedHotCache;
 use openlife_core::privacy::PrivacyEngine;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::vectors::VectorStore;
@@ -188,22 +187,6 @@ impl MainChatRuntimeState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum VectorPersistenceMode {
-    #[default]
-    Enabled,
-    EvalDisabled,
-}
-
-impl VectorPersistenceMode {
-    pub fn skip_reason(self) -> Option<&'static str> {
-        match self {
-            Self::Enabled => None,
-            Self::EvalDisabled => Some("eval_disabled"),
-        }
-    }
-}
-
 /// Central application state shared across all Tauri commands.
 #[derive(Clone)]
 pub struct AppState {
@@ -223,7 +206,6 @@ pub struct AppState {
     pub version_manager: Arc<Mutex<VersionManager>>,
     pub feedback_store: Arc<Mutex<FeedbackStore>>,
     pub vector_store: Arc<Mutex<VectorStore>>,
-    pub vector_persistence_mode: VectorPersistenceMode,
     pub last_snapshot_date: Arc<Mutex<Option<String>>>,
     pub mcp_audit_store: Arc<Mutex<McpAuditStore>>,
     /// Canonical Work owner for Task, Run, Item, ItemAttempt, FinalResult, and
@@ -231,8 +213,6 @@ pub struct AppState {
     /// authority; retired run-store state is not part of this lifecycle.
     pub canonical_task_runtime_store:
         Option<Arc<Mutex<openlife_core::task_runtime::CanonicalTaskRuntimeStore>>>,
-    pub evidence_store: Arc<Mutex<openlife_core::agent::EvidenceStore>>,
-    pub policy_store: Arc<openlife_core::agent::PolicyStore>,
     pub proposal_store: Option<Arc<Mutex<openlife_core::agent::ProposalStore>>>,
     pub memory_lifecycle_store: Option<Arc<Mutex<openlife_core::agent::MemoryLifecycleStore>>>,
     /// Bounded Observation/Candidate bridge for LifeModel learning. It does
@@ -242,16 +222,15 @@ pub struct AppState {
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub tool_permission_store: Arc<Mutex<openlife_core::tool_permissions::ToolPermissionStore>>,
     pub skill_registry: Arc<Mutex<openlife_core::skills::SkillRegistry>>,
-    pub hot_cache: SharedHotCache,
     pub startup_warnings: Vec<String>,
     pub credential_bootstrap_snapshot: CredentialBootstrapSnapshot,
     pub scheduled_task_store: Arc<openlife_core::tasks::TaskStore>,
+    #[cfg(test)]
     pub web_search_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
     pub(crate) resource_runtime: Option<Arc<crate::resource_commands::ResourceRuntime>>,
     /// Canonical ADR 0015 owner. Absence is an explicit degraded state; release
     /// bootstrap never replaces it with a temporary or in-memory product store.
     pub(crate) state_store: Option<Arc<openlife_core::state_store::StateStore>>,
-    pub shutdown_notify: Arc<tokio::sync::Notify>,
 }
 
 impl AppState {

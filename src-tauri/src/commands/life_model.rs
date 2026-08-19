@@ -623,9 +623,6 @@ mod tests {
 
     fn test_app_state(temp_dir: &tempfile::TempDir) -> Arc<AppState> {
         let config = openlife_core::config::AppConfig::default();
-        let hot_cache: openlife_core::memory_cache::SharedHotCache = Arc::new(
-            tokio::sync::RwLock::new(openlife_core::memory_cache::HotMemoryCache::default()),
-        );
         Arc::new(AppState {
             persistence_coordinator: Arc::new(
                 crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
@@ -672,16 +669,11 @@ mod tests {
             vector_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::vectors::VectorStore::new_in_memory().unwrap(),
             )),
-            vector_persistence_mode: crate::state::VectorPersistenceMode::Enabled,
             last_snapshot_date: Arc::new(tokio::sync::Mutex::new(None)),
             mcp_audit_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::mcp_audit::McpAuditStore::new(temp_dir.path().join("mcp_audit.db")),
             )),
             canonical_task_runtime_store: None,
-            evidence_store: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::agent::EvidenceStore::new_in_memory().unwrap(),
-            )),
-            policy_store: Arc::new(openlife_core::agent::PolicyStore::mvp_builtin()),
             proposal_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::agent::ProposalStore::new_in_memory().unwrap(),
             ))),
@@ -701,7 +693,6 @@ mod tests {
             skill_registry: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::skills::SkillRegistry::built_in(),
             )),
-            hot_cache,
             startup_warnings: vec![],
             credential_bootstrap_snapshot: Default::default(),
             scheduled_task_store: Arc::new(
@@ -710,7 +701,6 @@ mod tests {
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
             resource_runtime: None,
             state_store: None,
-            shutdown_notify: Arc::new(tokio::sync::Notify::new()),
         })
     }
 

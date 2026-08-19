@@ -13,7 +13,6 @@ pub mod llm;
 pub mod mcp;
 pub mod mcp_audit;
 pub mod memory;
-pub mod memory_cache;
 pub mod memory_gateway;
 pub mod network_client;
 pub mod ollama;

@@ -16,9 +16,9 @@ working tree.
 
 ## Current Development Status
 
-`repository_cleanup.md` is the sole active implementation plan. Earlier
-development programs remain in Git history. Product direction lives in
-`PRODUCT.md`; accepted architecture lives in ADRs.
+There is no active implementation plan. The repository cleanup is complete and
+remains available in Git history. Product direction lives in `PRODUCT.md`;
+accepted architecture lives in ADRs.
 
 ## Accepted Decisions
 

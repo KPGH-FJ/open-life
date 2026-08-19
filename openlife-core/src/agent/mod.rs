@@ -1,7 +1,6 @@
 pub mod action_executor;
 pub mod canonical_write_admission;
 pub mod conversation_context;
-pub mod evidence_store;
 pub mod governor;
 pub mod life_model_explicit_read;
 pub mod life_model_learning;
@@ -44,10 +43,6 @@ pub use action_executor::{
 pub use canonical_write_admission::{
     CanonicalWriteAdmission, CanonicalWriteAdmissionRejection, CanonicalWriteAdmissionRequest,
     CanonicalWritePermit,
-};
-pub use evidence_store::{
-    EvidenceDraft, EvidencePrivacyLevel, EvidenceQuery, EvidenceRecord, EvidenceSourceRef,
-    EvidenceSourceType, EvidenceStatus, EvidenceStore, EvidenceTombstone, EvidenceType,
 };
 pub use governor::{
     ExternalWriteGovernanceInput, GovernanceDecision, GovernanceDecisionClassification,
