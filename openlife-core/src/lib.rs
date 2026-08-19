@@ -20,7 +20,6 @@ pub mod ollama;
 pub mod persistence_outbox;
 pub mod plugins;
 pub mod privacy;
-pub mod proactive;
 pub mod resource;
 pub mod resource_gateway;
 pub mod resource_parser;

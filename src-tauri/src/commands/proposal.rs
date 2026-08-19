@@ -4406,24 +4406,7 @@ pub(crate) async fn reject_proposal_with_state(
         state, &proposal,
     )
     .await?;
-    record_rejected_proactive_reminder_evidence(state, &proposal).await;
     Ok(())
-}
-
-async fn record_rejected_proactive_reminder_evidence(
-    state: &Arc<AppState>,
-    proposal: &AgentProposal,
-) {
-    let evidence_store = state.evidence_store.lock().await;
-    if let Err(e) = openlife_core::proactive::ProactiveEngine::default()
-        .record_rejected_reminder_proposal(&evidence_store, proposal)
-    {
-        log::warn!(
-            "[LifeModel-HS] failed to record rejected reminder evidence for proposal {}: {}",
-            proposal.id,
-            e
-        );
-    }
 }
 
 pub(crate) async fn edit_proposal_with_state(

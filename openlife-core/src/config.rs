@@ -111,12 +111,6 @@ pub struct SystemConfig {
     /// ICS calendar file paths for calendar.read tool
     #[serde(default)]
     pub calendar_ics_paths: Vec<String>,
-    /// Proactive engine: days before a goal is considered stale
-    #[serde(default = "default_stale_goal_days")]
-    pub stale_goal_days: i64,
-    /// Proactive engine: days before a pending proposal triggers a reminder
-    #[serde(default = "default_proposal_reminder_days")]
-    pub proposal_reminder_days: i64,
     /// Web search provider: "duckduckgo" (default), "brave", "deepseek", or "searxng"
     #[serde(default = "default_search_provider")]
     pub search_provider: String,
@@ -147,8 +141,6 @@ impl Default for SystemConfig {
             safe_paths: Vec::new(),
             network_policy: NetworkPolicy::default(),
             calendar_ics_paths: Vec::new(),
-            stale_goal_days: default_stale_goal_days(),
-            proposal_reminder_days: default_proposal_reminder_days(),
             search_provider: default_search_provider(),
             search_provider_key: String::new(),
             search_provider_key_ref: None,
@@ -165,14 +157,6 @@ fn default_ollama_cache_ttl_seconds() -> u64 {
 }
 
 fn default_memory_search_top_k() -> usize {
-    3
-}
-
-fn default_stale_goal_days() -> i64 {
-    7
-}
-
-fn default_proposal_reminder_days() -> i64 {
     3
 }
 
