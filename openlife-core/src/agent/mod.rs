@@ -16,7 +16,6 @@ pub mod memory_lifecycle;
 pub mod memory_service;
 pub mod memory_view_model;
 pub mod metadata_safe;
-pub mod metrics;
 pub mod model_router;
 pub mod policy_store;
 pub mod product_read_model;
@@ -119,7 +118,6 @@ pub use metadata_safe::{
     metadata_safe_text_digest, metadata_safe_text_preview, metadata_safe_value_digest,
     metadata_safe_value_preview,
 };
-pub use metrics::{RolloutMetric, RolloutMetricsStore, RolloutSummary};
 pub use model_router::{
     ModelRouteDecision, ModelRouteScore, ModelRouter, PrivacyRequirement, ProviderAvailability,
     TaskType,

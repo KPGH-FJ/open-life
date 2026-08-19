@@ -130,27 +130,6 @@ impl Default for CredentialBootstrapSnapshot {
     }
 }
 
-/// Cached provider health status from ModelRouter, refreshed periodically.
-pub struct ProviderHealthCache {
-    pub providers: Vec<crate::commands::router::ProviderStatus>,
-    pub checked_at: String,
-    /// Metadata-only digest of provider/base/model/local preference,
-    /// credential version, and the concrete network decision.
-    pub identity_digest: String,
-}
-
-impl ProviderHealthCache {
-    pub fn is_fresh(&self) -> bool {
-        if let Ok(checked) = chrono::DateTime::parse_from_rfc3339(&self.checked_at) {
-            let elapsed =
-                chrono::Utc::now().signed_duration_since(checked.with_timezone(&chrono::Utc));
-            elapsed.num_seconds() < 30
-        } else {
-            false
-        }
-    }
-}
-
 /// One atomically captured provider runtime generation.
 ///
 /// `AppConfig` owns the canonical policy/configuration while
@@ -266,14 +245,12 @@ pub struct AppState {
     pub life_model_learning_store: Option<Arc<Mutex<openlife_core::agent::LifeModelLearningStore>>>,
     pub main_chat_runtime_state: Arc<Mutex<MainChatRuntimeState>>,
     pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
-    pub rollout_metrics_store: Option<Arc<Mutex<openlife_core::agent::RolloutMetricsStore>>>,
     pub tool_permission_store: Arc<Mutex<openlife_core::tool_permissions::ToolPermissionStore>>,
     pub skill_registry: Arc<Mutex<openlife_core::skills::SkillRegistry>>,
     pub plugin_registry: Arc<Mutex<openlife_core::plugins::PluginRegistry>>,
     pub hot_cache: SharedHotCache,
     pub startup_warnings: Vec<String>,
     pub credential_bootstrap_snapshot: CredentialBootstrapSnapshot,
-    pub provider_health_cache: Arc<tokio::sync::Mutex<Option<ProviderHealthCache>>>,
     pub scheduled_task_store: Arc<openlife_core::tasks::TaskStore>,
     pub web_search_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
     pub(crate) resource_runtime: Option<Arc<crate::resource_commands::ResourceRuntime>>,
@@ -299,9 +276,8 @@ impl AppState {
     }
 
     /// Replace the canonical provider configuration and its executable
-    /// scheduler as one in-process generation.  The cache is invalidated under
-    /// the same lock order, so a status reader observes either the old or the
-    /// new generation, never a mixed pair.
+    /// scheduler as one in-process generation, so readers observe either the
+    /// old or the new route rather than fields from both.
     pub(crate) async fn replace_provider_runtime_config(&self, config: AppConfig) -> String {
         let new_scheduler = InferenceScheduler::new(
             config.local_model.clone(),
@@ -317,10 +293,8 @@ impl AppState {
         let generation = new_scheduler.provider_config_generation().to_string();
         let mut current_config = self.config.lock().await;
         let mut scheduler = self.scheduler.lock().await;
-        let mut provider_health_cache = self.provider_health_cache.lock().await;
         *current_config = config;
         *scheduler = new_scheduler;
-        *provider_health_cache = None;
         generation
     }
 }

@@ -5854,32 +5854,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacing_provider_runtime_config_invalidates_cached_provider_truth() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        *state.provider_health_cache.lock().await = Some(crate::state::ProviderHealthCache {
-            providers: Vec::new(),
-            checked_at: chrono::Utc::now().to_rfc3339(),
-            identity_digest: "stale-provider-identity".into(),
-        });
-        let mut replacement = AppConfig::default();
-        replacement.llm.provider = "openai".into();
-        replacement.llm.openai_base = "https://api.openai.com/v1/changed-path".into();
-        replacement.llm.chat_model = "changed-model".into();
-        replacement.llm.openai_key = String::new();
-
-        replace_runtime_provider_config(&state, replacement).await;
-
-        assert!(state.provider_health_cache.lock().await.is_none());
-        let scheduler = state.scheduler.lock().await;
-        assert_eq!(
-            scheduler.openai_base,
-            "https://api.openai.com/v1/changed-path"
-        );
-        assert_eq!(scheduler.chat_model, "changed-model");
-        assert!(scheduler.openai_key.is_empty());
-    }
-
-    #[tokio::test]
     async fn concurrent_provider_replacement_never_exposes_a_mixed_status_generation() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let configured = |suffix: &str, credential_version: u64| {

@@ -82,6 +82,7 @@ pub(crate) enum ProviderValidationLoad {
 }
 
 impl ProviderValidationLoad {
+    #[cfg(test)]
     pub(crate) fn as_record(&self) -> Option<&ProviderValidationRecord> {
         match self {
             Self::Valid(record) => Some(record),
@@ -512,30 +513,6 @@ pub(crate) fn summarize_loaded_provider_validation(
             summary
         }
     }
-}
-
-pub(crate) fn current_provider_validation_receipt<'a>(
-    config: &AppConfig,
-    record: Option<&'a ProviderValidationRecord>,
-) -> Option<&'a ProviderInvocationReceipt> {
-    let record = record?;
-    if !provider_validation_record_authenticity_valid(config, record) {
-        return None;
-    }
-    let identity = current_provider_validation_identity(config);
-    if !record_matches_identity(record, &identity) {
-        return None;
-    }
-    let receipt = record.invocation_receipt.as_ref()?;
-    validate_receipt_for_identity(config, receipt).ok()?;
-    Some(receipt)
-}
-
-pub(crate) fn current_loaded_provider_validation_receipt<'a>(
-    config: &AppConfig,
-    load: &'a ProviderValidationLoad,
-) -> Option<&'a ProviderInvocationReceipt> {
-    current_provider_validation_receipt(config, load.as_record())
 }
 
 fn validate_receipt_for_identity(

@@ -52,10 +52,8 @@ const OPTIONAL_PERSONALIZATION_STORES: &[&str] = &[
 #[cfg(test)]
 pub const EXPLICIT_NON_CANONICAL_BOOTSTRAP_SURFACES: &[(&str, &str)] = &[
     ("VersionManager", "derived rollback snapshots"),
-    ("RolloutMetricsStore", "derived telemetry"),
     ("SkillRegistry", "built-in and manifest-derived registry"),
     ("HotMemoryCache", "rebuildable cache"),
-    ("ProviderHealthCache", "ephemeral observation cache"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]

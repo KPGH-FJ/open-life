@@ -3201,16 +3201,6 @@ export interface ToolActionScope extends ProductToolActionScope {
   allowed?: boolean;
 }
 
-export interface ProviderStatus {
-  name: string;
-  enabled: boolean;
-  available: boolean;
-  healthIsEstimated: boolean;
-  lastError?: string;
-  latencyMs?: number;
-  lastChecked?: string;
-}
-
 export type ToolPermissionPolicy =
   | "allow"
   | "deny"

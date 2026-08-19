@@ -109,7 +109,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         patch_store: Some(Arc::new(Mutex::new(
             openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
         ))),
-        rollout_metrics_store: None,
         tool_permission_store: Arc::new(Mutex::new(
             openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
         )),
@@ -122,7 +121,6 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         )),
         startup_warnings: vec![],
         credential_bootstrap_snapshot: Default::default(),
-        provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_store: Arc::new(openlife_core::tasks::TaskStore::new_in_memory().unwrap()),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         resource_runtime: None,

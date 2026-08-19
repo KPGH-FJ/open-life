@@ -1532,19 +1532,6 @@ fn bootstrap_with_secret_store(
     // product-selectable until ToolGateway owns a reviewed plugin executor contract.
     let skill_registry = openlife_core::skills::SkillRegistry::built_in();
 
-    let rollout_metrics_store = {
-        let store_path = data_dir.join("rollout_metrics.db");
-        match openlife_core::agent::RolloutMetricsStore::new(&store_path) {
-            Ok(store) => Some(Arc::new(Mutex::new(store))),
-            Err(e) => {
-                startup_warnings
-                    .borrow_mut()
-                    .push(format!("rollout_metrics.db 初始化失败: {}", e));
-                None
-            }
-        }
-    };
-
     let resource_runtime = {
         let store_path = data_dir.join("resources.db");
         let runtime = openlife_core::resource::ResourceStore::new(&store_path).and_then(|store| {
@@ -1692,14 +1679,12 @@ fn bootstrap_with_secret_store(
             .map(|store| Arc::new(Mutex::new(store))),
         main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
         patch_store: patch_store.map(|store| Arc::new(Mutex::new(store))),
-        rollout_metrics_store,
         tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),
         skill_registry: Arc::new(Mutex::new(skill_registry)),
         plugin_registry: Arc::new(Mutex::new(plugin_registry)),
         hot_cache,
         startup_warnings: startup_warnings.into_inner(),
         credential_bootstrap_snapshot,
-        provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
         scheduled_task_store: Arc::new(scheduled_task_store),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         resource_runtime,

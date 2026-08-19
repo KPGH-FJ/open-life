@@ -696,7 +696,6 @@ mod tests {
             patch_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
             ))),
-            rollout_metrics_store: None,
             tool_permission_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
             )),
@@ -709,7 +708,6 @@ mod tests {
             hot_cache,
             startup_warnings: vec![],
             credential_bootstrap_snapshot: Default::default(),
-            provider_health_cache: Arc::new(tokio::sync::Mutex::new(None)),
             scheduled_task_store: Arc::new(
                 openlife_core::tasks::TaskStore::new_in_memory().unwrap(),
             ),
