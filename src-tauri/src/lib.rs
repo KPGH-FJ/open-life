@@ -22,8 +22,6 @@ pub(crate) mod main_chat_context_loader;
 #[cfg(test)]
 pub(crate) mod main_chat_eval_state;
 pub(crate) mod main_chat_kernel;
-pub(crate) mod main_chat_memory_proposals;
-pub(crate) mod main_chat_runtime_facts;
 pub(crate) mod main_chat_send;
 pub(crate) mod main_chat_skills_tools;
 pub(crate) mod main_chat_source_bound;
@@ -67,15 +65,14 @@ pub use state::AppState;
 
 // Re-exports for test modules (imported as crate::...)
 use commands::main_chat_tools::{
-    clear_main_chat_skill, get_main_chat_skill_detail, list_main_chat_skills,
-    list_main_chat_tool_candidates, select_main_chat_skill,
+    clear_main_chat_skill, list_main_chat_skills, list_main_chat_tool_candidates,
+    select_main_chat_skill,
 };
 
 use commands::chat::{
     assign_conversation_project, create_chat_session, create_project, delete_chat_session,
     get_conversation_view_model, rename_chat_session,
 };
-use commands::execution::{list_tool_permissions, revoke_tool_permission};
 use commands::life_model::{
     confirm_lifemodel_learning_candidate, delete_lifemodel_learning_candidate,
     draft_legacy_lifemodel_migration, draft_lifemodel_v2_change, draft_lifemodel_v2_export,
@@ -83,39 +80,23 @@ use commands::life_model::{
     pause_lifemodel_learning_suggestion_class, reject_lifemodel_learning_candidate,
     stage_lifemodel_learning_candidate,
 };
-use commands::mcp::list_tool_manifests;
-#[cfg(feature = "dev-extensions")]
-use commands::mcp::{
-    clear_mcp_audit_logs, list_mcp_audit_logs, list_mcp_servers, list_mcp_templates,
-    list_mcp_tools, register_mcp_server, unregister_mcp_server,
-};
 use commands::memory::{
-    archive_low_access_memories, count_memory_chunks, create_knowledge_note,
     draft_memory_archive_proposal, draft_memory_correction_proposal,
-    draft_memory_stop_recall_proposal, get_memory_tier_stats, list_archived_chunks,
-    privacy_erase_memory_asset, rebuild_memory_index, restore_archived_chunks,
-    run_memory_tier_maintenance, search_memory,
+    draft_memory_stop_recall_proposal, privacy_erase_memory_asset, restore_archived_chunks,
 };
 use commands::proposal::{
-    accept_proposal, batch_accept_low_risk_proposals, edit_proposal, get_memory_asset,
-    get_pending_proposals, list_memory_assets, list_proposals, postpone_proposal, reject_proposal,
-    request_artifact_undo, rollback_memory_asset,
+    accept_proposal, postpone_proposal, reject_proposal, request_artifact_undo,
+    rollback_memory_asset,
 };
-#[cfg(feature = "dev-extensions")]
-use commands::settings::{cleanup_mcp_audit_logs, export_mcp_audit_logs, rotate_mcp_audit_key};
 use commands::settings::{
-    get_config, get_danger_action_preflight, get_privacy_policy,
-    recover_required_credential_access, save_config, set_privacy_policy, test_llm_connection,
+    get_config, recover_required_credential_access, save_config, test_llm_connection,
 };
 use life_state_projection::get_life_state_projection;
-use main_chat_memory_proposals::draft_edit_memory_proposal;
 use main_chat_steering::submit_main_chat_task_steering;
 use markdown_memory::{
     deactivate_markdown_memory_file_proposal, draft_markdown_memory_file_proposal,
     get_markdown_memory_view_model,
 };
-pub use openlife_core::memory_cache::HotMemoryCache;
-pub use openlife_core::memory_cache::SharedHotCache;
 pub use openlife_core::privacy::PrivacyEngine;
 use read_models::diagnostics::get_product_diagnostics_view_model;
 use read_models::life_model::get_life_model_view_model;
@@ -242,57 +223,6 @@ impl std::fmt::Debug for SendMessageResult {
             .field("tool_invoked", &self.tool_invoked)
             .finish()
     }
-}
-
-#[derive(serde::Serialize)]
-pub struct OllamaModelInfo {
-    pub name: String,
-    pub size_mb: u64,
-}
-
-#[derive(serde::Serialize)]
-pub struct SystemDiagnostics {
-    pub persistence_health: crate::persistence_coordinator::PersistenceHealthSnapshot,
-    pub policy_router: crate::commands::diagnostics::PolicyRouterStatus,
-    pub mcp_server_count: usize,
-    pub mcp_tool_count: usize,
-    pub mcp_recent_audit_count: usize,
-    pub mcp_recent_pii_count: usize,
-    pub memory_chunk_count: usize,
-    pub vector_corrupt_embedding_count: usize,
-    pub vector_unknown_profile_count: usize,
-    pub vector_profile_dimension_mismatch_count: usize,
-    pub ollama_service_online: bool,
-    pub ollama_online: bool,
-    pub local_model: String,
-    pub resolved_local_model: Option<String>,
-    pub prefer_local_model: bool,
-    pub cloud_api_configured: bool,
-    pub cloud_provider: String,
-    pub cloud_api_validated: bool,
-    pub cloud_api_last_error: Option<String>,
-    pub cloud_api_validation_status: String,
-    pub cloud_api_validated_at: Option<String>,
-    pub cloud_api_failed_at: Option<String>,
-    pub cloud_api_validation_source: Option<String>,
-    pub chat_ready: bool,
-    pub readiness_issues: Vec<String>,
-    pub data_dir: String,
-    pub active_data_dir: String,
-    pub database_status: String,
-    pub startup_warnings: Vec<String>,
-    pub life_model_ready: bool,
-    pub app_version: String,
-    pub model_empty: bool,
-    pub chat_session_count: usize,
-    pub usage_ready: bool,
-    pub usage_readiness_issues: Vec<String>,
-    pub ollama_models: Vec<OllamaModelInfo>,
-    pub pending_proposal_count: usize,
-    pub high_risk_pending_proposal_count: usize,
-    pub proposal_store_status: String,
-    pub runtime_build_info: runtime_build_info::RuntimeBuildInfo,
-    pub runtime_route_evidence: main_chat_runtime_facts::RuntimeRouteEvidence,
 }
 
 #[tauri::command]
@@ -496,22 +426,6 @@ async fn select_markdown_memory_root<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-async fn cancel_resource_import(
-    operation_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<bool, String> {
-    resource_commands::cancel_resource_import(&operation_id, state.inner())
-}
-
-#[tauri::command]
-fn get_resource_import_status(
-    operation_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<resource_commands::ResourceImportStatus, String> {
-    resource_commands::get_resource_import_status(&operation_id, state.inner())
-}
-
-#[tauri::command]
 async fn detach_resource_from_turn(
     operation_id: String,
     turn_operation_id: String,
@@ -525,17 +439,6 @@ async fn detach_resource_from_turn(
         state.inner(),
     )
     .await
-}
-
-#[cfg(feature = "dev-extensions")]
-#[tauri::command]
-async fn inspect_mcp_call(
-    name: String,
-    arguments: serde_json::Value,
-    state: State<'_, Arc<AppState>>,
-) -> Result<openlife_core::mcp::McpArgumentInspection, String> {
-    let reg = state.mcp_registry.lock().await;
-    Ok(reg.inspect_call_arguments(&name, &arguments))
 }
 
 #[cfg(feature = "dev-extensions")]
@@ -799,81 +702,35 @@ pub fn run() {
             select_markdown_memory_root,
             recover_required_credential_access,
             list_main_chat_skills,
-            get_main_chat_skill_detail,
             select_main_chat_skill,
             clear_main_chat_skill,
             list_main_chat_tool_candidates,
             open_external_https_source,
-            get_pending_proposals,
-            list_proposals,
-            batch_accept_low_risk_proposals,
             accept_proposal,
             reject_proposal,
             request_artifact_undo,
-            edit_proposal,
-            draft_edit_memory_proposal,
             postpone_proposal,
             rollback_memory_asset,
             draft_memory_correction_proposal,
             draft_memory_archive_proposal,
             draft_memory_stop_recall_proposal,
             privacy_erase_memory_asset,
-            list_memory_assets,
-            get_memory_asset,
             send_message,
             start_stream_message,
             cancel_chat_turn,
             cancel_work_task,
             retry_work_task,
             pick_and_import_resources,
-            cancel_resource_import,
-            get_resource_import_status,
             detach_resource_from_turn,
             submit_main_chat_task_steering,
             get_conversation_view_model,
-            #[cfg(feature = "dev-extensions")]
-            inspect_mcp_call,
-            #[cfg(feature = "dev-extensions")]
-            register_mcp_server,
-            #[cfg(feature = "dev-extensions")]
-            unregister_mcp_server,
-            #[cfg(feature = "dev-extensions")]
-            list_mcp_servers,
-            #[cfg(feature = "dev-extensions")]
-            list_mcp_tools,
-            #[cfg(feature = "dev-extensions")]
-            list_mcp_templates,
-            list_tool_manifests,
-            #[cfg(feature = "dev-extensions")]
-            list_mcp_audit_logs,
-            #[cfg(feature = "dev-extensions")]
-            clear_mcp_audit_logs,
-            run_memory_tier_maintenance,
-            count_memory_chunks,
-            create_knowledge_note,
-            search_memory,
-            get_danger_action_preflight,
             test_llm_connection,
             create_chat_session,
             create_project,
             assign_conversation_project,
             rename_chat_session,
             delete_chat_session,
-            archive_low_access_memories,
             restore_archived_chunks,
-            list_archived_chunks,
-            get_memory_tier_stats,
-            rebuild_memory_index,
-            #[cfg(feature = "dev-extensions")]
-            export_mcp_audit_logs,
-            #[cfg(feature = "dev-extensions")]
-            cleanup_mcp_audit_logs,
-            #[cfg(feature = "dev-extensions")]
-            rotate_mcp_audit_key,
-            get_privacy_policy,
-            set_privacy_policy,
-            list_tool_permissions,
-            revoke_tool_permission,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("Tauri build failed: {}", e))
@@ -916,7 +773,90 @@ mod external_source_tests {
 }
 
 #[cfg(test)]
-mod retired_lifemodel_surface_tests {
+mod release_surface_tests {
+    fn command_name_after_attribute(source: &str, offset: usize) -> Option<&str> {
+        let tail = &source[offset + concat!("#[", "tauri::command", "]").len()..];
+        let function = tail.find("fn ")?;
+        let name = &tail[function + 3..];
+        let end =
+            name.find(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))?;
+        Some(&name[..end])
+    }
+
+    #[test]
+    fn every_tauri_command_is_registered_in_the_release_handler() {
+        let command_attribute = concat!("#[", "tauri::command", "]");
+        let lib = include_str!("lib.rs");
+        let start = lib
+            .find(".invoke_handler(tauri::generate_handler![")
+            .expect("shipped Tauri handler start");
+        let end = lib[start..]
+            .find("])\n        .build(")
+            .map(|offset| start + offset)
+            .expect("shipped Tauri handler end");
+        let handler = &lib[start..end];
+        let sources = [
+            ("lib.rs", lib),
+            ("commands/chat.rs", include_str!("commands/chat.rs")),
+            (
+                "commands/life_model.rs",
+                include_str!("commands/life_model.rs"),
+            ),
+            (
+                "commands/main_chat_tools.rs",
+                include_str!("commands/main_chat_tools.rs"),
+            ),
+            ("commands/memory.rs", include_str!("commands/memory.rs")),
+            ("commands/proposal.rs", include_str!("commands/proposal.rs")),
+            ("commands/settings.rs", include_str!("commands/settings.rs")),
+            (
+                "life_state_projection.rs",
+                include_str!("life_state_projection.rs"),
+            ),
+            (
+                "main_chat_steering.rs",
+                include_str!("main_chat_steering.rs"),
+            ),
+            ("markdown_memory.rs", include_str!("markdown_memory.rs")),
+            (
+                "read_models/diagnostics.rs",
+                include_str!("read_models/diagnostics.rs"),
+            ),
+            (
+                "read_models/life_model.rs",
+                include_str!("read_models/life_model.rs"),
+            ),
+            (
+                "read_models/memory.rs",
+                include_str!("read_models/memory.rs"),
+            ),
+            (
+                "read_models/provider_privacy.rs",
+                include_str!("read_models/provider_privacy.rs"),
+            ),
+            (
+                "read_models/review_center.rs",
+                include_str!("read_models/review_center.rs"),
+            ),
+            ("read_models/tasks.rs", include_str!("read_models/tasks.rs")),
+        ];
+
+        for (path, source) in sources {
+            let mut offset = 0;
+            for line in source.split_inclusive('\n') {
+                if line.trim() == command_attribute {
+                    let name = command_name_after_attribute(source, offset)
+                        .unwrap_or_else(|| panic!("could not parse Tauri command in {path}"));
+                    assert!(
+                        handler.contains(&format!("{name},")),
+                        "Tauri command {name} in {path} is not registered in the release handler"
+                    );
+                }
+                offset += line.len();
+            }
+        }
+    }
+
     #[test]
     fn shipped_handler_contains_only_the_v2_lifemodel_product_surface() {
         let source = include_str!("lib.rs");

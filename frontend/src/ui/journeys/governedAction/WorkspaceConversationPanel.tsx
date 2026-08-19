@@ -605,7 +605,7 @@ export function WorkspaceConversationPanel({
         </FoundationNotice>
       )}
 
-      {controller.mode === "work" && controller.workStatus === "ready" && (
+      {controller.mode === "work" && controller.workStatus === "available" && (
         <MarkdownMemoryPanel controller={controller} />
       )}
 
@@ -634,7 +634,7 @@ export function WorkspaceConversationPanel({
               name="workspace-mode"
               value="work"
               checked={controller.mode === "work"}
-              disabled={controller.workStatus !== "ready"}
+              disabled={controller.workStatus !== "available"}
               onChange={() => controller.setMode("work")}
             />
             Work
@@ -643,8 +643,7 @@ export function WorkspaceConversationPanel({
             {controller.mode === "chat"
               ? "直接对话，不创建任务。"
               : "可使用文件、工具与受治理动作完成任务。"}
-            {controller.workStatus === "reconstructing" &&
-              " Work 当前不可用；不会回退到旧执行路径。"}
+            {controller.workStatus === "unavailable" && " Work 当前不可用；不会回退到旧执行路径。"}
           </small>
         </fieldset>
         {controller.mode === "chat" && (

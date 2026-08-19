@@ -2,16 +2,11 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import {
   acceptProposal,
-  draftEditMemoryProposal,
-  editProposal,
   restoreArchivedMemory,
   startStreamMessage,
   redactInvokeArgs,
   saveConfig,
-  sendMessageV2,
   pickAndImportResources,
-  cancelResourceImport,
-  getResourceImportStatus,
   detachResourceFromTurn,
 } from "./tauri";
 
@@ -32,7 +27,7 @@ describe("canonical Tauri command arguments", () => {
     return JSON.stringify(redactInvokeArgs(cmd, args));
   }
 
-  it("redacts send_message content from dev invoke logs", async () => {
+  it("redacts stream message content and identifiers from dev invoke logs", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reply: "ok",
       reasoning_trace: {},
@@ -40,14 +35,14 @@ describe("canonical Tauri command arguments", () => {
       run_id: "run-1",
     });
 
-    await sendMessageV2(
+    await startStreamMessage(
       "session-secret",
       [{ role: "user", content: "我的邮箱 test@example.com 和身份证 11010519491231002X" }],
       { operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a0" }
     );
 
     const redacted = redactedLogForLastInvoke();
-    expect(redacted).toContain("session-secret");
+    expect(redacted).not.toContain("session-secret");
     expect(redacted).not.toContain("test@example.com");
     expect(redacted).not.toContain("11010519491231002X");
     expect(redacted).toContain('"redacted":true');
@@ -106,19 +101,11 @@ describe("canonical Tauri command arguments", () => {
     const resourceId = "c7414f1e-35dc-4aec-b2f0-f704313003b4";
 
     await pickAndImportResources(importOperationId, turnOperationId);
-    await cancelResourceImport(importOperationId);
-    await getResourceImportStatus(importOperationId);
     await detachResourceFromTurn(detachOperationId, turnOperationId, resourceId);
 
     expect(invoke).toHaveBeenCalledWith("pick_and_import_resources", {
       importOperationId,
       turnOperationId,
-    });
-    expect(invoke).toHaveBeenCalledWith("cancel_resource_import", {
-      operationId: importOperationId,
-    });
-    expect(invoke).toHaveBeenCalledWith("get_resource_import_status", {
-      operationId: importOperationId,
     });
     expect(invoke).toHaveBeenCalledWith("detach_resource_from_turn", {
       operationId: detachOperationId,
@@ -134,22 +121,11 @@ describe("canonical Tauri command arguments", () => {
       tool_calls: [],
     });
 
-    await sendMessageV2("session-skill", [{ role: "user", content: "Summarize this" }], {
-      operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a2",
-      selectedSkillId: "summarize",
-    });
     await startStreamMessage("session-skill", [{ role: "user", content: "Summarize this" }], {
       operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a3",
       selectedSkillId: "summarize",
     });
 
-    expect(invoke).toHaveBeenCalledWith(
-      "send_message",
-      expect.objectContaining({
-        operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a2",
-        selectedSkillId: "summarize",
-      })
-    );
     expect(invoke).toHaveBeenCalledWith("start_stream_message", {
       args: expect.objectContaining({
         operationId: "c7414f1e-35dc-4aec-b2f0-f704313003a3",
@@ -158,21 +134,11 @@ describe("canonical Tauri command arguments", () => {
     });
   });
 
-  it("sends proposal commands without compatibility aliases", async () => {
+  it("sends the canonical proposal decision command", async () => {
     await acceptProposal("proposal-1");
-    await editProposal("proposal-1", { name: "新值" });
-    await draftEditMemoryProposal("proposal-memory-1", { content: "draft" });
 
     expect(invoke).toHaveBeenCalledWith("accept_proposal", {
       proposalId: "proposal-1",
-    });
-    expect(invoke).toHaveBeenCalledWith("edit_proposal", {
-      proposalId: "proposal-1",
-      newAfter: { name: "新值" },
-    });
-    expect(invoke).toHaveBeenCalledWith("draft_edit_memory_proposal", {
-      proposalId: "proposal-memory-1",
-      newAfter: { content: "draft" },
     });
   });
 });

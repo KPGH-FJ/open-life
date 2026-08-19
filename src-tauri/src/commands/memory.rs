@@ -1,7 +1,3 @@
-use crate::commands::settings::{
-    require_danger_action_confirmation, DangerActionConfirmationReference,
-    DangerActionConfirmationRequest,
-};
 use crate::danger_action_confirmation::{
     require_native_danger_action_confirmation, NativeDangerActionRequest,
 };
@@ -12,8 +8,6 @@ use openlife_core::agent::{
     AgentProposal, MemoryLifecycleCategory, MemoryLifecycleRiskLevel, ProposalSource, ProposalType,
     RiskLevel,
 };
-use openlife_core::memory_cache::HotMemoryCache;
-use openlife_core::vectors::{TierStats, VectorRebuildJob};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
@@ -294,31 +288,7 @@ pub async fn privacy_erase_memory_asset(
     memory_gateway::privacy_erase_memory_asset_with_state(memory_id, state.inner()).await
 }
 
-#[tauri::command]
-pub async fn run_memory_tier_maintenance(
-    state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, AppError> {
-    let (promoted, demoted) =
-        memory_gateway::run_memory_tier_maintenance_with_state(state.inner()).await?;
-    Ok(serde_json::json!({ "promoted": promoted, "demoted": demoted }))
-}
-
-#[tauri::command]
-pub async fn count_memory_chunks(state: State<'_, Arc<AppState>>) -> Result<i64, AppError> {
-    memory_gateway::count_memory_chunks_with_state(state.inner()).await
-}
-
-#[tauri::command]
-pub async fn create_knowledge_note(
-    operation_id: String,
-    session_id: String,
-    content: String,
-    source: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<crate::memory_gateway::KnowledgeNoteWriteResult, AppError> {
-    create_knowledge_note_with_state(operation_id, session_id, content, source, state.inner()).await
-}
-
+#[cfg(test)]
 pub(crate) async fn create_knowledge_note_with_state(
     operation_id: String,
     session_id: String,
@@ -336,77 +306,13 @@ pub(crate) async fn create_knowledge_note_with_state(
     .await
 }
 
-#[tauri::command]
-pub async fn search_memory(
-    query: String,
-    top_k: usize,
-    state: State<'_, Arc<AppState>>,
-) -> Result<crate::memory_gateway::MemorySearchResult, AppError> {
-    search_memory_with_state(query, top_k, state.inner()).await
-}
-
+#[cfg(test)]
 pub(crate) async fn search_memory_with_state(
     query: String,
     top_k: usize,
     state: &Arc<AppState>,
 ) -> Result<crate::memory_gateway::MemorySearchResult, AppError> {
     memory_gateway::search_memory_with_state(query, top_k, state).await
-}
-
-#[tauri::command]
-pub async fn undo_explicit_memory(
-    receipt_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Option<openlife_core::agent::MemoryRollbackReport>, AppError> {
-    undo_explicit_memory_with_state(receipt_id, state.inner()).await
-}
-
-pub(crate) async fn undo_explicit_memory_with_state(
-    receipt_id: String,
-    state: &Arc<AppState>,
-) -> Result<Option<openlife_core::agent::MemoryRollbackReport>, AppError> {
-    let normalized = receipt_id.trim();
-    if normalized.is_empty() {
-        return Ok(None);
-    }
-    let lifecycle_store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(|| AppError::internal("MemoryLifecycleStore unavailable"))?;
-    let record = {
-        let store = lifecycle_store.lock().await;
-        store.get_record(normalized).map_err(AppError::from)?
-    };
-    let Some(record) = record else {
-        return Ok(None);
-    };
-    if !record.proposal_id.starts_with("explicit_memory:")
-        || !record.status.is_runtime_active()
-        || record.runtime_context_excluded_at.is_some()
-    {
-        return Ok(None);
-    }
-    crate::memory_gateway::rollback_memory_asset_with_state(
-        normalized.to_string(),
-        "user_undo_explicit_memory".to_string(),
-        state,
-    )
-    .await
-    .map(Some)
-    .map_err(AppError::internal)
-}
-
-#[tauri::command]
-pub async fn get_hot_cache(state: State<'_, Arc<AppState>>) -> Result<HotMemoryCache, AppError> {
-    let cache = state.hot_cache.read().await;
-    Ok(cache.clone())
-}
-
-#[tauri::command]
-pub async fn archive_low_access_memories(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<crate::memory_gateway::LowAccessCanonicalMemoryCandidate>, AppError> {
-    memory_gateway::archive_low_access_memories_with_state(state.inner()).await
 }
 
 #[tauri::command]
@@ -417,56 +323,7 @@ pub async fn restore_archived_chunks(
     memory_gateway::restore_archived_chunks_with_state(&owner, state.inner()).await
 }
 
-#[tauri::command]
-pub async fn list_archived_chunks(
-    limit: usize,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<crate::memory_gateway::ArchivedCanonicalMemoryView>, AppError> {
-    memory_gateway::list_archived_chunks_with_state(limit, state.inner()).await
-}
-
-#[tauri::command]
-pub async fn get_memory_tier_stats(state: State<'_, Arc<AppState>>) -> Result<TierStats, AppError> {
-    memory_gateway::get_memory_tier_stats_with_state(state.inner()).await
-}
-
-#[tauri::command]
-pub async fn rebuild_memory_index(
-    confirmation_evidence: Option<DangerActionConfirmationReference>,
-    window: tauri::WebviewWindow,
-    state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, AppError> {
-    let affected_count = {
-        let store = state.memory_store.lock().await.clone();
-        store
-            .vector_rebuild_source_snapshot()
-            .map_err(AppError::from)?
-            .total_count
-    };
-    require_danger_action_confirmation(
-        DangerActionConfirmationRequest {
-            action_type: "vector_rebuild",
-            target_ids_for_new_challenge: &[],
-            requested_target: None,
-            affected_count: Some(affected_count),
-            reference: confirmation_evidence.as_ref(),
-            arguments: &serde_json::json!({
-                "canonical_memory_row_count": affected_count,
-                "owner_scope": ["knowledge_note", "memory_lifecycle", "legacy_memory_record"],
-                "unverified_rows": "reported_as_skipped",
-                "operation": "rebuild_vector_index",
-            }),
-            arguments_summary: &format!(
-                "扫描 {affected_count} 条 canonical Memory 记录重建本地索引；仅关系证据完整的 KnowledgeNote/Lifecycle 资产会进入向量空间，未验证记录计入 skipped。"
-            ),
-        },
-        &window,
-        state.inner(),
-    )
-    .await?;
-    rebuild_memory_index_with_state(state.inner()).await
-}
-
+#[cfg(test)]
 pub(crate) async fn rebuild_memory_index_with_state(
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
@@ -483,21 +340,6 @@ pub(crate) async fn rebuild_memory_index_with_state(
             .to_string(),
         ))
     }
-}
-
-#[tauri::command]
-pub async fn get_memory_index_rebuild_progress(
-    state: State<'_, Arc<AppState>>,
-) -> Result<Option<VectorRebuildJob>, AppError> {
-    memory_gateway::get_memory_index_rebuild_progress_with_state(state.inner()).await
-}
-
-#[tauri::command]
-pub async fn cancel_memory_index_rebuild(
-    job_id: Option<String>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<VectorRebuildJob, AppError> {
-    memory_gateway::cancel_memory_index_rebuild_with_state(job_id, state.inner()).await
 }
 
 #[cfg(test)]
@@ -1418,53 +1260,5 @@ mod tests {
             openlife_core::embedding::EmbeddingInvocationStatus::Completed
         );
         assert!(result.degraded_evidence.is_none());
-    }
-
-    #[tokio::test]
-    async fn undo_explicit_memory_command_archives_the_canonical_memory_once() {
-        let state = crate::test_utils::test_app_state();
-        let source_user_message = "请记住：我早餐喜欢咖啡和面包";
-        let (_policy, candidate, fact, proof) =
-            crate::main_chat_kernel::test_policy_memory_admission_context(
-                "message-1",
-                source_user_message,
-            );
-        let registry = {
-            state
-                .main_chat_runtime_state
-                .lock()
-                .await
-                .cancellation_registry
-                .clone()
-        };
-        let registration = registry.register("undo-command-session");
-        let receipt = crate::memory_gateway::commit_explicit_user_memory_for_turn_with_state(
-            &state,
-            "undo-command-session".into(),
-            "run-1".into(),
-            "message-1".into(),
-            fact,
-            proof,
-            source_user_message,
-            &candidate,
-            &registration.execution_epoch(),
-        )
-        .await
-        .unwrap();
-
-        let undo = undo_explicit_memory_with_state(receipt.receipt_id.clone(), &state)
-            .await
-            .unwrap()
-            .expect("canonical undo receipt");
-        assert!(undo.canonical_committed);
-        assert!(undo_explicit_memory_with_state(receipt.receipt_id, &state)
-            .await
-            .unwrap()
-            .is_none());
-        let active = {
-            let store = state.memory_lifecycle_store.as_ref().unwrap().lock().await;
-            store.list_active_records(None, 10).unwrap()
-        };
-        assert!(active.is_empty());
     }
 }

@@ -16,9 +16,8 @@ use crate::{
 };
 use openlife_core::agent::{
     AgentProposal, ArtifactEffectState, LifeModelLearningCandidateStatus,
-    LifeModelLearningReviewDecisionReceipt, MemoryLifecycleRecord, MemoryLifecycleScope,
-    MemoryLifecycleStatus, MemoryRollbackReport, ProposalSource, ProposalStatus, ProposalType,
-    RiskLevel,
+    LifeModelLearningReviewDecisionReceipt, MemoryRollbackReport, ProposalSource, ProposalStatus,
+    ProposalType, RiskLevel,
 };
 use openlife_core::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
@@ -431,10 +430,6 @@ fn proposal_store_missing() -> String {
     "Proposal store is unavailable. Please check Settings > 试用就绪检查.".to_string()
 }
 
-fn memory_lifecycle_store_missing() -> String {
-    "Memory lifecycle store is unavailable. Accepted memory rollback is blocked.".to_string()
-}
-
 fn check_safe_mode(state: &Arc<AppState>) -> Result<(), String> {
     if !state.startup_warnings.is_empty() {
         return Err(format!(
@@ -481,12 +476,6 @@ async fn ensure_review_change_precedes_effect_dispatch(
         )),
         None => Err("Proposal dispatch receipt is unavailable; review mutation failed closed".into()),
     }
-}
-
-fn is_retired_lifemodel_patch_batch(proposal: &AgentProposal) -> bool {
-    proposal.proposal_type == ProposalType::LifeModelUpdate
-        && proposal.source == ProposalSource::BuilderReview
-        && proposal.affected_path == openlife_core::life_model::patch::LIFEMODEL_PATCH_BATCH_PATH
 }
 
 fn is_lifemodel_v2_typed_diff(proposal: &AgentProposal) -> bool {
@@ -3860,21 +3849,6 @@ async fn update_review_proposal_before_dispatch_with_state(
     }
 }
 
-pub(crate) async fn get_pending_proposals_with_state(
-    limit: i64,
-    state: &Arc<AppState>,
-) -> Result<Vec<AgentProposal>, String> {
-    reconcile_durable_proposal_projections_with_state(state, limit.clamp(1, 200)).await?;
-    let store = state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(proposal_store_missing)?;
-    let store = store.lock().await;
-    store
-        .list_pending_proposals(limit.clamp(1, 200))
-        .map_err(|e| e.to_string())
-}
-
 #[cfg(test)]
 pub(crate) async fn accept_proposal_with_state(
     proposal_id: String,
@@ -4404,52 +4378,6 @@ pub(crate) async fn reject_proposal_with_state(
     Ok(())
 }
 
-pub(crate) async fn edit_proposal_with_state(
-    proposal_id: String,
-    new_after: Value,
-    state: &Arc<AppState>,
-) -> Result<serde_json::Value, String> {
-    require_persistence_write(state)?;
-    check_safe_mode(state)?;
-    let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
-    ensure_pending_or_postponed(&proposal)?;
-    ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
-    if is_lifemodel_v2_typed_diff(&proposal) || is_legacy_lifemodel_v2_migration(&proposal) {
-        return Err(
-            "LifeModel v2 Proposal requires its schema-aware editor; generic JSON edit is disabled."
-                .into(),
-        );
-    }
-    if is_retired_lifemodel_patch_batch(&proposal) {
-        return Err(
-            "Legacy Builder batch editing is retired; reject it and create a v2 typed LifeModel proposal."
-                .into(),
-        );
-    }
-    if matches!(
-        proposal.proposal_type,
-        ProposalType::LifeModelUpdate
-            | ProposalType::GoalUpdate
-            | ProposalType::StateUpdate
-            | ProposalType::PreferenceUpdate
-            | ProposalType::CapabilityUpdate
-    ) {
-        return Err(
-            "Legacy 4D LifeModel proposal editing is retired; reject it and create a v2 typed LifeModel proposal."
-                .into(),
-        );
-    }
-    canonicalize_proposal_affected_path(&mut proposal);
-    let expected_status = proposal.status;
-    proposal.edit(new_after);
-    update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
-    Ok(serde_json::json!({
-        "success": true,
-        "status": "edited_pending_review",
-        "durable_write_executed": false,
-    }))
-}
-
 pub(crate) async fn edit_lifemodel_learning_proposal_with_state(
     proposal_id: String,
     statement: String,
@@ -4591,33 +4519,6 @@ fn ensure_exact_memory_id(memory_id: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn parse_memory_lifecycle_scope(scope: Option<String>) -> Option<MemoryLifecycleScope> {
-    match scope.as_deref() {
-        Some("global") => Some(MemoryLifecycleScope::Global),
-        Some("workspace") => Some(MemoryLifecycleScope::Workspace),
-        Some("conversation") => Some(MemoryLifecycleScope::Conversation),
-        Some("project") => Some(MemoryLifecycleScope::Project),
-        _ => None,
-    }
-}
-
-fn parse_memory_lifecycle_status(status: Option<String>) -> Option<MemoryLifecycleStatus> {
-    match status.as_deref() {
-        Some("candidate") => Some(MemoryLifecycleStatus::Candidate),
-        Some("pending_review") => Some(MemoryLifecycleStatus::PendingReview),
-        Some("edited_pending_review") => Some(MemoryLifecycleStatus::EditedPendingReview),
-        Some("accepted") => Some(MemoryLifecycleStatus::Accepted),
-        Some("pending_materialization") => Some(MemoryLifecycleStatus::PendingMaterialization),
-        Some("materialized") => Some(MemoryLifecycleStatus::Materialized),
-        Some("materialization_failed") => Some(MemoryLifecycleStatus::MaterializationFailed),
-        Some("rejected") => Some(MemoryLifecycleStatus::Rejected),
-        Some("deferred") => Some(MemoryLifecycleStatus::Deferred),
-        Some("superseded") => Some(MemoryLifecycleStatus::Superseded),
-        Some("rolled_back") => Some(MemoryLifecycleStatus::RolledBack),
-        _ => None,
-    }
-}
-
 pub(crate) async fn rollback_memory_asset_with_state(
     memory_id: String,
     reason: String,
@@ -4629,190 +4530,6 @@ pub(crate) async fn rollback_memory_asset_with_state(
         return Err("rollback_memory_asset requires a rollback reason.".into());
     }
     memory_gateway::rollback_memory_asset_with_state(memory_id, reason.to_string(), state).await
-}
-
-pub(crate) async fn list_memory_assets_with_state(
-    scope: Option<String>,
-    status: Option<String>,
-    limit: i64,
-    offset: i64,
-    state: &Arc<AppState>,
-) -> Result<Vec<MemoryLifecycleRecord>, String> {
-    let lifecycle_store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(memory_lifecycle_store_missing)?;
-    let store = lifecycle_store.lock().await;
-    store
-        .list_records(
-            parse_memory_lifecycle_scope(scope),
-            parse_memory_lifecycle_status(status),
-            limit,
-            offset.max(0),
-        )
-        .map_err(|e| e.to_string())
-}
-
-pub(crate) async fn get_memory_asset_with_state(
-    memory_id: String,
-    state: &Arc<AppState>,
-) -> Result<MemoryLifecycleRecord, String> {
-    ensure_exact_memory_id(&memory_id)?;
-    let lifecycle_store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(memory_lifecycle_store_missing)?;
-    let store = lifecycle_store.lock().await;
-    store
-        .get_record(&memory_id)
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| format!("Memory asset not found: {memory_id}"))
-}
-
-pub(crate) async fn get_memory_lifecycle_events_with_state(
-    memory_id: String,
-    state: &Arc<AppState>,
-) -> Result<serde_json::Value, String> {
-    ensure_exact_memory_id(&memory_id)?;
-    let lifecycle_store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(memory_lifecycle_store_missing)?;
-    let store = lifecycle_store.lock().await;
-    let events = store
-        .lifecycle_events(&memory_id)
-        .map_err(|e| e.to_string())?;
-    serde_json::to_value(events).map_err(|e| e.to_string())
-}
-
-pub(crate) async fn rebuild_memory_materialized_view_with_state(
-    scope: Option<String>,
-    state: &Arc<AppState>,
-) -> Result<serde_json::Value, String> {
-    let view = memory_gateway::rebuild_materialized_memory_view_with_state(
-        parse_memory_lifecycle_scope(scope),
-        state,
-    )
-    .await?;
-    serde_json::to_value(view).map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn get_pending_proposals(
-    limit: i64,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<AgentProposal>, String> {
-    get_pending_proposals_with_state(limit, state.inner()).await
-}
-
-#[tauri::command]
-pub async fn list_proposals(
-    status: Option<String>,
-    proposal_type: Option<String>,
-    risk_level: Option<String>,
-    limit: i64,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<AgentProposal>, String> {
-    reconcile_durable_proposal_projections_with_state(state.inner(), limit.clamp(1, 200)).await?;
-    let status_filter = status.and_then(|s| match s.as_str() {
-        "pending" => Some(ProposalStatus::Pending),
-        "accepted" => Some(ProposalStatus::Accepted),
-        "rejected" => Some(ProposalStatus::Rejected),
-        "edited" => Some(ProposalStatus::Edited),
-        "postponed" => Some(ProposalStatus::Postponed),
-        "expired" => Some(ProposalStatus::Expired),
-        _ => None,
-    });
-
-    let type_filter = proposal_type.and_then(|t| match t.as_str() {
-        "life_model_update" => Some(ProposalType::LifeModelUpdate),
-        "goal_update" => Some(ProposalType::GoalUpdate),
-        "state_update" => Some(ProposalType::StateUpdate),
-        "preference_update" => Some(ProposalType::PreferenceUpdate),
-        "capability_update" => Some(ProposalType::CapabilityUpdate),
-        "memory_write" => Some(ProposalType::MemoryWrite),
-        "memory_archive" => Some(ProposalType::MemoryArchive),
-        "tool_permission" => Some(ProposalType::ToolPermission),
-        "scheduled_task" => Some(ProposalType::ScheduledTask),
-        "external_write_action" => Some(ProposalType::ExternalWriteAction),
-        "model_policy_change" => Some(ProposalType::ModelPolicyChange),
-        "data_export" => Some(ProposalType::DataExport),
-        "schedule_checkin" => Some(ProposalType::ScheduleCheckin),
-        "unsupported" => Some(ProposalType::Unsupported),
-        _ => None,
-    });
-
-    let risk_filter = risk_level.and_then(|r| match r.as_str() {
-        "low" => Some(RiskLevel::Low),
-        "medium" => Some(RiskLevel::Medium),
-        "high" => Some(RiskLevel::High),
-        "critical" => Some(RiskLevel::Critical),
-        _ => None,
-    });
-
-    let store = state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(proposal_store_missing)?;
-    let store = store.lock().await;
-    store
-        .list_proposals_filtered(status_filter, type_filter, risk_filter, limit.clamp(1, 200))
-        .map_err(|e| e.to_string())
-}
-
-#[tauri::command]
-pub async fn batch_accept_low_risk_proposals(
-    proposal_ids: Option<Vec<String>>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<i64, String> {
-    require_persistence_write(state.inner())?;
-    check_safe_mode(state.inner())?;
-    let store = state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(proposal_store_missing)?;
-    let store = store.lock().await;
-
-    // If specific IDs provided, use those; otherwise fall back to all low-risk pending
-    let proposals = if let Some(ids) = proposal_ids {
-        let mut proposals = Vec::new();
-        for id in ids {
-            if let Ok(Some(p)) = store.get_proposal(&id) {
-                if p.status == ProposalStatus::Pending
-                    && p.risk_level == RiskLevel::Low
-                    && !proposal_requires_native_confirmation(&p)
-                {
-                    proposals.push(p);
-                }
-            }
-        }
-        proposals
-    } else {
-        store
-            .list_proposals_filtered(
-                Some(ProposalStatus::Pending),
-                None,
-                Some(RiskLevel::Low),
-                200,
-            )
-            .map_err(|e| e.to_string())?
-            .into_iter()
-            .filter(|proposal| !proposal_requires_native_confirmation(proposal))
-            .collect()
-    };
-    drop(store);
-
-    let mut accepted_count = 0i64;
-    for proposal in proposals {
-        match accept_proposal_with_state_and_confirmation(proposal.id.clone(), state.inner(), None)
-            .await
-        {
-            Ok(_) => accepted_count += 1,
-            Err(e) => eprintln!("Batch accept failed for proposal {}: {}", proposal.id, e),
-        }
-    }
-
-    Ok(accepted_count)
 }
 
 fn proposal_native_confirmation_digest(proposal: &AgentProposal) -> String {
@@ -5081,15 +4798,6 @@ pub(crate) async fn request_artifact_undo_with_state(
 }
 
 #[tauri::command]
-pub async fn edit_proposal(
-    proposal_id: String,
-    new_after: Value,
-    state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
-    edit_proposal_with_state(proposal_id, new_after, state.inner()).await
-}
-
-#[tauri::command]
 pub async fn postpone_proposal(
     proposal_id: String,
     state: State<'_, Arc<AppState>>,
@@ -5104,39 +4812,4 @@ pub async fn rollback_memory_asset(
     state: State<'_, Arc<AppState>>,
 ) -> Result<MemoryRollbackReport, String> {
     rollback_memory_asset_with_state(memory_id, reason, state.inner()).await
-}
-
-#[tauri::command]
-pub async fn list_memory_assets(
-    scope: Option<String>,
-    status: Option<String>,
-    limit: i64,
-    offset: i64,
-    state: State<'_, Arc<AppState>>,
-) -> Result<Vec<MemoryLifecycleRecord>, String> {
-    list_memory_assets_with_state(scope, status, limit, offset, state.inner()).await
-}
-
-#[tauri::command]
-pub async fn get_memory_asset(
-    memory_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<MemoryLifecycleRecord, String> {
-    get_memory_asset_with_state(memory_id, state.inner()).await
-}
-
-#[tauri::command]
-pub async fn get_memory_lifecycle_events(
-    memory_id: String,
-    state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
-    get_memory_lifecycle_events_with_state(memory_id, state.inner()).await
-}
-
-#[tauri::command]
-pub async fn rebuild_memory_materialized_view(
-    scope: Option<String>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<serde_json::Value, String> {
-    rebuild_memory_materialized_view_with_state(scope, state.inner()).await
 }

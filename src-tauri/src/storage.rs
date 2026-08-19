@@ -2,6 +2,7 @@ use crate::errors::AppError;
 #[cfg(test)]
 use once_cell::sync::Lazy as LazyLock;
 use openlife_core::mcp_audit::AuditKeyConfig;
+#[cfg(test)]
 use openlife_core::privacy::PrivacyPolicy;
 #[cfg(test)]
 use std::collections::{HashMap, HashSet};
@@ -242,6 +243,7 @@ pub(crate) fn load_privacy_policy_from_path(path: &std::path::Path) -> PrivacyPo
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 pub(crate) fn save_privacy_policy_to_path(
     path: &std::path::Path,
     policy: &PrivacyPolicy,

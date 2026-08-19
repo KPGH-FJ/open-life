@@ -1,4 +1,4 @@
-use crate::commands::diagnostics::get_system_diagnostics_with_state;
+use crate::read_models::readiness::load_product_readiness;
 use crate::AppState;
 use chrono::Utc;
 use openlife_core::agent::{ProposalStatus, RiskLevel};
@@ -108,7 +108,7 @@ pub async fn get_life_state_projection(
 pub(crate) async fn get_life_state_projection_with_state(
     state: &Arc<AppState>,
 ) -> Result<LifeStateProjection, String> {
-    let diagnostics = get_system_diagnostics_with_state(state)
+    let diagnostics = load_product_readiness(state)
         .await
         .map_err(|err| err.to_string())?;
     let pending = build_pending_projection(state).await;

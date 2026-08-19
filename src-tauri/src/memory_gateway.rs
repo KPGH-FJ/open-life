@@ -13,7 +13,7 @@ use openlife_core::agent::main_chat_agent_v1::{
 use openlife_core::agent::{
     AgentProposal, CanonicalMemoryFactDescriptor, ExplicitMemoryWriteInput,
     ExplicitMemoryWriteReceipt, MainChatMemoryCandidate, MemoryLifecycleAcceptanceInput,
-    MemoryLifecycleScope, MemoryMaterializedView, MemoryPrivacyEraseReport, MemoryRollbackReport,
+    MemoryLifecycleScope, MemoryPrivacyEraseReport, MemoryRollbackReport,
 };
 use openlife_core::embedding::{
     execute_embedding, prepare_embedding_request_recorded, EmbeddingInvocationReceipt,
@@ -3470,21 +3470,6 @@ pub(crate) async fn rollback_explicit_user_memory_for_turn_with_state(
         replayed: false,
         final_active: false,
     })
-}
-
-pub(crate) async fn rebuild_materialized_memory_view_with_state(
-    scope: Option<MemoryLifecycleScope>,
-    state: &Arc<AppState>,
-) -> Result<MemoryMaterializedView, String> {
-    require_persistence_write_string(state)?;
-    let lifecycle_store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(memory_lifecycle_store_missing)?;
-    let store = lifecycle_store.lock().await;
-    store
-        .rebuild_materialized_view(scope)
-        .map_err(|e| e.to_string())
 }
 
 fn memory_lifecycle_store_missing() -> String {

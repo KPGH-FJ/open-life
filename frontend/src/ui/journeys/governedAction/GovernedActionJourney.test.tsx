@@ -149,7 +149,7 @@ describe("Workbench governed action journey", () => {
         providerProfiles: [],
         selectedProviderProfileId: null,
         providerErrorCode: null,
-        workStatus: "ready" as const,
+        workStatus: "available" as const,
       }),
       load: async () => {
         const snapshot = await fixture.load();
@@ -312,7 +312,7 @@ describe("Workbench governed action journey", () => {
         providerProfiles: [],
         selectedProviderProfileId: null,
         providerErrorCode: null,
-        workStatus: "ready" as const,
+        workStatus: "available" as const,
       }),
       load: async () => {
         const snapshot = await fixture.load();

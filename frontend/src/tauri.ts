@@ -309,30 +309,12 @@ export async function recoverRequiredCredentialAccess(): Promise<CredentialRecov
   return safeInvoke<CredentialRecoveryReport>("recover_required_credential_access");
 }
 
-// DEPRECATED: use sendMessageV2 for full trace support
 export interface MainChatMessageOptions {
   operationId: string;
   selectedSkillId?: string;
   mode?: "chat" | "work";
   taskId?: string;
   runId?: string;
-}
-
-export async function sendMessage(
-  sessionId: string,
-  messages: ChatMessage[],
-  options: MainChatMessageOptions
-): Promise<string> {
-  const result = await safeInvoke<SendMessageResult>("send_message", {
-    operationId: options.operationId,
-    ...sessionArgs(sessionId),
-    messages,
-    mode: options.mode ?? "chat",
-    taskId: options.taskId,
-    runId: options.runId,
-    ...selectedSkillArgs(options.selectedSkillId),
-  });
-  return result.reply;
 }
 
 export type ToolCallStatus = "success" | "error" | "pending" | "blocked" | "needs_confirmation";
@@ -562,11 +544,6 @@ export interface ResourceImportSelectionResult {
   receipt: ResourceImportReceipt | null;
 }
 
-export interface ResourceImportStatus {
-  status: "active" | "committed" | "not_found";
-  receipt: ResourceImportReceipt | null;
-}
-
 export interface ResourceDetachReceipt {
   operationId: string;
   messageId: string;
@@ -762,19 +739,6 @@ export interface MainChatSkillSummary {
   lastUsedAt?: string | null;
 }
 
-export interface MainChatSkillDetail {
-  skillId: string;
-  manifest: Record<string, unknown>;
-  boundedInstructionsPreview: string;
-  allowedTools: string[];
-  disallowedTools: string[];
-  policyNotes: string[];
-  requiredPermissions: string[];
-  evidenceDigest: string;
-  redactionSummary: string;
-  lastModifiedAt?: string | null;
-}
-
 export interface MainChatSelectedSkill {
   sessionId: string;
   selectedSkillId?: string | null;
@@ -832,12 +796,6 @@ export async function listMainChatSkills(sessionId?: string): Promise<MainChatSk
   });
 }
 
-export async function getMainChatSkillDetail(skillId: string): Promise<MainChatSkillDetail> {
-  return safeInvoke<MainChatSkillDetail>("get_main_chat_skill_detail", {
-    skillId,
-  });
-}
-
 export async function selectMainChatSkill(
   sessionId: string,
   skillId: string
@@ -864,22 +822,6 @@ export async function listMainChatToolCandidates(
 
 export async function openExternalHttpsSource(url: string): Promise<void> {
   return safeInvoke("open_external_https_source", { url });
-}
-
-export async function sendMessageV2(
-  sessionId: string,
-  messages: ChatMessage[],
-  options: MainChatMessageOptions
-): Promise<SendMessageResult> {
-  return safeInvoke<SendMessageResult>("send_message", {
-    operationId: options.operationId,
-    ...sessionArgs(sessionId),
-    messages,
-    mode: options.mode ?? "chat",
-    taskId: options.taskId,
-    runId: options.runId,
-    ...selectedSkillArgs(options.selectedSkillId),
-  });
 }
 
 export interface CancelChatTurnResult {
@@ -989,18 +931,6 @@ export async function pickAndImportResources(
   return safeInvoke<ResourceImportSelectionResult>("pick_and_import_resources", {
     importOperationId,
     turnOperationId,
-  });
-}
-
-export async function cancelResourceImport(operationId: string): Promise<boolean> {
-  return safeInvoke<boolean>("cancel_resource_import", {
-    operationId,
-  });
-}
-
-export async function getResourceImportStatus(operationId: string): Promise<ResourceImportStatus> {
-  return safeInvoke<ResourceImportStatus>("get_resource_import_status", {
-    operationId,
   });
 }
 
@@ -2316,325 +2246,6 @@ export type MemoryViewModel = {
   contractLimitations: string[];
 };
 
-export interface McpPrivacyFinding {
-  path: string;
-  privacy_type: string;
-  matched: string;
-}
-
-export interface McpArgumentInspection {
-  permission_level: string;
-  pii_found: boolean;
-  findings: McpPrivacyFinding[];
-  sanitized_arguments: Record<string, any>;
-  requires_confirmation: boolean;
-}
-
-export async function inspectMcpCall(
-  name: string,
-  arguments_: Record<string, any>
-): Promise<McpArgumentInspection> {
-  return safeInvoke<McpArgumentInspection>("inspect_mcp_call", { name, arguments: arguments_ });
-}
-
-export async function registerMcpServer(
-  name: string,
-  command: string,
-  args: string[],
-  manifests: ToolManifest[],
-  env?: Record<string, string>
-): Promise<void> {
-  return safeInvoke("register_mcp_server", { name, command, args, env, manifests });
-}
-
-export async function unregisterMcpServer(name: string): Promise<void> {
-  return safeInvoke("unregister_mcp_server", { name });
-}
-
-export interface McpServerInfo {
-  name: string;
-  command: string;
-  args: string[];
-  tool_count: number;
-}
-
-export interface McpAuditLogEntry {
-  id: number;
-  tool_name: string;
-  arguments: string;
-  result: string;
-  success: boolean;
-  pii_found: boolean;
-  created_at: string;
-}
-
-export async function listMcpServers(): Promise<McpServerInfo[]> {
-  return safeInvoke<McpServerInfo[]>("list_mcp_servers");
-}
-
-export async function listMcpAuditLogs(limit = 20): Promise<McpAuditLogEntry[]> {
-  return safeInvoke<McpAuditLogEntry[]>("list_mcp_audit_logs", { limit });
-}
-
-export async function clearMcpAuditLogs(days: number): Promise<number> {
-  return safeInvoke<number>("clear_mcp_audit_logs", { days });
-}
-
-export async function listMcpTools(): Promise<any[]> {
-  return safeInvoke<any[]>("list_mcp_tools");
-}
-
-export async function listToolManifests(): Promise<ToolManifest[]> {
-  return safeInvoke<ToolManifest[]>("list_tool_manifests");
-}
-
-export interface McpTemplate {
-  id: string;
-  name: string;
-  description: string;
-  command: string;
-  args: string[];
-  required_args: string[];
-  arg_labels?: Record<string, string>;
-  env?: Record<string, string>;
-  manifests?: ToolManifest[];
-  tags?: string[];
-}
-
-export async function listMcpTemplates(): Promise<McpTemplate[]> {
-  return safeInvoke<McpTemplate[]>("list_mcp_templates");
-}
-
-export interface ToolManifest {
-  id: string;
-  name: string;
-  description: string;
-  parameters: any;
-  permission_level: string;
-  risk_level: string;
-  version: string;
-  source: { type: "BuiltIn" } | { type: "Mcp"; server_name: string };
-  capabilities: string[];
-  requires_confirmation: boolean;
-  enabled: boolean;
-  declarative_only: boolean;
-  action_type: string;
-  idempotency_contract: ToolIdempotencyContract;
-  tags: string[];
-}
-
-export async function runMemoryTierMaintenance(): Promise<{
-  promoted: number;
-  demoted: number;
-}> {
-  return safeInvoke("run_memory_tier_maintenance");
-}
-
-export async function countMemoryChunks(): Promise<number> {
-  return safeInvoke("count_memory_chunks");
-}
-
-export async function rebuildMemoryIndex(
-  confirmationEvidence?: DangerActionConfirmationEvidence
-): Promise<{
-  processed: number;
-  indexed: number;
-  skipped: number;
-  embeddingProfileId?: string | null;
-  embeddingProfileRoute?: string | null;
-  embeddingDimension?: number | null;
-  providerInvocations?: number;
-  cacheHits?: number;
-}> {
-  return safeInvoke("rebuild_memory_index", {
-    ...(confirmationEvidence ? { confirmationEvidence } : {}),
-  });
-}
-
-export async function createKnowledgeNote(
-  sessionId: string,
-  content: string,
-  source: string,
-  operationId: string
-): Promise<{
-  operationId: string;
-  replayed: boolean;
-  embeddingId?: number;
-  embeddingProfile?: {
-    id: string;
-    route: "unknown" | "cloud" | "ollama" | "deterministic_hash";
-    provider: string;
-    model: string;
-    deploymentIdentity: string;
-    modelArtifactIdentity: string;
-    dimension: number;
-  };
-  embeddingReceipt?: {
-    requestId: string;
-    route: "unknown" | "cloud" | "ollama" | "deterministic_hash";
-    profileId: string;
-    status: "not_attempted" | "completed" | "failed";
-    source: string;
-    routeReasonCode: string;
-    cacheHit: boolean;
-    errorDigest?: string | null;
-    providerDispatches: Array<{
-      kind: "model_manifest" | "embedding";
-      startedAt: string;
-    }>;
-  };
-  knowledgeNoteId: number;
-  outboxEventId: string;
-  canonicalCommitted: boolean;
-  projectionState: "pending" | "degraded" | "applied" | "superseded" | "compensated";
-  projectionErrorDigest?: string;
-}> {
-  return safeInvoke("create_knowledge_note", {
-    ...sessionArgs(sessionId),
-    content,
-    source,
-    operationId,
-  });
-}
-
-export async function searchMemory(
-  query: string,
-  topK: number
-): Promise<{
-  hits: Array<{
-    chunk: { id: number; session_id: string; content: string; source: string; created_at: string };
-    score: number;
-  }>;
-  embeddingProfile: {
-    id: string;
-    route: "unknown" | "cloud" | "ollama" | "deterministic_hash";
-    provider: string;
-    model: string;
-    deploymentIdentity: string;
-    modelArtifactIdentity: string;
-    dimension: number;
-  };
-  embeddingReceipt: {
-    requestId: string;
-    route: "unknown" | "cloud" | "ollama" | "deterministic_hash";
-    profileId: string;
-    status: "not_attempted" | "completed" | "failed";
-    source: string;
-    routeReasonCode: string;
-    cacheHit: boolean;
-    errorDigest?: string | null;
-    providerDispatches: Array<{
-      kind: "model_manifest" | "embedding";
-      startedAt: string;
-    }>;
-  };
-  vectorStatus: "ready" | "rebuild_required" | "embedding_failed" | "vector_search_failed";
-  routeQuality:
-    | "semantic_model_verified"
-    | "deterministic_hash_approximation"
-    | "identity_unknown"
-    | "unavailable";
-  rebuild?: {
-    expectedProfileId: string;
-    expectedDimension: number;
-    incompatibleProfiles: string[];
-    unknownProfileCount: number;
-    profileMismatchCount: number;
-    dimensionMismatchCount: number;
-    corruptEmbeddingCount: number;
-  };
-  degradedEvidence?: {
-    reasonCode: string;
-    errorDigest?: string | null;
-  };
-}> {
-  const raw: {
-    hits: Array<[any, number]>;
-    embeddingProfile: any;
-    embeddingReceipt: any;
-    vectorStatus: "ready" | "rebuild_required" | "embedding_failed" | "vector_search_failed";
-    routeQuality:
-      | "semantic_model_verified"
-      | "deterministic_hash_approximation"
-      | "identity_unknown"
-      | "unavailable";
-    rebuild?: any;
-    degradedEvidence?: any;
-  } = await safeInvoke("search_memory", {
-    query,
-    topK,
-  });
-  return {
-    ...raw,
-    hits: raw.hits.map(([chunk, score]) => ({ chunk, score })),
-  };
-}
-
-export type DangerActionType =
-  | "mcp_audit_export"
-  | "mcp_audit_cleanup"
-  | "mcp_audit_key_rotation"
-  | "vector_rebuild";
-
-export interface DangerActionPreflightView {
-  actionType: DangerActionType;
-  riskTier: "medium" | "high" | "critical" | string;
-  scopeSummary: string;
-  dataCategories: string[];
-  writesDurableState: boolean;
-  privacySensitive: boolean;
-  externalTransmission: "not_sent_externally" | "sent_externally" | "unknown" | string;
-  dryRunAvailable: boolean;
-  backupStatus: string;
-  requiresTypedConfirmation: boolean;
-  confirmationRequired: boolean;
-  confirmationPhrase?: string | null;
-  confirmationScopeDigest: string;
-  preflightId: string;
-  affectedItemCount: number;
-  affectedItemDigest: string;
-  finalActionEnabled: boolean;
-  safeModeBlocked: boolean;
-  blockingReasons: string[];
-  sourceRefs: string[];
-}
-
-export interface DangerActionConfirmationEvidence {
-  actionType: DangerActionType;
-  preflightId: string;
-  confirmationPhrase: string;
-  confirmationScopeDigest: string;
-  safeMode: boolean;
-  targetIds: string[];
-}
-
-export function buildDangerActionConfirmationEvidence(
-  view: DangerActionPreflightView,
-  targetIds: string[] = []
-): DangerActionConfirmationEvidence {
-  return {
-    actionType: view.actionType,
-    preflightId: view.preflightId,
-    confirmationPhrase: view.confirmationPhrase ?? "",
-    confirmationScopeDigest: view.confirmationScopeDigest,
-    safeMode: view.safeModeBlocked,
-    targetIds,
-  };
-}
-
-export async function getDangerActionPreflight(
-  actionType: DangerActionType,
-  safeMode: boolean,
-  options: { targetIds?: string[]; affectedCount?: number } = {}
-): Promise<DangerActionPreflightView> {
-  return safeInvoke<DangerActionPreflightView>("get_danger_action_preflight", {
-    actionType,
-    safeMode,
-    ...(options.targetIds ? { targetIds: options.targetIds } : {}),
-    ...(options.affectedCount !== undefined ? { affectedCount: options.affectedCount } : {}),
-  });
-}
-
 export interface LlmConnectionTestResult {
   ok: boolean;
   provider: string;
@@ -2710,7 +2321,7 @@ export interface ConversationViewModel {
   providerProfiles: ProviderProfileViewModel[];
   selectedProviderProfileId: string | null;
   providerErrorCode: string | null;
-  workStatus: "reconstructing" | "ready";
+  workStatus: "available" | "unavailable";
 }
 
 export async function getConversationViewModel(
@@ -2756,23 +2367,6 @@ export interface CanonicalMemoryOwner {
   ownerId: string;
 }
 
-export interface LowAccessCanonicalMemoryCandidate {
-  owner: CanonicalMemoryOwner;
-  tier: number;
-  accessCount: number;
-  lastAccessedAt?: string;
-  importanceScore: number;
-  candidateOnly: boolean;
-}
-
-export interface ArchivedCanonicalMemoryView {
-  owner: CanonicalMemoryOwner;
-  revision: number;
-  lastEventId: string;
-  changedAt: string;
-  canonicalDisposition: string;
-}
-
 export interface MemoryRetrievalMutationResult {
   owner: CanonicalMemoryOwner;
   disposition: string;
@@ -2784,93 +2378,10 @@ export interface MemoryRetrievalMutationResult {
   projectionErrorDigest?: string;
 }
 
-export interface TierStats {
-  total: number;
-  tier1: number;
-  tier2: number;
-  tier3: number;
-  archived: number;
-}
-
-export async function getLowAccessMemoryCandidates(): Promise<LowAccessCanonicalMemoryCandidate[]> {
-  return safeInvoke<LowAccessCanonicalMemoryCandidate[]>("archive_low_access_memories");
-}
-
 export async function restoreArchivedMemory(
   owner: CanonicalMemoryOwner
 ): Promise<MemoryRetrievalMutationResult> {
   return safeInvoke<MemoryRetrievalMutationResult>("restore_archived_chunks", { owner });
-}
-
-export async function listArchivedChunks(limit: number): Promise<ArchivedCanonicalMemoryView[]> {
-  return safeInvoke<ArchivedCanonicalMemoryView[]>("list_archived_chunks", { limit });
-}
-
-export async function getMemoryTierStats(): Promise<TierStats> {
-  return safeInvoke<TierStats>("get_memory_tier_stats");
-}
-
-// ── Milestone D: MCP Audit Export / Cleanup ──
-export interface ExportedAuditEntry {
-  id: number;
-  tool_name: string;
-  arguments: string;
-  result: string;
-  success: boolean;
-  created_at: string;
-  pii_found: boolean;
-}
-
-export interface AuditExport {
-  exported_at: string;
-  entry_count: number;
-  days: number;
-  entries: ExportedAuditEntry[];
-}
-
-export async function exportMcpAuditLogs(days: number): Promise<AuditExport> {
-  return safeInvoke<AuditExport>("export_mcp_audit_logs", { days });
-}
-
-export async function cleanupMcpAuditLogs(
-  retentionDays: number,
-  confirmationEvidence?: DangerActionConfirmationEvidence
-): Promise<number> {
-  return safeInvoke<number>("cleanup_mcp_audit_logs", {
-    retentionDays,
-    ...(confirmationEvidence ? { confirmationEvidence } : {}),
-  });
-}
-
-export async function rotateMcpAuditKey(
-  confirmationEvidence?: DangerActionConfirmationEvidence
-): Promise<void> {
-  return safeInvoke("rotate_mcp_audit_key", {
-    ...(confirmationEvidence ? { confirmationEvidence } : {}),
-  });
-}
-
-// ── Milestone D: Configurable Privacy Policy ──
-export type PrivacyAction = "Mask" | "Block" | "Allow";
-
-export interface PrivacyRule {
-  ptype: string;
-  enabled: boolean;
-  action: PrivacyAction;
-  custom_pattern?: string;
-}
-
-export interface PrivacyPolicy {
-  rules: PrivacyRule[];
-  enabled: boolean;
-}
-
-export async function getPrivacyPolicy(): Promise<PrivacyPolicy> {
-  return safeInvoke<PrivacyPolicy>("get_privacy_policy");
-}
-
-export async function setPrivacyPolicy(policy: PrivacyPolicy): Promise<void> {
-  return safeInvoke("set_privacy_policy", { policy });
 }
 
 export interface ProductModelRouteTrace {
@@ -2918,76 +2429,6 @@ export interface ToolActionScope extends ProductToolActionScope {
   actionType?: string;
   requiresConfirmation?: boolean;
   allowed?: boolean;
-}
-
-export type ToolPermissionPolicy =
-  | "allow"
-  | "deny"
-  | "ask_every_time"
-  | "allow_once"
-  | "allow_until_revoked";
-
-export interface ToolPermissionRecord {
-  id: string;
-  toolName: string;
-  source: string;
-  riskLevel: string;
-  actionType: string;
-  policy: ToolPermissionPolicy;
-  createdAt: string;
-  expiresAt?: string;
-  consumedAt?: string;
-}
-
-export interface ToolPermissionDecision {
-  allowed: boolean;
-  requiresConfirmation: boolean;
-  decision: string;
-  reason: string;
-  policyId?: string;
-}
-
-export async function listToolPermissions(): Promise<ToolPermissionRecord[]> {
-  return safeInvoke<ToolPermissionRecord[]>("list_tool_permissions");
-}
-
-export async function revokeToolPermission(permissionId: string): Promise<boolean> {
-  return safeInvoke<boolean>("revoke_tool_permission", {
-    permissionId,
-  });
-}
-
-export interface SkillManifest {
-  id: string;
-  name: string;
-  description: string;
-  requiredContext: string[];
-  allowedTools: string[];
-  executionBudget: {
-    maxSteps: number;
-    maxToolCalls: number;
-    timeoutSeconds: number;
-    allowCloud: boolean;
-    allowWrites: boolean;
-  };
-  inputSchema?: any;
-  outputSchema: any;
-  proposalPolicy: string;
-  executionStatus?:
-    | "executable_built_in"
-    | "disabled_declarative_only"
-    | "model_only_no_tools"
-    | "blocked";
-  capabilityFlags?: string[];
-}
-
-export async function listProposals(
-  status?: string,
-  proposalType?: string,
-  riskLevel?: string,
-  limit: number = 50
-): Promise<AgentProposal[]> {
-  return safeInvoke<AgentProposal[]>("list_proposals", { status, proposalType, riskLevel, limit });
 }
 
 export async function getReviewCenterViewModel(): Promise<
@@ -3107,62 +2548,6 @@ export async function getWorkspaceViewModel(
   });
 }
 
-export async function batchAcceptLowRiskProposals(proposalIds?: string[]): Promise<number> {
-  return safeInvoke<number>("batch_accept_low_risk_proposals", { proposalIds });
-}
-
-// ── Proposal ──
-export type ProposalStatus =
-  | "pending"
-  | "accepted"
-  | "rejected"
-  | "edited"
-  | "postponed"
-  | "expired";
-export type ProposalType =
-  | "goal_update"
-  | "state_update"
-  | "preference_update"
-  | "capability_update"
-  | "memory_write"
-  | "memory_archive"
-  | "tool_permission"
-  | "scheduled_task"
-  | "external_write_action"
-  | "model_policy_change"
-  | "data_export"
-  | "schedule_checkin"
-  | "unsupported"
-  | "life_model_update";
-export type RiskLevel = "low" | "medium" | "high" | "critical";
-export type ProposalSource =
-  | "builder_review"
-  | "calibration_run"
-  | "feedback_evolution"
-  | "memory_governance"
-  | "skill_runtime"
-  | "manual"
-  | "chat_conversation"
-  | "planning_session";
-
-export interface AgentProposal {
-  id: string;
-  runId?: string;
-  proposalType: ProposalType;
-  source: ProposalSource;
-  sourceDetail?: string;
-  affectedPath: string;
-  before?: any;
-  after: any;
-  reason: string;
-  confidence: number;
-  riskLevel: RiskLevel;
-  status: ProposalStatus;
-  createdAt: string;
-  resolvedAt?: string;
-  expiresAt?: string;
-}
-
 export interface MemoryLifecycleRecord {
   memoryId: string;
   proposalId: string;
@@ -3258,20 +2643,6 @@ export interface MemoryActionProposalReceipt {
   memoryId: string;
   action: "correct" | "stop_recall" | "archive";
   status: "review_required";
-}
-
-export interface MemoryProposalDraftEditReport {
-  proposalId: string;
-  draftOnly: boolean;
-  durableWriteExecuted: boolean;
-  originalProvenancePreserved: boolean;
-  status: string;
-  beforeDigest: string;
-  afterDigest: string;
-}
-
-export async function getPendingProposals(limit: number = 50): Promise<AgentProposal[]> {
-  return safeInvoke<AgentProposal[]>("get_pending_proposals", { limit });
 }
 
 export interface PatchApplyResult {
@@ -3375,26 +2746,6 @@ export async function privacyEraseMemoryAsset(memoryId: string): Promise<MemoryP
   return safeInvoke("privacy_erase_memory_asset", { memoryId });
 }
 
-export async function listMemoryAssets(
-  options: {
-    scope?: string;
-    status?: string;
-    limit?: number;
-    offset?: number;
-  } = {}
-): Promise<MemoryLifecycleRecord[]> {
-  return safeInvoke("list_memory_assets", {
-    scope: options.scope,
-    status: options.status,
-    limit: options.limit ?? 100,
-    offset: options.offset ?? 0,
-  });
-}
-
-export async function getMemoryAsset(memoryId: string): Promise<MemoryLifecycleRecord> {
-  return safeInvoke("get_memory_asset", { memoryId });
-}
-
 export async function rejectProposal(proposalId: string): Promise<void> {
   return safeInvoke("reject_proposal", { proposalId });
 }
@@ -3406,26 +2757,6 @@ export async function requestArtifactUndo(artifactId: string): Promise<{
 }> {
   return safeInvoke("request_artifact_undo", {
     artifactId,
-  });
-}
-
-export async function editProposal(
-  proposalId: string,
-  newAfter: any
-): Promise<{ success: boolean; patchResult: PatchApplyResult }> {
-  return safeInvoke("edit_proposal", {
-    proposalId,
-    newAfter,
-  });
-}
-
-export async function draftEditMemoryProposal(
-  proposalId: string,
-  newAfter: any
-): Promise<MemoryProposalDraftEditReport> {
-  return safeInvoke("draft_edit_memory_proposal", {
-    proposalId,
-    newAfter,
   });
 }
 

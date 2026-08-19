@@ -588,7 +588,7 @@ export function workbenchJourneyFixtureDataSource(
         providerProfiles: [],
         selectedProviderProfileId: null,
         providerErrorCode: null,
-        workStatus: "ready",
+        workStatus: "available",
       };
     },
     async createSession(sessionId, title) {

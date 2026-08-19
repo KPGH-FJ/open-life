@@ -23,7 +23,7 @@ function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationContr
       selectedProfileId: null,
       errorCode: null,
     },
-    workStatus: "ready",
+    workStatus: "available",
     sessionMutation: { phase: "idle" },
     pendingResources: [],
     pendingResourceTurnOperationId: null,

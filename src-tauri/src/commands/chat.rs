@@ -30,8 +30,7 @@ pub struct ConversationViewModel {
     pub provider_profiles: Vec<crate::provider_registry::ProviderProfileViewModel>,
     pub selected_provider_profile_id: Option<String>,
     pub provider_error_code: Option<String>,
-    /// R1 intentionally keeps the retired Work runtime out of the product UI.
-    /// R2 changes this only after Task/Run/ItemAttempt is canonical end to end.
+    /// Product availability of the canonical Work runtime.
     pub work_status: String,
 }
 
@@ -146,9 +145,9 @@ pub(crate) async fn get_conversation_view_model_with_state(
         selected_provider_profile_id,
         provider_error_code,
         work_status: if state.canonical_task_runtime_store.is_some() {
-            "ready".into()
+            "available".into()
         } else {
-            "reconstructing".into()
+            "unavailable".into()
         },
     })
 }

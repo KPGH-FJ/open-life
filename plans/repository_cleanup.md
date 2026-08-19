@@ -2,7 +2,7 @@
 
 Status: active
 
-Current slice: C3 - release and dev boundaries. C0-C2 are complete.
+Current slice: C4 - Workbench read model. C0-C3 are complete.
 
 ## Objective
 

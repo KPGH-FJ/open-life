@@ -62,7 +62,7 @@ function source(overrides: Partial<WorkspaceConversationTestSource> = {}) {
         providerProfiles: [],
         selectedProviderProfileId: null,
         providerErrorCode: null,
-        workStatus: "ready",
+        workStatus: "available",
       };
     });
   const dataSource: WorkspaceConversationTestSource = {
@@ -1124,7 +1124,7 @@ describe("workspace conversation journey", () => {
       providerProfiles: [],
       selectedProviderProfileId: null,
       providerErrorCode: null,
-      workStatus: "ready" as const,
+      workStatus: "available" as const,
     });
     const loadConversation = vi
       .fn()

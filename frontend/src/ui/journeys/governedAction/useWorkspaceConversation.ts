@@ -29,7 +29,7 @@ export type WorkspaceConversationProviderState = {
   selectedProfileId: string | null;
   errorCode: string | null;
 };
-export type WorkspaceConversationWorkStatus = "unknown" | "reconstructing" | "ready";
+export type WorkspaceConversationWorkStatus = "unknown" | "available" | "unavailable";
 export type WorkspaceSessionMutationState =
   | { phase: "idle" }
   | { phase: "renaming"; sessionId: string }
@@ -333,7 +333,7 @@ export function useWorkspaceConversation(
   }, [dataSource]);
 
   useEffect(() => {
-    if (!dataSource?.loadMarkdownMemory || mode !== "work" || workStatus !== "ready") {
+    if (!dataSource?.loadMarkdownMemory || mode !== "work" || workStatus !== "available") {
       setMarkdownMemory({ phase: "loading", model: null });
       return;
     }
@@ -451,7 +451,7 @@ export function useWorkspaceConversation(
 
     setCapabilityState({ phase: "loading" });
     const shouldLoadWorkTools =
-      mode === "work" && workStatus === "ready" && Boolean(dataSource.listToolCandidates);
+      mode === "work" && workStatus === "available" && Boolean(dataSource.listToolCandidates);
     void Promise.all([
       dataSource.listSkills(selectedSessionId ?? undefined),
       shouldLoadWorkTools
@@ -838,8 +838,8 @@ export function useWorkspaceConversation(
               ? "上一轮仍在发送或核对。"
               : !trimmedDraft
                 ? "先输入要发送的内容。"
-                : mode === "work" && workStatus !== "ready"
-                  ? "Work 正在按新任务架构重建，当前尚不可交办。"
+                : mode === "work" && workStatus !== "available"
+                  ? "Work 的 canonical runtime 当前不可用。"
                   : mode === "chat" && provider.status === "unavailable"
                     ? "当前选择的模型不可用；请先在设置中完成模型配置。"
                     : undefined);
