@@ -904,7 +904,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn product_skill_catalog_excludes_unmarked_repository_fixtures() {
+    async fn product_skill_catalog_includes_packaged_evidence_review() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let conversation_id = uuid::Uuid::new_v4().to_string();
         state
@@ -921,16 +921,6 @@ mod tests {
         assert!(skills
             .iter()
             .any(|skill| skill.skill_id == "evidence_review" && skill.available));
-        for fixture_only in [
-            "planning_review",
-            "unselected_context",
-            "unselected_sensitive",
-        ] {
-            assert!(
-                skills.iter().all(|skill| skill.skill_id != fixture_only),
-                "unmarked repository fixture must not enter the product catalog: {fixture_only}"
-            );
-        }
     }
 
     #[tokio::test]

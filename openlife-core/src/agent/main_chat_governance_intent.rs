@@ -913,7 +913,7 @@ mod tests {
     #[test]
     fn main_chat_governance_intent_blocks_external_destination_publish() {
         let intent = extract_main_chat_intent_signals(
-            "Publish the seeded `dogfood/policy_note.md` to a sensitive external destination named in the write-like action seed.",
+            "Publish `policy-note.md` to a sensitive external destination named in the write-like action request.",
         );
 
         assert_eq!(
