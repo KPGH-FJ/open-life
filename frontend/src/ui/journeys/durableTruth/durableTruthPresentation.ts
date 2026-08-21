@@ -113,7 +113,6 @@ export function durableLifecyclePresentation(
   }
   if (!item) {
     const lifeModel = snapshot.lifeModelEnvelope.data;
-    const memory = snapshot.memoryEnvelope.data;
     const unresolvedLifeModelReferences = Boolean(
       (lifeModel?.pendingUpdateCounts.candidate ?? 0) > 0 ||
       (lifeModel?.pendingUpdateCounts.pendingReview ?? 0) > 0 ||
@@ -122,15 +121,7 @@ export function durableLifecyclePresentation(
       (lifeModel?.candidateChanges.length ?? 0) > 0 ||
       (lifeModel?.relatedReviewItemRefs.length ?? 0) > 0
     );
-    const unresolvedMemoryReferences = Boolean(
-      (memory?.summary.reviewRequiredCount ?? 0) > 0 ||
-      (memory?.summary.pendingMaterializationCount ?? 0) > 0 ||
-      (memory?.summary.failedMaterializationCount ?? 0) > 0 ||
-      (memory?.reviewItemRefs.length ?? 0) > 0
-    );
-    const unresolvedReferences =
-      (owner !== "memory" && unresolvedLifeModelReferences) ||
-      (owner !== "life_model" && unresolvedMemoryReferences);
+    const unresolvedReferences = owner !== "memory" && unresolvedLifeModelReferences;
     if (unresolvedReferences) {
       return {
         lifecycle: "unknown",

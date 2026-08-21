@@ -31,11 +31,15 @@ describe("OpenLife product shell", () => {
     expect(screen.queryByRole("button", { name: /^任务/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^审核中心/ })).not.toBeInTheDocument();
 
-    const resultsHeading = await screen.findByRole("heading", { name: "Work 进度与结果" });
+    const resultsHeading = await screen.findByRole("heading", { name: "进度与结果" });
     expect(resultsHeading).toBeInTheDocument();
+    expect(screen.getByTestId("conversation-workbench")).toHaveClass(
+      "ol-conversation-workbench-layout--with-results"
+    );
     const inlineCheckpoint = await screen.findByRole("region", {
       name: "当前 Work 的决定节点",
     });
+    expect(screen.queryByLabelText("审核项列表")).not.toBeInTheDocument();
     expect(
       inlineCheckpoint.compareDocumentPosition(resultsHeading) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
@@ -43,6 +47,64 @@ describe("OpenLife product shell", () => {
     expect(
       await screen.findByRole("heading", { name: "读取本地客户访谈记录", level: 2 })
     ).toBeInTheDocument();
+  });
+
+  it("shows a completed answer Work in Results even when it has no file artifact", async () => {
+    const fixture = workbenchJourneyFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      load: async () => {
+        const snapshot = await fixture.load();
+        const baseTask = snapshot.tasksEnvelope.data!.items[0];
+        const answerTask = {
+          ...baseTask,
+          lifecycleStatus: "completed" as const,
+          terminalDeliveryStatus: "delivered" as const,
+          finalDeliveryEvidencePresent: true,
+          artifacts: [],
+          pendingBlockers: [],
+          pendingReviewItemRefs: [],
+          allowedControls: [],
+          latestResultPreview: {
+            status: "delivered" as const,
+            label: "最终回答已交付",
+            preview: "STAGE6-PROJECT-ALPHA-SCOPED 已完成内部复核。",
+            evidenceRefs: baseTask.evidenceRefs,
+          },
+        };
+        return {
+          ...snapshot,
+          tasksEnvelope: {
+            ...snapshot.tasksEnvelope,
+            data: {
+              ...snapshot.tasksEnvelope.data!,
+              items: [answerTask],
+            },
+          },
+          workspaceEnvelope: {
+            ...snapshot.workspaceEnvelope,
+            data: {
+              ...snapshot.workspaceEnvelope.data!,
+              tasks: [answerTask],
+              activeTask: answerTask,
+            },
+          },
+        };
+      },
+    };
+
+    render(
+      <ProductWorkbenchJourney
+        dataSource={dataSource}
+        governedActionDataSource={dataSource}
+        workspaceConversationDataSource={dataSource}
+      />
+    );
+
+    expect(await screen.findByTestId("canonical-task-answer")).toHaveTextContent(
+      "STAGE6-PROJECT-ALPHA-SCOPED 已完成内部复核。"
+    );
+    expect(screen.queryByText("这项工作还没有可交付的结果。")).not.toBeInTheDocument();
   });
 
   it("opens a LifeModel checkpoint inline without restoring a separate Review page", async () => {
@@ -150,7 +212,7 @@ describe("OpenLife product shell", () => {
         name: /查询官网标题.*需要处理：所需资料当前不可访问/,
       })
     ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Work 进度与结果" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "进度与结果" })).toBeInTheDocument();
     expect(screen.queryByText("当前没有可展示的任务。")).not.toBeInTheDocument();
   });
 

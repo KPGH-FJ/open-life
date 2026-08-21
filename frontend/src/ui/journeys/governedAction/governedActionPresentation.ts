@@ -195,7 +195,7 @@ export function workspaceInspector(
 ): WorkbenchInspectorModel {
   if (!snapshot) {
     return {
-      title: "工作区状态依据",
+      title: "工作区详情",
       conclusion: "正在读取当前任务。",
       risk: "读取完成前不开放审核或任务控制。",
       nextAction: "等待后端读模型返回。",
@@ -218,7 +218,7 @@ export function workspaceInspector(
     task && model?.pendingReviewItems.find(item => item.type === "tool_permission");
 
   return {
-    title: task?.title ?? "工作区状态依据",
+    title: task?.title ?? "工作区详情",
     conclusion:
       snapshot.workspaceEnvelope.status === "error"
         ? "WorkspaceViewModel 未能建立，当前没有可执行产品结论。"
@@ -273,7 +273,7 @@ export function reviewInspector(
 ): WorkbenchInspectorModel {
   if (!snapshot) {
     return {
-      title: "审核状态依据",
+      title: "审核详情",
       conclusion: "正在读取审核项。",
       risk: "读取完成前不开放决定动作。",
       nextAction: "等待后端读模型返回。",
@@ -290,7 +290,7 @@ export function reviewInspector(
   ]);
 
   return {
-    title: item?.decisionContext.title ?? "审核状态依据",
+    title: item?.decisionContext.title ?? "审核详情",
     conclusion: item
       ? item.status === "approved"
         ? item.type === "tool_permission"

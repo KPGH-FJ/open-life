@@ -145,6 +145,10 @@ fn sha256_bytes(bytes: &[u8]) -> String {
     format!("sha256:{:x}", hasher.finalize())
 }
 
+pub(crate) fn artifact_content_digest(bytes: &[u8]) -> String {
+    sha256_bytes(bytes)
+}
+
 fn file_digest(path: &Path) -> Result<Option<String>, String> {
     match std::fs::symlink_metadata(path) {
         Ok(metadata) if metadata.file_type().is_symlink() => Err(format!(
@@ -175,6 +179,12 @@ fn media_type_for_path(path: &Path) -> &'static str {
     {
         Some("md" | "markdown") => "text/markdown; charset=utf-8",
         Some("csv") => "text/csv; charset=utf-8",
+        Some("html" | "htm") => "text/html; charset=utf-8",
+        Some("json") => "application/json; charset=utf-8",
+        Some("pdf") => "application/pdf",
+        Some("docx") => "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        Some("xlsx") => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Some("pptx") => "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         _ => "text/plain; charset=utf-8",
     }
 }
@@ -257,6 +267,26 @@ pub(crate) fn prepare_artifact_materialization_with_precondition_for_artifact(
     safe_paths: &[String],
     target_precondition: ArtifactTargetPrecondition,
 ) -> Result<PreparedArtifactMaterialization, String> {
+    prepare_artifact_materialization_with_precondition_for_artifact_bytes(
+        artifact_id,
+        proposal_id,
+        dispatch_claim_id,
+        path,
+        content.as_bytes(),
+        safe_paths,
+        target_precondition,
+    )
+}
+
+pub(crate) fn prepare_artifact_materialization_with_precondition_for_artifact_bytes(
+    artifact_id: &str,
+    proposal_id: &str,
+    dispatch_claim_id: &str,
+    path: &str,
+    content: &[u8],
+    safe_paths: &[String],
+    target_precondition: ArtifactTargetPrecondition,
+) -> Result<PreparedArtifactMaterialization, String> {
     if artifact_id.trim().is_empty() || artifact_id.len() > 512 || artifact_id.contains('\0') {
         return Err("Artifact identity is invalid.".into());
     }
@@ -284,7 +314,7 @@ pub(crate) fn prepare_artifact_materialization_with_precondition_for_artifact(
     }
     let target_reference = target_path.to_string_lossy().into_owned();
     let target_reference_digest = metadata_safe_text_digest(&target_reference).1;
-    let content_digest = sha256_bytes(content.as_bytes());
+    let content_digest = sha256_bytes(content);
     let stage_identity = metadata_safe_text_digest(&format!(
         "{proposal_id}\0{dispatch_claim_id}\0{target_reference_digest}"
     ))
@@ -583,7 +613,14 @@ pub(crate) fn stage_artifact_bytes(
     prepared: &PreparedArtifactMaterialization,
     content: &str,
 ) -> Result<(), ArtifactFilesystemFailure> {
-    if sha256_bytes(content.as_bytes()) != prepared.content_digest
+    stage_artifact_raw_bytes(prepared, content.as_bytes())
+}
+
+pub(crate) fn stage_artifact_raw_bytes(
+    prepared: &PreparedArtifactMaterialization,
+    content: &[u8],
+) -> Result<(), ArtifactFilesystemFailure> {
+    if sha256_bytes(content) != prepared.content_digest
         || content.len() as u64 != prepared.byte_size
     {
         return Err(ArtifactFilesystemFailure::FailedBeforeEffect(
@@ -620,9 +657,7 @@ pub(crate) fn stage_artifact_bytes(
             )))
         }
     };
-    let stage_result = stage
-        .write_all(content.as_bytes())
-        .and_then(|_| stage.sync_all());
+    let stage_result = stage.write_all(content).and_then(|_| stage.sync_all());
     drop(stage);
     if let Err(error) = stage_result {
         return match std::fs::remove_file(&prepared.stage_path) {
@@ -876,6 +911,34 @@ mod tests {
                 observed_content_digest: prepared.content_digest.clone()
             }
         );
+    }
+
+    #[test]
+    fn binary_artifact_uses_the_same_staging_and_digest_contract() {
+        let directory = tempfile::tempdir().unwrap();
+        let safe_root = directory.path().canonicalize().unwrap();
+        let safe_paths = vec![safe_root.to_string_lossy().into_owned()];
+        let target = safe_root.join("brief.docx");
+        let content = b"PK\x03\x04\0OPENLIFE_BINARY_SENTINEL";
+        let prepared = prepare_artifact_materialization_with_precondition_for_artifact_bytes(
+            "artifact:binary",
+            "proposal-binary",
+            "claim-binary",
+            &target.to_string_lossy(),
+            content,
+            &safe_paths,
+            ArtifactTargetPrecondition::Absent,
+        )
+        .unwrap();
+
+        assert_eq!(
+            prepared.media_type,
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
+        stage_artifact_raw_bytes(&prepared, content).unwrap();
+        let observed = commit_staged_artifact(&prepared, &safe_paths).unwrap();
+        assert_eq!(observed, prepared.content_digest);
+        assert_eq!(std::fs::read(target).unwrap(), content);
     }
 
     #[test]

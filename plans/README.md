@@ -16,9 +16,11 @@ working tree.
 
 ## Current Development Status
 
-There is no active implementation plan. The repository cleanup is complete and
-remains available in Git history. Product direction lives in `PRODUCT.md`;
-accepted architecture lives in ADRs.
+There is no active implementation plan. `openlife_capable_product_plan.md` is a
+completed plan retained in the current change set until review and commit make
+its history durable. The next substantial objective must begin with one new
+small plan. Product direction lives in `PRODUCT.md`; accepted architecture
+lives in ADRs.
 
 ## Accepted Decisions
 

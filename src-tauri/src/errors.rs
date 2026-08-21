@@ -30,7 +30,11 @@ pub enum AppError {
     /// Data format/serialization error
     Serialization { message: String },
     /// Catch-all for other unexpected errors
-    Internal { message: String },
+    Internal {
+        message: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        code: Option<String>,
+    },
 }
 
 impl AppError {
@@ -43,7 +47,7 @@ impl AppError {
             AppError::Timeout { message } => message,
             AppError::ExternalService { message, .. } => message,
             AppError::Serialization { message } => message,
-            AppError::Internal { message } => message,
+            AppError::Internal { message, .. } => message,
         }
     }
 
@@ -129,6 +133,14 @@ impl AppError {
     pub fn internal(msg: impl Into<String>) -> Self {
         AppError::Internal {
             message: msg.into(),
+            code: None,
+        }
+    }
+
+    pub fn internal_with_code(msg: impl Into<String>, code: impl Into<String>) -> Self {
+        AppError::Internal {
+            message: msg.into(),
+            code: Some(code.into()),
         }
     }
 }
@@ -149,7 +161,10 @@ impl From<anyhow::Error> for AppError {
                 hint: None,
             }
         } else {
-            AppError::Internal { message: msg }
+            AppError::Internal {
+                message: msg,
+                code: None,
+            }
         }
     }
 }
@@ -180,7 +195,10 @@ impl From<std::io::Error> for AppError {
 
 impl From<String> for AppError {
     fn from(msg: String) -> Self {
-        AppError::Internal { message: msg }
+        AppError::Internal {
+            message: msg,
+            code: None,
+        }
     }
 }
 

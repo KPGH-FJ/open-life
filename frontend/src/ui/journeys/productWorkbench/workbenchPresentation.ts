@@ -177,6 +177,7 @@ export function taskNeedsAttention(item: TaskViewModelItem): boolean {
       "blocked",
       "failed",
       "remote_unknown",
+      "interrupted",
       "completed_with_pending_review",
       "completed_needs_evidence",
       "unknown",
@@ -202,6 +203,8 @@ export function taskLifecyclePresentation(item: TaskViewModelItem): ProductStatu
       return { label: "远端结果未知", status: "unknown" };
     case "cancelled":
       return { label: "已取消", status: "neutral" };
+    case "interrupted":
+      return { label: "已中断，可重试", status: "blocked" };
     case "completed_with_pending_review":
       return { label: "待审核，未完成", status: "waiting" };
     case "completed_needs_evidence":

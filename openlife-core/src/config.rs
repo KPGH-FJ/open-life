@@ -102,6 +102,10 @@ pub struct SystemConfig {
     pub ollama_cache_ttl_seconds: u64,
     #[serde(default = "default_memory_search_top_k")]
     pub memory_search_top_k: usize,
+    /// Product-level master switch for Agent Memory recall and learning.
+    /// Explicit user management remains available while this is disabled.
+    #[serde(default = "default_agent_memory_enabled")]
+    pub agent_memory_enabled: bool,
     /// Safe paths for file.read tool (workspace directories allowed for file access)
     #[serde(default)]
     pub safe_paths: Vec<String>,
@@ -125,12 +129,6 @@ pub struct SystemConfig {
     /// Additional bounded knowledge roots for Main Chat context loading.
     #[serde(default)]
     pub knowledge_roots: Vec<String>,
-    /// User-selected root for Workspace-scoped Markdown working memory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub workspace_memory_root: Option<String>,
-    /// User-selected root for Project-scoped Markdown working memory.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_memory_root: Option<String>,
 }
 
 impl Default for SystemConfig {
@@ -138,6 +136,7 @@ impl Default for SystemConfig {
         Self {
             ollama_cache_ttl_seconds: default_ollama_cache_ttl_seconds(),
             memory_search_top_k: default_memory_search_top_k(),
+            agent_memory_enabled: default_agent_memory_enabled(),
             safe_paths: Vec::new(),
             network_policy: NetworkPolicy::default(),
             calendar_ics_paths: Vec::new(),
@@ -146,8 +145,6 @@ impl Default for SystemConfig {
             search_provider_key_ref: None,
             searxng_url: String::new(),
             knowledge_roots: Vec::new(),
-            workspace_memory_root: None,
-            project_memory_root: None,
         }
     }
 }
@@ -158,6 +155,10 @@ fn default_ollama_cache_ttl_seconds() -> u64 {
 
 fn default_memory_search_top_k() -> usize {
     3
+}
+
+fn default_agent_memory_enabled() -> bool {
+    true
 }
 
 fn default_search_provider() -> String {

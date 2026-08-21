@@ -113,7 +113,7 @@ pub(crate) async fn pick_and_import_resources<R: Runtime>(
             &[
                 "txt", "md", "markdown", "json", "rs", "ts", "tsx", "js", "jsx", "py", "go",
                 "java", "c", "h", "cpp", "hpp", "swift", "kt", "kts", "toml", "yaml", "yml", "xml",
-                "html", "css", "sql", "sh", "pdf", "docx", "csv", "xlsx",
+                "html", "css", "sql", "sh", "pdf", "docx", "csv", "xlsx", "pptx",
             ],
         )
         .pick_files(move |paths| {
@@ -261,6 +261,7 @@ fn declared_mime_for_path(path: &Path) -> Result<&'static str, String> {
         "docx" => Ok("application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
         "csv" => Ok("text/csv"),
         "xlsx" => Ok("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
+        "pptx" => Ok("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
         _ => Err("resource_format_unsupported".into()),
     }
 }

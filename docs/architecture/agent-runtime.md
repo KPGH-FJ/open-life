@@ -64,6 +64,12 @@ canonical ItemAttempt with a typed receipt. Successful reads add digest-only
 Observation Items. Tool bodies and provider prompts are not stored as task
 metadata.
 
+Web Fetch may use an explicit authenticated URL or bind to the first validated
+URL in a successful Web Search Observation from the same Run. It cannot invent
+a URL, reuse another Run's result, or continue when the search observation is
+missing or invalid. Requests such as "search, then open the result" therefore
+remain one dependency-ordered Work rather than two unrelated tasks.
+
 One bounded evidence-driven plan revision may continue the same Run. It cannot
 expand Policy scope, repeat a completed capability, reset budget, or erase
 earlier attempts. Failed, blocked, cancelled, and effect-unknown attempts stay
@@ -78,10 +84,9 @@ permission, durable write, or completion claim.
 
 Agent Memory and LifeModel are optional typed collaborators through
 `personal_intelligence_ports.rs`. Their unavailable state degrades
-personalization without replacing Conversation or Task truth. Workspace and
-Project Markdown Memory remains a user-controlled file surface in
-`markdown_memory.rs`; the release runtime does not treat an unbound Markdown
-file as implicit model context.
+personalization without replacing Conversation or Task truth. Markdown files
+remain ordinary selected documents or Project artifacts; they are not an
+implicit Memory source and never gain authority merely from their filename.
 
 ## Policy, provider, and network boundary
 
@@ -107,6 +112,14 @@ materialization projects into the same ArtifactVersion and only then permits a
 FinalResult. Recovery distinguishes prepared, staged, confirmed,
 failed-before-effect, and effect-unknown states and never blindly redispatches
 an ambiguous effect.
+
+The bounded text artifact contract currently supports Markdown, plain text,
+self-contained HTML, JSON objects/arrays, and CSV tables. Provider output is
+schema-validated, serialized by the backend where appropriate, checked against
+the requested extension, and staged under an allowed output root before Review.
+HTML rejects active or remotely loaded content; CSV rejects formula-leading
+cells. These formats use the same ArtifactVersion, Review, materialization and
+verification lifecycle rather than format-specific task runtimes.
 
 Review does not own a generic task-resume action. Canonical Work controls own
 cancel and retry; approval resumes only the exact waiting Item checkpoint.

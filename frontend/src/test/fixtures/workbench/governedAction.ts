@@ -482,6 +482,8 @@ function buildSnapshot(
     projects: [],
     selectedProjectId: null,
     selectedConversationId: empty ? null : "conversation-research-plan",
+    globalMemoryEnabled: true,
+    selectedMemoryMode: "use_and_learn",
     messages: empty
       ? []
       : [
@@ -608,7 +610,6 @@ export function workbenchJourneyFixtureDataSource(
     async pauseLifeModelLearningSuggestionClass() {},
     async correctMemory() {},
     async archiveMemory() {},
-    async stopRecall() {},
     async restoreMemory() {},
     async rollbackMemory() {},
     async privacyEraseMemory() {},
@@ -625,6 +626,8 @@ export function workbenchJourneyFixtureDataSource(
         projects: [],
         selectedProjectId: null,
         selectedConversationId,
+        globalMemoryEnabled: true,
+        selectedMemoryMode: "use_and_learn",
         messages: selectedConversationId
           ? (histories.get(selectedConversationId) ?? []).map(message => ({ ...message }))
           : [],

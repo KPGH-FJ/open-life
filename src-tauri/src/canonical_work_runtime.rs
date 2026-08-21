@@ -5,7 +5,7 @@
 //! creates retired task-session, run, action-queue, or Main Chat event records.
 
 use crate::artifact_materializer::{
-    capture_artifact_target_precondition, ArtifactTargetPrecondition,
+    artifact_content_digest, capture_artifact_target_precondition, ArtifactTargetPrecondition,
 };
 use crate::canonical_chat_runtime::{
     provider_state, verify_provider_binding, CanonicalChatEventSink,
@@ -22,6 +22,7 @@ use crate::main_chat_kernel::{
 use crate::provider_invocation_state::ProviderInvocationState;
 use crate::state::AppState;
 use crate::{SendMessageResult, ToolCallResult};
+use base64::Engine as _;
 use openlife_core::agent::main_chat_agent_v1::{
     AgentIngress, AgentIngressDecision, AllowedCapability, ContextSourceCandidate,
     ContextSourceKind, PolicyDecision, PolicyRouteKind,
@@ -64,7 +65,7 @@ fn persist_canonical_artifact_draft(
     database_path: Option<&Path>,
     artifact_id: &str,
     version: u64,
-    content: &str,
+    content: &[u8],
 ) -> Result<PathBuf, String> {
     let directory = match database_path.and_then(Path::parent) {
         Some(parent) => parent.join("artifact-drafts"),
@@ -81,7 +82,7 @@ fn persist_canonical_artifact_draft(
     if path.exists() {
         let existing = std::fs::read(&path)
             .map_err(|error| format!("read canonical Artifact draft failed: {error}"))?;
-        if existing != content.as_bytes() {
+        if existing != content {
             return Err("canonical_artifact_draft_content_conflict".into());
         }
         return Ok(path);
@@ -92,7 +93,7 @@ fn persist_canonical_artifact_draft(
         .create_new(true)
         .open(&temporary)
         .map_err(|error| format!("create canonical Artifact draft failed: {error}"))?;
-    file.write_all(content.as_bytes())
+    file.write_all(content)
         .map_err(|error| format!("write canonical Artifact draft failed: {error}"))?;
     file.sync_all()
         .map_err(|error| format!("sync canonical Artifact draft failed: {error}"))?;
@@ -103,7 +104,7 @@ fn persist_canonical_artifact_draft(
             let existing = std::fs::read(&path).map_err(|read_error| {
                 format!("read canonical Artifact draft failed: {read_error}")
             })?;
-            if existing != content.as_bytes() {
+            if existing != content {
                 let _ = std::fs::remove_file(&temporary);
                 return Err("canonical_artifact_draft_content_conflict".into());
             }
@@ -235,6 +236,20 @@ pub(crate) async fn retry_canonical_work_task(
         .get_turn(&prior_run.execution_session_id)
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "canonical_work_prior_turn_missing".to_string())?;
+    let current_provider = crate::provider_registry::selected_provider_profile(state).await?;
+    if !same_work_provider_boundary(&original_turn.turn.provider, &current_provider.binding) {
+        task_store
+            .lock()
+            .await
+            .record_attention(
+                &task_id,
+                &prior_run_id,
+                CanonicalAttentionKind::ScopeStale,
+                "work_provider_binding_stale",
+            )
+            .map_err(|error| error.to_string())?;
+        return Err("canonical_work_provider_binding_stale".into());
+    }
     let user_message = original_turn
         .items
         .iter()
@@ -247,6 +262,19 @@ pub(crate) async fn retry_canonical_work_task(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "canonical_work_conversation_missing".to_string())?;
     let selected_skill_id = conversation.selected_skill_id;
+    if prior_run.selected_skill_id != selected_skill_id {
+        task_store
+            .lock()
+            .await
+            .record_attention(
+                &task_id,
+                &prior_run_id,
+                CanonicalAttentionKind::ScopeStale,
+                "work_skill_binding_stale",
+            )
+            .map_err(|error| error.to_string())?;
+        return Err("canonical_work_skill_binding_stale".into());
+    }
     if conversation.project_id.as_ref() != prior_run.project_id.as_ref() {
         task_store
             .lock()
@@ -316,6 +344,7 @@ pub(crate) async fn retry_canonical_work_task(
         state,
         &mut discard,
         Some(retry_resource_scope_turn_id.as_str()),
+        Some(&original_turn.turn.provider),
     )
     .await
 }
@@ -325,7 +354,7 @@ pub(crate) async fn run_canonical_work(
     state: &Arc<AppState>,
     emit: &mut (dyn FnMut(&str, Value) + Send),
 ) -> Result<CanonicalWorkOutput, String> {
-    run_canonical_work_with_resource_scope(input, state, emit, None).await
+    run_canonical_work_with_resource_scope(input, state, emit, None, None).await
 }
 
 async fn run_canonical_work_with_resource_scope(
@@ -333,6 +362,7 @@ async fn run_canonical_work_with_resource_scope(
     state: &Arc<AppState>,
     emit: &mut (dyn FnMut(&str, Value) + Send),
     retry_resource_scope_turn_id: Option<&str>,
+    expected_provider_boundary: Option<&openlife_core::conversation::ProviderBinding>,
 ) -> Result<CanonicalWorkOutput, String> {
     validate_input(&input)?;
     let execution_slots = state
@@ -368,6 +398,11 @@ async fn run_canonical_work_with_resource_scope(
     }
     let route = selected_provider.route;
     let provider = selected_provider.binding;
+    if expected_provider_boundary
+        .is_some_and(|expected| !same_work_provider_boundary(expected, &provider))
+    {
+        return Err("canonical_work_provider_binding_stale".into());
+    }
     let begun_turn = conversation_store
         .lock()
         .await
@@ -424,6 +459,9 @@ async fn run_canonical_work_with_resource_scope(
             .get_conversation(&input.conversation_id)
             .map_err(|error| format!("load canonical Work Conversation failed: {error}"))?
             .ok_or_else(|| "canonical_work_conversation_missing".to_string())?;
+        if conversation.selected_skill_id != input.selected_skill_id {
+            return Err("canonical_work_selected_skill_stale".into());
+        }
         match conversation.project_id {
             Some(project_id) => {
                 let project = conversation_store
@@ -456,6 +494,15 @@ async fn run_canonical_work_with_resource_scope(
             scope_digest: project_scope.as_ref().map(|scope| scope.2.as_str()),
         })
         .map_err(|error| format!("begin canonical Work Task failed: {error}"))?;
+    task_store
+        .lock()
+        .await
+        .bind_general_run_selected_skill(
+            &input.task_id,
+            &input.run_id,
+            input.selected_skill_id.as_deref(),
+        )
+        .map_err(|error| format!("bind canonical Work Skill failed: {error}"))?;
     let (_, request_digest) = metadata_safe_text_digest(&format!(
         "{}\0{}\0{}\0{}",
         input.task_id, input.run_id, provider.profile_id, instruction_digest
@@ -528,17 +575,34 @@ async fn run_canonical_work_with_resource_scope(
             "model": provider.model_id,
         }),
     );
-    let mut work_plan = match generate_structured_work_plan(
-        &client,
-        &input,
-        state,
-        &authorization,
-        &ingress,
-        &instruction_digest,
-        &mut sink,
-    )
-    .await
-    {
+    let plan_generation_result = {
+        let plan_generation = generate_structured_work_plan(
+            &client,
+            &input,
+            state,
+            &authorization,
+            &ingress,
+            &instruction_digest,
+            &mut sink,
+        );
+        tokio::pin!(plan_generation);
+        tokio::select! {
+            biased;
+            _ = cancellation.token.cancelled() => {
+                terminalize_failure(
+                    state,
+                    &input,
+                    CanonicalTaskStatus::Cancelled,
+                    CanonicalTaskItemStatus::Cancelled,
+                    "work_cancelled",
+                )
+                .await?;
+                return Err("canonical_work_cancelled".into());
+            }
+            result = &mut plan_generation => result,
+        }
+    };
+    let mut work_plan = match plan_generation_result {
         Ok(plan) => plan,
         Err(error) => {
             let (task_status, attempt_status, _) =
@@ -551,7 +615,26 @@ async fn run_canonical_work_with_resource_scope(
             return Err(error);
         }
     };
-    persist_structured_work_plan(state, &input, begun_run.plan_revision, &work_plan).await?;
+    if cancellation.token.is_cancelled() {
+        terminalize_failure(
+            state,
+            &input,
+            CanonicalTaskStatus::Cancelled,
+            CanonicalTaskItemStatus::Cancelled,
+            "work_cancelled",
+        )
+        .await?;
+        return Err("canonical_work_cancelled".into());
+    }
+    if let Err(error) =
+        persist_structured_work_plan(state, &input, begun_run.plan_revision, &work_plan).await
+    {
+        if cancellation.token.is_cancelled() && error == "canonical_work_plan_run_not_running" {
+            return Err("canonical_work_cancelled".into());
+        }
+        return Err(error);
+    }
+    let memory_candidates = personal_context.memory.candidates.clone();
     let extra_candidates = personal_context.memory.candidates;
     let kernel_context = work_plan_kernel_context(
         MainChatKernelContextConfig {
@@ -670,13 +753,20 @@ async fn run_canonical_work_with_resource_scope(
             };
         }
     }
+    project_selected_memory_receipts(
+        state,
+        &input,
+        &memory_candidates,
+        kernel_result.context_metadata.as_ref(),
+    )
+    .await?;
     let personal_suggestion =
         match crate::personal_intelligence_ports::apply_authorized_personal_intelligence_suggestion(
             state,
             crate::personal_intelligence_ports::PersonalIntelligenceSuggestionRequest {
                 conversation_id: &input.conversation_id,
-                task_id: &input.task_id,
-                run_id: &input.run_id,
+                task_id: Some(&input.task_id),
+                run_id: Some(&input.run_id),
                 user_text: &current_user.content,
                 policy: &ingress.policy_decision,
                 memory_routing: &ingress.intent_frame.memory_routing,
@@ -700,23 +790,10 @@ async fn run_canonical_work_with_resource_scope(
         };
     project_personal_intelligence_suggestion_observation(state, &input, &personal_suggestion)
         .await?;
-    let personal_suggestion_reply = match personal_suggestion {
-        crate::personal_intelligence_ports::PersonalIntelligenceSuggestionReceipt::MemoryCommitted {
-            memory_id,
-            receipt_id,
-            newly_committed,
-            undo_available,
-        } => Some(format!(
-            "已按你的明确要求记录为可撤销的 Agent Memory。memory_id={memory_id} receipt_id={receipt_id} newly_committed={newly_committed} undo_available={undo_available}"
-        )),
-        crate::personal_intelligence_ports::PersonalIntelligenceSuggestionReceipt::LifeModelCandidateCaptured {
-            candidate_id,
-            replayed,
-        } => Some(format!(
-            "已记录一条 LifeModel 候选供你在个人智能中查看；尚未创建提案，也没有修改 LifeModel。candidate_id={candidate_id} replayed={replayed}"
-        )),
-        crate::personal_intelligence_ports::PersonalIntelligenceSuggestionReceipt::NotApplicable => None,
-    };
+    let personal_suggestion_reply =
+        crate::personal_intelligence_ports::personal_intelligence_product_reply(
+            &personal_suggestion,
+        );
     let invocation = provider_state(sink.events());
     if let Some(error) = sink.work_provider_lifecycle_error.clone() {
         terminalize_failure(
@@ -855,6 +932,13 @@ async fn run_canonical_work_with_resource_scope(
                 "work_artifact_review_required",
             )
             .map_err(|error| format!("record Work Review attention failed: {error}"))?;
+        crate::agent_memory_learning::schedule_after_idle(
+            Arc::clone(state),
+            input.conversation_id.clone(),
+            input.turn_id.clone(),
+            current_user.content.clone(),
+            ingress.clone(),
+        );
         let tool_calls = canonical_work_tool_call_results(&kernel_result.tool_calls, &input.run_id);
         return Ok(output(
             &input,
@@ -921,6 +1005,13 @@ async fn run_canonical_work_with_resource_scope(
         .await
         .resolve_attention_for_run(&input.task_id, &input.run_id)
         .map_err(|error| format!("resolve Work attention failed: {error}"))?;
+    crate::agent_memory_learning::schedule_after_idle(
+        Arc::clone(state),
+        input.conversation_id.clone(),
+        input.turn_id.clone(),
+        current_user.content.clone(),
+        ingress.clone(),
+    );
     Ok(output(
         &input,
         reply,
@@ -986,21 +1077,17 @@ async fn stage_canonical_work_artifacts_for_review(
             .get("path")
             .and_then(Value::as_str)
             .ok_or_else(|| "canonical_work_artifact_target_missing".to_string())?;
-        let content = expanded_outcome
-            .governed_input
-            .get("content")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "canonical_work_artifact_content_missing".to_string())?;
-        let content_digest = metadata_safe_text_digest(content).1;
-        let media_type = match expanded_outcome
+        let content = canonical_work_artifact_draft_bytes(&expanded_outcome.governed_input)?;
+        let content_digest = artifact_content_digest(&content);
+        let artifact_kind = expanded_outcome
             .governed_input
             .get("artifactKind")
             .and_then(Value::as_str)
-        {
-            Some("markdown") => "text/markdown; charset=utf-8",
-            Some("csv") => "text/csv; charset=utf-8",
-            _ => "text/plain; charset=utf-8",
-        };
+            .ok_or_else(|| "canonical_work_artifact_kind_missing".to_string())?;
+        let media_type = crate::main_chat_kernel::generated_artifact_media_type(artifact_kind);
+        if media_type == "application/octet-stream" {
+            return Err("canonical_work_artifact_kind_invalid".into());
+        }
         let (prepared, database_path) = {
             let store = store.lock().await;
             let prepared = store
@@ -1018,7 +1105,7 @@ async fn stage_canonical_work_artifacts_for_review(
             database_path.as_deref(),
             &prepared.artifact_id,
             prepared.version,
-            content,
+            &content,
         )?;
         let safe_paths = state.config.lock().await.system.safe_paths.clone();
         let target_precondition = capture_artifact_target_precondition(target, &safe_paths)?;
@@ -1100,6 +1187,35 @@ async fn stage_canonical_work_artifacts_for_review(
     Ok(proposal_ids)
 }
 
+fn canonical_work_artifact_draft_bytes(governed_input: &Value) -> Result<Vec<u8>, String> {
+    match governed_input
+        .get("encoding")
+        .and_then(Value::as_str)
+        .unwrap_or("utf-8")
+    {
+        "utf-8" => governed_input
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|content| !content.is_empty())
+            .map(|content| content.as_bytes().to_vec())
+            .ok_or_else(|| "canonical_work_artifact_content_missing".to_string()),
+        "base64" => {
+            let encoded = governed_input
+                .get("contentBase64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "canonical_work_artifact_content_missing".to_string())?;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .map_err(|_| "canonical_work_artifact_content_invalid".to_string())?;
+            if bytes.is_empty() {
+                return Err("canonical_work_artifact_content_missing".into());
+            }
+            Ok(bytes)
+        }
+        _ => Err("canonical_work_artifact_encoding_invalid".into()),
+    }
+}
+
 fn allowed_work_plan_kinds(
     policy: &PolicyDecision,
     selected_skill_id: Option<&str>,
@@ -1149,10 +1265,27 @@ fn required_work_plan_kinds(
         required.insert(WorkPlanStepKind::DraftArtifact);
     }
     if ingress.intent_frame.requires_external_read {
-        let explicitly_fetches =
-            lower.contains("web.fetch") || lower.contains("http://") || lower.contains("https://");
+        let has_explicit_url = lower.contains("http://") || lower.contains("https://");
+        let explicitly_fetches = has_explicit_url
+            || [
+                "web.fetch",
+                "fetch the result",
+                "fetch result",
+                "open the result",
+                "open result",
+                "read the full page",
+                "打开搜索结果",
+                "抓取搜索结果",
+                "读取完整网页",
+                "阅读全文",
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle));
         if explicitly_fetches && allowed.contains(&WorkPlanStepKind::WebFetch) {
             required.insert(WorkPlanStepKind::WebFetch);
+            if !has_explicit_url && allowed.contains(&WorkPlanStepKind::WebSearch) {
+                required.insert(WorkPlanStepKind::WebSearch);
+            }
         } else if allowed.contains(&WorkPlanStepKind::WebSearch) {
             required.insert(WorkPlanStepKind::WebSearch);
         }
@@ -1217,7 +1350,6 @@ fn deterministic_policy_plan(
     let mut steps = Vec::new();
     let prefer_exact_mcp =
         allowed.contains(&WorkPlanStepKind::ReadMcp) && !allowed_mcp_targets.is_empty();
-    let prefer_exact_fetch = allowed.contains(&WorkPlanStepKind::WebFetch);
     let prefer_bound_import = allowed.contains(&WorkPlanStepKind::ReadImportedDocument);
     for (id, kind) in [
         (
@@ -1231,7 +1363,7 @@ fn deterministic_policy_plan(
         ("draft", WorkPlanStepKind::DraftArtifact),
     ] {
         let selected = allowed.contains(&kind)
-            && !(kind == WorkPlanStepKind::WebSearch && (prefer_exact_mcp || prefer_exact_fetch))
+            && !(kind == WorkPlanStepKind::WebSearch && prefer_exact_mcp)
             && !(kind == WorkPlanStepKind::ReadWorkspaceFile && prefer_bound_import);
         if selected {
             steps.push(openlife_core::work_orchestration::WorkPlanStep {
@@ -1318,6 +1450,73 @@ fn deterministic_policy_plan(
     }
 }
 
+/// Builds the smallest execution skeleton that the authenticated task
+/// contract mechanically requires. This is a bounded fallback for providers
+/// that return usable inference but repeatedly violate the plan transport
+/// schema. It cannot add a capability: every emitted step comes from the
+/// runtime-derived required floor, which is itself a subset of policy-allowed
+/// kinds.
+fn deterministic_required_plan(
+    required: &HashSet<WorkPlanStepKind>,
+    allowed_mcp_targets: &HashMap<String, String>,
+) -> Result<StructuredWorkPlan, String> {
+    let mut steps = Vec::new();
+    for kind in [
+        WorkPlanStepKind::Analyze,
+        WorkPlanStepKind::ReadImportedDocument,
+        WorkPlanStepKind::ReadWorkspaceFile,
+        WorkPlanStepKind::WebSearch,
+        WorkPlanStepKind::WebFetch,
+        WorkPlanStepKind::UseSelectedSkill,
+        WorkPlanStepKind::ReadMcp,
+        WorkPlanStepKind::DraftArtifact,
+        WorkPlanStepKind::Verify,
+        WorkPlanStepKind::DeliverResult,
+    ] {
+        if !required.contains(&kind) {
+            continue;
+        }
+        let (target_id, target_contract_digest) = if kind == WorkPlanStepKind::ReadMcp {
+            let (target_id, contract_digest) = allowed_mcp_targets
+                .iter()
+                .min_by(|left, right| left.0.cmp(right.0))
+                .ok_or_else(|| "work_plan_required_mcp_target_missing".to_string())?;
+            (Some(target_id.clone()), Some(contract_digest.clone()))
+        } else {
+            (None, None)
+        };
+        steps.push(openlife_core::work_orchestration::WorkPlanStep {
+            id: format!("step{}", steps.len() + 1),
+            kind,
+            required: true,
+            depends_on: steps
+                .last()
+                .map(|step: &openlife_core::work_orchestration::WorkPlanStep| step.id.clone())
+                .into_iter()
+                .collect(),
+            target_id,
+            target_contract_digest,
+        });
+    }
+    if steps.is_empty()
+        || steps.last().map(|step| step.kind) != Some(WorkPlanStepKind::DeliverResult)
+    {
+        return Err("work_plan_required_delivery_missing".into());
+    }
+    Ok(StructuredWorkPlan {
+        schema_version: WORK_PLAN_SCHEMA_VERSION.into(),
+        steps,
+        completion: WorkCompletionContract {
+            result_kind: if required.contains(&WorkPlanStepKind::DraftArtifact) {
+                WorkResultKind::Artifact
+            } else {
+                WorkResultKind::Answer
+            },
+            requires_verification: required.contains(&WorkPlanStepKind::Verify),
+        },
+    })
+}
+
 #[cfg(not(test))]
 fn work_plan_system_prompt(
     allowed: &HashSet<WorkPlanStepKind>,
@@ -1381,6 +1580,7 @@ async fn generate_structured_work_plan(
     {
         let base_prompt = work_plan_system_prompt(&allowed, &allowed_mcp_target_ids, &required);
         let mut last_error = "work_plan_generation_failed".to_string();
+        let mut contract_rejection_count = 0usize;
         for attempt in 0..2 {
             sink.work_provider_lifecycle
                 .as_mut()
@@ -1439,11 +1639,20 @@ async fn generate_structured_work_plan(
                         ) {
                             Ok(plan) => match plan.validate_required_kinds(&required) {
                                 Ok(()) => return Ok(plan),
-                                Err(error) => last_error = error,
+                                Err(error) => {
+                                    contract_rejection_count += 1;
+                                    last_error = error;
+                                }
                             },
-                            Err(error) => last_error = error,
+                            Err(error) => {
+                                contract_rejection_count += 1;
+                                last_error = error;
+                            }
                         },
-                        Err(error) => last_error = error,
+                        Err(error) => {
+                            contract_rejection_count += 1;
+                            last_error = error;
+                        }
                     }
                 }
                 Err(failure) => {
@@ -1452,6 +1661,12 @@ async fn generate_structured_work_plan(
                         .unwrap_or_else(|| "work_plan_provider_failed".into());
                 }
             }
+        }
+        if contract_rejection_count == 2 {
+            let plan = deterministic_required_plan(&required, &allowed_mcp_targets)?;
+            plan.validate(&allowed, &allowed_mcp_target_ids)?;
+            plan.validate_required_kinds(&required)?;
+            return Ok(plan);
         }
         Err(last_error)
     }
@@ -1896,6 +2111,56 @@ fn evaluate_work_plan_execution(
     })
 }
 
+async fn project_selected_memory_receipts(
+    state: &Arc<AppState>,
+    input: &CanonicalWorkInput,
+    candidates: &[ContextSourceCandidate],
+    metadata: Option<&crate::main_chat_kernel::MainChatKernelContextMetadata>,
+) -> Result<(), String> {
+    let Some(metadata) = metadata else {
+        return Ok(());
+    };
+    let selected = metadata
+        .selected_source_ids_exact()
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
+        .lock()
+        .await;
+    for candidate in candidates.iter().filter(|candidate| {
+        candidate.source_kind == ContextSourceKind::SelectedPersonalContext
+            && candidate.source_id.starts_with("memory:")
+            && selected.contains(candidate.source_id.as_str())
+    }) {
+        let canonical_scope = candidate
+            .content
+            .lines()
+            .find_map(|line| line.strip_prefix("scope="))
+            .ok_or_else(|| "canonical_run_memory_scope_missing".to_string())?;
+        let scope = match canonical_scope {
+            "project" => "project",
+            "global" | "conversation" | "workspace" => "personal",
+            _ => return Err("canonical_run_memory_scope_invalid".into()),
+        };
+        let content_digest = metadata_safe_text_digest(&candidate.content).1;
+        store
+            .record_run_memory_use(
+                &input.task_id,
+                &input.run_id,
+                &candidate.source_id,
+                scope,
+                &content_digest,
+                &candidate.inclusion_reason,
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 async fn project_selected_skill_observation(
     state: &Arc<AppState>,
     input: &CanonicalWorkInput,
@@ -1956,6 +2221,31 @@ async fn project_personal_intelligence_suggestion_observation(
                 "newlyCommitted": newly_committed,
                 "undoAvailable": undo_available,
             }),
+        ),
+        PersonalIntelligenceSuggestionReceipt::MemoryArchived {
+            memory_id,
+            undo_available,
+        } => (
+            "work_memory_archived",
+            serde_json::json!({
+                "memoryId": memory_id,
+                "undoAvailable": undo_available,
+            }),
+        ),
+        PersonalIntelligenceSuggestionReceipt::MemoryForgetNotFound => (
+            "work_memory_forget_not_found",
+            serde_json::json!({"canonicalChanged": false}),
+        ),
+        PersonalIntelligenceSuggestionReceipt::MemoryForgetAmbiguous { match_count } => (
+            "work_memory_forget_ambiguous",
+            serde_json::json!({
+                "matchCount": match_count,
+                "canonicalChanged": false,
+            }),
+        ),
+        PersonalIntelligenceSuggestionReceipt::MemoryScopeUnsupported => (
+            "work_memory_scope_unsupported",
+            serde_json::json!({"canonicalChanged": false}),
         ),
         PersonalIntelligenceSuggestionReceipt::LifeModelCandidateCaptured {
             candidate_id,
@@ -2274,9 +2564,49 @@ fn validate_uuid(field: &str, value: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn same_work_provider_boundary(
+    expected: &openlife_core::conversation::ProviderBinding,
+    current: &openlife_core::conversation::ProviderBinding,
+) -> bool {
+    expected.profile_id == current.profile_id
+        && expected.provider_id == current.provider_id
+        && expected.model_id == current.model_id
+        && expected.endpoint_class == current.endpoint_class
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_artifact_draft_decodes_text_and_binary_transport() {
+        assert_eq!(
+            canonical_work_artifact_draft_bytes(&serde_json::json!({
+                "encoding": "utf-8",
+                "content": "hello"
+            }))
+            .unwrap(),
+            b"hello"
+        );
+        let bytes = [0_u8, 159, 146, 150, 255];
+        let encoded = base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert_eq!(
+            canonical_work_artifact_draft_bytes(&serde_json::json!({
+                "encoding": "base64",
+                "contentBase64": encoded,
+            }))
+            .unwrap(),
+            bytes
+        );
+        assert_eq!(
+            canonical_work_artifact_draft_bytes(&serde_json::json!({
+                "encoding": "base64",
+                "contentBase64": "not-base64",
+            }))
+            .unwrap_err(),
+            "canonical_work_artifact_content_invalid"
+        );
+    }
 
     async fn canonical_state(reply: &'static str) -> Arc<AppState> {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
@@ -2285,6 +2615,44 @@ mod tests {
         )
         .await;
         state
+    }
+
+    async fn seed_personal_memory(state: &Arc<AppState>, content: &str) -> String {
+        let mut proposal = openlife_core::agent::AgentProposal::new(
+            openlife_core::agent::ProposalType::MemoryWrite,
+            "memory.personal",
+            serde_json::json!({
+                "content": content,
+                "scope": "global",
+                "category": "fact",
+                "candidateKind": "semantic_user_fact",
+                "riskLevel": "low",
+                "sensitivity": "internal"
+            }),
+            "accepted personal Memory for Work context test",
+            1.0,
+            openlife_core::agent::RiskLevel::Low,
+            openlife_core::agent::ProposalSource::Manual,
+        );
+        proposal.id = format!("proposal:work-memory:{}", uuid::Uuid::new_v4());
+        let accepted = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .accept_memory_proposal(
+                openlife_core::agent::MemoryLifecycleAcceptanceInput::from_memory_proposal(
+                    &proposal,
+                    content.to_string(),
+                )
+                .unwrap(),
+            )
+            .unwrap();
+        crate::memory_gateway::reconcile_canonical_outboxes_with_state(state, 32)
+            .await
+            .unwrap();
+        accepted.record.memory_id
     }
 
     fn input(conversation_id: &str) -> CanonicalWorkInput {
@@ -2567,7 +2935,7 @@ mod tests {
         let output = run_canonical_work(request, &state, &mut |_, _| {})
             .await
             .unwrap();
-        assert!(output.result.reply.contains("Agent Memory"));
+        assert!(output.result.reply.contains("已按你的明确要求记住"));
         assert!(!output.result.model_invoked);
         assert_eq!(
             state
@@ -2596,6 +2964,48 @@ mod tests {
             item.kind == CanonicalTaskItemKind::Observation
                 && item.summary_code == "work_memory_suggestion_committed"
         }));
+    }
+
+    #[tokio::test]
+    async fn work_records_only_metadata_for_memory_actually_selected_into_context() {
+        let state = canonical_state("Concise project summary delivered.").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Work Memory receipt")
+            .unwrap();
+        let memory_content = "User prefers concise project summaries.";
+        let memory_id = seed_personal_memory(&state, memory_content).await;
+        let mut request = input(&conversation_id);
+        request.messages[0].content =
+            "Use my Agent Memory to create a concise project summary.".into();
+        let task_id = request.task_id.clone();
+
+        run_canonical_work(request, &state, &mut |_, _| {})
+            .await
+            .unwrap();
+
+        let snapshot = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.memory_uses.len(), 1);
+        assert_eq!(snapshot.memory_uses[0].memory_id, memory_id);
+        assert_eq!(snapshot.memory_uses[0].scope, "personal");
+        assert!(!snapshot.memory_uses[0].content_digest.is_empty());
+        assert!(!snapshot.memory_uses[0].selection_reason.is_empty());
+        assert!(!serde_json::to_string(&snapshot)
+            .unwrap()
+            .contains(memory_content));
     }
 
     #[tokio::test]
@@ -2941,6 +3351,233 @@ mod tests {
             artifact.artifact.status
                 == openlife_core::task_runtime::CanonicalArtifactStatus::Materialized
         }));
+    }
+
+    #[tokio::test]
+    async fn html_and_json_artifacts_are_validated_materialized_and_verified_in_one_work() {
+        let state = canonical_state(
+            r##"{"html":"<!doctype html><html><body><h1>Verified result</h1></body></html>","json":{"status":"verified","items":[1,2]}}"##,
+        )
+        .await;
+        let safe_root = tempfile::tempdir().unwrap();
+        state.config.lock().await.system.safe_paths = vec![safe_root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()];
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "HTML and JSON artifacts")
+            .unwrap();
+        let mut request = input(&conversation_id);
+        request.messages[0].content =
+            "生成 HTML 报告 result.html 和 JSON 文件 result.json，并在我确认后保存。".into();
+        let task_id = request.task_id.clone();
+
+        let output = run_canonical_work(request, &state, &mut |_, _| {})
+            .await
+            .unwrap();
+        assert!(output.result.reply.contains("2 份"));
+        let waiting = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(waiting.artifacts.len(), 2);
+        let proposal_ids = waiting
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                artifact
+                    .review_checkpoint
+                    .as_ref()
+                    .unwrap()
+                    .proposal_id
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        for proposal_id in proposal_ids {
+            let accepted =
+                crate::commands::proposal::accept_proposal_with_state(proposal_id, &state)
+                    .await
+                    .unwrap();
+            assert_eq!(accepted["effect_status"], "confirmed");
+        }
+
+        let completed = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.task.status, CanonicalTaskStatus::Completed);
+        assert!(completed.final_result.is_some());
+        let materialized = completed
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                (
+                    artifact.artifact.media_type.clone(),
+                    std::fs::read_to_string(
+                        artifact.artifact.materialized_reference.as_ref().unwrap(),
+                    )
+                    .unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        assert!(materialized.iter().any(|(media_type, content)| {
+            media_type == "text/html; charset=utf-8" && content.contains("Verified result")
+        }));
+        assert!(materialized.iter().any(|(media_type, content)| {
+            media_type == "application/json; charset=utf-8"
+                && serde_json::from_str::<serde_json::Value>(content).unwrap()["status"]
+                    == "verified"
+        }));
+    }
+
+    #[tokio::test]
+    async fn office_artifacts_share_one_canonical_review_and_materialization_spine() {
+        let state = canonical_state(
+            r##"{"docx":{"title":"OpenLife Brief","sections":[{"heading":"Conclusion","paragraphs":["Verified document output."]}]},"xlsx":{"sheets":[{"name":"Metrics","headers":["Name","Value"],"rows":[["Status","Ready"]]}]},"pptx":{"title":"OpenLife Deck","slides":[{"title":"Conclusion","bullets":["Verified presentation output."]}]}}"##,
+        )
+        .await;
+        let safe_root = tempfile::tempdir().unwrap();
+        state.config.lock().await.system.safe_paths = vec![safe_root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()];
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Office artifact bundle")
+            .unwrap();
+        let mut request = input(&conversation_id);
+        request.messages[0].content =
+            "生成 brief.docx、metrics.xlsx 和 briefing.pptx，并在我确认后保存。".into();
+        let task_id = request.task_id.clone();
+
+        let output = run_canonical_work(request, &state, &mut |_, _| {})
+            .await
+            .unwrap();
+        assert!(output.result.reply.contains("3 份"));
+        let waiting = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(waiting.task.status, CanonicalTaskStatus::WaitingReview);
+        assert_eq!(waiting.artifacts.len(), 3);
+        let waiting_view = crate::read_models::tasks::get_tasks_view_model_with_state(&state)
+            .await
+            .unwrap()
+            .data
+            .unwrap();
+        let waiting_task = waiting_view
+            .items
+            .iter()
+            .find(|item| item.canonical_task_id == task_id)
+            .unwrap();
+        assert_eq!(waiting_task.artifacts.len(), 3);
+        assert!(waiting_task.artifacts.iter().all(|artifact| {
+            artifact
+                .preview
+                .content
+                .as_deref()
+                .is_some_and(|content| !content.trim().is_empty())
+        }));
+        let proposal_ids = waiting
+            .artifacts
+            .iter()
+            .map(|artifact| {
+                artifact
+                    .review_checkpoint
+                    .as_ref()
+                    .unwrap()
+                    .proposal_id
+                    .clone()
+            })
+            .collect::<Vec<_>>();
+        for proposal_id in proposal_ids {
+            let accepted =
+                crate::commands::proposal::accept_proposal_with_state(proposal_id, &state)
+                    .await
+                    .unwrap();
+            assert_eq!(accepted["effect_status"], "confirmed");
+        }
+
+        let completed = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(completed.task.status, CanonicalTaskStatus::Completed);
+        let completed_view = crate::read_models::tasks::get_tasks_view_model_with_state(&state)
+            .await
+            .unwrap()
+            .data
+            .unwrap();
+        let completed_task = completed_view
+            .items
+            .iter()
+            .find(|item| item.canonical_task_id == task_id)
+            .unwrap();
+        assert!(completed_task.artifacts.iter().all(|artifact| {
+            artifact.verification.status
+                == openlife_core::agent::TaskArtifactVerificationStatus::Verified
+                && artifact.preview.content.is_some()
+        }));
+        let mut saw_docx = false;
+        let mut saw_xlsx = false;
+        let mut saw_pptx = false;
+        for artifact in &completed.artifacts {
+            let path = artifact.artifact.materialized_reference.as_ref().unwrap();
+            let extraction = openlife_core::resource_parser::extract_resource(
+                openlife_core::resource_parser::ResourceExtractionRequest {
+                    filename: std::path::Path::new(path)
+                        .file_name()
+                        .unwrap()
+                        .to_string_lossy()
+                        .into_owned(),
+                    declared_mime: artifact.artifact.media_type.clone(),
+                    bytes: std::fs::read(path).unwrap(),
+                },
+            )
+            .unwrap();
+            match extraction.format {
+                openlife_core::resource::ResourceFormat::Docx => saw_docx = true,
+                openlife_core::resource::ResourceFormat::Xlsx => saw_xlsx = true,
+                openlife_core::resource::ResourceFormat::Pptx => saw_pptx = true,
+                other => panic!("unexpected Office Artifact format: {other:?}"),
+            }
+        }
+        assert!(saw_docx && saw_xlsx && saw_pptx);
     }
 
     #[tokio::test]
@@ -3321,6 +3958,73 @@ mod tests {
         assert!(!required.contains(&WorkPlanStepKind::DraftArtifact));
     }
 
+    #[test]
+    fn deterministic_plan_fallback_uses_only_the_authenticated_required_floor() {
+        let required = HashSet::from([
+            WorkPlanStepKind::WebFetch,
+            WorkPlanStepKind::DraftArtifact,
+            WorkPlanStepKind::Verify,
+            WorkPlanStepKind::DeliverResult,
+        ]);
+        let plan = deterministic_required_plan(&required, &HashMap::new()).unwrap();
+        assert_eq!(
+            plan.steps.iter().map(|step| step.kind).collect::<Vec<_>>(),
+            [
+                WorkPlanStepKind::WebFetch,
+                WorkPlanStepKind::DraftArtifact,
+                WorkPlanStepKind::Verify,
+                WorkPlanStepKind::DeliverResult,
+            ]
+        );
+        assert_eq!(plan.completion.result_kind, WorkResultKind::Artifact);
+        assert!(plan.completion.requires_verification);
+        assert!(plan
+            .steps
+            .windows(2)
+            .all(|pair| pair[1].depends_on == [pair[0].id.clone()]));
+        assert!(!plan
+            .steps
+            .iter()
+            .any(|step| step.kind == WorkPlanStepKind::WebSearch));
+    }
+
+    #[test]
+    fn search_then_open_requires_both_observation_bound_web_steps() {
+        let prompt = "搜索 OpenLife 的公开信息，打开搜索结果阅读全文，再给出带来源的结论。";
+        let ingress = AgentIngress::default().decide(
+            "search-fetch-required-plan",
+            prompt,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let allowed = allowed_work_plan_kinds(&ingress.policy_decision, None);
+        let required = required_work_plan_kinds(&ingress, None, &allowed);
+        assert!(allowed.contains(&WorkPlanStepKind::WebSearch));
+        assert!(allowed.contains(&WorkPlanStepKind::WebFetch));
+        assert!(required.contains(&WorkPlanStepKind::WebSearch));
+        assert!(required.contains(&WorkPlanStepKind::WebFetch));
+        assert!(required.contains(&WorkPlanStepKind::Verify));
+    }
+
+    #[test]
+    fn explicit_url_read_requires_web_fetch_even_without_search_wording() {
+        let prompt = "读取 https://www.iana.org/help/example-domains 的内容，生成一份带来源的 Markdown 报告。";
+        let ingress = AgentIngress::default().decide(
+            "explicit-url-fetch-required-plan",
+            prompt,
+            None,
+            openlife_core::agent::AgentTaskKind::Conversation,
+        );
+        let allowed = allowed_work_plan_kinds(&ingress.policy_decision, None);
+        let required = required_work_plan_kinds(&ingress, None, &allowed);
+        assert!(ingress.intent_frame.requires_external_read);
+        assert!(allowed.contains(&WorkPlanStepKind::WebFetch));
+        assert!(!allowed.contains(&WorkPlanStepKind::ReadWorkspaceFile));
+        assert!(required.contains(&WorkPlanStepKind::WebFetch));
+        assert!(!required.contains(&WorkPlanStepKind::ReadWorkspaceFile));
+        assert!(required.contains(&WorkPlanStepKind::Verify));
+    }
+
     #[tokio::test]
     async fn web_citation_retry_records_each_provider_invocation_as_its_own_attempt() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
@@ -3494,6 +4198,14 @@ mod tests {
             .await
             .create_conversation(&conversation_id, "Selected Skill")
             .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .set_selected_skill(&conversation_id, Some("evidence_review"))
+            .unwrap();
         let mut request = input(&conversation_id);
         request.selected_skill_id = Some("evidence_review".into());
         let task_id = request.task_id.clone();
@@ -3509,6 +4221,10 @@ mod tests {
             .load_task_snapshot(&task_id)
             .unwrap()
             .unwrap();
+        assert_eq!(
+            snapshot.runs[0].selected_skill_id.as_deref(),
+            Some("evidence_review")
+        );
         assert!(snapshot.items.iter().any(|item| {
             item.kind == CanonicalTaskItemKind::Observation
                 && item.status == CanonicalTaskItemStatus::Completed
@@ -3997,6 +4713,406 @@ for line in sys.stdin:
         assert_eq!(snapshot.runs[0].status, CanonicalTaskStatus::Failed);
         assert_eq!(snapshot.runs[1].status, CanonicalTaskStatus::Completed);
         assert_eq!(snapshot.task.status, CanonicalTaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn restart_interruption_offers_one_new_run_and_preserves_the_prior_run() {
+        let state = canonical_state("recovered result").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let prior_run_id = uuid::Uuid::new_v4().to_string();
+        let prior_turn_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Restart recovery")
+            .unwrap();
+        let provider = crate::provider_registry::selected_provider_profile(&state)
+            .await
+            .unwrap()
+            .binding;
+        let begun = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_chat_turn_with_proof(BeginChatTurn {
+                turn_id: &prior_turn_id,
+                conversation_id: &conversation_id,
+                user_message: "Summarize the current situation.",
+                provider: &provider,
+            })
+            .unwrap();
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &prior_run_id,
+                execution_session_id: &prior_turn_id,
+                instruction_digest: begun.user_message_proof.content_digest(),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+
+        assert_eq!(
+            state
+                .conversation_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .interrupt_incomplete_turns()
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            state
+                .canonical_task_runtime_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .recover_interrupted_general_runs()
+                .unwrap(),
+            1
+        );
+        let tasks = crate::read_models::tasks::get_tasks_view_model_with_state(&state)
+            .await
+            .unwrap()
+            .data
+            .unwrap();
+        let recovered = tasks
+            .items
+            .iter()
+            .find(|item| item.canonical_task_id == task_id)
+            .unwrap();
+        assert_eq!(recovered.lifecycle_status.as_str(), "interrupted");
+        assert!(recovered.allowed_controls.iter().any(|control| {
+            control.kind == openlife_core::agent::TaskControlKind::Retry && control.enabled
+        }));
+
+        retry_canonical_work_task(
+            task_id.clone(),
+            prior_run_id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            &state,
+        )
+        .await
+        .unwrap();
+        let snapshot = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.runs.len(), 2);
+        assert_eq!(snapshot.runs[0].run_id, prior_run_id);
+        assert_eq!(snapshot.runs[0].status, CanonicalTaskStatus::Interrupted);
+        assert_eq!(snapshot.runs[1].status, CanonicalTaskStatus::Completed);
+    }
+
+    #[tokio::test]
+    async fn effect_unknown_requires_attention_and_never_offers_automatic_retry() {
+        let state = canonical_state("unused result").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let request = input(&conversation_id);
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Unknown provider effect")
+            .unwrap();
+        let provider = crate::provider_registry::selected_provider_profile(&state)
+            .await
+            .unwrap()
+            .binding;
+        let begun = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_chat_turn_with_proof(BeginChatTurn {
+                turn_id: &request.turn_id,
+                conversation_id: &conversation_id,
+                user_message: &request.messages[0].content,
+                provider: &provider,
+            })
+            .unwrap();
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &request.task_id,
+                conversation_id: &conversation_id,
+                run_id: &request.run_id,
+                execution_session_id: &request.turn_id,
+                instruction_digest: begun.user_message_proof.content_digest(),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+
+        terminalize_failure(
+            &state,
+            &request,
+            CanonicalTaskStatus::EffectUnknown,
+            CanonicalTaskItemStatus::EffectUnknown,
+            "work_provider_effect_unknown",
+        )
+        .await
+        .unwrap();
+
+        let tasks = crate::read_models::tasks::get_tasks_view_model_with_state(&state)
+            .await
+            .unwrap()
+            .data
+            .unwrap();
+        let unknown = tasks
+            .items
+            .iter()
+            .find(|item| item.canonical_task_id == request.task_id)
+            .unwrap();
+        assert_eq!(unknown.lifecycle_status.as_str(), "remote_unknown");
+        assert!(unknown.needs_attention);
+        assert_eq!(
+            unknown.attention_reason_codes,
+            vec!["work_provider_effect_unknown"]
+        );
+        assert!(!unknown
+            .allowed_controls
+            .iter()
+            .any(|control| control.kind == openlife_core::agent::TaskControlKind::Retry));
+    }
+
+    #[tokio::test]
+    async fn retry_refuses_a_silent_provider_boundary_change_and_records_attention() {
+        let state = canonical_state("first provider").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let prior_run_id = uuid::Uuid::new_v4().to_string();
+        let prior_turn_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Provider-bound retry")
+            .unwrap();
+        let provider = crate::provider_registry::selected_provider_profile(&state)
+            .await
+            .unwrap()
+            .binding;
+        let begun = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_chat_turn_with_proof(BeginChatTurn {
+                turn_id: &prior_turn_id,
+                conversation_id: &conversation_id,
+                user_message: "Summarize the current situation.",
+                provider: &provider,
+            })
+            .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .fail_chat_turn(&prior_turn_id, "provider_failed")
+            .unwrap();
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &prior_run_id,
+                execution_session_id: &prior_turn_id,
+                instruction_digest: begun.user_message_proof.content_digest(),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .terminalize_general_run(&task_id, &prior_run_id, CanonicalTaskStatus::Failed)
+            .unwrap();
+        crate::main_chat_acceptance_test_support::configure_live_provider_eval_state_with_local_http_provider(
+            &state,
+            "different provider endpoint",
+        )
+        .await;
+
+        let error = retry_canonical_work_task(
+            task_id.clone(),
+            prior_run_id,
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            &state,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "canonical_work_provider_binding_stale");
+        let snapshot = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.runs.len(), 1);
+        assert!(snapshot.attention.iter().any(|attention| {
+            attention.reason_code == "work_provider_binding_stale"
+                && attention.resolved_at.is_none()
+        }));
+    }
+
+    #[tokio::test]
+    async fn retry_refuses_a_changed_skill_binding_and_records_attention() {
+        let state = canonical_state("unused retry result").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let prior_run_id = uuid::Uuid::new_v4().to_string();
+        let prior_turn_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Skill-bound retry")
+            .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .set_selected_skill(&conversation_id, Some("evidence_review"))
+            .unwrap();
+        let provider = crate::provider_registry::selected_provider_profile(&state)
+            .await
+            .unwrap()
+            .binding;
+        let begun = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_chat_turn_with_proof(BeginChatTurn {
+                turn_id: &prior_turn_id,
+                conversation_id: &conversation_id,
+                user_message: "Summarize the current situation.",
+                provider: &provider,
+            })
+            .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .fail_chat_turn(&prior_turn_id, "provider_failed")
+            .unwrap();
+        let task_store = state.canonical_task_runtime_store.as_ref().unwrap();
+        task_store
+            .lock()
+            .await
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &prior_run_id,
+                execution_session_id: &prior_turn_id,
+                instruction_digest: begun.user_message_proof.content_digest(),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+        task_store
+            .lock()
+            .await
+            .bind_general_run_selected_skill(&task_id, &prior_run_id, Some("evidence_review"))
+            .unwrap();
+        task_store
+            .lock()
+            .await
+            .terminalize_general_run(&task_id, &prior_run_id, CanonicalTaskStatus::Failed)
+            .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .set_selected_skill(&conversation_id, None)
+            .unwrap();
+
+        let error = retry_canonical_work_task(
+            task_id.clone(),
+            prior_run_id.clone(),
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+            &state,
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "canonical_work_skill_binding_stale");
+        let snapshot = task_store
+            .lock()
+            .await
+            .load_task_snapshot(&task_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.runs.len(), 1);
+        assert!(snapshot.attention.iter().any(|attention| {
+            attention.run_id == prior_run_id
+                && attention.reason_code == "work_skill_binding_stale"
+                && attention.resolved_at.is_none()
+        }));
     }
 
     #[tokio::test]

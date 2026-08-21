@@ -5,6 +5,7 @@ use openlife_core::agent::{
     ReviewCenterViewModel, ReviewItemArtifactEvidence, ReviewItemMaterializationStatus,
     ViewModelEnvelope, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
 };
+use openlife_core::task_runtime::CanonicalArtifactEffectState;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tauri::State;
@@ -33,7 +34,7 @@ pub(crate) async fn get_review_center_view_model_with_state(
     let proposals = proposal_store
         .list_all_proposals(100, 0)
         .map_err(|err| format!("failed to load review proposals: {err}"))?;
-    let artifact_evidence = proposals
+    let mut artifact_evidence = proposals
         .iter()
         .map(|proposal| {
             proposal_store.artifact_effect(&proposal.id).map(|record| {
@@ -61,18 +62,20 @@ pub(crate) async fn get_review_center_view_model_with_state(
     let (dispatch_materialization_overrides, mut dispatch_warnings) =
         dispatch_materialization_overrides(&proposal_store, &proposals);
     drop(proposal_store);
+    let (canonical_artifact_evidence, mut canonical_artifact_warnings) =
+        canonical_artifact_evidence_overrides(state, &proposals).await;
+    artifact_evidence.extend(canonical_artifact_evidence);
     let config = state.config.lock().await;
     let safe_paths = config.system.safe_paths.clone();
     drop(config);
 
-    let (safe_path_overrides, mut safe_path_warnings) =
-        proposal_safe_path_overrides(state, &proposals).await;
+    let safe_path_overrides = BTreeMap::new();
 
     let (mut materialization_overrides, mut warnings) =
         memory_materialization_overrides(state, &proposals).await;
     materialization_overrides.extend(dispatch_materialization_overrides);
     warnings.append(&mut dispatch_warnings);
-    warnings.append(&mut safe_path_warnings);
+    warnings.append(&mut canonical_artifact_warnings);
     // Review availability is owned by the exact Proposal/Artifact capability
     // being reviewed. Unrelated startup warnings (including retired execution
     // stores) must not turn the whole Review Center into Safe Mode.
@@ -98,33 +101,53 @@ pub(crate) async fn get_review_center_view_model_with_state(
     Ok(envelope)
 }
 
-async fn proposal_safe_path_overrides(
+async fn canonical_artifact_evidence_overrides(
     state: &Arc<AppState>,
     proposals: &[AgentProposal],
-) -> (BTreeMap<String, Vec<String>>, Vec<ViewModelWarning>) {
-    let mut overrides = BTreeMap::new();
+) -> (
+    BTreeMap<String, ReviewItemArtifactEvidence>,
+    Vec<ViewModelWarning>,
+) {
+    let Some(store) = state.canonical_task_runtime_store.as_ref() else {
+        return (BTreeMap::new(), Vec::new());
+    };
+    let store = store.lock().await;
+    let mut evidence = BTreeMap::new();
     let mut warnings = Vec::new();
-    for proposal in proposals.iter().filter(|proposal| {
-        proposal
-            .after
-            .get("source")
-            .and_then(serde_json::Value::as_str)
-            == Some("markdown_memory_editor")
-    }) {
-        match crate::commands::proposal::artifact_safe_paths_for_proposal(state, proposal).await {
-            Ok(paths) => {
-                overrides.insert(proposal.id.clone(), paths);
+    for proposal in proposals {
+        match store.load_artifact_effect(&proposal.id) {
+            Ok(Some(record)) => {
+                let state = match record.state {
+                    CanonicalArtifactEffectState::Prepared => "prepared",
+                    CanonicalArtifactEffectState::Staged => "staged",
+                    CanonicalArtifactEffectState::Confirmed => "confirmed",
+                    CanonicalArtifactEffectState::FailedBeforeEffect => "failed_before_effect",
+                    CanonicalArtifactEffectState::EffectUnknown => "unknown",
+                };
+                evidence.insert(
+                    proposal.id.clone(),
+                    ReviewItemArtifactEvidence {
+                        state: state.into(),
+                        target_reference_digest: record.target_reference_digest,
+                        content_digest: record.content_digest,
+                        observed_content_digest: record.observed_content_digest,
+                        byte_size: record.byte_size,
+                        media_type: record.media_type,
+                        error_code: record.error_code,
+                    },
+                );
             }
+            Ok(None) => {}
             Err(error) => warnings.push(warning(
-                "markdown_memory_review_scope_unavailable",
+                "canonical_artifact_effect_lookup_failed",
                 format!(
-                    "Markdown Memory review scope could not be confirmed for proposal {}: {error}",
+                    "Canonical artifact effect lookup failed for proposal {}: {error}",
                     proposal.id
                 ),
             )),
         }
     }
-    (overrides, warnings)
+    (evidence, warnings)
 }
 
 fn dispatch_materialization_overrides(

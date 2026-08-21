@@ -73,6 +73,8 @@ function statusDetail(item: TaskViewModelItem): string {
   if (item.latestResultPreview?.preview) return item.latestResultPreview.preview;
   if (item.lifecycleStatus === "running") return "任务仍在执行。";
   if (item.lifecycleStatus === "remote_unknown") return "远端执行结果未知，不能标记为完成。";
+  if (item.lifecycleStatus === "interrupted")
+    return "任务因应用中断而停止，可以从保留的任务记录重试。";
   return "查看依据可核对当前生命周期与交付状态。";
 }
 
@@ -89,6 +91,10 @@ function reasonLabel(reason: string): string {
     artifact_undo_unavailable_without_original_bytes: "缺少可恢复的原始内容",
     artifact_undo_requires_verified_materialization: "结果核验后才能撤销",
     artifact_undo_unavailable: "当前结果不可撤销",
+    work_provider_binding_stale: "Provider 或模型已经变化，请作为新的工作重新提交",
+    work_project_assignment_stale: "对话所属 Project 已经变化，请作为新的工作重新提交",
+    work_project_scope_stale: "Project 范围已经变化，请核对后作为新的工作重新提交",
+    work_skill_binding_stale: "所选技能已经变化，请作为新的工作重新提交",
   };
   if (labels[reason]) return labels[reason];
   return /^[a-z0-9_.:-]+$/i.test(reason) ? "后端要求核对这项状态" : reason;
@@ -99,6 +105,15 @@ function artifactTypeLabel(mediaType: string): string {
   if (normalized === "text/markdown") return "Markdown 结果";
   if (normalized === "text/html") return "HTML 结果";
   if (normalized === "application/pdf") return "PDF 结果";
+  if (normalized === "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    return "Word 文档";
+  if (normalized === "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return "Excel 表格";
+  if (normalized === "application/vnd.openxmlformats-officedocument.presentationml.presentation")
+    return "PowerPoint 演示文稿";
+  if (normalized === "text/csv") return "CSV 表格";
+  if (normalized === "application/json") return "JSON 结果";
+  if (normalized === "text/plain") return "文本结果";
   return normalized || "任务产物";
 }
 
@@ -247,7 +262,7 @@ function taskControlFeedback(state: TaskControlDispatchState) {
   if (state.phase === "refreshing") {
     return {
       title: "正在核对任务状态",
-      body: "等待同一任务的后端读模型刷新。",
+      body: "正在刷新同一项工作的状态。",
       tone: "neutral" as const,
     };
   }
@@ -366,12 +381,12 @@ export function WorkbenchResultsView({
     >
       <header className="ol-workbench-result-page-heading ol-workbench-result-page-heading--with-actions">
         <div>
-          <span>{embedded ? "当前 Conversation" : "哪些任务需要我或可以继续"}</span>
-          <h2>{embedded ? "Work 进度与结果" : taskPrimaryQuestion(envelope)}</h2>
+          <span>{embedded ? "当前对话" : "哪些工作需要我或可以继续"}</span>
+          <h2>{embedded ? "进度与结果" : taskPrimaryQuestion(envelope)}</h2>
           <p>
             {embedded
-              ? "计划、进度、决定、结果与验证都来自当前 Conversation 的后端 canonical 投影。"
-              : "生命周期、阻塞、结果和可用动作都只来自后端任务读模型。"}
+              ? "计划、重要进度、待决定事项和最终结果会在这里持续更新。"
+              : "这里显示 OpenLife 已确认的进度、阻塞、结果和可用动作。"}
           </p>
         </div>
         {!fixedFilter && (
@@ -409,47 +424,51 @@ export function WorkbenchResultsView({
         <section className="ol-workbench-result-section" aria-labelledby="tasks-list-title">
           <div className="ol-workbench-result-section-heading ol-workbench-result-task-tools-heading">
             <div>
-              <span>任务列表</span>
+              <span>工作</span>
               <h3 id="tasks-list-title">最近工作</h3>
             </div>
-            <div className="ol-workbench-result-task-tools">
-              <label className="ol-workbench-result-search">
-                <span className="ol-sr-only">搜索任务</span>
-                <Search size={17} strokeWidth={1.75} aria-hidden="true" />
-                <input
-                  type="search"
-                  value={query}
-                  placeholder="搜索任务"
-                  onChange={event => {
-                    setQuery(event.target.value);
-                    announceVisible(event.target.value, activeFilter);
-                  }}
-                />
-              </label>
-              {!fixedFilter && (
-                <label className="ol-workbench-result-filter">
-                  <span className="ol-sr-only">筛选任务</span>
-                  <select
-                    value={filter}
+            {items.length > 5 && (
+              <div className="ol-workbench-result-task-tools">
+                <label className="ol-workbench-result-search">
+                  <span className="ol-sr-only">搜索任务</span>
+                  <Search size={17} strokeWidth={1.75} aria-hidden="true" />
+                  <input
+                    type="search"
+                    value={query}
+                    placeholder="搜索任务"
                     onChange={event => {
-                      const nextFilter = event.target.value as TaskFilter;
-                      setFilter(nextFilter);
-                      announceVisible(query, nextFilter);
+                      setQuery(event.target.value);
+                      announceVisible(event.target.value, activeFilter);
                     }}
-                  >
-                    <option value="all">全部</option>
-                    <option value="attention">需要处理</option>
-                    <option value="active">进行中</option>
-                    <option value="terminal">最近结果</option>
-                  </select>
+                  />
                 </label>
-              )}
-            </div>
+                {!fixedFilter && (
+                  <label className="ol-workbench-result-filter">
+                    <span className="ol-sr-only">筛选任务</span>
+                    <select
+                      value={filter}
+                      onChange={event => {
+                        const nextFilter = event.target.value as TaskFilter;
+                        setFilter(nextFilter);
+                        announceVisible(query, nextFilter);
+                      }}
+                    >
+                      <option value="all">全部</option>
+                      <option value="attention">需要处理</option>
+                      <option value="active">进行中</option>
+                      <option value="terminal">最近结果</option>
+                    </select>
+                  </label>
+                )}
+              </div>
+            )}
           </div>
 
-          <p className="ol-workbench-result-list-count">
-            共 {items.length} 项，当前显示 {visibleItems.length} 项
-          </p>
+          {items.length > 1 && (
+            <p className="ol-workbench-result-list-count">
+              共 {items.length} 项，当前显示 {visibleItems.length} 项
+            </p>
+          )}
 
           {visibleItems.length > 0 ? (
             <div className="ol-workbench-result-task-list">
@@ -491,7 +510,7 @@ export function WorkbenchResultsView({
         <section className="ol-workbench-result-section" aria-labelledby="tasks-plan-title">
           <div className="ol-workbench-result-section-heading">
             <div>
-              <span>任务合同</span>
+              <span>完成标准</span>
               <h3 id="tasks-plan-title">{selectedTask ? "计划与完成标准" : "选择任务查看计划"}</h3>
             </div>
           </div>
@@ -526,8 +545,8 @@ export function WorkbenchResultsView({
           ) : (
             <p className="ol-workbench-result-empty-list">
               {selectedTask
-                ? "该任务没有后端确认的结构化计划；不会从消息或执行记录推断完成标准。"
-                : "选择任务后显示后端记录的计划与完成标准。"}
+                ? "这项工作没有可显示的结构化计划；OpenLife 不会猜测完成标准。"
+                : "选择一项工作查看计划与完成标准。"}
             </p>
           )}
         </section>
@@ -537,7 +556,7 @@ export function WorkbenchResultsView({
         <section className="ol-workbench-result-section" aria-labelledby="tasks-progress-title">
           <div className="ol-workbench-result-section-heading">
             <div>
-              <span>执行过程</span>
+              <span>进度</span>
               <h3 id="tasks-progress-title">
                 {selectedTask ? selectedTask.title : "选择任务查看执行过程"}
               </h3>
@@ -561,9 +580,7 @@ export function WorkbenchResultsView({
             </ol>
           ) : (
             <p className="ol-workbench-result-empty-list">
-              {selectedTask
-                ? "该任务还没有后端确认的执行记录。"
-                : "选择任务后显示后端 Task Item 记录。"}
+              {selectedTask ? "这项工作还没有可显示的执行记录。" : "选择一项工作查看执行进度。"}
             </p>
           )}
         </section>
@@ -573,7 +590,7 @@ export function WorkbenchResultsView({
         <section className="ol-workbench-result-section" aria-labelledby="tasks-results-title">
           <div className="ol-workbench-result-section-heading">
             <div>
-              <span>任务结果</span>
+              <span>结果</span>
               <h3 id="tasks-results-title">
                 {selectedTask ? selectedTask.title : "选择任务查看产物"}
               </h3>
@@ -585,7 +602,7 @@ export function WorkbenchResultsView({
                 <article className="ol-task-result-card" key={artifact.artifactId}>
                   <header className="ol-task-result-card__header">
                     <div>
-                      <span>Result</span>
+                      <span>结果</span>
                       <h4>
                         {artifactTypeLabel(artifact.mediaType)} · v{artifact.version}
                       </h4>
@@ -606,26 +623,26 @@ export function WorkbenchResultsView({
                   </header>
 
                   <section className="ol-task-result-card__section" aria-label="Changes">
-                    <span>Changes</span>
+                    <span>变更</span>
                     <strong>{artifactChangeLabel(artifact.change.kind)}</strong>
-                    <p>{artifact.change.targetReference ?? "后端尚未确认目标引用。"}</p>
+                    <p>{artifact.change.targetReference ?? "结果位置尚未确认。"}</p>
                     {artifact.change.expectedPriorDigest && (
                       <small>替换基线：{artifact.change.expectedPriorDigest}</small>
                     )}
                   </section>
 
                   <section className="ol-task-result-card__section" aria-label="Preview">
-                    <span>Preview</span>
+                    <span>预览</span>
                     {artifact.preview.content ? (
                       <pre>{artifact.preview.content}</pre>
                     ) : (
                       <p>预览不可用：{reasonLabel(artifact.preview.reasonCode ?? "来源未确认")}</p>
                     )}
-                    {artifact.preview.status === "truncated" && <small>预览已由后端截断。</small>}
+                    {artifact.preview.status === "truncated" && <small>这里只显示部分预览。</small>}
                   </section>
 
                   <section className="ol-task-result-card__section" aria-label="Verification">
-                    <span>Verification</span>
+                    <span>核验</span>
                     <FoundationStatusLabel
                       label={artifactVerificationLabel(artifact.verification.status)}
                       status={
@@ -639,22 +656,25 @@ export function WorkbenchResultsView({
                       }
                       verified={artifact.verification.status === "verified"}
                     />
-                    <dl>
-                      <div>
-                        <dt>期望摘要</dt>
-                        <dd>{artifact.verification.expectedContentDigest}</dd>
-                      </div>
-                      <div>
-                        <dt>实测摘要</dt>
-                        <dd>{artifact.verification.observedContentDigest ?? "尚未观测"}</dd>
-                      </div>
-                    </dl>
+                    <details className="ol-task-result-card__technical">
+                      <summary>查看技术核验信息</summary>
+                      <dl>
+                        <div>
+                          <dt>期望摘要</dt>
+                          <dd>{artifact.verification.expectedContentDigest}</dd>
+                        </div>
+                        <div>
+                          <dt>实测摘要</dt>
+                          <dd>{artifact.verification.observedContentDigest ?? "尚未观测"}</dd>
+                        </div>
+                      </dl>
+                    </details>
                     {artifact.verification.reasonCode && (
                       <small>{reasonLabel(artifact.verification.reasonCode)}</small>
                     )}
                   </section>
                   <section className="ol-task-result-card__section" aria-label="Undo">
-                    <span>Undo</span>
+                    <span>撤销</span>
                     {artifact.undo.available ? (
                       <FoundationActionButton
                         onClick={() => {
@@ -680,13 +700,36 @@ export function WorkbenchResultsView({
                       </p>
                     )}
                   </section>
-                  <small className="ol-task-result-card__id">{artifact.artifactId}</small>
                 </article>
               ))}
             </div>
+          ) : selectedTask?.latestResultPreview?.preview ? (
+            <article className="ol-task-result-card" data-testid="canonical-task-answer">
+              <header className="ol-task-result-card__header">
+                <div>
+                  <span>{selectedTask.finalDeliveryEvidencePresent ? "最终回答" : "当前结果"}</span>
+                  <h4>
+                    {selectedTask.finalDeliveryEvidencePresent
+                      ? "最终回答已交付"
+                      : selectedTask.latestResultPreview.label}
+                  </h4>
+                </div>
+                <FoundationStatusLabel
+                  label={selectedTask.finalDeliveryEvidencePresent ? "已交付" : "交付尚未确认"}
+                  status={selectedTask.finalDeliveryEvidencePresent ? "success" : "unknown"}
+                  verified={selectedTask.finalDeliveryEvidencePresent}
+                />
+              </header>
+              <section className="ol-task-result-card__section" aria-label="Answer">
+                <span>回答</span>
+                <p className="ol-task-result-card__answer">
+                  {selectedTask.latestResultPreview.preview}
+                </p>
+              </section>
+            </article>
           ) : (
             <p className="ol-workbench-result-empty-list">
-              {selectedTask ? "该任务还没有 canonical Artifact。" : "选择任务后显示后端产物记录。"}
+              {selectedTask ? "这项工作还没有可交付的结果。" : "选择一项工作查看结果。"}
             </p>
           )}
         </section>
@@ -695,7 +738,7 @@ export function WorkbenchResultsView({
       {listAvailable && (
         <section className="ol-workbench-result-action-area" aria-labelledby="tasks-controls-title">
           <div>
-            <span>任务动作</span>
+            <span>可用动作</span>
             <h3 id="tasks-controls-title">
               {selectedTask ? selectedTask.title : "选择一个任务查看可用动作"}
             </h3>
@@ -713,7 +756,7 @@ export function WorkbenchResultsView({
                 const disabledReason =
                   staleReason ||
                   control.disabledReason ||
-                  (!control.enabled ? "后端未提供禁用原因；动作保持关闭。" : undefined) ||
+                  (!control.enabled ? "此动作当前不可用。" : undefined) ||
                   (taskControlBusy ? "另一项任务动作正在核对。" : undefined);
                 return (
                   <FoundationActionButton
@@ -731,8 +774,7 @@ export function WorkbenchResultsView({
                     data-action-effect={control.effect}
                     data-action-enabled={String(control.enabled)}
                     data-action-disabled-reason={
-                      control.disabledReason ??
-                      (!control.enabled ? "后端未提供禁用原因；动作保持关闭。" : "")
+                      control.disabledReason ?? (!control.enabled ? "此动作当前不可用。" : "")
                     }
                     data-action-target-ref={control.targetTaskId}
                     data-action-target-action-id={control.targetActionId ?? ""}
@@ -750,7 +792,7 @@ export function WorkbenchResultsView({
           ) : (
             <p className="ol-workbench-result-task-control-empty">
               {selectedTask
-                ? "后端当前没有提供可执行的任务控制。"
+                ? "这项工作当前没有可用动作。"
                 : "选择任务只改变当前检查对象，不会自动发送命令。"}
             </p>
           )}
@@ -764,13 +806,13 @@ export function WorkbenchResultsView({
 
       <section className="ol-workbench-result-action-area" aria-labelledby="tasks-evidence-title">
         <div>
-          <span>证据入口</span>
+          <span>技术详情</span>
           <h3 id="tasks-evidence-title">
-            {selectedTaskId ? "核对所选任务的来源" : "核对任务列表的来源与限制"}
+            {selectedTaskId ? "查看这项工作的依据与限制" : "查看工作列表的依据与限制"}
           </h3>
         </div>
         <FoundationActionButton
-          label="查看依据"
+          label="查看详情"
           variant="secondary"
           icon={<FileSearch size={18} strokeWidth={1.75} aria-hidden="true" />}
           {...actionAttributes(inspectAction)}

@@ -492,9 +492,11 @@ fn is_memory_scope_instruction_fragment(value: &str) -> bool {
             "在当前会话范围",
             "在当前工作区范围",
             "在当前项目范围",
+            "在当前 project",
             "仅限当前会话",
             "仅限当前工作区",
             "仅限当前项目",
+            "仅限当前 project",
             "in the current conversation",
             "in the current workspace",
             "in the current project",
@@ -505,18 +507,22 @@ fn is_memory_scope_instruction_fragment(value: &str) -> bool {
     )
 }
 
-pub fn explicit_memory_scope_from_user_text(user_text: &str) -> MemoryLifecycleScope {
+pub fn explicit_memory_scope_from_user_text(
+    user_text: &str,
+) -> anyhow::Result<MemoryLifecycleScope> {
     let lower = user_text.to_ascii_lowercase();
     if contains_any(
         &lower,
         &[
             "在当前项目范围",
+            "在当前 project",
             "仅限当前项目",
+            "仅限当前 project",
             "in the current project",
             "project-scoped",
         ],
     ) {
-        MemoryLifecycleScope::Project
+        Ok(MemoryLifecycleScope::Project)
     } else if contains_any(
         &lower,
         &[
@@ -524,21 +530,15 @@ pub fn explicit_memory_scope_from_user_text(user_text: &str) -> MemoryLifecycleS
             "仅限当前工作区",
             "in the current workspace",
             "workspace-scoped",
-        ],
-    ) {
-        MemoryLifecycleScope::Workspace
-    } else if contains_any(
-        &lower,
-        &[
             "在当前会话范围",
             "仅限当前会话",
             "in the current conversation",
             "conversation-scoped",
         ],
     ) {
-        MemoryLifecycleScope::Conversation
+        anyhow::bail!("agent_memory_scope_not_supported")
     } else {
-        MemoryLifecycleScope::Global
+        Ok(MemoryLifecycleScope::Global)
     }
 }
 
@@ -1521,20 +1521,45 @@ mod tests {
     #[test]
     fn explicit_memory_scope_requires_unambiguous_user_words() {
         assert_eq!(
-            explicit_memory_scope_from_user_text("请记住：发布复核代号是 OL-GLOBAL-417。"),
+            explicit_memory_scope_from_user_text("请记住：发布复核代号是 OL-GLOBAL-417。").unwrap(),
             MemoryLifecycleScope::Global
         );
         assert_eq!(
-            explicit_memory_scope_from_user_text("请在当前会话范围记住：只在这次对话使用。"),
-            MemoryLifecycleScope::Conversation
+            explicit_memory_scope_from_user_text("请在当前会话范围记住：只在这次对话使用。")
+                .unwrap_err()
+                .to_string(),
+            "agent_memory_scope_not_supported"
         );
         assert_eq!(
-            explicit_memory_scope_from_user_text("请在当前工作区范围记住：使用工作区检查表。"),
-            MemoryLifecycleScope::Workspace
+            explicit_memory_scope_from_user_text("请在当前工作区范围记住：使用工作区检查表。")
+                .unwrap_err()
+                .to_string(),
+            "agent_memory_scope_not_supported"
         );
         assert_eq!(
-            explicit_memory_scope_from_user_text("请在当前项目范围记住：使用项目检查表。"),
+            explicit_memory_scope_from_user_text("请在当前项目范围记住：使用项目检查表。").unwrap(),
             MemoryLifecycleScope::Project
+        );
+        assert_eq!(
+            explicit_memory_scope_from_user_text("请在当前 Project 记住：使用项目检查表。")
+                .unwrap(),
+            MemoryLifecycleScope::Project
+        );
+    }
+
+    #[test]
+    fn mixed_language_project_scope_from_product_copy_keeps_only_the_fact() {
+        let result = routed("请在当前 Project 记住：发布复核代号是 OL-PROJECT-UI-417。");
+        let proposals = result
+            .candidates
+            .iter()
+            .filter(|candidate| candidate.destination == MemoryDestination::MemoryProposal)
+            .collect::<Vec<_>>();
+
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(
+            proposals[0].normalized_claim,
+            "发布复核代号是 OL-PROJECT-UI-417"
         );
     }
 

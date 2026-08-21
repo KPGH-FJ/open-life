@@ -5,6 +5,7 @@ use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 
+mod agent_memory_learning;
 pub(crate) mod artifact_materializer;
 pub mod bootstrap;
 mod canonical_chat_runtime;
@@ -28,12 +29,8 @@ pub(crate) mod main_chat_source_bound;
 pub(crate) mod main_chat_steering;
 pub(crate) mod main_chat_streaming;
 pub(crate) mod main_chat_tool_observation;
-#[allow(dead_code)]
 pub(crate) mod main_chat_tool_selection;
-pub(crate) mod markdown_memory;
-#[allow(dead_code)]
 pub(crate) mod memory_gateway;
-#[allow(dead_code)]
 pub(crate) mod memory_retrieval_filter;
 pub(crate) mod persistence_coordinator;
 pub(crate) mod personal_intelligence_ports;
@@ -71,7 +68,7 @@ use commands::main_chat_tools::{
 
 use commands::chat::{
     assign_conversation_project, create_chat_session, create_project, delete_chat_session,
-    get_conversation_view_model, rename_chat_session,
+    get_conversation_view_model, rename_chat_session, set_conversation_memory_mode,
 };
 use commands::life_model::{
     confirm_lifemodel_learning_candidate, delete_lifemodel_learning_candidate,
@@ -81,8 +78,7 @@ use commands::life_model::{
     stage_lifemodel_learning_candidate,
 };
 use commands::memory::{
-    draft_memory_archive_proposal, draft_memory_correction_proposal,
-    draft_memory_stop_recall_proposal, privacy_erase_memory_asset, restore_archived_chunks,
+    archive_memory, correct_memory, privacy_erase_memory_asset, restore_memory,
 };
 use commands::proposal::{
     accept_proposal, postpone_proposal, reject_proposal, request_artifact_undo,
@@ -93,10 +89,6 @@ use commands::settings::{
 };
 use life_state_projection::get_life_state_projection;
 use main_chat_steering::submit_main_chat_task_steering;
-use markdown_memory::{
-    deactivate_markdown_memory_file_proposal, draft_markdown_memory_file_proposal,
-    get_markdown_memory_view_model,
-};
 pub use openlife_core::privacy::PrivacyEngine;
 use read_models::diagnostics::get_product_diagnostics_view_model;
 use read_models::life_model::get_life_model_view_model;
@@ -417,15 +409,6 @@ async fn select_artifact_output_directory<R: tauri::Runtime>(
 }
 
 #[tauri::command]
-async fn select_markdown_memory_root<R: tauri::Runtime>(
-    scope: markdown_memory::MarkdownMemoryScope,
-    app_handle: tauri::AppHandle<R>,
-    state: State<'_, Arc<AppState>>,
-) -> Result<commands::settings::MarkdownMemoryRootSelection, errors::AppError> {
-    commands::settings::select_markdown_memory_root(app_handle, state.inner(), scope).await
-}
-
-#[tauri::command]
 async fn detach_resource_from_turn(
     operation_id: String,
     turn_operation_id: String,
@@ -689,16 +672,12 @@ pub fn run() {
             get_life_model_view_model,
             get_review_center_view_model,
             get_memory_view_model,
-            get_markdown_memory_view_model,
-            draft_markdown_memory_file_proposal,
-            deactivate_markdown_memory_file_proposal,
             get_provider_privacy_boundary_summary,
             get_workbench_view_model,
             get_product_diagnostics_view_model,
             get_config,
             save_config,
             select_artifact_output_directory,
-            select_markdown_memory_root,
             recover_required_credential_access,
             list_main_chat_skills,
             select_main_chat_skill,
@@ -710,9 +689,9 @@ pub fn run() {
             request_artifact_undo,
             postpone_proposal,
             rollback_memory_asset,
-            draft_memory_correction_proposal,
-            draft_memory_archive_proposal,
-            draft_memory_stop_recall_proposal,
+            correct_memory,
+            archive_memory,
+            restore_memory,
             privacy_erase_memory_asset,
             send_message,
             start_stream_message,
@@ -727,9 +706,9 @@ pub fn run() {
             create_chat_session,
             create_project,
             assign_conversation_project,
+            set_conversation_memory_mode,
             rename_chat_session,
             delete_chat_session,
-            restore_archived_chunks,
         ])
         .build(tauri::generate_context!())
         .unwrap_or_else(|e| panic!("Tauri build failed: {}", e))
@@ -816,7 +795,6 @@ mod release_surface_tests {
                 "main_chat_steering.rs",
                 include_str!("main_chat_steering.rs"),
             ),
-            ("markdown_memory.rs", include_str!("markdown_memory.rs")),
             (
                 "read_models/diagnostics.rs",
                 include_str!("read_models/diagnostics.rs"),
@@ -857,7 +835,7 @@ mod release_surface_tests {
     }
 
     #[test]
-    fn shipped_handler_contains_only_the_v2_lifemodel_product_surface() {
+    fn shipped_handler_excludes_retired_product_surfaces() {
         let source = include_str!("lib.rs");
         let start = source
             .find(".invoke_handler(tauri::generate_handler![")
@@ -872,6 +850,9 @@ mod release_surface_tests {
             "get_life_model_view_model",
             "draft_lifemodel_v2_change",
             "draft_legacy_lifemodel_migration",
+            "correct_memory",
+            "archive_memory",
+            "restore_memory",
         ] {
             assert!(
                 handler.contains(required),
@@ -894,6 +875,14 @@ mod release_surface_tests {
             "generate_evolution_report",
             "log_analytics_event",
             "get_proactive_suggestions",
+            "select_markdown_memory_root",
+            "get_markdown_memory_view_model",
+            "draft_markdown_memory_file_proposal",
+            "deactivate_markdown_memory_file_proposal",
+            "draft_memory_stop_recall_proposal",
+            "draft_memory_correction_proposal",
+            "draft_memory_archive_proposal",
+            "restore_archived_chunks",
         ] {
             assert!(
                 !handler.contains(retired),

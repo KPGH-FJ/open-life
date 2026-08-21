@@ -56,6 +56,8 @@ function source(overrides: Partial<WorkspaceConversationTestSource> = {}) {
         projects: [],
         selectedProjectId: null,
         selectedConversationId,
+        globalMemoryEnabled: true,
+        selectedMemoryMode: "use_and_learn",
         messages: selectedConversationId ? await loadHistory(selectedConversationId) : [],
         latestTurn: null,
         providerStatus: "ready",
@@ -111,6 +113,58 @@ function source(overrides: Partial<WorkspaceConversationTestSource> = {}) {
 }
 
 describe("workspace conversation journey", () => {
+  it("does not let an older aggregate snapshot replace an explicit new Conversation draft", () => {
+    const seed: ConversationViewModel = {
+      status: "ready",
+      conversations: [
+        {
+          session_id: "conversation-1",
+          title: "Existing conversation",
+          created_at: "2026-08-20T00:00:00Z",
+          updated_at: "2026-08-20T00:01:00Z",
+        },
+      ],
+      projects: [],
+      selectedProjectId: null,
+      selectedConversationId: "conversation-1",
+      globalMemoryEnabled: true,
+      selectedMemoryMode: "use_and_learn",
+      messages: existingMessages,
+      latestTurn: null,
+      providerStatus: "ready",
+      providerProfiles: [],
+      selectedProviderProfileId: null,
+      providerErrorCode: null,
+      workStatus: "available",
+    };
+    const dataSource = source();
+    const { result, rerender } = renderHook(
+      ({ canonicalSeed }: { canonicalSeed: ConversationViewModel }) =>
+        useWorkspaceConversation(
+          dataSource,
+          vi.fn(),
+          vi.fn().mockResolvedValue(undefined),
+          null,
+          canonicalSeed
+        ),
+      { initialProps: { canonicalSeed: seed } }
+    );
+
+    act(() => result.current.startNewConversation());
+    expect(result.current.selectedSessionId).toBeNull();
+    expect(result.current.messages).toEqual([]);
+
+    rerender({
+      canonicalSeed: {
+        ...seed,
+        messages: [...existingMessages],
+      },
+    });
+
+    expect(result.current.selectedSessionId).toBeNull();
+    expect(result.current.messages).toEqual([]);
+  });
+
   it("keeps the backend-owned Life Model influence receipt after a completed turn", async () => {
     const response = turnResult("completed");
     response.life_model_influence = {
@@ -157,69 +211,6 @@ describe("workspace conversation journey", () => {
         durableWriteAuthorized: false,
       },
     });
-  });
-
-  it("keeps Markdown Memory changes pending until the backend returns a Review receipt", async () => {
-    const loadMarkdownMemory = vi.fn().mockResolvedValue({
-      roots: [
-        { scope: "workspace", configured: false, rootPath: null, status: "unconfigured" },
-        { scope: "project", configured: true, rootPath: "/project", status: "ready" },
-      ],
-      files: [
-        {
-          scope: "project",
-          relativePath: "MEMORY.md",
-          content: "# Release\nKeep sources exact.",
-          contentDigest: "sha256:current",
-          charCount: 29,
-          active: true,
-        },
-      ],
-      totalCharCount: 29,
-      truncated: false,
-      sourceRule: "exact roots only",
-    });
-    const draftMarkdownMemoryFileProposal = vi.fn().mockResolvedValue({
-      proposalId: "proposal-1",
-      scope: "project",
-      relativePath: "MEMORY.md",
-      operation: "write",
-      status: "review_required",
-    });
-    const dataSource = source({ loadMarkdownMemory, draftMarkdownMemoryFileProposal });
-    const announce = vi.fn();
-    const { result } = renderHook(() =>
-      useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
-    );
-    await act(async () => {
-      await result.current.reload();
-      result.current.setMode("work");
-    });
-    await waitFor(() => expect(result.current.markdownMemory.phase).toBe("ready"));
-
-    await act(async () =>
-      expect(
-        await result.current.proposeMarkdownMemoryWrite({
-          scope: "project",
-          relativePath: "MEMORY.md",
-          content: "# Release\nKeep sources and dates exact.",
-          expectedCurrentDigest: "sha256:current",
-        })
-      ).toBe(true)
-    );
-
-    expect(draftMarkdownMemoryFileProposal).toHaveBeenCalledWith({
-      scope: "project",
-      relativePath: "MEMORY.md",
-      content: "# Release\nKeep sources and dates exact.",
-      expectedCurrentDigest: "sha256:current",
-    });
-    expect(result.current.markdownMemory).toMatchObject({
-      phase: "ready",
-      lastProposal: { proposalId: "proposal-1", status: "review_required" },
-    });
-    expect(loadMarkdownMemory).toHaveBeenCalledTimes(1);
-    expect(announce).toHaveBeenCalledWith("Markdown Memory 变更已进入 Review；当前文件尚未修改。");
   });
 
   it("binds selected resources and the streamed turn to one exact operation", async () => {
@@ -820,9 +811,10 @@ describe("workspace conversation journey", () => {
       steering: { steeringId: "steering-1", status: "pending" },
       scopeExpansionBlocked: false,
     });
+    const announce = vi.fn();
     const dataSource = source({ streamTurn, steerTask });
     const { result } = renderHook(() =>
-      useWorkspaceConversation(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+      useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
     );
     await act(async () => result.current.reload());
     act(() => result.current.setDraft("生成访谈报告"));
@@ -841,6 +833,52 @@ describe("workspace conversation journey", () => {
       })
     );
     expect(result.current.draft).toBe("");
+    expect(announce).toHaveBeenLastCalledWith("调整已加入当前任务，将在下一次安全步骤生效。");
+    await act(async () => finishTurn(turnResult("completed")));
+  });
+
+  it("explains a closed steering window without exposing backend checkpoint terms", async () => {
+    let finishTurn!: (value: StreamMessageDonePayload) => void;
+    const announce = vi.fn();
+    const streamTurn = vi.fn(
+      async (
+        _sessionId,
+        _messages,
+        _options,
+        events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
+      ) => {
+        events.onStart({
+          session_id: "conversation-1",
+          operation_id: "operation-steer-closed",
+          conversation_id: "conversation-1",
+          turn_id: "operation-steer-closed",
+          task_id: "task-steer-closed",
+          run_id: "run-steer-closed",
+          reasoning_trace: {},
+          tool_calls: [],
+        });
+        return new Promise<StreamMessageDonePayload>(resolve => {
+          finishTurn = resolve;
+        });
+      }
+    );
+    const steerTask = vi.fn().mockRejectedValue(new Error("canonical_steering_checkpoint_passed"));
+    const dataSource = source({ streamTurn, steerTask });
+    const { result } = renderHook(() =>
+      useWorkspaceConversation(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.setDraft("生成访谈报告"));
+    act(() => void result.current.send());
+    await waitFor(() => expect(result.current.activeTaskId).toBe("task-steer-closed"));
+
+    act(() => result.current.setDraft("缩短结论"));
+    await act(async () => result.current.steer());
+
+    expect(result.current.draft).toBe("缩短结论");
+    expect(announce).toHaveBeenLastCalledWith(
+      "这次任务已经进入最终生成阶段，当前调整没有加入；完成后可以继续补充要求。"
+    );
     await act(async () => finishTurn(turnResult("completed")));
   });
 
@@ -959,6 +997,53 @@ describe("workspace conversation journey", () => {
     await waitFor(() =>
       expect(result.current.turnState).toMatchObject({ phase: "resolved", status: "cancelled" })
     );
+  });
+
+  it("treats the canonical cancellation terminal error as a cancelled turn", async () => {
+    let rejectTurn!: (reason: Error) => void;
+    let emittedTaskId = "";
+    const streamTurn = vi.fn(
+      async (
+        _sessionId,
+        _messages,
+        options,
+        events: Parameters<WorkspaceConversationDataSource["streamTurn"]>[3]
+      ) => {
+        emittedTaskId = options.taskId ?? "";
+        events.onStart({
+          session_id: "conversation-1",
+          operation_id: options.operationId,
+          conversation_id: "conversation-1",
+          turn_id: options.operationId,
+          task_id: emittedTaskId,
+          run_id: options.runId,
+          reasoning_trace: {},
+          tool_calls: [],
+        });
+        return new Promise<StreamMessageDonePayload>((_resolve, reject) => {
+          rejectTurn = reject;
+        });
+      }
+    );
+    const cancelWorkTask = vi.fn().mockResolvedValue({ status: "cancelled" });
+    const announce = vi.fn();
+    const afterTurn = vi.fn().mockResolvedValue(undefined);
+    const dataSource = source({ streamTurn, cancelWorkTask });
+    const { result } = renderHook(() => useWorkspaceConversation(dataSource, announce, afterTurn));
+    await act(async () => result.current.reload());
+    act(() => result.current.setMode("work"));
+    act(() => result.current.setDraft("执行后取消"));
+    act(() => void result.current.send());
+    await waitFor(() => expect(result.current.activeTaskId).toBe(emittedTaskId));
+
+    await act(async () => result.current.cancel());
+    await act(async () => rejectTurn(new Error("canonical_work_cancelled")));
+
+    await waitFor(() =>
+      expect(result.current.turnState).toMatchObject({ phase: "resolved", status: "cancelled" })
+    );
+    expect(announce).toHaveBeenCalledWith("本轮已取消。");
+    expect(afterTurn).toHaveBeenCalled();
   });
 
   it("cancels canonical Chat by exact Conversation and Turn without a Task", async () => {
@@ -1118,6 +1203,8 @@ describe("workspace conversation journey", () => {
       projects: assigned ? [project] : [],
       selectedProjectId: assigned ? project.id : null,
       selectedConversationId: "conversation-1",
+      globalMemoryEnabled: true,
+      selectedMemoryMode: "use_and_learn" as const,
       messages: existingMessages,
       latestTurn: null,
       providerStatus: "ready" as const,

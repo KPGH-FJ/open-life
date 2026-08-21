@@ -174,9 +174,8 @@ export interface AppConfig {
   system?: {
     ollama_cache_ttl_seconds?: number;
     memory_search_top_k?: number;
+    agent_memory_enabled?: boolean;
     safe_paths?: string[];
-    workspace_memory_root?: string;
-    project_memory_root?: string;
     search_provider?: "duckduckgo" | "brave" | "deepseek" | "searxng";
     search_provider_key?: string;
     search_provider_key_ref?: string;
@@ -208,77 +207,6 @@ export interface ArtifactOutputDirectorySelection {
 
 export async function selectArtifactOutputDirectory(): Promise<ArtifactOutputDirectorySelection> {
   return safeInvoke<ArtifactOutputDirectorySelection>("select_artifact_output_directory");
-}
-
-export type MarkdownMemoryScope = "workspace" | "project";
-
-export interface MarkdownMemoryRootSelection {
-  cancelled: boolean;
-  scope: MarkdownMemoryScope;
-  selectedPath: string | null;
-}
-
-export interface MarkdownMemoryRootView {
-  scope: MarkdownMemoryScope;
-  configured: boolean;
-  rootPath: string | null;
-  status: "ready" | "unavailable" | "unconfigured";
-}
-
-export interface MarkdownMemoryFileView {
-  scope: MarkdownMemoryScope;
-  relativePath: string;
-  content: string;
-  contentDigest: string;
-  charCount: number;
-  active: boolean;
-}
-
-export interface MarkdownMemoryViewModel {
-  roots: MarkdownMemoryRootView[];
-  files: MarkdownMemoryFileView[];
-  totalCharCount: number;
-  truncated: boolean;
-  sourceRule: string;
-}
-
-export interface MarkdownMemoryProposalReceipt {
-  proposalId: string;
-  scope: MarkdownMemoryScope;
-  relativePath: string;
-  operation: "write" | "deactivate";
-  status: "review_required";
-}
-
-export async function selectMarkdownMemoryRoot(
-  scope: MarkdownMemoryScope
-): Promise<MarkdownMemoryRootSelection> {
-  return safeInvoke<MarkdownMemoryRootSelection>("select_markdown_memory_root", { scope });
-}
-
-export async function getMarkdownMemoryViewModel(): Promise<MarkdownMemoryViewModel> {
-  return safeInvoke<MarkdownMemoryViewModel>("get_markdown_memory_view_model");
-}
-
-export async function draftMarkdownMemoryFileProposal(request: {
-  scope: MarkdownMemoryScope;
-  relativePath: string;
-  content: string;
-  expectedCurrentDigest?: string;
-}): Promise<MarkdownMemoryProposalReceipt> {
-  return safeInvoke<MarkdownMemoryProposalReceipt>("draft_markdown_memory_file_proposal", {
-    request,
-  });
-}
-
-export async function deactivateMarkdownMemoryFileProposal(request: {
-  scope: MarkdownMemoryScope;
-  relativePath: string;
-  expectedCurrentDigest: string;
-}): Promise<MarkdownMemoryProposalReceipt> {
-  return safeInvoke<MarkdownMemoryProposalReceipt>("deactivate_markdown_memory_file_proposal", {
-    request,
-  });
 }
 
 export interface CredentialRecoveryItem {
@@ -1268,14 +1196,6 @@ export type ProviderPrivacyBoundarySummary = {
   evidenceRefs: EvidenceRef[];
 };
 
-export type MemoryLane =
-  | "turn_context"
-  | "episodic_life_event"
-  | "semantic_fact_preference"
-  | "procedural_rule"
-  | "evidence_record"
-  | "canonical_lifemodel_truth";
-
 export type BackendEntityRef = {
   id: string;
   kind:
@@ -1898,6 +1818,7 @@ export type TaskLifecycleStatus =
   | "failed"
   | "remote_unknown"
   | "cancelled"
+  | "interrupted"
   | "completed"
   | "completed_with_pending_review"
   | "completed_needs_evidence"
@@ -2143,70 +2064,11 @@ export type WorkspaceViewModel = {
   contractLimitations: string[];
 };
 
-export type MemoryTierSummary = {
-  total: number;
-  tier1: number;
-  tier2: number;
-  tier3: number;
-  archived: number;
-};
-
-export type MemoryLifecycleSummary = {
-  candidateCount: number;
-  pendingReviewCount: number;
-  editedPendingReviewCount: number;
-  acceptedCount: number;
-  confirmedCount: number;
-  pendingMaterializationCount: number;
-  materializedCount: number;
-  materializationFailedCount: number;
-  rejectedCount: number;
-  deferredCount: number;
-  supersededCount: number;
-  rolledBackCount: number;
-  expiredCount: number;
-  archivedCount: number;
-  byStatus: Record<string, number>;
-  byMaterializationStatus: Record<string, number>;
-};
-
-export type MemoryLaneSummary = {
-  lane: MemoryLane;
-  label: string;
-  totalCount: number;
-  activeCount: number;
-  candidateCount: number;
-  pendingReviewCount: number;
-  confirmedCount: number;
-  materializedCount: number;
-  rolledBackCount: number;
-  archivedCount: number;
-  reviewItemRefs: BackendEntityRef[];
-  evidenceRefs: EvidenceRef[];
-};
-
-export type MemoryLifeModelLinkageSummary = {
-  linkedMemoryCount: number;
-  candidateMemoryCount: number;
-  materializedMemoryCount: number;
-  conflictCount: number;
-  boundaryMemoryCount: number;
-  linkageStatus: "partial" | "unknown";
-  memoryRefs: BackendEntityRef[];
-  evidenceRefs: EvidenceRef[];
-};
-
 export type MemoryViewModelSummary = {
-  totalLifecycleRecords: number;
+  totalMemoryCount: number;
   activeMemoryCount: number;
-  reviewRequiredCount: number;
-  materializedCount: number;
-  pendingMaterializationCount: number;
-  failedMaterializationCount: number;
-  rolledBackCount: number;
-  archivedVectorCount: number;
-  conflictCount: number;
-  tierSummary?: MemoryTierSummary;
+  archivedMemoryCount: number;
+  historicalMemoryCount: number;
 };
 
 export type MemoryItemView = {
@@ -2214,20 +2076,13 @@ export type MemoryItemView = {
   content?: string;
   scope: string;
   category: string;
-  status: string;
-  materializationStatus: string;
   recallState: "active" | "paused" | "archived" | "historical" | "erased" | "unavailable";
-  sensitivity: string;
   whyRemembered: string;
   recallExplanation: string;
   acceptedAt?: string;
-  evidenceIds: string[];
   sourceRefs: EvidenceRef[];
-  supersedesMemoryId?: string;
-  replacementMemoryId?: string;
   privacyErased: boolean;
   canCorrect: boolean;
-  canStopRecall: boolean;
   canArchive: boolean;
   canRestore: boolean;
   canRollback: boolean;
@@ -2236,11 +2091,6 @@ export type MemoryItemView = {
 
 export type MemoryViewModel = {
   summary: MemoryViewModelSummary;
-  lifecycleSummary: MemoryLifecycleSummary;
-  laneSummaries: MemoryLaneSummary[];
-  recentMemoryRefs: BackendEntityRef[];
-  reviewItemRefs: BackendEntityRef[];
-  lifeModelLinkage: MemoryLifeModelLinkageSummary;
   items: MemoryItemView[];
   sourceRefs: EvidenceRef[];
   contractLimitations: string[];
@@ -2315,6 +2165,8 @@ export interface ConversationViewModel {
   projects: ProjectRecord[];
   selectedProjectId: string | null;
   selectedConversationId: string | null;
+  globalMemoryEnabled: boolean;
+  selectedMemoryMode: ConversationMemoryMode;
   messages: ChatMessage[];
   latestTurn: ConversationTurnViewModel | null;
   providerStatus: "ready" | "unavailable";
@@ -2323,6 +2175,8 @@ export interface ConversationViewModel {
   providerErrorCode: string | null;
   workStatus: "available" | "unavailable";
 }
+
+export type ConversationMemoryMode = "use_and_learn" | "use_only" | "off";
 
 export interface WorkbenchViewModel {
   capturedAt: string;
@@ -2370,6 +2224,13 @@ export async function assignConversationProject(
   });
 }
 
+export async function setConversationMemoryMode(
+  conversationId: string,
+  mode: ConversationMemoryMode
+): Promise<void> {
+  return safeInvoke("set_conversation_memory_mode", { conversationId, mode });
+}
+
 export async function renameChatSession(sessionId: string, title: string): Promise<void> {
   return safeInvoke("rename_chat_session", { ...sessionArgs(sessionId), title });
 }
@@ -2393,12 +2254,6 @@ export interface MemoryRetrievalMutationResult {
   outboxEventId?: string;
   projectionState: "applied" | "pending" | "degraded" | "superseded" | "compensated";
   projectionErrorDigest?: string;
-}
-
-export async function restoreArchivedMemory(
-  owner: CanonicalMemoryOwner
-): Promise<MemoryRetrievalMutationResult> {
-  return safeInvoke<MemoryRetrievalMutationResult>("restore_archived_chunks", { owner });
 }
 
 export interface ProductModelRouteTrace {
@@ -2643,11 +2498,13 @@ export interface MemoryPrivacyEraseReport {
   projectionErrorDigest?: string;
 }
 
-export interface MemoryActionProposalReceipt {
-  proposalId: string;
+export interface MemoryCorrectionResult {
   memoryId: string;
-  action: "correct" | "stop_recall" | "archive";
-  status: "review_required";
+  replacedMemoryId: string;
+  canonicalCommitted: boolean;
+  projectionState: "pending" | "degraded" | "applied" | "superseded" | "compensated";
+  projectionErrorDigest?: string;
+  undoAvailable: boolean;
 }
 
 export interface PatchApplyResult {
@@ -2725,26 +2582,22 @@ export async function rollbackMemoryAsset(
   return safeInvoke("rollback_memory_asset", { memoryId, reason });
 }
 
-export async function draftMemoryCorrectionProposal(
+export async function correctMemory(
   memoryId: string,
   content: string
-): Promise<MemoryActionProposalReceipt> {
-  return safeInvoke("draft_memory_correction_proposal", {
+): Promise<MemoryCorrectionResult> {
+  return safeInvoke("correct_memory", {
     memoryId,
     content,
   });
 }
 
-export async function draftMemoryArchiveProposal(
-  memoryId: string
-): Promise<MemoryActionProposalReceipt> {
-  return safeInvoke("draft_memory_archive_proposal", { memoryId });
+export async function archiveMemory(memoryId: string): Promise<MemoryRetrievalMutationResult> {
+  return safeInvoke("archive_memory", { memoryId });
 }
 
-export async function draftMemoryStopRecallProposal(
-  memoryId: string
-): Promise<MemoryActionProposalReceipt> {
-  return safeInvoke("draft_memory_stop_recall_proposal", { memoryId });
+export async function restoreMemory(memoryId: string): Promise<MemoryRetrievalMutationResult> {
+  return safeInvoke("restore_memory", { memoryId });
 }
 
 export async function privacyEraseMemoryAsset(memoryId: string): Promise<MemoryPrivacyEraseReport> {

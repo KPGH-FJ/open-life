@@ -22,7 +22,9 @@ use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 const MEMORY_LIFECYCLE_AGGREGATE_KIND: &str = "memory_lifecycle";
-const MEMORY_LIFECYCLE_PROJECTION_TARGETS: [&str; 2] = ["memory_store", "vector_store"];
+// The lifecycle database owns the fact body and lexical truth. VectorStore is
+// a rebuildable semantic index; MemoryStore must not receive a duplicate body.
+const MEMORY_LIFECYCLE_PROJECTION_TARGETS: [&str; 1] = ["vector_store"];
 const MEMORY_LIFECYCLE_RETRIEVAL_AGGREGATE_KIND: &str = "memory_retrieval";
 const MEMORY_LIFECYCLE_RETRIEVAL_OWNER_KIND: &str = "memory_lifecycle";
 
@@ -520,8 +522,8 @@ pub enum MemoryAdmissionOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplicitMemoryWriteInput {
-    pub source_task_id: String,
-    pub source_run_id: String,
+    pub source_task_id: Option<String>,
+    pub source_run_id: Option<String>,
     pub source_message_id: String,
     pub source_message_digest: String,
     pub authorized_candidate_id: String,
@@ -749,6 +751,7 @@ impl MemoryLifecycleStore {
             )",
             [],
         )?;
+        migrate_legacy_source_task_column_tx(&tx)?;
         tx.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_lifecycle_proposal ON memory_lifecycle_records(proposal_id)",
             [],
@@ -1346,8 +1349,8 @@ impl MemoryLifecycleStore {
         let mut record = MemoryLifecycleRecord {
             memory_id: memory_id.clone(),
             proposal_id: proposal_id.clone(),
-            source_task_id: Some(input.source_task_id),
-            source_run_id: Some(input.source_run_id),
+            source_task_id: input.source_task_id,
+            source_run_id: input.source_run_id,
             content: input.fact.canonical_body,
             scope: input.fact.scope,
             scope_owner_ref: input.fact.scope_owner_ref,
@@ -3462,7 +3465,12 @@ fn rebuild_memory_lifecycle_tables_if_needed_tx(tx: &rusqlite::Transaction<'_>) 
         && records_sql.contains("CHECK(risk_level IN")
         && records_sql.contains("CHECK(sensitivity IN")
         && records_sql.contains("CHECK(scope IN")
-        && records_sql.contains("CHECK(category IN");
+        && records_sql.contains("CHECK(category IN")
+        && !memory_lifecycle_table_has_column_tx(
+            tx,
+            "memory_lifecycle_records",
+            "source_task_session_id",
+        )?;
     let links_strict = links_sql.contains("admitted_memory_id TEXT NOT NULL")
         && links_sql.contains("fact_key TEXT NOT NULL CHECK")
         && links_sql.contains("CHECK(risk_level IN")
@@ -3551,6 +3559,63 @@ fn rebuild_memory_lifecycle_tables_if_needed_tx(tx: &rusqlite::Transaction<'_>) 
          CREATE INDEX idx_memory_lifecycle_proposal_links_memory
          ON memory_lifecycle_proposal_links(memory_id);",
     )?;
+    Ok(())
+}
+
+fn memory_lifecycle_table_has_column_tx(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> Result<bool> {
+    if !table
+        .bytes()
+        .chain(column.bytes())
+        .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+    {
+        anyhow::bail!("invalid Memory lifecycle migration identifier");
+    }
+    let mut statement = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn migrate_legacy_source_task_column_tx(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let has_canonical =
+        memory_lifecycle_table_has_column_tx(tx, "memory_lifecycle_records", "source_task_id")?;
+    let has_legacy = memory_lifecycle_table_has_column_tx(
+        tx,
+        "memory_lifecycle_records",
+        "source_task_session_id",
+    )?;
+    match (has_canonical, has_legacy) {
+        (false, true) => {
+            tx.execute_batch(
+                "ALTER TABLE memory_lifecycle_records
+                 RENAME COLUMN source_task_session_id TO source_task_id;",
+            )?;
+        }
+        (true, true) => {
+            tx.execute(
+                "UPDATE memory_lifecycle_records
+                 SET source_task_id = COALESCE(source_task_id, source_task_session_id)",
+                [],
+            )?;
+        }
+        (false, false) => {
+            crate::sqlite_migration::ensure_column(
+                tx,
+                "memory_lifecycle_records",
+                "source_task_id",
+                "TEXT",
+            )?;
+        }
+        (true, false) => {}
+    }
     Ok(())
 }
 
@@ -3940,8 +4005,8 @@ mod tests {
 
     fn explicit_input(message_id: &str, content: &str) -> ExplicitMemoryWriteInput {
         ExplicitMemoryWriteInput {
-            source_task_id: "task".into(),
-            source_run_id: "run".into(),
+            source_task_id: Some("task".into()),
+            source_run_id: Some("run".into()),
             source_message_id: message_id.into(),
             source_message_digest: digest_label(content),
             authorized_candidate_id: format!("candidate:test:{message_id}"),
@@ -4191,8 +4256,8 @@ mod tests {
         let proposed = store.accept_memory_proposal(proposal_input).unwrap();
         let explicit = store
             .commit_test_explicit_user_memory(ExplicitMemoryWriteInput {
-                source_task_id: "task".into(),
-                source_run_id: "run".into(),
+                source_task_id: Some("task".into()),
+                source_run_id: Some("run".into()),
                 source_message_id: "message-typed-semantic-fact".into(),
                 source_message_digest: digest_label("User prefers focused work before lunch."),
                 authorized_candidate_id: "candidate:test:message-typed-semantic-fact".into(),
@@ -4927,6 +4992,57 @@ mod tests {
     }
 
     #[test]
+    fn legacy_source_task_session_column_migrates_losslessly_even_at_current_schema_version() {
+        let directory = tempfile::tempdir().expect("temporary lifecycle directory");
+        let path = directory.path().join("legacy-source-task-column.db");
+        let store = MemoryLifecycleStore::new(&path).unwrap();
+        let committed = store
+            .commit_test_explicit_user_memory(explicit_input(
+                "message-legacy-source-task",
+                "Legacy source task column fact",
+            ))
+            .unwrap();
+        drop(store);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE memory_lifecycle_records
+             RENAME COLUMN source_task_id TO source_task_session_id;",
+        )
+        .unwrap();
+        let recorded_version: i64 = conn
+            .query_row(
+                "SELECT version FROM openlife_schema_versions
+                 WHERE component = 'memory_lifecycle_store'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded_version, 7);
+        drop(conn);
+
+        let migrated = MemoryLifecycleStore::new(&path).expect("migrate legacy task column");
+        let record = migrated
+            .get_record(&committed.memory_id)
+            .unwrap()
+            .expect("preserve canonical Memory record");
+        assert_eq!(record.source_task_id.as_deref(), Some("task"));
+
+        let conn = migrated.conn.lock().unwrap();
+        let columns = conn
+            .prepare("PRAGMA table_info(memory_lifecycle_records)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "source_task_id"));
+        assert!(!columns
+            .iter()
+            .any(|column| column == "source_task_session_id"));
+    }
+
+    #[test]
     fn legacy_duplicate_facts_migrate_to_one_conservative_owner() {
         let directory = tempfile::tempdir().expect("temporary lifecycle directory");
         let path = directory.path().join("legacy-duplicates.db");
@@ -5043,7 +5159,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(winner_materialized_events, 1);
-        assert_eq!(winner_deliveries, 2);
+        assert_eq!(winner_deliveries, 1);
         assert_eq!(tombstone_count, 1);
         drop(conn);
 
@@ -5638,8 +5754,8 @@ mod tests {
     fn direct_lane_rejects_boundary_identity_high_and_sensitive_memory() {
         let store = MemoryLifecycleStore::new_in_memory().unwrap();
         let boundary = ExplicitMemoryWriteInput {
-            source_task_id: "task-boundary".into(),
-            source_run_id: "run-boundary".into(),
+            source_task_id: Some("task-boundary".into()),
+            source_run_id: Some("run-boundary".into()),
             source_message_id: "message-boundary".into(),
             source_message_digest: digest_label("I am the finance administrator."),
             authorized_candidate_id: "candidate:test:message-boundary".into(),
@@ -5653,8 +5769,8 @@ mod tests {
             .unwrap(),
         };
         let identity = ExplicitMemoryWriteInput {
-            source_task_id: "task-identity".into(),
-            source_run_id: "run-identity".into(),
+            source_task_id: Some("task-identity".into()),
+            source_run_id: Some("run-identity".into()),
             source_message_id: "message-identity".into(),
             source_message_digest: digest_label("I am the finance administrator."),
             authorized_candidate_id: "candidate:test:message-identity".into(),
@@ -5860,7 +5976,7 @@ mod tests {
                 .projection_summary(repaired.outbox_event_id.as_deref().unwrap())
                 .unwrap()
                 .pending,
-            2
+            1
         );
     }
 

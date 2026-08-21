@@ -1,7 +1,7 @@
 use crate::main_chat_context_loader::{
     load_workspace_knowledge_context_candidates, sanitize_main_chat_selected_skill_id,
 };
-use crate::main_chat_tool_selection::main_chat_workspace_file_target;
+use crate::workspace_file_resolver::resolve_main_chat_workspace_file_target;
 
 #[test]
 fn main_chat_context_loader_tests_are_not_concentrated_in_lib_rs() {
@@ -57,7 +57,7 @@ fn main_chat_context_loader_declares_controlled_knowledge_format_surfaces() {
 
 #[test]
 fn workspace_file_resolver_accepts_explicit_nested_workspace_relative_path() {
-    let (label, path) = main_chat_workspace_file_target("Read plans/README.md").unwrap();
+    let (label, path) = resolve_main_chat_workspace_file_target("Read plans/README.md").unwrap();
 
     assert_eq!(label, "plans/README.md");
     assert!(path.ends_with("plans/README.md"));
@@ -65,7 +65,7 @@ fn workspace_file_resolver_accepts_explicit_nested_workspace_relative_path() {
 
 #[test]
 fn workspace_file_resolver_blocks_explicit_path_traversal() {
-    let error = main_chat_workspace_file_target("Read ../Cargo.toml").unwrap_err();
+    let error = resolve_main_chat_workspace_file_target("Read ../Cargo.toml").unwrap_err();
 
     assert!(error.contains("outside workspace") || error.contains("path traversal"));
 }

@@ -95,6 +95,27 @@ function credentialSettingsSource(
 }
 
 describe("SettingsPrivacyView", () => {
+  it("offers one global Agent Memory setting", async () => {
+    const source = credentialSettingsSource(null);
+    const snapshot = await source.loadSettingsPrivacy();
+    source.loadSettingsPrivacy = vi.fn().mockResolvedValue({
+      ...snapshot,
+      config: {
+        ...snapshot.config,
+        system: { ...snapshot.config?.system, agent_memory_enabled: true },
+      },
+    });
+
+    render(<SafeModeSettings source={source} surface="privacy-network" />);
+
+    const memorySwitch = await screen.findByRole("switch", {
+      name: "允许 OpenLife 使用 Agent 记忆",
+    });
+    expect(memorySwitch).toHaveAttribute("aria-checked", "true");
+    fireEvent.click(memorySwitch);
+    expect(memorySwitch).toHaveAttribute("aria-checked", "false");
+  });
+
   it("renders only canonical product diagnostics and reports blockers explicitly", async () => {
     const source = credentialSettingsSource(null);
     const snapshot = await source.loadSettingsPrivacy();

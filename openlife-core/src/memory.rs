@@ -816,7 +816,28 @@ impl MemoryStore {
             "DELETE FROM memories WHERE content_type = 'chat_message'",
             [],
         )?;
-        crate::sqlite_migration::record_schema_version(&conn, "memory_store", 8)?;
+        // Lifecycle Memory bodies now remain in MemoryLifecycleStore. Retire
+        // the old compatibility projection and its markers; lifecycle lexical
+        // retrieval reads the canonical records directly and VectorStore is
+        // the only rebuildable external index.
+        conn.execute(
+            "DELETE FROM memories
+             WHERE source LIKE 'memory_lifecycle:%'
+                OR EXISTS (
+                    SELECT 1 FROM json_each(
+                        CASE WHEN json_valid(memories.tags_json)
+                             THEN memories.tags_json ELSE '[]' END
+                    ) owner_tag
+                    WHERE owner_tag.value = 'canonical_owner:memory_lifecycle'
+                )",
+            [],
+        )?;
+        conn.execute(
+            "DELETE FROM memory_materialization_projections
+             WHERE aggregate_kind = 'memory_lifecycle'",
+            [],
+        )?;
+        crate::sqlite_migration::record_schema_version(&conn, "memory_store", 9)?;
         Ok(())
     }
 

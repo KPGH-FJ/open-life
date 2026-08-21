@@ -36,6 +36,14 @@ describe("release Tauri surface", () => {
       "get_proactive_suggestions",
       "generate_micro_evolution_changes",
       "calibration_create_proposals",
+      "select_markdown_memory_root",
+      "get_markdown_memory_view_model",
+      "draft_markdown_memory_file_proposal",
+      "deactivate_markdown_memory_file_proposal",
+      "draft_memory_stop_recall_proposal",
+      "draft_memory_correction_proposal",
+      "draft_memory_archive_proposal",
+      "restore_archived_chunks",
     ]) {
       expect(releaseClient, retiredCommand).not.toContain(`"${retiredCommand}"`);
     }

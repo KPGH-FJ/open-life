@@ -290,8 +290,18 @@ impl IntentFrame {
         let supplied_text_transformation_only = is_supplied_text_transformation_request(&lower)
             && !is_explicit_tracked_plan_request(&lower);
 
+        let has_explicit_memory_candidate =
+            governance_intent
+                .memory_routing
+                .candidates
+                .iter()
+                .any(|candidate| {
+                    candidate.destination == crate::agent::MemoryDestination::MemoryProposal
+                        && candidate.explicitness == "explicit"
+                });
         let requests_memory_change = governance_intent.durable_write_requirement
             == Some(MainChatDurableWriteRequirement::MemoryProposal)
+            && has_explicit_memory_candidate
             && !has_embedded_untrusted_instruction
             && !advice_only;
         let requests_memory_rollback_after_commit =
@@ -320,7 +330,8 @@ impl IntentFrame {
             || action_proposal_requirement.is_some();
         let requires_external_read = !has_embedded_untrusted_instruction
             && (governance_intent.external_read_requirement.is_some()
-                || is_current_external_read_intent(&lower));
+                || is_current_external_read_intent(&lower)
+                || explicitly_requests_web_fetch(&lower));
         let requests_read_observation = !has_embedded_untrusted_instruction
             && (is_tool_observation_intent(&lower) || has_explicit_governed_read_intent(&lower));
         let requests_conditional_observation_memory_review = requests_read_observation
@@ -1352,7 +1363,7 @@ impl PolicyMemoryAdmissionProof {
             anyhow::bail!("high-risk or sensitive Memory requires ReviewWorkflow");
         }
         let expected_scope =
-            crate::agent::explicit_memory_scope_from_user_text(source_user_message);
+            crate::agent::explicit_memory_scope_from_user_text(source_user_message)?;
         if fact.scope != expected_scope {
             anyhow::bail!("explicit Memory admission scope does not match the user message");
         }
@@ -2108,11 +2119,7 @@ fn requested_read_capabilities(intent: &IntentFrame) -> Vec<AllowedCapability> {
     ) {
         capabilities.push(AllowedCapability::UnsupportedToolBlocker);
     }
-    if lower.contains("http://")
-        || lower.contains("https://")
-        || lower.contains("web.fetch")
-        || lower.contains("抓取")
-    {
+    if explicitly_requests_web_fetch(&lower) {
         capabilities.push(AllowedCapability::WebFetch);
     }
     if is_current_external_read_intent(&lower)
@@ -2185,18 +2192,41 @@ fn requested_read_capabilities(intent: &IntentFrame) -> Vec<AllowedCapability> {
     }
     // A Web read produces untrusted evidence, not a user-facing answer. The
     // same PolicyDecision must explicitly authorize the provider synthesis
-    // step; ToolGateway success alone cannot be promoted to completion prose.
+    // step; ToolGateway or Memory selection alone cannot be promoted to
+    // completion prose.
     if capabilities.iter().any(|capability| {
         matches!(
             capability,
             AllowedCapability::ImportedResourceRead
                 | AllowedCapability::WebSearch
                 | AllowedCapability::WebFetch
+                | AllowedCapability::MemoryRead
         )
     }) {
         capabilities.push(AllowedCapability::ProviderGeneration);
     }
     capabilities
+}
+
+fn explicitly_requests_web_fetch(lower: &str) -> bool {
+    lower.contains("http://")
+        || lower.contains("https://")
+        || contains_any(
+            lower,
+            &[
+                "web.fetch",
+                "fetch the result",
+                "fetch result",
+                "open the result",
+                "open result",
+                "read the full page",
+                "打开搜索结果",
+                "抓取搜索结果",
+                "读取完整网页",
+                "阅读全文",
+                "抓取",
+            ],
+        )
 }
 
 fn requests_registered_read_integration(lower: &str) -> bool {
@@ -3916,31 +3946,45 @@ fn is_governed_file_write_intent(lower: &str) -> bool {
             && (lower.contains(" to file")
                 || lower.contains("到文件")
                 || lower.contains("到工作区"));
-    let generated_artifact_save = contains_any(lower, &["保存", "save"])
-        && contains_any(
+    let generated_artifact_save =
+        contains_any(
             lower,
             &[
                 ".md",
                 ".markdown",
                 ".csv",
+                ".txt",
+                ".html",
+                ".htm",
+                ".json",
+                ".docx",
+                ".xlsx",
+                ".pptx",
                 "markdown",
                 "csv",
-                "路演摘要",
-                "风险清单",
+                "html",
+                "json",
+                "docx",
+                "xlsx",
+                "pptx",
+                "word document",
+                "excel spreadsheet",
+                "powerpoint",
+                "presentation",
+                "word 文档",
+                "excel 表格",
+                "演示文稿",
+                "幻灯片",
+                "plain text",
+                "纯文本",
+                "report",
+                "document",
+                "artifact",
+                "报告",
+                "文档",
+                "产物",
             ],
-        )
-        && contains_any(
-            lower,
-            &[
-                "生成",
-                "整理",
-                "最终摘要",
-                "风险清单",
-                "generate",
-                "create",
-                "final summary",
-            ],
-        );
+        ) && contains_any(lower, &["生成", "整理", "generate", "create", "draft"]);
     (explicit_write_phrase || named_file_write || generated_artifact_save)
         && !contains_any(
             lower,
@@ -3959,13 +4003,7 @@ fn looks_like_workspace_file_read_intent(lower: &str) -> bool {
         return false;
     }
     let has_read_verb = lower.contains("read ") || lower.contains("读取") || lower.contains("查看");
-    has_read_verb
-        && (contains_any(
-            lower,
-            &[
-                ".md", ".toml", ".json", ".rs", ".ts", ".tsx", ".yaml", ".yml",
-            ],
-        ) || workspace_path_token_follows_read_verb(lower))
+    has_read_verb && workspace_path_token_follows_read_verb(lower)
 }
 
 fn is_negated_workspace_file_read_intent(lower: &str) -> bool {
@@ -4065,6 +4103,11 @@ fn looks_like_workspace_path_token(raw: &str) -> bool {
             .is_some_and(|separator| *separator == b':')
         || token.contains('/')
         || token.contains('\\')
+        || [
+            ".md", ".toml", ".json", ".rs", ".ts", ".tsx", ".yaml", ".yml",
+        ]
+        .iter()
+        .any(|extension| token.ends_with(extension))
 }
 
 fn has_explicit_governed_read_intent(lower: &str) -> bool {
@@ -4400,6 +4443,30 @@ mod explicit_lifemodel_read_policy_tests {
     }
 
     #[test]
+    fn implicit_stable_fact_keeps_the_chat_provider_lane_for_idle_memory_review() {
+        let decision = AgentIngress::default().decide(
+            "implicit-stable-fact-provider-lane",
+            "My work timezone is Central European Time. Reply only: STAGE6-MEMORY-EXTRACTION-TURN-OK",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert_eq!(decision.policy_route, PolicyRouteKind::DirectAnswer);
+        assert_eq!(decision.disposition, MainChatDisposition::DirectAnswer);
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
+        assert!(!decision.intent_frame.requests_durable_write);
+        assert!(decision
+            .intent_frame
+            .memory_routing
+            .candidates
+            .iter()
+            .any(|candidate| candidate.explicitness == "implicit"
+                && candidate.destination == crate::agent::MemoryDestination::MemoryProposal));
+    }
+
+    #[test]
     fn exclusive_agent_memory_read_that_negates_lifemodel_keeps_provider_generation() {
         let decision = AgentIngress::default().decide(
             "exclusive-agent-memory-read-policy",
@@ -4416,6 +4483,27 @@ mod explicit_lifemodel_read_policy_tests {
         assert!(decision
             .policy_decision
             .allows(AllowedCapability::ProviderGeneration));
+    }
+
+    #[test]
+    fn ordinary_agent_memory_read_can_synthesize_a_work_result() {
+        let decision = AgentIngress::default().decide(
+            "agent-memory-work-provider-policy",
+            "使用当前 Project 的 Agent Memory，写一段两句话的内部复核说明；不要使用 Web，不要创建文件。",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert_eq!(decision.policy_route, PolicyRouteKind::ReadOnlyTool);
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::MemoryRead));
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
+        assert!(!decision
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal));
     }
 }
 
@@ -4659,6 +4747,62 @@ mod generated_artifact_policy_tests {
     }
 
     #[test]
+    fn named_english_markdown_report_is_a_governed_artifact_request() {
+        let decision = AgentIngress::default().decide(
+            "named-english-artifact-policy",
+            "Create a sourced Markdown report named stage2-live.md. Wait for my review before saving.",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert!(decision.intent_frame.requests_file_change);
+        assert_eq!(decision.policy_route, PolicyRouteKind::ProposalOnlyWrite);
+        assert_eq!(decision.disposition, MainChatDisposition::FileWriteProposal);
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal));
+    }
+
+    #[test]
+    fn named_office_artifact_bundle_uses_the_general_review_route() {
+        let decision = AgentIngress::default().decide(
+            "named-office-artifact-policy",
+            "生成 brief.docx、metrics.xlsx 和 briefing.pptx，并在我确认后保存。",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert!(decision.intent_frame.requests_file_change);
+        assert_eq!(decision.policy_route, PolicyRouteKind::ProposalOnlyWrite);
+        assert_eq!(decision.disposition, MainChatDisposition::FileWriteProposal);
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal));
+    }
+
+    #[test]
+    fn html_and_json_artifacts_use_the_same_general_file_review_route() {
+        let decision = AgentIngress::default().decide(
+            "structured-artifact-policy",
+            "生成 HTML 报告 result.html 和 JSON 文件 result.json，并在我确认后保存。",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert!(decision.intent_frame.requests_file_change);
+        assert_eq!(decision.policy_route, PolicyRouteKind::ProposalOnlyWrite);
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::FileWriteProposal));
+    }
+
+    #[test]
     fn mixed_report_prompt_preserves_web_read_inside_file_review_route() {
         let decision = AgentIngress::default().decide(
             "mixed-report-policy",
@@ -4735,6 +4879,25 @@ mod generated_artifact_policy_tests {
         assert!(!decision
             .policy_decision
             .allows(AllowedCapability::LifeModelProposal));
+    }
+
+    #[test]
+    fn search_then_open_result_authorizes_search_fetch_and_provider_synthesis() {
+        let decision = AgentIngress::default().decide(
+            "search-fetch-policy",
+            "搜索 OpenLife 的公开信息，打开搜索结果阅读全文，再给出带来源的结论。",
+            None,
+            AgentTaskKind::Conversation,
+        );
+
+        assert_eq!(decision.policy_route, PolicyRouteKind::ReadOnlyTool);
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::WebSearch));
+        assert!(decision.policy_decision.allows(AllowedCapability::WebFetch));
+        assert!(decision
+            .policy_decision
+            .allows(AllowedCapability::ProviderGeneration));
     }
 
     #[test]

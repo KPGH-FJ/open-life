@@ -1,7 +1,6 @@
 import {
-  draftMemoryArchiveProposal,
-  draftMemoryCorrectionProposal,
-  draftMemoryStopRecallProposal,
+  archiveMemory,
+  correctMemory,
   draftLegacyLifeModelMigration,
   draftLifeModelV2Change,
   draftLifeModelV2Export,
@@ -15,7 +14,7 @@ import {
   getMemoryViewModel,
   getReviewCenterViewModel,
   privacyEraseMemoryAsset,
-  restoreArchivedMemory,
+  restoreMemory,
   rollbackMemoryAsset,
   type LifeModelViewModel,
   type DraftLegacyLifeModelMigrationRequest,
@@ -46,7 +45,6 @@ export interface DurableTruthDataSource {
   loadDurableTruth(): Promise<DurableTruthSnapshot>;
   correctMemory(memoryId: string, content: string): Promise<void>;
   archiveMemory(memoryId: string): Promise<void>;
-  stopRecall(memoryId: string): Promise<void>;
   restoreMemory(memoryId: string): Promise<void>;
   rollbackMemory(memoryId: string, reason: string): Promise<void>;
   privacyEraseMemory(memoryId: string): Promise<void>;
@@ -73,20 +71,6 @@ function requireLifeModelProposalReceipt(
     throw new Error("lifemodel_v2_proposal_receipt_unverified");
   }
   return receipt.proposalId;
-}
-
-function requireReviewedMemoryProposal(
-  receipt: { memoryId: string; action: string; status: string },
-  memoryId: string,
-  action: string
-) {
-  if (
-    receipt.memoryId !== memoryId ||
-    receipt.action !== action ||
-    receipt.status !== "review_required"
-  ) {
-    throw new Error(`memory_${action}_proposal_receipt_unverified`);
-  }
 }
 
 function requireAppliedMemoryProjection(
@@ -280,22 +264,24 @@ export const tauriDurableTruthDataSource: DurableTruthDataSource = {
     return requireLifeModelProposalReceipt(receipt, request.modelVersion);
   },
   async correctMemory(memoryId, content) {
-    const receipt = await draftMemoryCorrectionProposal(memoryId, content);
-    requireReviewedMemoryProposal(receipt, memoryId, "correct");
+    const receipt = await correctMemory(memoryId, content);
+    if (receipt.replacedMemoryId !== memoryId || !receipt.memoryId || !receipt.undoAvailable) {
+      throw new Error("memory_correct_receipt_unverified");
+    }
+    requireAppliedMemoryProjection(receipt, "correct");
   },
   async archiveMemory(memoryId) {
-    const receipt = await draftMemoryArchiveProposal(memoryId);
-    requireReviewedMemoryProposal(receipt, memoryId, "archive");
-  },
-  async stopRecall(memoryId) {
-    const receipt = await draftMemoryStopRecallProposal(memoryId);
-    requireReviewedMemoryProposal(receipt, memoryId, "stop_recall");
+    const receipt = await archiveMemory(memoryId);
+    if (receipt.owner.ownerKind !== "memory_lifecycle" || receipt.owner.ownerId !== memoryId) {
+      throw new Error("memory_archive_owner_unverified");
+    }
+    requireAppliedMemoryProjection(receipt, "archive");
   },
   async restoreMemory(memoryId) {
-    const receipt = await restoreArchivedMemory({
-      ownerKind: "memory_lifecycle",
-      ownerId: memoryId,
-    });
+    const receipt = await restoreMemory(memoryId);
+    if (receipt.owner.ownerKind !== "memory_lifecycle" || receipt.owner.ownerId !== memoryId) {
+      throw new Error("memory_restore_owner_unverified");
+    }
     requireAppliedMemoryProjection(receipt, "restore");
   },
   async rollbackMemory(memoryId, reason) {

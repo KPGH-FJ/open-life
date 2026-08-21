@@ -17,7 +17,7 @@ export function journeyErrorCode(error: unknown): string {
 
   const detail = asRecord(record.detail);
   const kind = nonEmptyString(record.kind);
-  const code = nonEmptyString(record.code);
+  const code = nonEmptyString(detail?.code) ?? nonEmptyString(record.code);
   const hint = nonEmptyString(detail?.hint) ?? nonEmptyString(record.hint);
 
   if (kind && hint) return `${kind}:${hint}`;

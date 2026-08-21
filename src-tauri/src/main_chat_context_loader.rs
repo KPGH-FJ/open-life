@@ -13,7 +13,6 @@ const CONFIGURED_KNOWLEDGE_ROOT_ENV: &str = "OPENLIFE_KNOWLEDGE_ROOT";
 pub(crate) enum MainChatContextTaskMode {
     OpenEnded,
     EvidenceBoundSources,
-    EvidenceBoundMarkdown,
     EvidenceBoundDocuments,
     EvidenceBoundAgentMemory,
     ExactAgentMemoryRead,
@@ -24,7 +23,6 @@ impl MainChatContextTaskMode {
         match self {
             Self::OpenEnded => "open_ended",
             Self::EvidenceBoundSources => "evidence_bound_sources",
-            Self::EvidenceBoundMarkdown => "evidence_bound_markdown",
             Self::EvidenceBoundDocuments => "evidence_bound_documents",
             Self::EvidenceBoundAgentMemory => "evidence_bound_agent_memory",
             Self::ExactAgentMemoryRead => "exact_agent_memory_read",
@@ -98,12 +96,6 @@ impl MainChatContextRequest {
                     task_mode: MainChatContextTaskMode::EvidenceBoundSources,
                     memory_scopes: Vec::new(),
                     inline_facts,
-                }
-            } else if positive_source_text.contains("markdown") {
-                Self {
-                    task_mode: MainChatContextTaskMode::EvidenceBoundMarkdown,
-                    memory_scopes: Vec::new(),
-                    inline_facts: Vec::new(),
                 }
             } else if explicitly_names_a_source {
                 Self {
@@ -205,10 +197,6 @@ impl MainChatContextRequest {
     pub(crate) fn is_inline_fact_bound(&self) -> bool {
         self.task_mode == MainChatContextTaskMode::EvidenceBoundSources
             && !self.inline_facts.is_empty()
-    }
-
-    pub(crate) fn is_markdown_bound(&self) -> bool {
-        self.task_mode == MainChatContextTaskMode::EvidenceBoundMarkdown
     }
 
     pub(crate) fn is_document_bound(&self) -> bool {
@@ -574,12 +562,14 @@ impl RuntimeMemoryScope {
                         .as_ref()
                         .is_some_and(|owner| self.legacy_conversations.contains(owner))
             }
-            MemoryLifecycleScope::Workspace => {
-                record.scope_owner_ref.as_deref() == self.workspace.as_deref()
-            }
-            MemoryLifecycleScope::Project => {
-                record.scope_owner_ref.as_deref() == self.project.as_deref()
-            }
+            MemoryLifecycleScope::Workspace => self
+                .workspace
+                .as_deref()
+                .is_some_and(|owner| record.scope_owner_ref.as_deref() == Some(owner)),
+            MemoryLifecycleScope::Project => self
+                .project
+                .as_deref()
+                .is_some_and(|owner| record.scope_owner_ref.as_deref() == Some(owner)),
         }
     }
 }
@@ -589,19 +579,26 @@ async fn runtime_memory_scope(
     conversation_owner_id: &str,
     _records: &[MemoryLifecycleRecord],
 ) -> Result<RuntimeMemoryScope, String> {
-    let (workspace_root, project_root) = {
-        let config = state.config.lock().await;
-        (
-            config.system.workspace_memory_root.clone(),
-            config.system.project_memory_root.clone(),
-        )
-    };
-    let scoped_ref = |scope, identity: Option<String>| {
-        identity
-            .map(|identity| {
-                memory_scope_owner_ref(scope, &identity).map_err(|error| error.to_string())
-            })
-            .transpose()
+    let project = if let Some(store) = state.conversation_store.as_ref() {
+        let store = store.lock().await;
+        let conversation = store
+            .get_conversation(conversation_owner_id)
+            .map_err(|error| format!("memory_scope_conversation_query_failed:{error}"))?;
+        match conversation.and_then(|conversation| conversation.project_id) {
+            Some(project_id) => {
+                let project = store
+                    .get_project(&project_id)
+                    .map_err(|error| format!("memory_scope_project_query_failed:{error}"))?
+                    .ok_or_else(|| "memory_scope_project_missing".to_string())?;
+                Some(
+                    memory_scope_owner_ref(MemoryLifecycleScope::Project, &project.id)
+                        .map_err(|error| error.to_string())?,
+                )
+            }
+            None => None,
+        }
+    } else {
+        None
     };
     Ok(RuntimeMemoryScope {
         conversation: memory_scope_owner_ref(
@@ -613,8 +610,8 @@ async fn runtime_memory_scope(
         // Intelligence, but production recall never guesses a Conversation
         // owner without an exact canonical scope binding.
         legacy_conversations: HashSet::new(),
-        workspace: scoped_ref(MemoryLifecycleScope::Workspace, workspace_root)?,
-        project: scoped_ref(MemoryLifecycleScope::Project, project_root)?,
+        workspace: None,
+        project,
     })
 }
 
@@ -1069,7 +1066,7 @@ mod tests {
     }
 
     #[test]
-    fn generic_knowledge_roots_do_not_gain_markdown_memory_authority() {
+    fn generic_knowledge_roots_only_load_supported_context_files() {
         let dir = tempfile::tempdir().expect("temp knowledge root");
         std::fs::create_dir_all(dir.path().join("memories")).expect("memories dir");
         std::fs::create_dir_all(dir.path().join("skills/summarize")).expect("selected skill dir");
@@ -1306,27 +1303,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_scope_recall_is_bound_to_the_selected_project_owner() {
+    async fn project_scope_recall_requires_a_canonical_project_binding() {
         const ALLOWED: &str = "PROJECT_SCOPE_ALLOWED_RELEASE_CHECKLIST";
         const BLOCKED: &str = "PROJECT_SCOPE_BLOCKED_RELEASE_CHECKLIST";
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let project_a = tempfile::tempdir().expect("project a");
-        let project_b = tempfile::tempdir().expect("project b");
-        let project_a_path = project_a.path().canonicalize().unwrap();
-        let project_b_path = project_b.path().canonicalize().unwrap();
-        let owner_a = memory_scope_owner_ref(
-            MemoryLifecycleScope::Project,
-            project_a_path.to_str().unwrap(),
-        )
-        .unwrap();
-        let owner_b = memory_scope_owner_ref(
-            MemoryLifecycleScope::Project,
-            project_b_path.to_str().unwrap(),
-        )
-        .unwrap();
-        state.config.lock().await.system.project_memory_root =
-            Some(project_a_path.to_string_lossy().into_owned());
-
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let project_a_id = uuid::Uuid::new_v4().to_string();
+        let project_b_id = uuid::Uuid::new_v4().to_string();
+        {
+            let store = state
+                .conversation_store
+                .as_ref()
+                .expect("conversation store")
+                .lock()
+                .await;
+            store
+                .create_conversation(&conversation_id, "Project Memory isolation")
+                .expect("create conversation");
+            store
+                .create_project(&project_a_id, "Project A", None)
+                .expect("create project A");
+            store
+                .create_project(&project_b_id, "Project B", None)
+                .expect("create project B");
+            store
+                .assign_conversation_project(&conversation_id, Some(&project_a_id))
+                .expect("bind project A");
+        }
+        let owner_a = memory_scope_owner_ref(MemoryLifecycleScope::Project, &project_a_id).unwrap();
+        let owner_b = memory_scope_owner_ref(MemoryLifecycleScope::Project, &project_b_id).unwrap();
         let allowed = accept_and_project_memory(
             &state,
             &lifecycle_memory_proposal(ALLOWED, "project", Some(&owner_a), Vec::new()),
@@ -1340,7 +1345,7 @@ mod tests {
 
         let candidates = retrievable_lifecycle_context_candidates(
             &state,
-            "conversation-a",
+            &conversation_id,
             "PROJECT SCOPE RELEASE CHECKLIST",
             &[],
         )
@@ -1355,38 +1360,61 @@ mod tests {
         assert!(!candidates
             .iter()
             .any(|candidate| candidate.content.contains(BLOCKED)));
+
+        state
+            .conversation_store
+            .as_ref()
+            .expect("conversation store")
+            .lock()
+            .await
+            .assign_conversation_project(&conversation_id, Some(&project_b_id))
+            .expect("bind project B");
+        let project_b_candidates = retrievable_lifecycle_context_candidates(
+            &state,
+            &conversation_id,
+            "PROJECT SCOPE RELEASE CHECKLIST",
+            &[],
+        )
+        .await
+        .expect("project B lifecycle retrieval");
+        assert!(!project_b_candidates
+            .iter()
+            .any(|candidate| candidate.source_id == allowed.memory_id));
+        assert!(project_b_candidates
+            .iter()
+            .any(|candidate| candidate.source_id == blocked.memory_id));
+
+        state
+            .conversation_store
+            .as_ref()
+            .expect("conversation store")
+            .lock()
+            .await
+            .assign_conversation_project(&conversation_id, None)
+            .expect("remove project binding");
+        let unbound_candidates = retrievable_lifecycle_context_candidates(
+            &state,
+            &conversation_id,
+            "PROJECT SCOPE RELEASE CHECKLIST",
+            &[],
+        )
+        .await
+        .expect("unbound lifecycle retrieval");
+        assert!(!unbound_candidates
+            .iter()
+            .any(|candidate| candidate.source_id == allowed.memory_id));
+        assert!(!unbound_candidates
+            .iter()
+            .any(|candidate| candidate.source_id == blocked.memory_id));
         let projected = state
             .memory_store
             .lock()
             .await
             .export_active_memory_records()
-            .expect("projected Memory rows");
-        let allowed_accesses = projected
+            .expect("non-lifecycle Memory rows");
+        assert!(!projected
             .iter()
-            .find(|memory| memory.content == ALLOWED)
-            .expect("allowed projection")
-            .access_count;
-        let blocked_accesses = projected
-            .iter()
-            .find(|memory| memory.content == BLOCKED)
-            .expect("blocked projection")
-            .access_count;
-        assert!(allowed_accesses > 0);
-        assert_eq!(blocked_accesses, 0);
-        let vectors = state
-            .vector_store
-            .lock()
-            .await
-            .export_all_chunks()
-            .expect("projected vectors");
-        assert_eq!(
-            vectors
-                .iter()
-                .find(|chunk| chunk.content == BLOCKED)
-                .expect("blocked vector projection")
-                .access_count,
-            0
-        );
+            .any(|memory| memory.content == ALLOWED || memory.content == BLOCKED));
     }
 
     #[tokio::test]
@@ -1401,9 +1429,6 @@ mod tests {
             project_path.to_str().unwrap(),
         )
         .unwrap();
-        state.config.lock().await.system.project_memory_root =
-            Some(project_path.to_string_lossy().into_owned());
-
         let global = accept_and_project_memory(
             &state,
             &lifecycle_memory_proposal(GLOBAL, "global", None, Vec::new()),
@@ -1510,11 +1535,11 @@ mod tests {
     #[test]
     fn context_request_uses_the_positively_selected_source_not_negated_exclusions() {
         let markdown = MainChatContextRequest::from_user_text(
-            "只允许使用当前已绑定 Project Markdown Memory 回答；不要使用当前对话历史、Agent Memory、LifeModel、文件资料或一般知识。",
+            "只允许使用选中的 Markdown 文档回答；不要使用当前对话历史、Agent Memory、LifeModel 或一般知识。",
         );
         assert_eq!(
             markdown.task_mode,
-            MainChatContextTaskMode::EvidenceBoundMarkdown
+            MainChatContextTaskMode::EvidenceBoundDocuments
         );
 
         let document = MainChatContextRequest::from_user_text(
@@ -1538,11 +1563,11 @@ mod tests {
         );
 
         let english_markdown = MainChatContextRequest::from_user_text(
-            "Only use the selected Markdown memory. Do not use conversation history, Agent Memory, LifeModel, documents, or general knowledge.",
+            "Only use the selected Markdown document. Do not use conversation history, Agent Memory, LifeModel, or general knowledge.",
         );
         assert_eq!(
             english_markdown.task_mode,
-            MainChatContextTaskMode::EvidenceBoundMarkdown
+            MainChatContextTaskMode::EvidenceBoundDocuments
         );
     }
 
@@ -1604,10 +1629,7 @@ mod tests {
             workspace_path.to_str().unwrap(),
         )
         .unwrap();
-        state.config.lock().await.system.workspace_memory_root =
-            Some(workspace_path.to_string_lossy().into_owned());
-
-        accept_and_project_memory(
+        let conflicted = accept_and_project_memory(
             &state,
             &lifecycle_memory_proposal(
                 CONFLICTED,
@@ -1617,13 +1639,16 @@ mod tests {
             ),
         )
         .await;
-        accept_and_project_memory(
+        let unbound = accept_and_project_memory(
             &state,
             &lifecycle_memory_proposal(UNBOUND, "workspace", None, Vec::new()),
         )
         .await;
 
-        for query in [CONFLICTED, UNBOUND] {
+        for (query, memory_id) in [
+            (CONFLICTED, conflicted.memory_id),
+            (UNBOUND, unbound.memory_id),
+        ] {
             let candidates = retrievable_lifecycle_context_candidates(
                 &state,
                 "conversation-a",
@@ -1634,7 +1659,7 @@ mod tests {
             .expect("fail-closed lifecycle retrieval");
             assert!(!candidates
                 .iter()
-                .any(|candidate| candidate.content.contains(query)));
+                .any(|candidate| candidate.source_id == memory_id));
         }
     }
 

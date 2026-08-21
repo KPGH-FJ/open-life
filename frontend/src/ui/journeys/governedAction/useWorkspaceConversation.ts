@@ -2,15 +2,13 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ProviderProfileViewModel,
   ChatSession,
+  ConversationMemoryMode,
   ConversationViewModel,
   ImportedResourceReceipt,
   MainChatSkillSummary,
   MainChatLifeModelProductReceipt,
   MainChatToolCandidateList,
   MainChatTurnStatus,
-  MarkdownMemoryProposalReceipt,
-  MarkdownMemoryScope,
-  MarkdownMemoryViewModel,
   ProductAction,
   ProjectRecord,
   StreamMessageChunkPayload,
@@ -37,7 +35,8 @@ export type WorkspaceSessionMutationState =
   | { phase: "deleting"; sessionId: string }
   | { phase: "creating_project" }
   | { phase: "assigning_project"; projectId: string | null }
-  | { phase: "failed"; action: "rename" | "delete" | "project"; reason: string };
+  | { phase: "assigning_memory"; mode: ConversationMemoryMode }
+  | { phase: "failed"; action: "rename" | "delete" | "project" | "memory"; reason: string };
 
 export type WorkspaceResourceMutationState =
   | { phase: "idle" }
@@ -51,13 +50,6 @@ export type WorkspaceCapabilityState =
   | { phase: "ready" }
   | { phase: "selecting"; skillId: string | null }
   | { phase: "failed"; reason: string };
-
-export type WorkspaceMarkdownMemoryState =
-  | { phase: "loading"; model: MarkdownMemoryViewModel | null }
-  | { phase: "ready"; model: MarkdownMemoryViewModel; lastProposal?: MarkdownMemoryProposalReceipt }
-  | { phase: "selecting_root"; model: MarkdownMemoryViewModel | null; scope: MarkdownMemoryScope }
-  | { phase: "submitting"; model: MarkdownMemoryViewModel; operation: "write" | "deactivate" }
-  | { phase: "failed"; model: MarkdownMemoryViewModel | null; reason: string };
 
 export type WorkspaceTurnState =
   | { phase: "idle" }
@@ -153,11 +145,30 @@ function turnAnnouncement(status: MainChatTurnStatus): string {
   }
 }
 
+function steeringFailureAnnouncement(error: unknown): string {
+  const code = errorText(error);
+  if (code.includes("canonical_steering_checkpoint_passed")) {
+    return "这次任务已经进入最终生成阶段，当前调整没有加入；完成后可以继续补充要求。";
+  }
+  if (code.includes("canonical_steering_pending_conflict")) {
+    return "上一条调整仍在等待应用，请等它进入当前任务后再继续补充。";
+  }
+  if (
+    code.includes("canonical_steering_target_terminal") ||
+    code.includes("conversation_steering_target_not_running")
+  ) {
+    return "当前任务已经结束，不能再作为运行中调整；可以在对话中发起后续工作。";
+  }
+  return "当前调整未能加入任务，请稍后重试。";
+}
+
 export type WorkspaceConversationController = {
   sessions: ChatSession[];
   projects: ProjectRecord[];
   selectedProjectId: string | null;
   selectedSessionId: string | null;
+  globalMemoryEnabled: boolean;
+  memoryMode: ConversationMemoryMode;
   messages: ChatMessage[];
   draft: string;
   loadStatus: WorkspaceConversationLoadStatus;
@@ -176,7 +187,6 @@ export type WorkspaceConversationController = {
   selectedSkillId: string | null;
   toolCandidates: MainChatToolCandidateList | null;
   capabilityState: WorkspaceCapabilityState;
-  markdownMemory: WorkspaceMarkdownMemoryState;
   busy: boolean;
   ensureLoaded: () => void;
   reload: () => Promise<boolean>;
@@ -184,24 +194,12 @@ export type WorkspaceConversationController = {
   startNewConversation: () => void;
   createProject: (name: string) => Promise<boolean>;
   assignProject: (projectId: string | null) => Promise<boolean>;
+  setMemoryMode: (mode: ConversationMemoryMode) => Promise<boolean>;
   setDraft: (value: string) => void;
   setMode: (mode: WorkspaceConversationMode) => void;
   attachResources: () => Promise<boolean>;
   detachResource: (resourceId: string) => Promise<boolean>;
   selectSkill: (skillId: string | null) => Promise<boolean>;
-  reloadMarkdownMemory: () => Promise<boolean>;
-  selectMarkdownMemoryRoot: (scope: MarkdownMemoryScope) => Promise<boolean>;
-  proposeMarkdownMemoryWrite: (request: {
-    scope: MarkdownMemoryScope;
-    relativePath: string;
-    content: string;
-    expectedCurrentDigest?: string;
-  }) => Promise<boolean>;
-  proposeMarkdownMemoryDeactivation: (request: {
-    scope: MarkdownMemoryScope;
-    relativePath: string;
-    expectedCurrentDigest: string;
-  }) => Promise<boolean>;
   sendAction: (disabledReason?: string) => ProductAction;
   send: (disabledReason?: string) => Promise<void>;
   steer: () => Promise<void>;
@@ -221,6 +219,8 @@ export function useWorkspaceConversation(
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [globalMemoryEnabled, setGlobalMemoryEnabled] = useState(true);
+  const [memoryMode, setMemoryModeState] = useState<ConversationMemoryMode>("use_and_learn");
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [loadStatus, setLoadStatus] = useState<WorkspaceConversationLoadStatus>("idle");
@@ -252,14 +252,9 @@ export function useWorkspaceConversation(
   const [capabilityState, setCapabilityState] = useState<WorkspaceCapabilityState>({
     phase: "idle",
   });
-  const [markdownMemory, setMarkdownMemory] = useState<WorkspaceMarkdownMemoryState>({
-    phase: "loading",
-    model: null,
-  });
   const requestRef = useRef(0);
   const operationRef = useRef(0);
   const cancelRequestRef = useRef(0);
-  const markdownMemoryRequestRef = useRef(0);
   const loadedRef = useRef(false);
   const explicitConversationChoiceRef = useRef(false);
 
@@ -267,13 +262,14 @@ export function useWorkspaceConversation(
     requestRef.current += 1;
     operationRef.current += 1;
     cancelRequestRef.current += 1;
-    markdownMemoryRequestRef.current += 1;
     loadedRef.current = false;
     explicitConversationChoiceRef.current = false;
     setSessions([]);
     setProjects([]);
     setSelectedProjectId(null);
     setSelectedSessionId(null);
+    setGlobalMemoryEnabled(true);
+    setMemoryModeState("use_and_learn");
     setMessages([]);
     setDraft("");
     setLoadStatus("idle");
@@ -297,12 +293,10 @@ export function useWorkspaceConversation(
     setSelectedSkillId(null);
     setToolCandidates(null);
     setCapabilityState({ phase: "idle" });
-    setMarkdownMemory({ phase: "loading", model: null });
     return () => {
       requestRef.current += 1;
       operationRef.current += 1;
       cancelRequestRef.current += 1;
-      markdownMemoryRequestRef.current += 1;
       loadedRef.current = false;
     };
   }, [dataSource]);
@@ -312,9 +306,6 @@ export function useWorkspaceConversation(
     requestRef.current += 1;
     setSessions(canonicalSeed.conversations);
     setProjects(canonicalSeed.projects);
-    setSelectedProjectId(canonicalSeed.selectedProjectId);
-    setSelectedSessionId(canonicalSeed.selectedConversationId);
-    setMessages(canonicalSeed.messages);
     setProvider({
       status: canonicalSeed.providerStatus,
       profiles: canonicalSeed.providerProfiles,
@@ -322,6 +313,20 @@ export function useWorkspaceConversation(
       errorCode: canonicalSeed.providerErrorCode,
     });
     setWorkStatus(canonicalSeed.workStatus);
+    setGlobalMemoryEnabled(canonicalSeed.globalMemoryEnabled);
+    // A refreshed Workbench aggregate may still project the previously
+    // selected Conversation while the user has explicitly opened a new draft
+    // or selected another Conversation. Refresh shared catalog/provider facts,
+    // but never let that older projection steal the user's active context.
+    if (loadedRef.current && explicitConversationChoiceRef.current) {
+      setLoadError(null);
+      setLoadStatus("ready");
+      return;
+    }
+    setSelectedProjectId(canonicalSeed.selectedProjectId);
+    setMemoryModeState(canonicalSeed.selectedMemoryMode);
+    setSelectedSessionId(canonicalSeed.selectedConversationId);
+    setMessages(canonicalSeed.messages);
     const selectedSession = canonicalSeed.selectedConversationId;
     const latestTurn = canonicalSeed.latestTurn;
     setTurnState(
@@ -340,138 +345,6 @@ export function useWorkspaceConversation(
     setLoadError(null);
     setLoadStatus("ready");
   }, [canonicalSeed]);
-
-  const reloadMarkdownMemory = useCallback(async (): Promise<boolean> => {
-    const requestId = ++markdownMemoryRequestRef.current;
-    if (!dataSource?.loadMarkdownMemory) {
-      setMarkdownMemory(current => ({
-        phase: "failed",
-        model: current.model,
-        reason: "markdown_memory_data_source_unavailable",
-      }));
-      return false;
-    }
-    setMarkdownMemory(current => ({ phase: "loading", model: current.model }));
-    try {
-      const model = await dataSource.loadMarkdownMemory();
-      if (requestId !== markdownMemoryRequestRef.current) return false;
-      setMarkdownMemory({ phase: "ready", model });
-      return true;
-    } catch (error) {
-      if (requestId !== markdownMemoryRequestRef.current) return false;
-      setMarkdownMemory(current => ({
-        phase: "failed",
-        model: current.model,
-        reason: errorText(error),
-      }));
-      return false;
-    }
-  }, [dataSource]);
-
-  useEffect(() => {
-    if (!dataSource?.loadMarkdownMemory || mode !== "work" || workStatus !== "available") {
-      setMarkdownMemory({ phase: "loading", model: null });
-      return;
-    }
-    void reloadMarkdownMemory();
-  }, [dataSource, mode, reloadMarkdownMemory, workStatus]);
-
-  const selectMarkdownMemoryRoot = useCallback(
-    async (scope: MarkdownMemoryScope): Promise<boolean> => {
-      if (!dataSource?.selectMarkdownMemoryRoot || markdownMemory.phase === "selecting_root") {
-        announce("当前不能选择 Markdown Memory 文件夹。");
-        return false;
-      }
-      const currentModel = markdownMemory.model;
-      const requestId = ++markdownMemoryRequestRef.current;
-      setMarkdownMemory({ phase: "selecting_root", model: currentModel, scope });
-      try {
-        const selection = await dataSource.selectMarkdownMemoryRoot(scope);
-        if (requestId !== markdownMemoryRequestRef.current) return false;
-        if (selection.cancelled) {
-          if (currentModel) setMarkdownMemory({ phase: "ready", model: currentModel });
-          else setMarkdownMemory({ phase: "loading", model: null });
-          announce("没有选择文件夹；当前 Markdown Memory 作用域未改变。");
-          return false;
-        }
-        if (selection.scope !== scope || !selection.selectedPath) {
-          throw new Error("markdown_memory_root_selection_identity_mismatch");
-        }
-        const reloaded = await reloadMarkdownMemory();
-        announce(
-          reloaded
-            ? `${scope === "workspace" ? "Workspace" : "Project"} Memory 文件夹已重新读取。`
-            : "文件夹选择已返回，但 Memory 状态没有得到后端确认。"
-        );
-        return reloaded;
-      } catch (error) {
-        if (requestId !== markdownMemoryRequestRef.current) return false;
-        setMarkdownMemory({ phase: "failed", model: currentModel, reason: errorText(error) });
-        announce("Markdown Memory 文件夹没有完成选择。");
-        return false;
-      }
-    },
-    [announce, dataSource, markdownMemory, reloadMarkdownMemory]
-  );
-
-  const proposeMarkdownMemoryWrite = useCallback(
-    async (request: {
-      scope: MarkdownMemoryScope;
-      relativePath: string;
-      content: string;
-      expectedCurrentDigest?: string;
-    }): Promise<boolean> => {
-      if (!dataSource?.draftMarkdownMemoryFileProposal || !markdownMemory.model) {
-        announce("当前不能提交 Markdown Memory 变更。");
-        return false;
-      }
-      const model = markdownMemory.model;
-      const requestId = ++markdownMemoryRequestRef.current;
-      setMarkdownMemory({ phase: "submitting", model, operation: "write" });
-      try {
-        const receipt = await dataSource.draftMarkdownMemoryFileProposal(request);
-        if (requestId !== markdownMemoryRequestRef.current) return false;
-        setMarkdownMemory({ phase: "ready", model, lastProposal: receipt });
-        announce("Markdown Memory 变更已进入 Review；当前文件尚未修改。");
-        return true;
-      } catch (error) {
-        if (requestId !== markdownMemoryRequestRef.current) return false;
-        setMarkdownMemory({ phase: "failed", model, reason: errorText(error) });
-        announce("Markdown Memory 变更未能进入 Review；当前文件未修改。");
-        return false;
-      }
-    },
-    [announce, dataSource, markdownMemory.model]
-  );
-
-  const proposeMarkdownMemoryDeactivation = useCallback(
-    async (request: {
-      scope: MarkdownMemoryScope;
-      relativePath: string;
-      expectedCurrentDigest: string;
-    }): Promise<boolean> => {
-      if (!dataSource?.deactivateMarkdownMemoryFileProposal || !markdownMemory.model) {
-        announce("当前不能停用 Markdown Memory 文件。");
-        return false;
-      }
-      const model = markdownMemory.model;
-      const requestId = ++markdownMemoryRequestRef.current;
-      setMarkdownMemory({ phase: "submitting", model, operation: "deactivate" });
-      try {
-        const receipt = await dataSource.deactivateMarkdownMemoryFileProposal(request);
-        if (requestId !== markdownMemoryRequestRef.current) return false;
-        setMarkdownMemory({ phase: "ready", model, lastProposal: receipt });
-        announce("停用请求已进入 Review；批准并物化前仍会继续召回当前文件。");
-        return true;
-      } catch (error) {
-        if (requestId !== markdownMemoryRequestRef.current) return false;
-        setMarkdownMemory({ phase: "failed", model, reason: errorText(error) });
-        announce("停用请求未能进入 Review；当前文件仍保持启用。");
-        return false;
-      }
-    },
-    [announce, dataSource, markdownMemory.model]
-  );
 
   useEffect(() => {
     let active = true;
@@ -523,6 +396,8 @@ export function useWorkspaceConversation(
       }
       setProjects(canonical.projects);
       setSelectedProjectId(canonical.selectedProjectId);
+      setGlobalMemoryEnabled(canonical.globalMemoryEnabled);
+      setMemoryModeState(canonical.selectedMemoryMode);
       const history = canonical.messages;
       if (requestId !== requestRef.current) return;
       setSelectedSessionId(sessionId);
@@ -557,6 +432,8 @@ export function useWorkspaceConversation(
       const nextSessions = canonical.conversations;
       setProjects(canonical.projects);
       setSelectedProjectId(canonical.selectedProjectId);
+      setGlobalMemoryEnabled(canonical.globalMemoryEnabled);
+      setMemoryModeState(canonical.selectedMemoryMode);
       setProvider({
         status: canonical.providerStatus,
         profiles: canonical.providerProfiles,
@@ -582,6 +459,7 @@ export function useWorkspaceConversation(
           setSelectedSessionId(nextSessionId);
           setMessages(canonical.messages);
           setSelectedProjectId(canonical.selectedProjectId);
+          setMemoryModeState(canonical.selectedMemoryMode);
           const turn = canonical.latestTurn;
           setTurnState(
             !turn || turn.status === "completed"
@@ -1059,11 +937,37 @@ export function useWorkspaceConversation(
       } catch (error) {
         if (operationId !== operationRef.current) return;
         cancelRequestRef.current += 1;
+        const failureCode = errorText(error);
+        if (
+          streamStarted &&
+          sessionId &&
+          (failureCode === "canonical_work_cancelled" ||
+            failureCode === "canonical_chat_turn_cancelled")
+        ) {
+          try {
+            const refreshedHistory = (await dataSource.loadConversation(sessionId)).messages;
+            if (operationId !== operationRef.current) return;
+            setMessages(refreshedHistory);
+          } catch {
+            if (operationId !== operationRef.current) return;
+          }
+          setStreamingReply("");
+          setActiveTaskId(null);
+          setTurnState({
+            phase: "resolved",
+            sessionId,
+            status: "cancelled",
+            blockers: [],
+          });
+          await onAfterTurn();
+          announce(turnAnnouncement("cancelled"));
+          return;
+        }
         if (!streamStarted) setDraft(text);
         setTurnState({
           phase: "failed",
           stage: sessionCreated || selectedSessionId ? "send" : "create",
-          reason: errorText(error),
+          reason: failureCode,
         });
         announce(
           sessionCreated || selectedSessionId
@@ -1162,10 +1066,10 @@ export function useWorkspaceConversation(
       announce(
         result.scopeExpansionBlocked
           ? "这条调整会扩大权限范围，已记录为阻断项；当前任务不会获得新权限。"
-          : "调整已绑定到当前任务，将在下一次安全的 provider checkpoint 应用。"
+          : "调整已加入当前任务，将在下一次安全步骤生效。"
       );
     } catch (error) {
-      announce(`任务调整未被后端接受：${errorText(error)}`);
+      announce(steeringFailureAnnouncement(error));
     }
   }, [activeTaskId, announce, dataSource, draft, selectedSessionId, turnState]);
 
@@ -1270,12 +1174,36 @@ export function useWorkspaceConversation(
     [announce, busy, dataSource, reload, selectedSessionId]
   );
 
+  const setMemoryMode = useCallback(
+    async (nextMode: ConversationMemoryMode): Promise<boolean> => {
+      if (!dataSource?.setMemoryMode || !selectedSessionId || busy) {
+        announce("当前不能改变这段对话的记忆设置。");
+        return false;
+      }
+      setSessionMutation({ phase: "assigning_memory", mode: nextMode });
+      try {
+        await dataSource.setMemoryMode(selectedSessionId, nextMode);
+        if (!(await reload())) throw new Error("memory_mode_refresh_failed_after_update");
+        setSessionMutation({ phase: "idle" });
+        announce("当前对话的记忆设置已更新。");
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "memory", reason: errorText(error) });
+        announce("记忆设置未得到后端确认。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload, selectedSessionId]
+  );
+
   return useMemo(
     () => ({
       sessions,
       projects,
       selectedProjectId,
       selectedSessionId,
+      globalMemoryEnabled,
+      memoryMode,
       messages,
       draft,
       loadStatus,
@@ -1294,7 +1222,6 @@ export function useWorkspaceConversation(
       selectedSkillId,
       toolCandidates,
       capabilityState,
-      markdownMemory,
       busy,
       ensureLoaded,
       reload,
@@ -1302,15 +1229,12 @@ export function useWorkspaceConversation(
       startNewConversation,
       createProject,
       assignProject,
+      setMemoryMode,
       setDraft: updateDraft,
       setMode,
       attachResources,
       detachResource,
       selectSkill,
-      reloadMarkdownMemory,
-      selectMarkdownMemoryRoot,
-      proposeMarkdownMemoryWrite,
-      proposeMarkdownMemoryDeactivation,
       sendAction,
       send,
       steer,
@@ -1323,7 +1247,6 @@ export function useWorkspaceConversation(
       cancel,
       capabilityState,
       createProject,
-      markdownMemory,
       deleteSelected,
       detachResource,
       draft,
@@ -1337,13 +1260,13 @@ export function useWorkspaceConversation(
       pendingResourceTurnOperationId,
       projects,
       renameSelected,
-      reloadMarkdownMemory,
       reload,
       resourceMutation,
       selectSkill,
-      selectMarkdownMemoryRoot,
       selectSession,
       selectedProjectId,
+      globalMemoryEnabled,
+      memoryMode,
       setMode,
       selectedSessionId,
       selectedSkillId,
@@ -1355,13 +1278,12 @@ export function useWorkspaceConversation(
       skills,
       startNewConversation,
       assignProject,
+      setMemoryMode,
       streamingReply,
       activeTaskId,
       turnState,
       toolCandidates,
       updateDraft,
-      proposeMarkdownMemoryWrite,
-      proposeMarkdownMemoryDeactivation,
     ]
   );
 }

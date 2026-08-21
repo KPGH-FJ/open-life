@@ -126,4 +126,16 @@ describe("Workbench read-only presentation invariants", () => {
       )
     ).toEqual({ label: "远端结果未知", status: "unknown" });
   });
+
+  it("shows a recovered interruption as retryable instead of a generic blocker", () => {
+    expect(
+      taskLifecyclePresentation(
+        task({
+          lifecycleStatus: "interrupted",
+          terminalDeliveryStatus: "not_terminal",
+          finalDeliveryEvidencePresent: false,
+        })
+      )
+    ).toEqual({ label: "已中断，可重试", status: "blocked" });
+  });
 });

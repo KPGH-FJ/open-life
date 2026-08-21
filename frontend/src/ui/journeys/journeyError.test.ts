@@ -23,6 +23,18 @@ describe("journeyErrorCode", () => {
     );
   });
 
+  it("uses an explicit backend code without exposing its private message", () => {
+    expect(
+      journeyErrorCode({
+        kind: "Internal",
+        detail: {
+          message: "private backend details must-not-render",
+          code: "canonical_steering_checkpoint_passed",
+        },
+      })
+    ).toBe("canonical_steering_checkpoint_passed");
+  });
+
   it("preserves explicit frontend error codes", () => {
     expect(journeyErrorCode(new Error("builder_review_read_model_missing"))).toBe(
       "builder_review_read_model_missing"

@@ -41,27 +41,30 @@ pub(crate) async fn filter_canonical_retrievable_memory_results(
         }
     }
 
-    let verified_sources = {
+    let non_lifecycle_sources = results
+        .iter()
+        .filter(|(chunk, _)| lifecycle_memory_id_from_source(&chunk.source).is_none())
+        .filter_map(|(chunk, _)| {
+            canonical_memory_owner_from_source(&chunk.source)
+                .map(|owner| (chunk.source.clone(), owner))
+        })
+        .collect::<Vec<_>>();
+    let verified_sources = if non_lifecycle_sources.is_empty() {
+        std::collections::HashSet::new()
+    } else {
         let store = state.memory_store.lock().await;
         let mut verified = std::collections::HashSet::new();
-        for (chunk, _) in &results {
-            let Some(owner) = canonical_memory_owner_from_source(&chunk.source) else {
-                continue;
-            };
+        for (source, owner) in non_lifecycle_sources {
             let proven = store
                 .is_verified_canonical_memory_owner(&owner)
                 .map_err(|error| {
                     format!("memory_retrieval_degraded:owner_proof_query_failed:{error}")
                 })?;
-            let retrieval_active = if owner.kind() == "memory_lifecycle" {
-                true
-            } else {
-                store.is_memory_retrieval_active(&owner).map_err(|error| {
-                    format!("memory_retrieval_degraded:retrieval_state_query_failed:{error}")
-                })?
-            };
+            let retrieval_active = store.is_memory_retrieval_active(&owner).map_err(|error| {
+                format!("memory_retrieval_degraded:retrieval_state_query_failed:{error}")
+            })?;
             if proven && retrieval_active {
-                verified.insert(chunk.source.clone());
+                verified.insert(source);
             }
         }
         verified
@@ -71,8 +74,7 @@ pub(crate) async fn filter_canonical_retrievable_memory_results(
         .into_iter()
         .filter(|(chunk, _)| {
             if let Some(memory_id) = lifecycle_memory_id_from_source(&chunk.source) {
-                return active_lifecycle_ids.contains(memory_id)
-                    && verified_sources.contains(&chunk.source);
+                return active_lifecycle_ids.contains(memory_id);
             }
             if chunk.source.starts_with("knowledge_note:")
                 || chunk.source.starts_with("memory_record:")
@@ -112,16 +114,16 @@ pub(crate) fn merge_memory_hits(
     text_hits: Vec<MemorySearchHit>,
     top_k: usize,
 ) -> Vec<(MemoryChunk, f32)> {
-    let mut merged: HashMap<(String, String), (MemoryChunk, f32)> = HashMap::new();
+    let mut merged: HashMap<(u8, String, String), (MemoryChunk, f32)> = HashMap::new();
     for (chunk, score) in vector_hits {
-        let key = (chunk.session_id.clone(), chunk.content.clone());
+        let key = memory_hit_merge_key(&chunk);
         merged
             .entry(key)
             .and_modify(|(_, existing)| *existing = existing.max(score))
             .or_insert((chunk, score));
     }
     for hit in text_hits {
-        let key = (hit.chunk.session_id.clone(), hit.chunk.content.clone());
+        let key = memory_hit_merge_key(&hit.chunk);
         merged
             .entry(key)
             .and_modify(|(_, existing)| *existing = existing.max(hit.relevance_score))
@@ -136,4 +138,68 @@ pub(crate) fn merge_memory_hits(
     });
     results.truncate(top_k);
     results
+}
+
+fn memory_hit_merge_key(chunk: &MemoryChunk) -> (u8, String, String) {
+    if lifecycle_memory_id_from_source(&chunk.source).is_some() {
+        // A lifecycle source is the canonical owner identity. Its indexed
+        // session field is projection metadata and may differ from the
+        // current lexical candidate after a scope migration or rebuild.
+        (1, chunk.source.clone(), String::new())
+    } else {
+        (0, chunk.session_id.clone(), chunk.content.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn chunk(session_id: &str, source: &str, content: &str) -> MemoryChunk {
+        MemoryChunk {
+            id: 1,
+            session_id: session_id.into(),
+            content: content.into(),
+            source: source.into(),
+            created_at: String::new(),
+            tier: 0,
+            access_count: 0,
+            last_accessed_at: String::new(),
+            importance_score: 0.0,
+            archived: false,
+            archived_at: None,
+            summary: None,
+        }
+    }
+
+    #[test]
+    fn lifecycle_hits_merge_by_canonical_memory_owner_not_projection_session() {
+        let source = "memory_lifecycle:memory:11111111-1111-4111-8111-111111111111";
+        let vector = chunk("historical-session", source, "same canonical fact");
+        let lexical = chunk("global", source, "same canonical fact");
+
+        let merged = merge_memory_hits(
+            vec![(vector, 0.9)],
+            vec![MemorySearchHit {
+                chunk: lexical,
+                relevance_score: 0.6,
+                source_tier: "canonical_lifecycle_lexical".into(),
+            }],
+            4,
+        );
+
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].1, 0.9);
+        assert_eq!(merged[0].0.source, source);
+    }
+
+    #[test]
+    fn ordinary_hits_keep_session_and_content_identity() {
+        let first = chunk("session-a", "legacy", "same text");
+        let second = chunk("session-b", "legacy", "same text");
+
+        let merged = merge_memory_hits(vec![(first, 0.9), (second, 0.8)], vec![], 4);
+
+        assert_eq!(merged.len(), 2);
+    }
 }

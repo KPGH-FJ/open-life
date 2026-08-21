@@ -13,10 +13,9 @@ const tauriMocks = vi.hoisted(() => ({
   deleteLifeModelLearningCandidate: vi.fn(),
   rejectLifeModelLearningCandidate: vi.fn(),
   pauseLifeModelLearningSuggestionClass: vi.fn(),
-  draftMemoryCorrectionProposal: vi.fn(),
-  draftMemoryArchiveProposal: vi.fn(),
-  draftMemoryStopRecallProposal: vi.fn(),
-  restoreArchivedMemory: vi.fn(),
+  correctMemory: vi.fn(),
+  archiveMemory: vi.fn(),
+  restoreMemory: vi.fn(),
   rollbackMemoryAsset: vi.fn(),
   privacyEraseMemoryAsset: vi.fn(),
 }));
@@ -172,23 +171,25 @@ describe("durable truth Tauri data source", () => {
     expect(tauriMocks.pauseLifeModelLearningSuggestionClass).toHaveBeenCalledWith("candidate:two");
   });
 
-  it("keeps correction and archive reviewed while restore, rollback, and erase use exact owners", async () => {
-    tauriMocks.draftMemoryCorrectionProposal.mockResolvedValue({
-      memoryId: "memory:one",
-      action: "correct",
-      status: "review_required",
+  it("uses direct verified receipts for reversible Memory controls", async () => {
+    tauriMocks.correctMemory.mockResolvedValue({
+      memoryId: "memory:replacement",
+      replacedMemoryId: "memory:one",
+      canonicalCommitted: true,
+      projectionState: "applied",
+      undoAvailable: true,
     });
-    tauriMocks.draftMemoryArchiveProposal.mockResolvedValue({
-      memoryId: "memory:one",
-      action: "archive",
-      status: "review_required",
+    tauriMocks.archiveMemory.mockResolvedValue({
+      owner: { ownerKind: "memory_lifecycle", ownerId: "memory:one" },
+      disposition: "archived",
+      changed: true,
+      canonicalCommitted: true,
+      projectionState: "applied",
     });
-    tauriMocks.draftMemoryStopRecallProposal.mockResolvedValue({
-      memoryId: "memory:one",
-      action: "stop_recall",
-      status: "review_required",
-    });
-    tauriMocks.restoreArchivedMemory.mockResolvedValue({
+    tauriMocks.restoreMemory.mockResolvedValue({
+      owner: { ownerKind: "memory_lifecycle", ownerId: "memory:one" },
+      disposition: "active",
+      changed: true,
       canonicalCommitted: true,
       projectionState: "applied",
     });
@@ -203,23 +204,29 @@ describe("durable truth Tauri data source", () => {
 
     await tauriDurableTruthDataSource.correctMemory("memory:one", "corrected");
     await tauriDurableTruthDataSource.archiveMemory("memory:one");
-    await tauriDurableTruthDataSource.stopRecall("memory:one");
     await tauriDurableTruthDataSource.restoreMemory("memory:one");
     await tauriDurableTruthDataSource.rollbackMemory("memory:one", "user correction");
     await tauriDurableTruthDataSource.privacyEraseMemory("memory:one");
 
-    expect(tauriMocks.draftMemoryCorrectionProposal).toHaveBeenCalledWith(
-      "memory:one",
-      "corrected"
-    );
-    expect(tauriMocks.draftMemoryArchiveProposal).toHaveBeenCalledWith("memory:one");
-    expect(tauriMocks.draftMemoryStopRecallProposal).toHaveBeenCalledWith("memory:one");
-    expect(tauriMocks.restoreArchivedMemory).toHaveBeenCalledWith({
-      ownerKind: "memory_lifecycle",
-      ownerId: "memory:one",
-    });
+    expect(tauriMocks.correctMemory).toHaveBeenCalledWith("memory:one", "corrected");
+    expect(tauriMocks.archiveMemory).toHaveBeenCalledWith("memory:one");
+    expect(tauriMocks.restoreMemory).toHaveBeenCalledWith("memory:one");
     expect(tauriMocks.rollbackMemoryAsset).toHaveBeenCalledWith("memory:one", "user correction");
     expect(tauriMocks.privacyEraseMemoryAsset).toHaveBeenCalledWith("memory:one");
+  });
+
+  it("rejects a direct Memory control when its canonical projection is not applied", async () => {
+    tauriMocks.correctMemory.mockResolvedValue({
+      memoryId: "memory:replacement",
+      replacedMemoryId: "memory:one",
+      canonicalCommitted: true,
+      projectionState: "pending",
+      undoAvailable: true,
+    });
+
+    await expect(
+      tauriDurableTruthDataSource.correctMemory("memory:one", "corrected")
+    ).rejects.toThrow("memory_correct_projection_pending");
   });
 
   it("accepts only an exact Review-required migration draft receipt", async () => {

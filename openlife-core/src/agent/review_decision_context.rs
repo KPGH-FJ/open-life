@@ -218,6 +218,8 @@ pub fn build_review_decision_context(
             },
             readable_lifemodel_v2_diff,
         )
+    } else if proposal.proposal_type == ProposalType::MemoryWrite {
+        readable_memory_write(proposal)
     } else {
         readable_value(&proposal.after)
     };
@@ -1049,6 +1051,23 @@ fn readable_value(value: &Value) -> ReviewReadableValue {
     }
 }
 
+fn readable_memory_write(proposal: &AgentProposal) -> ReviewReadableValue {
+    proposal
+        .after
+        .get("content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(|content| ReviewReadableValue {
+            kind: ReviewReadableValueKind::Text,
+            summary: bounded_text(content, "Memory content unavailable"),
+            detail: None,
+            sensitivity: EvidenceSensitivity::LocalPrivate,
+            truncated: content.chars().count() > MAX_READABLE_TEXT_CHARS,
+        })
+        .unwrap_or_else(|| readable_value(&proposal.after))
+}
+
 fn collection_readable_value(
     kind: ReviewReadableValueKind,
     summary: String,
@@ -1255,6 +1274,27 @@ mod tests {
 
         assert!(detail.contains("[REDACTED]"));
         assert!(!detail.contains("must-not-leak"));
+    }
+
+    #[test]
+    fn memory_write_review_shows_the_exact_candidate_instead_of_object_field_count() {
+        let proposal = proposal(
+            ProposalType::MemoryWrite,
+            json!({
+                "content": "My work timezone is Central European Time.",
+                "scope": "global",
+                "source": "conversation_idle_extraction"
+            }),
+        );
+
+        let context = build_review_decision_context(&proposal, &[]);
+
+        assert_eq!(context.after.kind, ReviewReadableValueKind::Text);
+        assert_eq!(
+            context.after.summary,
+            "My work timezone is Central European Time."
+        );
+        assert_eq!(context.after.detail, None);
     }
 
     #[test]

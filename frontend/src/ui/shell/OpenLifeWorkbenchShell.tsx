@@ -148,6 +148,7 @@ export function OpenLifeWorkbenchShell({
     <div
       className="ol-foundation ol-workbench-shell"
       data-shell-mode={mode}
+      data-active-navigation={activeNavigationId}
       data-inspector-open={inspectorOpen ? "true" : "false"}
     >
       <a
@@ -281,7 +282,7 @@ export function OpenLifeWorkbenchShell({
           )}
           <FoundationIconButton
             ref={inspectorTriggerRef}
-            label={inspectorOpen ? "证据检查器已打开" : "打开证据检查器"}
+            label={inspectorOpen ? "详情已打开" : "打开详情"}
             icon={<PanelRightOpen size={18} strokeWidth={1.75} aria-hidden="true" />}
             aria-expanded={inspectorOpen}
             aria-controls="ol-shell-inspector"
@@ -308,13 +309,13 @@ export function OpenLifeWorkbenchShell({
         >
           <header className="ol-shell-inspector__header">
             <div>
-              <span>证据与限制</span>
+              <span>详情</span>
               <h2 ref={inspectorHeadingRef} id="ol-shell-inspector-title" tabIndex={-1}>
                 {inspector.title}
               </h2>
             </div>
             <FoundationIconButton
-              label="关闭证据检查器"
+              label="关闭详情"
               icon={<X size={18} strokeWidth={1.75} aria-hidden="true" />}
               onClick={onCloseInspector}
             />
@@ -334,7 +335,7 @@ export function OpenLifeWorkbenchShell({
               <p>{inspector.nextAction}</p>
             </section>
             <section>
-              <h3>证据</h3>
+              <h3>来源与记录</h3>
               <div className="ol-shell-evidence-list">
                 {inspector.evidence.map(evidence => (
                   <FoundationEvidenceRow

@@ -45,6 +45,7 @@ export type SettingsDraftEdit =
   | { field: "credential"; value: string }
   | { field: "prefer_local"; value: boolean }
   | { field: "local_model"; value: string }
+  | { field: "agent_memory_enabled"; value: boolean }
   | { field: "network_enabled"; value: boolean }
   | { field: "network_default"; value: "ask" | "allow" | "deny" }
   | {
@@ -129,6 +130,9 @@ function applyDraftEdit(config: AppConfig, edit: SettingsDraftEdit): AppConfig {
       return next;
     case "local_model":
       next.local_model = edit.value;
+      return next;
+    case "agent_memory_enabled":
+      next.system = { ...next.system, agent_memory_enabled: edit.value };
       return next;
     case "network_enabled":
       next.system = {

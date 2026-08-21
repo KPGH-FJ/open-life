@@ -274,6 +274,7 @@ pub enum ProviderLocalOnlyReason {
 #[serde(rename_all = "snake_case")]
 pub enum ProviderPayloadPurpose {
     MainChatDirectAnswer,
+    AgentMemoryExtraction,
     MainChatEvidenceCheck,
     MainChatArtifactDraft,
     MainChatWorkPlan,
@@ -289,6 +290,7 @@ impl ProviderPayloadPurpose {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MainChatDirectAnswer => "main_chat_direct_answer",
+            Self::AgentMemoryExtraction => "agent_memory_extraction",
             Self::MainChatEvidenceCheck => "main_chat_evidence_check",
             Self::MainChatArtifactDraft => "main_chat_artifact_draft",
             Self::MainChatWorkPlan => "main_chat_work_plan",
@@ -1601,25 +1603,36 @@ pub fn resolve_provider_chat_model(_provider: &str, chat_model: &str) -> String 
     chat_model.trim().to_string()
 }
 
+fn extract_provider_text(value: &serde_json::Value) -> Option<String> {
+    if let Some(text) = value.as_str().filter(|text| !text.trim().is_empty()) {
+        return Some(text.to_string());
+    }
+    let parts = value.as_array()?;
+    let joined = parts
+        .iter()
+        .filter_map(|part| {
+            part.get("text")
+                .and_then(serde_json::Value::as_str)
+                .or_else(|| part.get("content").and_then(serde_json::Value::as_str))
+        })
+        .filter(|text| !text.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("");
+    (!joined.trim().is_empty()).then_some(joined)
+}
+
 fn extract_chat_content(json: &serde_json::Value) -> Option<String> {
-    json["choices"][0]["message"]["content"]
-        .as_str()
-        .or_else(|| json["choices"][0]["text"].as_str())
-        .or_else(|| json["output_text"].as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string)
+    extract_provider_text(&json["choices"][0]["message"]["content"])
+        .or_else(|| extract_provider_text(&json["choices"][0]["text"]))
+        .or_else(|| extract_provider_text(&json["output_text"]))
 }
 
 fn extract_stream_content(json: &serde_json::Value) -> Option<String> {
-    json["choices"][0]["delta"]["content"]
-        .as_str()
-        .or_else(|| json["choices"][0]["message"]["content"].as_str())
-        .or_else(|| json["choices"][0]["text"].as_str())
-        .or_else(|| json["delta"]["content"].as_str())
-        .or_else(|| json["content"].as_str())
-        .map(ToString::to_string)
-        .filter(|s| !s.is_empty())
+    extract_provider_text(&json["choices"][0]["delta"]["content"])
+        .or_else(|| extract_provider_text(&json["choices"][0]["message"]["content"]))
+        .or_else(|| extract_provider_text(&json["choices"][0]["text"]))
+        .or_else(|| extract_provider_text(&json["delta"]["content"]))
+        .or_else(|| extract_provider_text(&json["content"]))
 }
 
 fn has_reasoning_content(json: &serde_json::Value) -> bool {
@@ -1701,8 +1714,17 @@ fn provider_endpoint_allows_system_fake_ip_proxy(provider: &str, endpoint: &reqw
 }
 
 fn provider_http_error(label: &str, status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    let reason_code = match status.as_u16() {
+        401 | 403 => "provider_authentication_failed",
+        402 => "provider_quota_exhausted",
+        408 | 504 => "provider_timeout",
+        429 => "provider_rate_limited",
+        400 | 404 | 405 | 422 => "provider_request_rejected",
+        500..=599 => "provider_unavailable",
+        _ => "provider_http_terminal_failed",
+    };
     confirmed_provider_terminal_failure(
-        "provider_http_terminal_failed",
+        reason_code,
         anyhow::anyhow!(
             "{} provider returned HTTP {} (body_digest={})",
             label,
@@ -1730,6 +1752,12 @@ pub(crate) struct OpenAiCompatibleAdapterRequest<'a> {
     /// use a provider-native JSON mode, but callers cannot infer this from
     /// prompt text or relax downstream schema validation.
     pub(crate) structured_json_output: bool,
+    /// Whether the remote provider should also be asked to enforce its native
+    /// JSON response mode. This is deliberately separate from OpenLife's
+    /// local structured-output contract: some provider/model combinations can
+    /// satisfy the latter more reliably without the former, and the returned
+    /// content is still parsed and schema-checked before it is trusted.
+    pub(crate) provider_native_json_mode: bool,
     pub(crate) network_policy: &'a NetworkPolicy,
     pub(crate) network_policy_decision: &'a NetworkPolicyDecision,
     pub(crate) request_id: Option<&'a str>,
@@ -1750,6 +1778,7 @@ where
         api_key: configured_api_key,
         model,
         structured_json_output,
+        provider_native_json_mode,
         network_policy,
         network_policy_decision,
         request_id,
@@ -1782,14 +1811,18 @@ where
         }));
     }
 
+    let max_tokens = if structured_json_output { 8192 } else { 2048 };
+    let temperature = if structured_json_output { 0.2 } else { 0.7 };
     let mut body = json!({
         "model": model,
         "messages": req_messages,
-        "temperature": 0.7,
-        "max_tokens": 2048,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
     });
     if structured_json_output && provider == "deepseek" {
-        body["response_format"] = json!({ "type": "json_object" });
+        if provider_native_json_mode {
+            body["response_format"] = json!({ "type": "json_object" });
+        }
         // DeepSeek V4 enables thinking by default and counts reasoning tokens
         // against `max_tokens`. Artifact/evidence requests need the bounded
         // budget for the validated JSON result itself; otherwise a long
@@ -1892,6 +1925,7 @@ where
         api_key: configured_api_key,
         model,
         structured_json_output: _,
+        provider_native_json_mode: _,
         network_policy,
         network_policy_decision,
         request_id,
@@ -2104,6 +2138,39 @@ mod tests {
     use std::sync::Arc;
 
     #[test]
+    fn provider_http_statuses_map_to_stable_safe_terminal_codes() {
+        for (status, expected) in [
+            (
+                reqwest::StatusCode::UNAUTHORIZED,
+                "provider_authentication_failed",
+            ),
+            (
+                reqwest::StatusCode::PAYMENT_REQUIRED,
+                "provider_quota_exhausted",
+            ),
+            (
+                reqwest::StatusCode::TOO_MANY_REQUESTS,
+                "provider_rate_limited",
+            ),
+            (
+                reqwest::StatusCode::BAD_REQUEST,
+                "provider_request_rejected",
+            ),
+            (
+                reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                "provider_unavailable",
+            ),
+        ] {
+            let error = super::provider_http_error("test", status, "sensitive body");
+            assert_eq!(error.to_string(), expected);
+            assert_eq!(
+                super::provider_error_terminal_status(&error),
+                super::ProviderInvocationStatus::Failed
+            );
+        }
+    }
+
+    #[test]
     fn trusted_kernel_context_does_not_expose_its_internal_snapshot_ref_to_the_model() {
         let prompt = render_provider_system_prompt(&[BoundedContextBlock {
             source_ref: "mainchat_ctx_deadbeef".into(),
@@ -2206,6 +2273,7 @@ mod tests {
                 api_key: key,
                 model,
                 structured_json_output: false,
+                provider_native_json_mode: false,
                 network_policy: &policy,
                 network_policy_decision: &decision,
                 request_id: None,
@@ -2234,6 +2302,7 @@ mod tests {
                 api_key: key,
                 model,
                 structured_json_output: false,
+                provider_native_json_mode: false,
                 network_policy: &policy,
                 network_policy_decision: &decision,
                 request_id: None,
@@ -2276,6 +2345,7 @@ mod tests {
                 api_key: "sk-test",
                 model: "deepseek-v4-flash",
                 structured_json_output: true,
+                provider_native_json_mode: true,
                 network_policy: &policy,
                 network_policy_decision: &decision,
                 request_id: None,
@@ -2291,6 +2361,52 @@ mod tests {
         let body: serde_json::Value = serde_json::from_str(body).expect("JSON request body");
         assert_eq!(body["response_format"]["type"], "json_object");
         assert_eq!(body["thinking"]["type"], "disabled");
+        assert_eq!(body["max_tokens"], 8192);
+        assert_eq!(body["temperature"], 0.2);
+    }
+
+    #[tokio::test]
+    async fn deepseek_structured_contract_can_avoid_native_json_mode() {
+        let (listener, base) = local_provider_base().await;
+        let server = tokio::spawn(serve_provider_response(
+            listener,
+            "200 OK",
+            br#"{"choices":[{"message":{"content":"{\"markdown\":\"ok\"}"}}]}"#.to_vec(),
+            None,
+        ));
+        let (policy, decision) = allow_provider_network("deepseek", &base);
+        let endpoint = super::chat_completions_url("deepseek", &base);
+
+        let result = super::chat_with_openrouter_raw_with_start_observer(
+            super::OpenAiCompatibleAdapterRequest {
+                messages: vec![super::ChatMessage {
+                    role: "user".into(),
+                    content: "Return JSON.".into(),
+                }],
+                system_prompt: Some("Return only one JSON object."),
+                provider: "deepseek",
+                endpoint: &endpoint,
+                api_key: "sk-test",
+                model: "deepseek-v4-flash",
+                structured_json_output: true,
+                provider_native_json_mode: false,
+                network_policy: &policy,
+                network_policy_decision: &decision,
+                request_id: None,
+            },
+            || Ok(()),
+        )
+        .await
+        .expect("structured provider response");
+        assert_eq!(result, r#"{"markdown":"ok"}"#);
+
+        let request = server.await.unwrap();
+        let body = request.split("\r\n\r\n").nth(1).expect("HTTP request body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("JSON request body");
+        assert!(body.get("response_format").is_none());
+        assert_eq!(body["thinking"]["type"], "disabled");
+        assert_eq!(body["max_tokens"], 8192);
+        assert_eq!(body["temperature"], 0.2);
     }
 
     #[test]
@@ -2482,6 +2598,7 @@ mod tests {
                 api_key: "sk-test",
                 model: "gpt-test",
                 structured_json_output: false,
+                provider_native_json_mode: false,
                 network_policy: &policy,
                 network_policy_decision: &decision,
                 request_id: None,
@@ -2684,11 +2801,20 @@ mod tests {
         let text = serde_json::json!({
             "choices": [{"text": "hello text"}]
         });
+        let content_parts = serde_json::json!({
+            "choices": [{"message": {"content": [
+                {"type": "text", "text": "hello "},
+                {"type": "text", "text": "parts"}
+            ]}}]
+        });
         let stream = serde_json::json!({
             "choices": [{"delta": {"content": "hi"}}]
         });
         let stream_alt = serde_json::json!({
             "delta": {"content": "alt"}
+        });
+        let stream_with_boundary_space = serde_json::json!({
+            "choices": [{"delta": {"content": "chunk "}}]
         });
         let reasoning = serde_json::json!({
             "choices": [{"delta": {"reasoning_content": "thinking"}}]
@@ -2698,8 +2824,16 @@ mod tests {
         });
         assert_eq!(extract_chat_content(&normal).as_deref(), Some("hello"));
         assert_eq!(extract_chat_content(&text).as_deref(), Some("hello text"));
+        assert_eq!(
+            extract_chat_content(&content_parts).as_deref(),
+            Some("hello parts")
+        );
         assert_eq!(extract_stream_content(&stream).as_deref(), Some("hi"));
         assert_eq!(extract_stream_content(&stream_alt).as_deref(), Some("alt"));
+        assert_eq!(
+            extract_stream_content(&stream_with_boundary_space).as_deref(),
+            Some("chunk ")
+        );
         assert!(has_reasoning_content(&reasoning));
         assert!(has_reasoning_content(&reasoning_message));
         assert_eq!(extract_stream_content(&reasoning), None);

@@ -1,14 +1,17 @@
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { WorkspaceConversationController } from "./useWorkspaceConversation";
 import { WorkspaceConversationPanel } from "./WorkspaceConversationPanel";
 
-function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationController {
+function workController(): WorkspaceConversationController {
   return {
     sessions: [],
     projects: [],
     selectedProjectId: null,
     selectedSessionId: null,
+    globalMemoryEnabled: true,
+    memoryMode: "use_and_learn",
     messages: [],
     draft: "",
     loadStatus: "ready",
@@ -19,8 +22,16 @@ function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationContr
     mode: "work",
     provider: {
       status: "ready",
-      profiles: [],
-      selectedProfileId: null,
+      profiles: [
+        {
+          profileId: "deepseek-default",
+          providerId: "deepseek",
+          modelId: "deepseek-v4-flash",
+          endpointClass: "cloud",
+          selected: true,
+        },
+      ],
+      selectedProfileId: "deepseek-default",
       errorCode: null,
     },
     workStatus: "available",
@@ -32,29 +43,6 @@ function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationContr
     selectedSkillId: null,
     toolCandidates: null,
     capabilityState: { phase: "idle" },
-    markdownMemory: {
-      phase: "submitting",
-      operation: "write",
-      model: {
-        roots: [
-          { scope: "workspace", configured: false, rootPath: null, status: "unconfigured" },
-          { scope: "project", configured: true, rootPath: "/project", status: "ready" },
-        ],
-        files: [
-          {
-            scope: "project",
-            relativePath: "MEMORY.md",
-            content: "# Project Memory\nKeep the verified scope exact.",
-            contentDigest: "sha256:current",
-            charCount: 47,
-            active: true,
-          },
-        ],
-        totalCharCount: 47,
-        truncated: false,
-        sourceRule: "exact roots only",
-      },
-    },
     busy: false,
     ensureLoaded: vi.fn(),
     reload: vi.fn().mockResolvedValue(true),
@@ -62,15 +50,12 @@ function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationContr
     startNewConversation: vi.fn(),
     createProject: vi.fn().mockResolvedValue(true),
     assignProject: vi.fn().mockResolvedValue(true),
+    setMemoryMode: vi.fn().mockResolvedValue(true),
     setDraft: vi.fn(),
     setMode: vi.fn(),
     attachResources: vi.fn().mockResolvedValue(true),
     detachResource: vi.fn().mockResolvedValue(true),
     selectSkill: vi.fn().mockResolvedValue(true),
-    reloadMarkdownMemory: vi.fn().mockResolvedValue(true),
-    selectMarkdownMemoryRoot: vi.fn().mockResolvedValue(true),
-    proposeMarkdownMemoryWrite: vi.fn().mockResolvedValue(true),
-    proposeMarkdownMemoryDeactivation: vi.fn().mockResolvedValue(true),
     sendAction: () => ({
       id: "workspace.send",
       label: "发送",
@@ -87,21 +72,50 @@ function controllerWhileMarkdownMemoryIsSubmitting(): WorkspaceConversationContr
   };
 }
 
-describe("WorkspaceConversationPanel Markdown Memory", () => {
-  it("renders the in-flight proposal state without violating disabled-control truth", () => {
-    render(
-      <WorkspaceConversationPanel
-        controller={controllerWhileMarkdownMemoryIsSubmitting()}
-        onOpenLifeModel={vi.fn()}
-      />
+describe("WorkspaceConversationPanel", () => {
+  it("updates the selected Conversation memory mode without changing the global setting", async () => {
+    const user = userEvent.setup();
+    const controller = workController();
+    controller.selectedSessionId = "conversation-memory-mode";
+
+    render(<WorkspaceConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
+
+    await user.selectOptions(screen.getByRole("combobox", { name: /记忆/ }), "use_only");
+    expect(controller.setMemoryMode).toHaveBeenCalledWith("use_only");
+  });
+
+  it("keeps optional Work context behind one composer disclosure", async () => {
+    const user = userEvent.setup();
+    const controller = workController();
+
+    render(<WorkspaceConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
+
+    const summary = screen.getByText("文件、技能与工具");
+    const details = summary.closest("details");
+    expect(details).not.toHaveAttribute("open");
+    expect(screen.getByText("按需添加")).toBeInTheDocument();
+    expect(screen.getByText(/当前模型：/)).toHaveTextContent(
+      "当前模型：deepseek · deepseek-v4-flash"
     );
 
-    expect(screen.getByRole("button", { name: "处理中" })).toBeDisabled();
-    expect(screen.getByText("变更正在提交到 Review；文件仍未修改。")).toBeInTheDocument();
+    await user.click(summary);
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "添加文件" })).toBeInTheDocument();
+  });
+
+  it("keeps Project creation out of the default conversation rail", async () => {
+    const user = userEvent.setup();
+    const controller = workController();
+
+    render(<WorkspaceConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
+
+    expect(screen.queryByLabelText("Project 名称")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "新建 Project" }));
+    expect(screen.getByLabelText("Project 名称")).toBeInTheDocument();
   });
 
   it("shows a human-readable basis for a source-bound answer", () => {
-    const controller = controllerWhileMarkdownMemoryIsSubmitting();
+    const controller = workController();
     controller.turnState = {
       phase: "resolved",
       sessionId: "session-source-bound",
@@ -123,7 +137,7 @@ describe("WorkspaceConversationPanel Markdown Memory", () => {
   });
 
   it("does not claim an answer when the source-bound check failed closed", () => {
-    const controller = controllerWhileMarkdownMemoryIsSubmitting();
+    const controller = workController();
     controller.turnState = {
       phase: "resolved",
       sessionId: "session-source-bound-blocked",
@@ -146,7 +160,7 @@ describe("WorkspaceConversationPanel Markdown Memory", () => {
   });
 
   it("keeps the composer visible while Work offers steering and stop", () => {
-    const controller = controllerWhileMarkdownMemoryIsSubmitting();
+    const controller = workController();
     controller.draft = "把风险结论放在最前面";
     controller.activeTaskId = "task-steer";
     controller.turnState = {

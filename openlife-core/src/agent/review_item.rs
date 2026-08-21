@@ -891,7 +891,7 @@ mod tests {
     #[test]
     fn review_item_safe_path_override_is_bound_to_one_exact_proposal() {
         let mut bound = proposal(ProposalType::ExternalWriteAction);
-        bound.id = "proposal:markdown-memory:bound".into();
+        bound.id = "proposal:external-write:bound".into();
         bound.after = json!({
             "operation": "propose_write",
             "path": "/memory/MEMORY.md",
@@ -905,7 +905,7 @@ mod tests {
         let model = build_review_center_view_model(ReviewCenterBuildInput {
             proposals: vec![bound, unrelated],
             safe_path_overrides: BTreeMap::from([(
-                "proposal:markdown-memory:bound".into(),
+                "proposal:external-write:bound".into(),
                 vec!["/memory".into()],
             )]),
             ..Default::default()

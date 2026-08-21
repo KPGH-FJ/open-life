@@ -70,12 +70,11 @@ struct JsonRpcResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 struct JsonRpcError {
     code: i32,
     message: String,
-    #[serde(default)]
-    data: Option<Value>,
+    #[serde(default, rename = "data")]
+    _data: Option<Value>,
 }
 
 struct McpSession {

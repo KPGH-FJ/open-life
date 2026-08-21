@@ -293,9 +293,8 @@ pub(crate) async fn fetch_url_async(
     admission: super::ToolDispatchAdmission<'_>,
 ) -> Result<ToolCallInternalResult> {
     let (receipt_tracker, started_observer) = admission.into_remote_parts();
-    let fake_ip_proxy_domain_allowlist = network_policy
-        .map(|policy| policy.domain_allowlist.clone())
-        .unwrap_or_default();
+    let fake_ip_proxy_domain_allowlist =
+        web_fetch_fake_ip_proxy_domain_allowlist(url, network_policy);
     let response = match crate::network_client::NetworkClient::new(
         crate::network_client::NetworkClientPolicy {
             fake_ip_proxy_domain_allowlist,
@@ -356,6 +355,29 @@ pub(crate) async fn fetch_url_async(
         output: Some(truncate_text(&text, 50_000)),
         error: None,
     })
+}
+
+fn web_fetch_fake_ip_proxy_domain_allowlist(
+    url: &str,
+    network_policy: Option<&crate::config::NetworkPolicy>,
+) -> Vec<String> {
+    let Some(policy) = network_policy else {
+        return Vec::new();
+    };
+    let mut domains = policy.domain_allowlist.clone();
+    let decision = crate::network_client::resolve_network_policy_decision(policy, url, "web.fetch");
+    if decision.as_ref().is_ok_and(|decision| {
+        decision.disposition == crate::network_client::NetworkPolicyDisposition::Allow
+    }) {
+        if let Ok(parsed) = reqwest::Url::parse(url) {
+            if let Some(host) = parsed.host_str() {
+                domains.push(host.to_ascii_lowercase());
+            }
+        }
+    }
+    domains.sort();
+    domains.dedup();
+    domains
 }
 
 pub(crate) async fn search_web_async(
@@ -1502,9 +1524,32 @@ mod web_content_observation_tests {
     use super::{
         classify_duckduckgo_html_response, configured_web_search_endpoint,
         deepseek_search_request_body, format_deepseek_search_response, format_search_results,
-        prepare_web_content_observation, SearchProviderConfig, SearchResult,
-        WEB_CONTENT_OBSERVATION_MAX_CHARS, WEB_SEARCH_QUERY_MAX_CHARS,
+        prepare_web_content_observation, web_fetch_fake_ip_proxy_domain_allowlist,
+        SearchProviderConfig, SearchResult, WEB_CONTENT_OBSERVATION_MAX_CHARS,
+        WEB_SEARCH_QUERY_MAX_CHARS,
     };
+
+    #[test]
+    fn web_fetch_allows_only_the_policy_approved_host_through_a_fake_ip_proxy() {
+        let policy = crate::config::NetworkPolicy {
+            default_decision: "allow".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            web_fetch_fake_ip_proxy_domain_allowlist("https://example.com/research", Some(&policy)),
+            vec!["example.com"]
+        );
+
+        let denied = crate::config::NetworkPolicy {
+            default_decision: "deny".into(),
+            ..Default::default()
+        };
+        assert!(web_fetch_fake_ip_proxy_domain_allowlist(
+            "https://example.com/research",
+            Some(&denied)
+        )
+        .is_empty());
+    }
 
     #[test]
     fn search_endpoint_selection_is_per_execution_and_fails_closed_without_requirements() {

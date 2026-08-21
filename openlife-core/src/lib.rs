@@ -1,4 +1,5 @@
 pub mod agent;
+pub mod artifact_render;
 pub mod atomic_file;
 pub mod calendar;
 pub mod config;

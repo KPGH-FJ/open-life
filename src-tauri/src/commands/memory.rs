@@ -4,59 +4,8 @@ use crate::danger_action_confirmation::{
 use crate::errors::AppError;
 use crate::memory_gateway;
 use crate::AppState;
-use openlife_core::agent::{
-    AgentProposal, MemoryLifecycleCategory, MemoryLifecycleRiskLevel, ProposalSource, ProposalType,
-    RiskLevel,
-};
-use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MemoryActionProposalReceipt {
-    pub proposal_id: String,
-    pub memory_id: String,
-    pub action: String,
-    pub status: String,
-}
-
-fn proposal_risk(risk: MemoryLifecycleRiskLevel) -> RiskLevel {
-    match risk {
-        MemoryLifecycleRiskLevel::Low => RiskLevel::Low,
-        MemoryLifecycleRiskLevel::Medium => RiskLevel::Medium,
-        MemoryLifecycleRiskLevel::High => RiskLevel::High,
-        MemoryLifecycleRiskLevel::IdentityValue => RiskLevel::Critical,
-    }
-}
-
-fn candidate_kind(category: MemoryLifecycleCategory) -> Option<&'static str> {
-    match category {
-        MemoryLifecycleCategory::Preference => Some("preference"),
-        MemoryLifecycleCategory::Fact => Some("semantic_user_fact"),
-        MemoryLifecycleCategory::Workflow => Some("procedural_rule"),
-        MemoryLifecycleCategory::Correction => None,
-        MemoryLifecycleCategory::Boundary => Some("identity_or_role"),
-    }
-}
-
-async fn create_memory_action_proposal(
-    state: &Arc<AppState>,
-    proposal: &AgentProposal,
-) -> Result<(), String> {
-    state
-        .persistence_coordinator
-        .require_effects_allowed()
-        .map_err(|error| error.to_string())?;
-    state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(|| "ProposalStore unavailable".to_string())?
-        .lock()
-        .await
-        .create_proposal(proposal)
-        .map_err(|error| format!("Memory action proposal creation failed: {error}"))
-}
 
 async fn lifecycle_record(
     state: &Arc<AppState>,
@@ -77,181 +26,28 @@ async fn lifecycle_record(
 }
 
 #[tauri::command]
-pub async fn draft_memory_correction_proposal(
+pub async fn correct_memory(
     memory_id: String,
     content: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<MemoryActionProposalReceipt, String> {
-    draft_memory_correction_proposal_with_state(memory_id, content, state.inner()).await
-}
-
-pub(crate) async fn draft_memory_correction_proposal_with_state(
-    memory_id: String,
-    content: String,
-    state: &Arc<AppState>,
-) -> Result<MemoryActionProposalReceipt, String> {
-    let record = lifecycle_record(state, &memory_id).await?;
-    let content = content.trim();
-    if !record.status.is_runtime_active()
-        || record.runtime_context_excluded_at.is_some()
-        || record.content.is_empty()
-    {
-        return Err("Only a current, non-erased Memory can be corrected".into());
-    }
-    if !state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(|| "MemoryLifecycleStore unavailable".to_string())?
-        .lock()
-        .await
-        .is_memory_retrievable(&record.memory_id)
-        .map_err(|error| error.to_string())?
-    {
-        return Err("Restore an archived Memory before correcting it".into());
-    }
-    if content.is_empty() || content == record.content {
-        return Err("Memory correction must provide different non-empty content".into());
-    }
-    if content.chars().count() > 32_768 {
-        return Err("Memory correction exceeds the 32,768 character limit".into());
-    }
-    let candidate_kind = candidate_kind(record.category)
-        .ok_or_else(|| "Historical correction records cannot be corrected again".to_string())?;
-    let affected_path = format!("memory.lifecycle.{}", record.memory_id);
-    let mut proposal = AgentProposal::new(
-        ProposalType::MemoryWrite,
-        &affected_path,
-        serde_json::json!({
-            "content": content,
-            "scope": record.scope,
-            "category": record.category,
-            "candidateKind": candidate_kind,
-            "riskLevel": record.risk_level,
-            "sensitivity": record.sensitivity,
-            "supersedesMemoryId": record.memory_id,
-            "correctionKind": "user_reviewed_replacement"
-        }),
-        "User requested a reviewed correction that replaces one exact canonical Memory owner.",
-        1.0,
-        proposal_risk(record.risk_level),
-        ProposalSource::Manual,
-    );
-    proposal.id = format!("proposal:memory-correction:{}", uuid::Uuid::new_v4());
-    create_memory_action_proposal(state, &proposal).await?;
-    Ok(MemoryActionProposalReceipt {
-        proposal_id: proposal.id,
-        memory_id,
-        action: "correct".into(),
-        status: "review_required".into(),
-    })
+) -> Result<memory_gateway::MemoryCorrectionResult, String> {
+    memory_gateway::correct_memory_asset_with_state(memory_id, content, state.inner()).await
 }
 
 #[tauri::command]
-pub async fn draft_memory_archive_proposal(
+pub async fn archive_memory(
     memory_id: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<MemoryActionProposalReceipt, String> {
-    draft_memory_archive_proposal_with_state(memory_id, state.inner()).await
-}
-
-pub(crate) async fn draft_memory_archive_proposal_with_state(
-    memory_id: String,
-    state: &Arc<AppState>,
-) -> Result<MemoryActionProposalReceipt, String> {
-    let record = lifecycle_record(state, &memory_id).await?;
-    let store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(|| "MemoryLifecycleStore unavailable".to_string())?
-        .lock()
-        .await;
-    if !store
-        .is_memory_active(&record.memory_id)
-        .map_err(|error| error.to_string())?
-        || store
-            .memory_retrieval_state(&record.memory_id)
-            .map_err(|error| error.to_string())?
-            .is_some_and(|state| {
-                state.disposition == openlife_core::memory::MemoryRetrievalDisposition::Archived
-            })
-    {
-        return Err("Memory is already archived, inactive, or unavailable".into());
-    }
-    drop(store);
-    let affected_path = format!("memory.lifecycle.{}", record.memory_id);
-    let mut proposal = AgentProposal::new(
-        ProposalType::MemoryArchive,
-        &affected_path,
-        serde_json::json!({
-            "owner": {
-                "ownerKind": "memory_lifecycle",
-                "ownerId": record.memory_id,
-            },
-            "recallDisposition": "archived"
-        }),
-        "User requested a reviewed, recoverable stop-recall action for one exact Memory.",
-        1.0,
-        RiskLevel::Medium,
-        ProposalSource::Manual,
-    );
-    proposal.id = format!("proposal:memory-archive:{}", uuid::Uuid::new_v4());
-    create_memory_action_proposal(state, &proposal).await?;
-    Ok(MemoryActionProposalReceipt {
-        proposal_id: proposal.id,
-        memory_id,
-        action: "archive".into(),
-        status: "review_required".into(),
-    })
+) -> Result<memory_gateway::MemoryRetrievalMutationResult, AppError> {
+    memory_gateway::archive_memory_asset_with_state(memory_id, state.inner()).await
 }
 
 #[tauri::command]
-pub async fn draft_memory_stop_recall_proposal(
+pub async fn restore_memory(
     memory_id: String,
     state: State<'_, Arc<AppState>>,
-) -> Result<MemoryActionProposalReceipt, String> {
-    draft_memory_stop_recall_proposal_with_state(memory_id, state.inner()).await
-}
-
-pub(crate) async fn draft_memory_stop_recall_proposal_with_state(
-    memory_id: String,
-    state: &Arc<AppState>,
-) -> Result<MemoryActionProposalReceipt, String> {
-    let record = lifecycle_record(state, &memory_id).await?;
-    if !state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(|| "MemoryLifecycleStore unavailable".to_string())?
-        .lock()
-        .await
-        .is_memory_retrievable(&record.memory_id)
-        .map_err(|error| error.to_string())?
-    {
-        return Err("Memory is already excluded from normal recall".into());
-    }
-    let affected_path = format!("memory.lifecycle.{}", record.memory_id);
-    let mut proposal = AgentProposal::new(
-        ProposalType::MemoryArchive,
-        &affected_path,
-        serde_json::json!({
-            "owner": {
-                "ownerKind": "memory_lifecycle",
-                "ownerId": record.memory_id,
-            },
-            "recallDisposition": "paused"
-        }),
-        "User requested a reviewed stop-recall action without archiving the Memory asset.",
-        1.0,
-        RiskLevel::Medium,
-        ProposalSource::Manual,
-    );
-    proposal.id = format!("proposal:memory-stop-recall:{}", uuid::Uuid::new_v4());
-    create_memory_action_proposal(state, &proposal).await?;
-    Ok(MemoryActionProposalReceipt {
-        proposal_id: proposal.id,
-        memory_id,
-        action: "stop_recall".into(),
-        status: "review_required".into(),
-    })
+) -> Result<memory_gateway::MemoryRetrievalMutationResult, AppError> {
+    memory_gateway::restore_memory_asset_with_state(memory_id, state.inner()).await
 }
 
 #[tauri::command]
@@ -315,14 +111,6 @@ pub(crate) async fn search_memory_with_state(
     memory_gateway::search_memory_with_state(query, top_k, state).await
 }
 
-#[tauri::command]
-pub async fn restore_archived_chunks(
-    owner: crate::memory_gateway::CanonicalMemoryOwnerInput,
-    state: State<'_, Arc<AppState>>,
-) -> Result<crate::memory_gateway::MemoryRetrievalMutationResult, AppError> {
-    memory_gateway::restore_archived_chunks_with_state(&owner, state.inner()).await
-}
-
 #[cfg(test)]
 pub(crate) async fn rebuild_memory_index_with_state(
     state: &Arc<AppState>,
@@ -346,7 +134,10 @@ pub(crate) async fn rebuild_memory_index_with_state(
 mod tests {
     use super::*;
     use openlife_core::{
-        agent::{MemoryLifecycleAcceptanceInput, ProposalStatus},
+        agent::{
+            AgentProposal, MemoryLifecycleAcceptanceInput, MemoryLifecycleStatus, ProposalSource,
+            ProposalType, RiskLevel,
+        },
         embedding::clear_embedding_cache,
         llm::ChatMessage,
     };
@@ -412,48 +203,55 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn correction_and_archive_actions_only_create_review_proposals() {
+    async fn correction_archive_and_restore_are_direct_reversible_memory_controls() {
         let state = crate::test_utils::test_app_state();
         let memory_id = accepted_test_memory(&state).await;
+        let proposal_count_before = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_all_proposals(100, 0)
+            .unwrap()
+            .len();
 
-        let correction = draft_memory_correction_proposal_with_state(
+        let correction = memory_gateway::correct_memory_asset_with_state(
             memory_id.clone(),
             "User prefers spoken project updates.".into(),
             &state,
         )
         .await
         .unwrap();
-        let archive = draft_memory_archive_proposal_with_state(memory_id.clone(), &state)
-            .await
-            .unwrap();
-        let stop_recall = draft_memory_stop_recall_proposal_with_state(memory_id.clone(), &state)
-            .await
-            .unwrap();
+        assert!(correction.canonical_committed);
+        assert_eq!(correction.replaced_memory_id, memory_id);
+        assert!(correction.undo_available);
 
-        let store = state.proposal_store.as_ref().unwrap().lock().await;
-        let correction_proposal = store
-            .get_proposal(&correction.proposal_id)
-            .unwrap()
-            .unwrap();
-        let archive_proposal = store.get_proposal(&archive.proposal_id).unwrap().unwrap();
-        let stop_recall_proposal = store
-            .get_proposal(&stop_recall.proposal_id)
-            .unwrap()
-            .unwrap();
-        assert_eq!(correction_proposal.status, ProposalStatus::Pending);
-        assert_eq!(correction_proposal.proposal_type, ProposalType::MemoryWrite);
-        assert_eq!(correction_proposal.after["supersedesMemoryId"], memory_id);
-        assert_eq!(archive_proposal.status, ProposalStatus::Pending);
-        assert_eq!(archive_proposal.proposal_type, ProposalType::MemoryArchive);
-        assert_eq!(archive_proposal.after["recallDisposition"], "archived");
-        assert_eq!(
-            stop_recall_proposal.proposal_type,
-            ProposalType::MemoryArchive
-        );
-        assert_eq!(stop_recall_proposal.after["recallDisposition"], "paused");
-        drop(store);
+        let archive =
+            memory_gateway::archive_memory_asset_with_state(correction.memory_id.clone(), &state)
+                .await
+                .unwrap();
+        assert!(archive.canonical_committed);
+        assert_eq!(archive.disposition, "archived");
+        let restore =
+            memory_gateway::restore_memory_asset_with_state(correction.memory_id.clone(), &state)
+                .await
+                .unwrap();
+        assert!(restore.canonical_committed);
+        assert_eq!(restore.disposition, "active");
 
-        let record = state
+        let proposal_count_after = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_all_proposals(100, 0)
+            .unwrap()
+            .len();
+        assert_eq!(proposal_count_after, proposal_count_before);
+
+        let old_record = state
             .memory_lifecycle_store
             .as_ref()
             .unwrap()
@@ -462,8 +260,22 @@ mod tests {
             .get_record(&memory_id)
             .unwrap()
             .unwrap();
-        assert_eq!(record.content, "User prefers written project updates.");
-        assert!(record.status.is_runtime_active());
+        assert_eq!(old_record.status, MemoryLifecycleStatus::Superseded);
+        assert_eq!(
+            old_record.replacement_memory_id.as_deref(),
+            Some(correction.memory_id.as_str())
+        );
+        let replacement = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_record(&correction.memory_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(replacement.content, "User prefers spoken project updates.");
+        assert!(replacement.status.is_runtime_active());
     }
 
     #[tokio::test]

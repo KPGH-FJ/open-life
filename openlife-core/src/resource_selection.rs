@@ -583,6 +583,7 @@ fn provenance_label(provenance: &ResourceProvenance) -> String {
         ResourceProvenance::Xlsx { sheet, range } => {
             format!("sheet {sheet}, range {range}")
         }
+        ResourceProvenance::Pptx { slide } => format!("slide {slide}"),
     }
 }
 

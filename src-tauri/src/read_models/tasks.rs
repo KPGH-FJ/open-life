@@ -452,6 +452,10 @@ async fn canonical_task_input(
         .map(|attention| attention.reason_code.clone())
         .collect::<Vec<_>>();
     let needs_attention = !attention_reason_codes.is_empty();
+    let retry_scope_stale = snapshot.attention.iter().any(|attention| {
+        attention.resolved_at.is_none()
+            && attention.kind == openlife_core::task_runtime::CanonicalAttentionKind::ScopeStale
+    });
     (
         TaskViewModelTaskInput {
             task_id: snapshot.task.id.clone(),
@@ -492,7 +496,11 @@ async fn canonical_task_input(
                 CanonicalTaskStatus::Failed
                 | CanonicalTaskStatus::Blocked
                 | CanonicalTaskStatus::Cancelled
-                | CanonicalTaskStatus::Interrupted => vec!["retry".into()],
+                | CanonicalTaskStatus::Interrupted
+                    if !retry_scope_stale =>
+                {
+                    vec!["retry".into()]
+                }
                 _ => Vec::new(),
             },
             retry_action_id: snapshot.runs.last().map(|run| run.run_id.clone()),
@@ -592,7 +600,7 @@ fn canonical_general_delivery_status(
             false,
         ),
         CanonicalTaskStatus::Interrupted => (
-            TaskLifecycleStatus::Blocked,
+            TaskLifecycleStatus::Interrupted,
             TaskTerminalDeliveryStatus::NotTerminal,
             false,
         ),
@@ -763,7 +771,7 @@ fn canonical_artifact_delivery_status(
             false,
         ),
         CanonicalTaskStatus::Interrupted => (
-            TaskLifecycleStatus::Blocked,
+            TaskLifecycleStatus::Interrupted,
             TaskTerminalDeliveryStatus::NotTerminal,
             false,
         ),
@@ -935,6 +943,7 @@ async fn artifact_presentation(
                 state,
                 draft_reference,
                 &snapshot.artifact.content_digest,
+                &snapshot.artifact.media_type,
             )
             .await
             {
@@ -960,7 +969,7 @@ async fn artifact_presentation(
             };
         };
         let safe_paths = state.config.lock().await.system.safe_paths.clone();
-        match read_verified_artifact(path, &safe_paths) {
+        match read_verified_artifact(path, &safe_paths, &snapshot.artifact.media_type) {
             Ok((digest, content)) => {
                 verification.observed_content_digest = Some(digest.clone());
                 if digest == snapshot.artifact.content_digest
@@ -1018,6 +1027,7 @@ async fn read_canonical_artifact_draft(
     state: &Arc<AppState>,
     reference: &str,
     expected_digest: &str,
+    media_type: &str,
 ) -> Result<String, String> {
     let path = Path::new(reference);
     let metadata = std::fs::symlink_metadata(path)
@@ -1053,15 +1063,17 @@ async fn read_canonical_artifact_draft(
     }
     let bytes =
         std::fs::read(path).map_err(|_| "canonical_artifact_draft_read_failed".to_string())?;
-    let content =
-        String::from_utf8(bytes).map_err(|_| "canonical_artifact_draft_not_utf8".to_string())?;
-    if openlife_core::agent::metadata_safe_text_digest(&content).1 != expected_digest {
+    if crate::artifact_materializer::artifact_content_digest(&bytes) != expected_digest {
         return Err("canonical_artifact_draft_digest_mismatch".into());
     }
-    Ok(content)
+    artifact_preview_content(path, media_type, bytes)
 }
 
-fn read_verified_artifact(path: &str, safe_paths: &[String]) -> Result<(String, String), String> {
+fn read_verified_artifact(
+    path: &str,
+    safe_paths: &[String],
+    media_type: &str,
+) -> Result<(String, String), String> {
     let path = Path::new(path);
     let parent = path
         .parent()
@@ -1091,9 +1103,63 @@ fn read_verified_artifact(path: &str, safe_paths: &[String]) -> Result<(String, 
         use sha2::{Digest, Sha256};
         format!("sha256:{:x}", Sha256::digest(&bytes))
     };
-    let content = String::from_utf8(bytes)
-        .map_err(|_| "artifact_materialized_preview_not_utf8".to_string())?;
+    let content = artifact_preview_content(path, media_type, bytes)?;
     Ok((digest, content))
+}
+
+fn artifact_preview_content(
+    path: &Path,
+    media_type: &str,
+    bytes: Vec<u8>,
+) -> Result<String, String> {
+    let normalized = media_type
+        .split(';')
+        .next()
+        .unwrap_or(media_type)
+        .trim()
+        .to_ascii_lowercase();
+    if matches!(
+        normalized.as_str(),
+        "text/plain" | "text/markdown" | "text/html" | "text/csv" | "application/json"
+    ) {
+        return String::from_utf8(bytes).map_err(|_| "artifact_preview_text_not_utf8".to_string());
+    }
+    let binary_filename = match normalized.as_str() {
+        "application/pdf" => Some("artifact.pdf"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => {
+            Some("artifact.docx")
+        }
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => {
+            Some("artifact.xlsx")
+        }
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => {
+            Some("artifact.pptx")
+        }
+        _ => None,
+    };
+    let filename = binary_filename
+        .or_else(|| path.file_name().and_then(|value| value.to_str()))
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "artifact_preview_filename_missing".to_string())?;
+    let extraction = openlife_core::resource_parser::extract_resource(
+        openlife_core::resource_parser::ResourceExtractionRequest {
+            filename: filename.to_string(),
+            declared_mime: normalized,
+            bytes,
+        },
+    )
+    .map_err(|_| "artifact_preview_format_verification_failed".to_string())?;
+    let content = extraction
+        .chunks
+        .into_iter()
+        .map(|chunk| chunk.content)
+        .filter(|content| !content.trim().is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    if content.is_empty() {
+        return Err("artifact_preview_content_empty".into());
+    }
+    Ok(content)
 }
 
 fn canonical_task_preview(snapshot: &CanonicalTaskSnapshot) -> String {
@@ -1247,6 +1313,71 @@ mod tests {
             .warnings
             .iter()
             .any(|warning| warning.code.contains("review_center")));
+    }
+
+    #[tokio::test]
+    async fn stale_retry_scope_requires_a_new_work_instead_of_reoffering_retry() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let store = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await;
+        store
+            .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: &turn_id,
+                instruction_digest: &openlife_core::agent::metadata_safe_text_digest(
+                    "retry under the original provider",
+                )
+                .1,
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+            })
+            .unwrap();
+        store
+            .terminalize_general_run(
+                &task_id,
+                &run_id,
+                openlife_core::task_runtime::CanonicalTaskStatus::Failed,
+            )
+            .unwrap();
+        store
+            .record_attention(
+                &task_id,
+                &run_id,
+                openlife_core::task_runtime::CanonicalAttentionKind::ScopeStale,
+                "work_provider_binding_stale",
+            )
+            .unwrap();
+        drop(store);
+
+        let envelope = get_tasks_view_model_with_state(&state).await.unwrap();
+        let task = envelope
+            .data
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|task| task.canonical_task_id == task_id)
+            .unwrap();
+        assert!(task.needs_attention);
+        assert_eq!(
+            task.attention_reason_codes,
+            vec!["work_provider_binding_stale"]
+        );
+        assert!(!task
+            .allowed_controls
+            .iter()
+            .any(|control| control.kind == openlife_core::agent::TaskControlKind::Retry));
     }
 
     #[tokio::test]

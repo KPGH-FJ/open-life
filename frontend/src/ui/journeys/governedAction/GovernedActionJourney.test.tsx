@@ -88,7 +88,7 @@ describe("Workbench governed action journey", () => {
       />
     );
 
-    expect(await screen.findByRole("heading", { name: "Work 进度与结果" })).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "进度与结果" })).toBeInTheDocument();
     expect(
       await screen.findByRole("heading", { name: "读取本地客户访谈记录", level: 2 })
     ).toBeInTheDocument();
@@ -102,8 +102,8 @@ describe("Workbench governed action journey", () => {
     await user.click(screen.getByRole("button", { name: "确认仅允许本次" }));
     await waitFor(() => expect(dispatchReview).toHaveBeenCalledTimes(1));
     expect(
-      await screen.findByText("已开始读取本地记录并提取重复问题；尚未形成最终结果。")
-    ).toBeInTheDocument();
+      await screen.findAllByText("已开始读取本地记录并提取重复问题；尚未形成最终结果。")
+    ).not.toHaveLength(0);
     expect(screen.queryByRole("button", { name: "仅允许本次" })).not.toBeInTheDocument();
     expect(screen.queryByText("任务已完成")).not.toBeInTheDocument();
 
@@ -143,6 +143,8 @@ describe("Workbench governed action journey", () => {
         projects: [],
         selectedProjectId: null,
         selectedConversationId: null,
+        globalMemoryEnabled: true,
+        selectedMemoryMode: "use_and_learn" as const,
         messages: [],
         latestTurn: null,
         providerStatus: "ready" as const,
@@ -290,8 +292,8 @@ describe("Workbench governed action journey", () => {
       />
     );
 
-    expect(await screen.findByText("继续当前工作")).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Work 进度与结果" })).not.toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "新对话" })).toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "进度与结果" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "仅允许本次" })).not.toBeInTheDocument();
   });
 
@@ -313,6 +315,8 @@ describe("Workbench governed action journey", () => {
               projects: [],
               selectedProjectId: null,
               selectedConversationId: null,
+              globalMemoryEnabled: true,
+              selectedMemoryMode: "use_and_learn" as const,
               messages: [],
               latestTurn: null,
               providerStatus: "ready" as const,
@@ -484,9 +488,9 @@ describe("Workbench governed action journey", () => {
     );
 
     expect(
-      await screen.findByText("Work 投影尚未匹配当前 Conversation；旧任务不会暂时显示在这里。")
+      await screen.findByText("新对话的工作记录正在读取；上一段对话的结果不会显示在这里。")
     ).toBeInTheDocument();
-    expect(screen.queryByRole("heading", { name: "Work 进度与结果" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("heading", { name: "进度与结果" })).not.toBeInTheDocument();
   });
 
   it("shows only backend-confirmed resources and removes them through the exact binding", async () => {
@@ -504,7 +508,7 @@ describe("Workbench governed action journey", () => {
       />
     );
 
-    await screen.findByText("继续当前工作");
+    await screen.findByRole("radio", { name: "Chat" });
     const workMode = screen.getByRole("radio", { name: "Work" });
     await waitFor(() => expect(workMode).toBeEnabled());
     await user.click(workMode);

@@ -110,6 +110,8 @@ function snapshot(status: ViewModelEnvelope<unknown>["status"] = "ready"): Gover
         projects: [],
         selectedProjectId: null,
         selectedConversationId: null,
+        globalMemoryEnabled: true,
+        selectedMemoryMode: "use_and_learn",
         messages: [],
         latestTurn: null,
         providerStatus: "ready",

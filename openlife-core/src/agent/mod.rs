@@ -91,9 +91,8 @@ pub use memory_lifecycle::{
     MemoryRollbackEvent, MemoryRollbackReport,
 };
 pub use memory_view_model::{
-    build_memory_view_model, MemoryItemView, MemoryLaneSummary, MemoryLifeModelLinkageStatus,
-    MemoryLifeModelLinkageSummary, MemoryLifecycleSummary, MemoryTierSummary, MemoryViewModel,
-    MemoryViewModelBuildInput, MemoryViewModelSummary,
+    build_memory_view_model, MemoryItemView, MemoryViewModel, MemoryViewModelBuildInput,
+    MemoryViewModelSummary,
 };
 pub use metadata_safe::{
     metadata_safe_text_digest, metadata_safe_text_preview, metadata_safe_value_digest,

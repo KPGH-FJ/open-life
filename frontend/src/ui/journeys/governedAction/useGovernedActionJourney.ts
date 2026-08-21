@@ -299,7 +299,13 @@ export function useGovernedActionJourney(
         } else if (action.kind === "approve" && dispatchedItem?.type === "tool_permission") {
           announce("权限决定已由刷新后的审核读模型确认；任务尚未继续。");
         } else if (action.kind === "approve") {
-          announce("批准决定已由刷新后的审核读模型确认；应用结果仍需独立刷新证明。");
+          announce(
+            item.materializationStatus === "applied"
+              ? "批准和应用结果已由刷新后的同一事项确认。"
+              : item.materializationStatus === "unknown"
+                ? "批准已经记录，但应用结果仍不确定；不会自动重试。"
+                : "批准已经记录；应用结果尚未由刷新后的同一事项确认。"
+          );
         } else if (action.kind === "reject") {
           announce("拒绝决定已由刷新后的审核读模型确认。");
         } else if (action.kind === "later") {

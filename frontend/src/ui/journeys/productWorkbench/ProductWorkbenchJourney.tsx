@@ -317,6 +317,10 @@ export function ProductWorkbenchJourney({
   const selectedConversationIdRef = useRef<string | null>(null);
   const refreshGovernedAfterTurn = useCallback(async () => {
     if (governedActionDataSource) {
+      // A completed/blocked turn may have created a new canonical Task. The
+      // prior manual Task selection must not pin Results to stale work after
+      // the active Conversation has just produced a newer Task.
+      setSelectedTask(null);
       await governed.load(false, selectedConversationIdRef.current ?? "");
     }
   }, [governed.load, governedActionDataSource]);
@@ -645,7 +649,7 @@ export function ProductWorkbenchJourney({
 
   function openInspector(): void {
     setInspectorOpen(true);
-    setAnnouncement("已打开证据与限制检查器。 ");
+    setAnnouncement("已打开详情。 ");
   }
 
   function openReviewItem(item: ReviewItem): void {
@@ -783,7 +787,12 @@ export function ProductWorkbenchJourney({
         </section>
       ) : undefined;
     content = (
-      <div className="ol-conversation-workbench-layout" data-testid="conversation-workbench">
+      <div
+        className={`ol-conversation-workbench-layout${
+          scopedTasks.length > 0 ? " ol-conversation-workbench-layout--with-results" : ""
+        }`}
+        data-testid="conversation-workbench"
+      >
         <WorkspaceGovernedView
           snapshot={governed.snapshot}
           refreshing={governed.refreshing}
@@ -850,7 +859,6 @@ export function ProductWorkbenchJourney({
         onOpenInspector={openInspector}
         onCorrectMemory={durable.correctMemory}
         onArchiveMemory={durable.archiveMemory}
-        onStopRecall={durable.stopRecall}
         onRestoreMemory={durable.restoreMemory}
         onRollbackMemory={durable.rollbackMemory}
         onPrivacyEraseMemory={durable.privacyEraseMemory}
@@ -894,7 +902,7 @@ export function ProductWorkbenchJourney({
       onOpenInspector={openInspector}
       onCloseInspector={() => {
         setInspectorOpen(false);
-        setAnnouncement("证据检查器已关闭，焦点返回打开按钮。 ");
+        setAnnouncement("详情已关闭，焦点返回打开按钮。 ");
       }}
       onOpenEvidence={openEvidence}
       announcement={announcement}

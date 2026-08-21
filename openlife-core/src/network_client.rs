@@ -1388,6 +1388,30 @@ async fn resolve_network_egress_route(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "external-live HTTPS and macOS system-proxy evidence"]
+    async fn external_live_allowed_https_host_can_use_the_fake_ip_system_proxy() {
+        let policy = NetworkPolicy {
+            default_decision: "allow".into(),
+            ..Default::default()
+        };
+        let response = NetworkClient::new(NetworkClientPolicy {
+            fake_ip_proxy_domain_allowlist: vec!["example.com".into()],
+            ..Default::default()
+        })
+        .get_text_with_headers_for_capability_and_start_observer(
+            "https://example.com",
+            Some(&policy),
+            "web.fetch",
+            HeaderMap::new(),
+            |_| async { Ok(()) },
+        )
+        .await
+        .expect("the policy-approved public HTTPS host should be reachable");
+        assert!(response.status.is_success());
+        assert!(response.body.contains("Example Domain"));
+    }
+
     #[derive(Default)]
     struct DurableToolStartObserver {
         starts: std::sync::Mutex<Vec<crate::tool_execution_receipt::ToolExecutionReceipt>>,

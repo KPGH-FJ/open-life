@@ -44,7 +44,7 @@ export function useDurableTruthJourney(
   const [refreshing, setRefreshing] = useState(false);
   const [memoryAction, setMemoryAction] = useState<{
     memoryId: string;
-    action: "correct" | "stop_recall" | "archive" | "restore" | "rollback" | "erase";
+    action: "correct" | "archive" | "restore" | "rollback" | "erase";
     error?: string;
   } | null>(null);
   const [migrationAction, setMigrationAction] = useState<{
@@ -138,7 +138,7 @@ export function useDurableTruthJourney(
   const runMemoryAction = useCallback(
     async (
       memoryId: string,
-      action: "correct" | "stop_recall" | "archive" | "restore" | "rollback" | "erase",
+      action: "correct" | "archive" | "restore" | "rollback" | "erase",
       operation: (source: DurableTruthDataSource) => Promise<void>,
       success: string
     ): Promise<boolean> => {
@@ -169,7 +169,7 @@ export function useDurableTruthJourney(
         memoryId,
         "correct",
         source => source.correctMemory(memoryId, content),
-        "Memory 纠正已进入 Review；旧记忆仍保持当前状态。"
+        "Memory 已纠正；此前内容保留为可回滚历史。"
       ),
     [runMemoryAction]
   );
@@ -179,17 +179,7 @@ export function useDurableTruthJourney(
         memoryId,
         "archive",
         source => source.archiveMemory(memoryId),
-        "归档已进入 Review；确认应用前仍保持当前状态。"
-      ),
-    [runMemoryAction]
-  );
-  const stopRecall = useCallback(
-    (memoryId: string) =>
-      runMemoryAction(
-        memoryId,
-        "stop_recall",
-        source => source.stopRecall(memoryId),
-        "停止召回已进入 Review；确认应用前仍会正常召回。"
+        "Memory 已归档，不再参与召回；需要时可以恢复。"
       ),
     [runMemoryAction]
   );
@@ -448,7 +438,6 @@ export function useDurableTruthJourney(
     selectItem,
     correctMemory,
     archiveMemory,
-    stopRecall,
     restoreMemory,
     rollbackMemory,
     privacyEraseMemory,

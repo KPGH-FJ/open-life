@@ -173,7 +173,7 @@ function nextAction(controller: SettingsPrivacyJourneyController): string {
       ? "使用“重新读取保存结果”重新核对精确配置与边界；未知状态下不要依赖本地确定态。"
       : "重新读取设置与边界；未知状态下不要依赖本地确定态。";
   if (controller.state.phase === "failed") return "查看返回说明，修改草稿后再测试或保存。";
-  return "修改配置前先核对当前边界；需要更多来源时打开证据项。";
+  return "修改配置前先核对当前边界；需要更多信息时打开详情。";
 }
 
 export function settingsPrivacyInspector(

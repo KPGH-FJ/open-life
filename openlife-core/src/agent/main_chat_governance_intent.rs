@@ -987,6 +987,16 @@ mod tests {
     }
 
     #[test]
+    fn office_artifact_filenames_do_not_become_external_write_intents() {
+        let prompt = "生成 brief.docx、metrics.xlsx 和 briefing.pptx，并在我确认后保存。";
+        let intent = extract_main_chat_intent_signals(prompt);
+        assert!(
+            intent.blocker_requirement.is_none(),
+            "local reviewed Office artifacts must not become an external write: {intent:?}"
+        );
+    }
+
+    #[test]
     fn main_chat_governance_intent_blocks_explicit_external_sensitive_writes() {
         for prompt in [
             "send my health note to my coworker",

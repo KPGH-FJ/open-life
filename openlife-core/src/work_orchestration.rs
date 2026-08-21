@@ -5,7 +5,7 @@
 //! into a bounded plan and mechanically evaluates execution evidence.
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub const WORK_PLAN_SCHEMA_VERSION: &str = "openlife.work-plan.v2";
 pub const MAX_WORK_PLAN_STEPS: usize = 8;
@@ -97,10 +97,53 @@ impl StructuredWorkPlan {
             .and_then(|value| value.strip_suffix("```"))
             .map(str::trim)
             .unwrap_or(trimmed);
-        let plan: Self =
+        let mut plan: Self =
             serde_json::from_str(json).map_err(|_| "work_plan_json_invalid".to_string())?;
+        plan.normalize_model_step_ids_if_needed()?;
         plan.validate(allowed_kinds, allowed_mcp_target_ids)?;
         Ok(plan)
+    }
+
+    /// Step ids are model-authored graph labels, not capability or authority
+    /// identities. Some otherwise valid providers emit labels such as
+    /// `step-1` or `Step1` despite the requested schema. Canonicalize that
+    /// presentation-only variance before validation while preserving the
+    /// exact dependency graph. Duplicate or unbounded labels still fail
+    /// closed because their dependency meaning would be ambiguous.
+    fn normalize_model_step_ids_if_needed(&mut self) -> Result<(), String> {
+        if self
+            .steps
+            .iter()
+            .all(|step| validate_step_id(&step.id).is_ok())
+        {
+            return Ok(());
+        }
+
+        let mut replacements = HashMap::new();
+        for (index, step) in self.steps.iter().enumerate() {
+            if step.id.is_empty() || step.id.len() > 256 {
+                return Err("work_plan_step_id_invalid".into());
+            }
+            if replacements
+                .insert(step.id.clone(), format!("step{}", index + 1))
+                .is_some()
+            {
+                return Err("work_plan_step_id_duplicate".into());
+            }
+        }
+
+        for step in &mut self.steps {
+            step.id = replacements
+                .get(&step.id)
+                .cloned()
+                .ok_or_else(|| "work_plan_step_id_invalid".to_string())?;
+            for dependency in &mut step.depends_on {
+                if let Some(replacement) = replacements.get(dependency) {
+                    *dependency = replacement.clone();
+                }
+            }
+        }
+        Ok(())
     }
 
     pub fn validate(
@@ -415,6 +458,38 @@ mod tests {
         )
         .unwrap();
         assert_eq!(plan.steps.len(), 3);
+    }
+
+    #[test]
+    fn canonicalizes_non_authoritative_model_step_labels() {
+        let plan = StructuredWorkPlan::parse_and_validate(
+            r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"Web-Research","kind":"web_search","required":true,"dependsOn":[]},{"id":"Verify Result","kind":"verify","required":true,"dependsOn":["Web-Research"]},{"id":"Deliver.Result","kind":"deliver_result","required":true,"dependsOn":["Verify Result"]}],"completion":{"resultKind":"answer","requiresVerification":true}}"#,
+            &allowed(),
+            &HashSet::new(),
+        )
+        .unwrap();
+
+        assert_eq!(
+            plan.steps
+                .iter()
+                .map(|step| step.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["step1", "step2", "step3"]
+        );
+        assert_eq!(plan.steps[1].depends_on, vec!["step1"]);
+        assert_eq!(plan.steps[2].depends_on, vec!["step2"]);
+    }
+
+    #[test]
+    fn rejects_ambiguous_duplicate_model_step_labels() {
+        let error = StructuredWorkPlan::parse_and_validate(
+            r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"Step-1","kind":"web_search","required":true,"dependsOn":[]},{"id":"Step-1","kind":"verify","required":true,"dependsOn":["Step-1"]},{"id":"Deliver","kind":"deliver_result","required":true,"dependsOn":["Step-1"]}],"completion":{"resultKind":"answer","requiresVerification":true}}"#,
+            &allowed(),
+            &HashSet::new(),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "work_plan_step_id_duplicate");
     }
 
     #[test]

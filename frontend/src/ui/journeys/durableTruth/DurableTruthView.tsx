@@ -74,6 +74,13 @@ const learningSourceLabel: Record<LifeModelLearningCandidate["sourceKinds"][numb
   model_extraction: "模型辅助提取",
 };
 
+function memoryScopeLabel(scope: string): string {
+  if (scope === "project") return "Project";
+  if (scope === "conversation") return "当前对话";
+  if (scope === "workspace") return "Workspace";
+  return "个人";
+}
+
 type CanonicalLifeModelSectionKey =
   | "identity"
   | "values"
@@ -139,7 +146,6 @@ export function DurableTruthView({
   memoryAction,
   onCorrectMemory,
   onArchiveMemory,
-  onStopRecall,
   onRestoreMemory,
   onRollbackMemory,
   onPrivacyEraseMemory,
@@ -167,12 +173,11 @@ export function DurableTruthView({
   onOpenReviewCenter?: () => void;
   memoryAction: {
     memoryId: string;
-    action: "correct" | "stop_recall" | "archive" | "restore" | "rollback" | "erase";
+    action: "correct" | "archive" | "restore" | "rollback" | "erase";
     error?: string;
   } | null;
   onCorrectMemory: (memoryId: string, content: string) => Promise<boolean>;
   onArchiveMemory: (memoryId: string) => Promise<boolean>;
-  onStopRecall: (memoryId: string) => Promise<boolean>;
   onRestoreMemory: (memoryId: string) => Promise<boolean>;
   onRollbackMemory: (memoryId: string, reason: string) => Promise<boolean>;
   onPrivacyEraseMemory: (memoryId: string) => Promise<boolean>;
@@ -222,6 +227,11 @@ export function DurableTruthView({
   const lifeModel = snapshot.lifeModelEnvelope.data;
   const memory = snapshot.memoryEnvelope.data;
   const durableItems = durableReviewItems(snapshot);
+  const memoryItems = durableItems.filter(
+    item =>
+      (item.type === "memory_write" || item.type === "memory_archive") &&
+      ["pending", "edited", "deferred"].includes(item.status)
+  );
   const lifeModelItems = durableItems.filter(
     item => item.type !== "memory_write" && item.type !== "memory_archive"
   );
@@ -229,7 +239,6 @@ export function DurableTruthView({
     lifeModelItems.find(item => item.id === selectedItem?.id) ?? lifeModelItems[0] ?? null;
   const state = durableLifecyclePresentation(snapshot, lifeModelItem, "life_model");
   const memoryOwnerReady = snapshot.memoryEnvelope.status === "ready";
-  const reviewOwnerReady = snapshot.reviewEnvelope.status === "ready";
 
   if (snapshot.lifeModelEnvelope.status === "error" && snapshot.memoryEnvelope.status === "error") {
     return (
@@ -801,7 +810,7 @@ export function DurableTruthView({
                       />
                     )}
                     <FoundationActionButton
-                      label="查看状态依据"
+                      label="查看详情"
                       icon={<Eye size={17} aria-hidden="true" />}
                       variant="quiet"
                       onClick={onOpenInspector}
@@ -850,7 +859,7 @@ export function DurableTruthView({
             <div className="ol-durable-section-heading">
               <div>
                 <span>Memory</span>
-                <h2 id="durable-memory-title">Agent 记忆</h2>
+                <h2 id="durable-memory-title">记忆</h2>
               </div>
               <FoundationStatusLabel
                 label={
@@ -870,49 +879,70 @@ export function DurableTruthView({
             </div>
             {memory ? (
               <>
-                <dl className="ol-durable-memory-summary">
+                <dl className="ol-durable-memory-summary" aria-label="记忆概览">
                   <div>
                     <dt>当前记忆</dt>
                     <dd>{memory.summary.activeMemoryCount}</dd>
                   </div>
-                  <div>
-                    <dt>待决定</dt>
-                    <dd>{memory.summary.reviewRequiredCount}</dd>
-                  </div>
-                  <div>
-                    <dt>待应用</dt>
-                    <dd>{memory.summary.pendingMaterializationCount}</dd>
-                  </div>
-                  <div>
-                    <dt>应用失败</dt>
-                    <dd>{memory.summary.failedMaterializationCount}</dd>
-                  </div>
                 </dl>
-                <div className="ol-durable-lanes" role="list" aria-label="记忆分层">
-                  {memory.laneSummaries.map(lane => (
-                    <div key={lane.lane} role="listitem">
+                {memoryItems.length > 0 ? (
+                  <section
+                    className="ol-memory-suggestions"
+                    aria-labelledby="memory-suggestions-title"
+                  >
+                    <div className="ol-memory-assets__heading">
                       <div>
-                        <strong>{lane.label}</strong>
-                        <small>{lane.activeCount} 条当前记录</small>
+                        <h3 id="memory-suggestions-title">待处理的记忆建议</h3>
+                        <p>这些内容尚未写入 Agent Memory；你可以先查看来源和影响，再决定。</p>
                       </div>
-                      <span>
-                        {lane.pendingReviewCount > 0
-                          ? `${lane.pendingReviewCount} 待决定`
-                          : lane.rolledBackCount > 0
-                            ? `${lane.rolledBackCount} 已回滚`
-                            : `${lane.materializedCount} 已应用`}
-                      </span>
                     </div>
-                  ))}
-                </div>
+                    <ol>
+                      {memoryItems.map(item => {
+                        const memoryState = durableLifecyclePresentation(snapshot, item, "memory");
+                        const awaitingDecision = ["pending", "edited", "deferred"].includes(
+                          item.status
+                        );
+                        return (
+                          <li key={item.id}>
+                            <div>
+                              <FoundationStatusLabel
+                                label={memoryState.label}
+                                status={memoryState.status}
+                                verified={memoryState.verified}
+                              />
+                              <strong>
+                                {item.type === "memory_archive"
+                                  ? "建议忘记这条记忆"
+                                  : "OpenLife 建议记住"}
+                              </strong>
+                            </div>
+                            <p>{item.decisionContext.after.summary}</p>
+                            <small>{item.decisionContext.reasonSummary}</small>
+                            {awaitingDecision ? (
+                              <FoundationActionButton
+                                label="查看并决定"
+                                icon={<ArrowRight size={17} aria-hidden="true" />}
+                                variant="primary"
+                                data-action-category="product"
+                                data-action-id={`memory.open-review:${item.id}`}
+                                data-action-kind="open"
+                                data-action-enabled="true"
+                                data-action-disabled-reason=""
+                                data-action-target-ref={item.id}
+                                onClick={() => onOpenReview(item)}
+                              />
+                            ) : null}
+                          </li>
+                        );
+                      })}
+                    </ol>
+                  </section>
+                ) : null}
                 <div className="ol-memory-assets" aria-label="可管理的长期记忆">
                   <div className="ol-memory-assets__heading">
                     <div>
-                      <strong>记忆内容与控制</strong>
-                      <p>
-                        这里管理 Agent 如何延续工作，不修改“关于我”。纠正、停止召回和归档先进入
-                        Review；永久擦除需要原生确认。
-                      </p>
+                      <strong>OpenLife 记住的内容</strong>
+                      <p>你可以随时编辑、忘记或删除；这些内容不会改变 LifeModel。</p>
                     </div>
                   </div>
                   {memory.items.length > 0 ? (
@@ -920,15 +950,9 @@ export function DurableTruthView({
                       const busy = memoryAction?.memoryId === item.memoryId;
                       const editing = editingMemoryId === item.memoryId;
                       const directActionDisabled = busy || !memoryOwnerReady;
-                      const reviewedActionDisabled = directActionDisabled || !reviewOwnerReady;
                       const directActionDisabledReason = busy
                         ? "同一条 Memory 的操作正在处理。"
                         : "Memory 状态不是最新的可用读模型；请先重新读取。";
-                      const reviewedActionDisabledReason = !memoryOwnerReady
-                        ? directActionDisabledReason
-                        : !reviewOwnerReady
-                          ? "Review Center 状态不可用；不能创建无法核对的审核建议。"
-                          : directActionDisabledReason;
                       return (
                         <article className="ol-memory-asset" key={item.memoryId}>
                           <div className="ol-memory-asset__meta">
@@ -946,29 +970,29 @@ export function DurableTruthView({
                               }
                               status={item.recallState === "active" ? "neutral" : "unknown"}
                             />
-                            <span>{item.scope}</span>
-                            <span>{item.category}</span>
+                            <span>{memoryScopeLabel(item.scope)}</span>
                           </div>
                           <p className="ol-memory-asset__content">
                             {item.content ?? "该记忆的正文和来源已经永久擦除。"}
                           </p>
-                          <small>为什么记住：{item.whyRemembered}</small>
-                          <small>如何召回：{item.recallExplanation}</small>
-                          {item.sourceRefs.length > 0 ? (
-                            <small>
-                              来源：
-                              {item.sourceRefs
-                                .slice(0, 3)
-                                .map(ref => ref.label)
-                                .join(" · ")}
-                            </small>
-                          ) : null}
-                          {item.acceptedAt ? <small>用户确认时间：{item.acceptedAt}</small> : null}
+                          <details className="ol-memory-asset__details">
+                            <summary>详情</summary>
+                            <small>记住原因：{item.whyRemembered}</small>
+                            <small>使用方式：{item.recallExplanation}</small>
+                            {item.sourceRefs.length > 0 ? (
+                              <small>
+                                来源：
+                                {item.sourceRefs
+                                  .slice(0, 3)
+                                  .map(ref => ref.label)
+                                  .join(" · ")}
+                              </small>
+                            ) : null}
+                            {item.acceptedAt ? <small>保存时间：{item.acceptedAt}</small> : null}
+                          </details>
                           {editing ? (
                             <div className="ol-memory-asset__editor">
-                              <label htmlFor={`memory-correction-${item.memoryId}`}>
-                                纠正后的完整内容
-                              </label>
+                              <label htmlFor={`memory-correction-${item.memoryId}`}>编辑记忆</label>
                               <textarea
                                 id={`memory-correction-${item.memoryId}`}
                                 value={memoryDraft}
@@ -977,20 +1001,20 @@ export function DurableTruthView({
                               />
                               <div>
                                 <FoundationActionButton
-                                  label="提交 Review"
+                                  label="保存"
                                   loading={busy && memoryAction?.action === "correct"}
                                   loadingLabel="正在提交"
                                   disabled={
-                                    reviewedActionDisabled ||
+                                    directActionDisabled ||
                                     !memoryDraft.trim() ||
                                     memoryDraft.trim() === item.content
                                   }
                                   disabledReason={
-                                    reviewedActionDisabled
-                                      ? reviewedActionDisabledReason
+                                    directActionDisabled
+                                      ? directActionDisabledReason
                                       : !memoryDraft.trim()
                                         ? "请输入纠正后的完整内容。"
-                                        : "内容没有变化；无需创建新的 Review。"
+                                        : "内容没有变化；无需保存。"
                                   }
                                   onClick={() =>
                                     void onCorrectMemory(item.memoryId, memoryDraft).then(ok => {
@@ -1016,44 +1040,32 @@ export function DurableTruthView({
                           <div className="ol-memory-asset__actions">
                             {item.canCorrect ? (
                               <FoundationActionButton
-                                label="纠正"
+                                label="编辑"
                                 icon={<SquarePen size={16} aria-hidden="true" />}
                                 variant="quiet"
-                                disabled={reviewedActionDisabled}
-                                disabledReason={reviewedActionDisabledReason}
+                                disabled={directActionDisabled}
+                                disabledReason={directActionDisabledReason}
                                 onClick={() => {
                                   setEditingMemoryId(item.memoryId);
                                   setMemoryDraft(item.content ?? "");
                                 }}
                               />
                             ) : null}
-                            {item.canStopRecall ? (
-                              <FoundationActionButton
-                                label="停止召回"
-                                icon={<Archive size={16} aria-hidden="true" />}
-                                variant="quiet"
-                                loading={busy && memoryAction?.action === "stop_recall"}
-                                loadingLabel="正在提交"
-                                disabled={reviewedActionDisabled}
-                                disabledReason={reviewedActionDisabledReason}
-                                onClick={() => void onStopRecall(item.memoryId)}
-                              />
-                            ) : null}
                             {item.canArchive ? (
                               <FoundationActionButton
-                                label="归档"
+                                label="忘记"
                                 icon={<Archive size={16} aria-hidden="true" />}
                                 variant="quiet"
                                 loading={busy && memoryAction?.action === "archive"}
                                 loadingLabel="正在提交"
-                                disabled={reviewedActionDisabled}
-                                disabledReason={reviewedActionDisabledReason}
+                                disabled={directActionDisabled}
+                                disabledReason={directActionDisabledReason}
                                 onClick={() => void onArchiveMemory(item.memoryId)}
                               />
                             ) : null}
                             {item.canRestore ? (
                               <FoundationActionButton
-                                label="恢复召回"
+                                label="撤销忘记"
                                 icon={<RotateCcw size={16} aria-hidden="true" />}
                                 variant="quiet"
                                 loading={busy && memoryAction?.action === "restore"}
@@ -1065,7 +1077,7 @@ export function DurableTruthView({
                             ) : null}
                             {item.canRollback ? (
                               <FoundationActionButton
-                                label="回滚这次变更"
+                                label="撤销最近修改"
                                 icon={<RotateCcw size={16} aria-hidden="true" />}
                                 variant="quiet"
                                 loading={busy && memoryAction?.action === "rollback"}
@@ -1082,7 +1094,7 @@ export function DurableTruthView({
                             ) : null}
                             {item.canPrivacyErase ? (
                               <FoundationActionButton
-                                label="永久擦除"
+                                label="永久删除"
                                 icon={<ShieldX size={16} aria-hidden="true" />}
                                 variant="quiet"
                                 loading={busy && memoryAction?.action === "erase"}
@@ -1097,7 +1109,7 @@ export function DurableTruthView({
                       );
                     })
                   ) : (
-                    <p className="ol-durable-muted">还没有可管理的跨会话 Memory。</p>
+                    <p className="ol-durable-muted">还没有保存的记忆。</p>
                   )}
                 </div>
               </>

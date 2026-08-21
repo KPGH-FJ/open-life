@@ -9,17 +9,14 @@ const mocks = vi.hoisted(() => ({
   cancelWorkTask: vi.fn(),
   createProject: vi.fn(),
   assignConversationProject: vi.fn(),
+  setConversationMemoryMode: vi.fn(),
   pickAndImportResources: vi.fn(),
   detachResourceFromTurn: vi.fn(),
   listMainChatSkills: vi.fn(),
   selectMainChatSkill: vi.fn(),
   clearMainChatSkill: vi.fn(),
   listMainChatToolCandidates: vi.fn(),
-  getMarkdownMemoryViewModel: vi.fn(),
   getConversationViewModel: vi.fn(),
-  selectMarkdownMemoryRoot: vi.fn(),
-  draftMarkdownMemoryFileProposal: vi.fn(),
-  deactivateMarkdownMemoryFileProposal: vi.fn(),
   submitMainChatTaskSteering: vi.fn(),
 }));
 
@@ -37,6 +34,7 @@ vi.mock("@/tauri", () => ({
   createChatSession: vi.fn(),
   createProject: mocks.createProject,
   assignConversationProject: mocks.assignConversationProject,
+  setConversationMemoryMode: mocks.setConversationMemoryMode,
   deleteChatSession: vi.fn(),
   getConversationViewModel: mocks.getConversationViewModel,
   renameChatSession: vi.fn(),
@@ -47,10 +45,6 @@ vi.mock("@/tauri", () => ({
   selectMainChatSkill: mocks.selectMainChatSkill,
   clearMainChatSkill: mocks.clearMainChatSkill,
   listMainChatToolCandidates: mocks.listMainChatToolCandidates,
-  getMarkdownMemoryViewModel: mocks.getMarkdownMemoryViewModel,
-  selectMarkdownMemoryRoot: mocks.selectMarkdownMemoryRoot,
-  draftMarkdownMemoryFileProposal: mocks.draftMarkdownMemoryFileProposal,
-  deactivateMarkdownMemoryFileProposal: mocks.deactivateMarkdownMemoryFileProposal,
   submitMainChatTaskSteering: mocks.submitMainChatTaskSteering,
 }));
 
@@ -64,62 +58,15 @@ describe("workspace conversation Tauri stream adapter", () => {
     mocks.cancelWorkTask.mockReset();
     mocks.createProject.mockReset();
     mocks.assignConversationProject.mockReset();
+    mocks.setConversationMemoryMode.mockReset();
     mocks.pickAndImportResources.mockReset();
     mocks.detachResourceFromTurn.mockReset();
     mocks.listMainChatSkills.mockReset();
     mocks.selectMainChatSkill.mockReset();
     mocks.clearMainChatSkill.mockReset();
     mocks.listMainChatToolCandidates.mockReset();
-    mocks.getMarkdownMemoryViewModel.mockReset();
     mocks.getConversationViewModel.mockReset();
-    mocks.selectMarkdownMemoryRoot.mockReset();
-    mocks.draftMarkdownMemoryFileProposal.mockReset();
-    mocks.deactivateMarkdownMemoryFileProposal.mockReset();
     mocks.submitMainChatTaskSteering.mockReset();
-  });
-
-  it("keeps Markdown Memory reads, root selection, writes, and deactivation on backend bridges", async () => {
-    const model = {
-      roots: [],
-      files: [],
-      totalCharCount: 0,
-      truncated: false,
-      sourceRule: "exact",
-    };
-    mocks.getMarkdownMemoryViewModel.mockResolvedValue(model);
-    mocks.selectMarkdownMemoryRoot.mockResolvedValue({
-      cancelled: false,
-      scope: "project",
-      selectedPath: "/project",
-    });
-    mocks.draftMarkdownMemoryFileProposal.mockResolvedValue({ proposalId: "proposal-1" });
-    mocks.deactivateMarkdownMemoryFileProposal.mockResolvedValue({ proposalId: "proposal-2" });
-
-    await tauriWorkspaceConversationDataSource.loadMarkdownMemory?.();
-    await tauriWorkspaceConversationDataSource.selectMarkdownMemoryRoot?.("project");
-    await tauriWorkspaceConversationDataSource.draftMarkdownMemoryFileProposal?.({
-      scope: "project",
-      relativePath: "MEMORY.md",
-      content: "# Project",
-    });
-    await tauriWorkspaceConversationDataSource.deactivateMarkdownMemoryFileProposal?.({
-      scope: "project",
-      relativePath: "MEMORY.md",
-      expectedCurrentDigest: "sha256:current",
-    });
-
-    expect(mocks.getMarkdownMemoryViewModel).toHaveBeenCalledOnce();
-    expect(mocks.selectMarkdownMemoryRoot).toHaveBeenCalledWith("project");
-    expect(mocks.draftMarkdownMemoryFileProposal).toHaveBeenCalledWith({
-      scope: "project",
-      relativePath: "MEMORY.md",
-      content: "# Project",
-    });
-    expect(mocks.deactivateMarkdownMemoryFileProposal).toHaveBeenCalledWith({
-      scope: "project",
-      relativePath: "MEMORY.md",
-      expectedCurrentDigest: "sha256:current",
-    });
   });
 
   it("forwards skill selection and tool discovery through backend-owned bridges", async () => {
@@ -148,6 +95,17 @@ describe("workspace conversation Tauri stream adapter", () => {
 
     expect(mocks.pickAndImportResources).toHaveBeenCalledWith("import-1", "turn-1");
     expect(mocks.detachResourceFromTurn).toHaveBeenCalledWith("detach-1", "turn-1", "resource-1");
+  });
+
+  it("forwards the selected Conversation Memory mode to the canonical command", async () => {
+    mocks.setConversationMemoryMode.mockResolvedValue({
+      conversationId: "conversation-1",
+      mode: "use_only",
+    });
+
+    await tauriWorkspaceConversationDataSource.setMemoryMode?.("conversation-1", "use_only");
+
+    expect(mocks.setConversationMemoryMode).toHaveBeenCalledWith("conversation-1", "use_only");
   });
 
   it("forwards only events bound to the exact conversation and operation", async () => {

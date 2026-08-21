@@ -2850,14 +2850,14 @@ impl InferenceScheduler {
         let system_prompt = request.system_prompt();
         let request_id = request.context_manifest.request_id.clone();
         let payload_purpose = request.policy_receipt_evidence().payload_purpose;
-        let structured_json_output = matches!(
-            payload_purpose,
-            Some(
-                ProviderPayloadPurpose::MainChatArtifactDraft
-                    | ProviderPayloadPurpose::MainChatEvidenceCheck
-                    | ProviderPayloadPurpose::MainChatWorkPlan
-            )
-        );
+        // Artifact drafts use the ordinary model response transport. OpenLife
+        // still requires the exact artifact envelope in the trusted prompt and
+        // rejects the response locally unless the file-specific parser and
+        // schema checks pass. This avoids coupling successful artifact delivery
+        // to a provider-native JSON/thinking mode; those smaller native modes
+        // remain useful for work-plan and evidence-check envelopes.
+        let structured_json_output = cloud_provider_uses_native_structured_output(payload_purpose);
+        let provider_native_json_mode = structured_json_output;
 
         if self.scripted_generation_response.is_some()
             && (payload_purpose == Some(ProviderPayloadPurpose::MainChatWorkPlan)
@@ -2924,6 +2924,7 @@ impl InferenceScheduler {
                 api_key: execution_binding.api_key(),
                 model: &request.model_target,
                 structured_json_output,
+                provider_native_json_mode,
                 network_policy: &request.network_policy,
                 network_policy_decision: &request.network_policy_decision,
                 request_id: Some(&request_id),
@@ -3362,6 +3363,10 @@ impl InferenceScheduler {
                             | ProviderPayloadPurpose::MainChatEvidenceCheck
                     )
                 ),
+                provider_native_json_mode: matches!(
+                    policy_evidence.payload_purpose,
+                    Some(ProviderPayloadPurpose::MainChatEvidenceCheck)
+                ),
                 network_policy: &request.network_policy,
                 network_policy_decision: &request.network_policy_decision,
                 request_id: Some(&request_id),
@@ -3504,6 +3509,7 @@ fn non_streaming_ollama_requires_deterministic_output(
         payload_purpose,
         Some(
             ProviderPayloadPurpose::MainChatDirectAnswer
+                | ProviderPayloadPurpose::AgentMemoryExtraction
                 | ProviderPayloadPurpose::MainChatEvidenceCheck
                 | ProviderPayloadPurpose::MainChatArtifactDraft
         )
@@ -3512,9 +3518,23 @@ fn non_streaming_ollama_requires_deterministic_output(
         .any(|category| category == crate::web_search::WEB_SEARCH_CONTEXT_CATEGORY)
 }
 
+fn cloud_provider_uses_native_structured_output(
+    payload_purpose: Option<ProviderPayloadPurpose>,
+) -> bool {
+    matches!(
+        payload_purpose,
+        Some(
+            ProviderPayloadPurpose::MainChatEvidenceCheck
+                | ProviderPayloadPurpose::MainChatWorkPlan
+                | ProviderPayloadPurpose::AgentMemoryExtraction
+        )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
+        cloud_provider_uses_native_structured_output,
         non_streaming_ollama_requires_deterministic_output, InferenceScheduler,
         PreparedProviderGenerationMismatch, PreparedProviderStreamEvent,
         PreparedProviderStreamTerminal, ProviderInvocationProgress,
@@ -3547,6 +3567,19 @@ mod tests {
             Some(ProviderPayloadPurpose::ScheduledTaskStep),
             &[],
         ));
+    }
+
+    #[test]
+    fn cloud_artifact_draft_keeps_local_schema_without_native_json_mode() {
+        assert!(!cloud_provider_uses_native_structured_output(Some(
+            ProviderPayloadPurpose::MainChatArtifactDraft
+        )));
+        assert!(cloud_provider_uses_native_structured_output(Some(
+            ProviderPayloadPurpose::MainChatWorkPlan
+        )));
+        assert!(cloud_provider_uses_native_structured_output(Some(
+            ProviderPayloadPurpose::MainChatEvidenceCheck
+        )));
     }
 
     fn allow_network_policy() -> crate::config::NetworkPolicy {

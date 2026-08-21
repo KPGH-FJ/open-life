@@ -21,6 +21,7 @@ pub enum TaskLifecycleStatus {
     Failed,
     RemoteUnknown,
     Cancelled,
+    Interrupted,
     Completed,
     CompletedWithPendingReview,
     CompletedNeedsEvidence,
@@ -37,6 +38,7 @@ impl TaskLifecycleStatus {
             Self::Failed => "failed",
             Self::RemoteUnknown => "remote_unknown",
             Self::Cancelled => "cancelled",
+            Self::Interrupted => "interrupted",
             Self::Completed => "completed",
             Self::CompletedWithPendingReview => "completed_with_pending_review",
             Self::CompletedNeedsEvidence => "completed_needs_evidence",
@@ -807,6 +809,7 @@ fn terminal_delivery_status_for_task(
         TaskLifecycleStatus::Failed => TaskTerminalDeliveryStatus::Failed,
         TaskLifecycleStatus::RemoteUnknown => TaskTerminalDeliveryStatus::Unknown,
         TaskLifecycleStatus::Cancelled => TaskTerminalDeliveryStatus::Cancelled,
+        TaskLifecycleStatus::Interrupted => TaskTerminalDeliveryStatus::NotTerminal,
         TaskLifecycleStatus::Running => TaskTerminalDeliveryStatus::NotTerminal,
         TaskLifecycleStatus::Unknown => TaskTerminalDeliveryStatus::Unknown,
     }
@@ -999,6 +1002,7 @@ fn summarize_tasks(items: &[TaskViewModelItem]) -> TasksViewModelSummary {
             TaskLifecycleStatus::Failed => summary.failed_count += 1,
             TaskLifecycleStatus::RemoteUnknown => {}
             TaskLifecycleStatus::Cancelled => summary.cancelled_count += 1,
+            TaskLifecycleStatus::Interrupted => summary.blocked_count += 1,
             TaskLifecycleStatus::Unknown => {}
         }
         summary.pending_review_count += item.pending_review_item_refs.len();

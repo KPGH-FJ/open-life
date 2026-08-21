@@ -1,7 +1,6 @@
 import type {
   EvidenceRef,
   LifeModelViewModel,
-  MemoryLaneSummary,
   MemoryViewModel,
   ReviewAction,
   ReviewCenterViewModel,
@@ -320,112 +319,14 @@ function emptyLifeModel(): LifeModelViewModel {
   };
 }
 
-function lane(
-  laneId: MemoryLaneSummary["lane"],
-  label: string,
-  overrides: Partial<MemoryLaneSummary> = {}
-): MemoryLaneSummary {
-  return {
-    lane: laneId,
-    label,
-    totalCount: 0,
-    activeCount: 0,
-    candidateCount: 0,
-    pendingReviewCount: 0,
-    confirmedCount: 0,
-    materializedCount: 0,
-    rolledBackCount: 0,
-    archivedCount: 0,
-    reviewItemRefs: [],
-    evidenceRefs: [],
-    ...overrides,
-  };
-}
-
 function memory(stage: DurableFixtureStage): MemoryViewModel {
-  const pending = stage === "pending" || stage === "deferred";
-  const pendingMaterialization = stage === "approved_not_applied" || stage === "applying";
-  const applied = stage === "applied";
-  const failed = stage === "failed";
   const rolledBack = stage === "rolled_back";
   return {
     summary: {
-      totalLifecycleRecords: 24,
+      totalMemoryCount: 24,
       activeMemoryCount: 18,
-      reviewRequiredCount: pending ? 1 : 0,
-      materializedCount: 12 + (applied ? 1 : 0),
-      pendingMaterializationCount: pendingMaterialization ? 1 : 0,
-      failedMaterializationCount: failed ? 1 : 0,
-      rolledBackCount: rolledBack ? 1 : 0,
-      archivedVectorCount: 2,
-      conflictCount: 0,
-      tierSummary: { total: 18, tier1: 6, tier2: 8, tier3: 4, archived: 2 },
-    },
-    lifecycleSummary: {
-      candidateCount: pending ? 1 : 0,
-      pendingReviewCount: pending ? 1 : 0,
-      editedPendingReviewCount: 0,
-      acceptedCount: pendingMaterialization ? 1 : 0,
-      confirmedCount: 12 + (applied ? 1 : 0),
-      pendingMaterializationCount: pendingMaterialization ? 1 : 0,
-      materializedCount: 12 + (applied ? 1 : 0),
-      materializationFailedCount: failed ? 1 : 0,
-      rejectedCount: stage === "rejected" ? 1 : 0,
-      deferredCount: stage === "deferred" ? 1 : 0,
-      supersededCount: 1,
-      rolledBackCount: rolledBack ? 1 : 0,
-      expiredCount: 0,
-      archivedCount: 2,
-      byStatus: {},
-      byMaterializationStatus: {},
-    },
-    laneSummaries: [
-      lane("semantic_fact_preference", "事实与偏好", {
-        totalCount: 9,
-        activeCount: 8,
-        candidateCount: pending ? 1 : 0,
-        pendingReviewCount: pending ? 1 : 0,
-        confirmedCount: 6,
-        materializedCount: 6 + (applied ? 1 : 0),
-        rolledBackCount: rolledBack ? 1 : 0,
-        reviewItemRefs: pending
-          ? [{ id: durableReviewItemId, kind: "review_item", label: "工作偏好建议" }]
-          : [],
-        evidenceRefs: [memoryEvidence, conversationEvidence],
-      }),
-      lane("procedural_rule", "做事方式", {
-        totalCount: 6,
-        activeCount: 5,
-        confirmedCount: 5,
-        materializedCount: 5,
-        evidenceRefs: [memoryEvidence],
-      }),
-      lane("episodic_life_event", "经历与事件", {
-        totalCount: 5,
-        activeCount: 4,
-        confirmedCount: 1,
-        materializedCount: 1,
-      }),
-      lane("evidence_record", "依据记录", {
-        totalCount: 4,
-        activeCount: 1,
-        archivedCount: 2,
-        evidenceRefs: [conversationEvidence],
-      }),
-    ],
-    recentMemoryRefs: [{ id: memoryEvidence.id, kind: "memory", label: "先结论后细节的写作反馈" }],
-    reviewItemRefs: pending
-      ? [{ id: durableReviewItemId, kind: "review_item", label: "工作偏好建议" }]
-      : [],
-    lifeModelLinkage: {
-      linkedMemoryCount: 18,
-      candidateMemoryCount: pending ? 1 : 0,
-      materializedMemoryCount: applied ? 1 : 0,
-      conflictCount: 0,
-      boundaryMemoryCount: 0,
-      linkageStatus: "partial",
-      memoryRefs: [{ id: memoryEvidence.id, kind: "memory", label: "先结论后细节的写作反馈" }],
-      evidenceRefs: [memoryEvidence],
+      archivedMemoryCount: 2,
+      historicalMemoryCount: rolledBack ? 1 : 0,
     },
     items: [
       {
@@ -433,18 +334,13 @@ function memory(stage: DurableFixtureStage): MemoryViewModel {
         content: "输出建议时先给结论，再补充依据。",
         scope: "project",
         category: "preference",
-        status: "materialized",
-        materializationStatus: "materialized",
         recallState: rolledBack ? "historical" : "active",
-        sensitivity: "internal",
         whyRemembered: "用户在 Review 中确认了这条工作偏好。",
         recallExplanation: "只有当前项目与任务相关时才会参与混合检索，并在每个回合重新排序。",
         acceptedAt: generatedAt,
-        evidenceIds: [conversationEvidence.id],
         sourceRefs: [memoryEvidence, conversationEvidence],
         privacyErased: false,
         canCorrect: !rolledBack,
-        canStopRecall: !rolledBack,
         canArchive: !rolledBack,
         canRestore: false,
         canRollback: !rolledBack,

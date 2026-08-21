@@ -406,6 +406,18 @@ pub(crate) async fn run_canonical_chat(
     emit: &mut (dyn FnMut(&str, Value) + Send),
 ) -> Result<CanonicalChatOutput, String> {
     validate_input(&input)?;
+    // Chat and Work share one bounded parent execution budget. Admission is
+    // deliberately before any Conversation write, so overload cannot create a
+    // partial Turn that appears resumable even though no work started.
+    let execution_slots = state
+        .main_chat_runtime_state
+        .lock()
+        .await
+        .execution_slots
+        .clone();
+    let _execution_slot = execution_slots
+        .try_acquire_owned()
+        .map_err(|_| "canonical_chat_concurrency_limit_reached".to_string())?;
     state
         .persistence_coordinator
         .require_effects_for_stores(&["ConversationStore"])
@@ -502,6 +514,61 @@ pub(crate) async fn run_canonical_chat(
             &history,
         )
         .map_err(|error| format!("canonical Chat policy admission failed: {error}"))?;
+    let is_memory_control = ingress.policy_route == PolicyRouteKind::ReversibleMemoryCommit
+        || crate::personal_intelligence_ports::has_explicit_memory_forget_request(
+            &current_user.content,
+        );
+    if is_memory_control {
+        let receipt = match crate::personal_intelligence_ports::apply_authorized_personal_intelligence_suggestion(
+            state,
+            crate::personal_intelligence_ports::PersonalIntelligenceSuggestionRequest {
+                conversation_id: &input.conversation_id,
+                task_id: None,
+                run_id: None,
+                user_text: &current_user.content,
+                policy: &ingress.policy_decision,
+                memory_routing: &ingress.intent_frame.memory_routing,
+                execution_epoch: &cancellation.execution_epoch(),
+            },
+        )
+        .await
+        {
+            Ok(receipt) => receipt,
+            Err(error) => {
+                conversation_store
+                    .lock()
+                    .await
+                    .fail_chat_turn(&input.turn_id, "chat_memory_action_failed")
+                    .map_err(|terminal_error| {
+                        format!("terminalize Chat Memory failure failed: {terminal_error}")
+                    })?;
+                return Err(format!("canonical Chat Memory action failed: {error}"));
+            }
+        };
+        let Some(reply) =
+            crate::personal_intelligence_ports::personal_intelligence_product_reply(&receipt)
+        else {
+            conversation_store
+                .lock()
+                .await
+                .fail_chat_turn(&input.turn_id, "chat_memory_action_not_applicable")
+                .map_err(|error| format!("terminalize Chat Memory no-op failed: {error}"))?;
+            return Err("canonical_chat_memory_action_not_applicable".into());
+        };
+        conversation_store
+            .lock()
+            .await
+            .complete_chat_turn(&input.turn_id, &reply)
+            .map_err(|error| format!("complete canonical Chat Memory Turn failed: {error}"))?;
+        return Ok(output_from_result(
+            &input,
+            reply,
+            Vec::new(),
+            ProviderInvocationState::NotAttempted,
+            route,
+            None,
+        ));
+    }
     if ingress.policy_route != PolicyRouteKind::DirectAnswer {
         conversation_store
             .lock()
@@ -580,12 +647,32 @@ pub(crate) async fn run_canonical_chat(
         }
     };
     let invocation = provider_state(sink.events());
-    if let Err(code) = verify_provider_binding(sink.events(), &provider) {
+    let deterministic_no_provider = !invocation.observed_adapter_start()
+        && kernel_result.assistant_message.is_some()
+        && kernel_result
+            .route_metadata
+            .as_ref()
+            .is_some_and(|metadata| metadata.provider == "none");
+    if invocation.observed_adapter_start() {
+        if let Err(code) = verify_provider_binding(sink.events(), &provider) {
+            conversation_store
+                .lock()
+                .await
+                .fail_chat_turn(&input.turn_id, &code)
+                .map_err(|error| format!("terminalize provider-binding failure failed: {error}"))?;
+            return Err(code);
+        }
+    } else if !deterministic_no_provider {
+        let code = kernel_result
+            .blockers
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "canonical_chat_provider_start_missing".into());
         conversation_store
             .lock()
             .await
             .fail_chat_turn(&input.turn_id, &code)
-            .map_err(|error| format!("terminalize provider-binding failure failed: {error}"))?;
+            .map_err(|error| format!("terminalize pre-dispatch Chat failure failed: {error}"))?;
         return Err(code);
     }
     let reply = kernel_result
@@ -610,6 +697,13 @@ pub(crate) async fn run_canonical_chat(
         .await
         .complete_chat_turn(&input.turn_id, &reply)
         .map_err(|error| format!("complete canonical Chat Turn failed: {error}"))?;
+    crate::agent_memory_learning::schedule_after_idle(
+        Arc::clone(state),
+        input.conversation_id.clone(),
+        input.turn_id.clone(),
+        current_user.content.clone(),
+        ingress.clone(),
+    );
     Ok(output_from_result(
         &input,
         reply,
@@ -893,6 +987,353 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn chat_explicit_memory_control_completes_without_provider_or_task() {
+        let state = canonical_state("provider must not answer this turn").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Chat Memory")
+            .unwrap();
+        let output = run_canonical_chat(
+            CanonicalChatInput {
+                turn_id: turn_id.clone(),
+                conversation_id: conversation_id.clone(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "请记住：我喜欢先看结论。".into(),
+                }],
+                selected_skill_id: None,
+                stream: false,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            output.result.provider_invocation_status,
+            ProviderInvocationState::NotAttempted
+        );
+        assert!(!output.result.model_invoked);
+        assert!(output.result.reply.contains("已按你的明确要求记住"));
+        let records = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_active_records(None, 10)
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert!(records[0].source_task_id.is_none());
+        assert!(records[0].source_run_id.is_none());
+        assert!(state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_task_snapshots(10)
+            .unwrap()
+            .is_empty());
+
+        let unsupported_scope_turn_id = uuid::Uuid::new_v4().to_string();
+        let unsupported_scope = run_canonical_chat(
+            CanonicalChatInput {
+                turn_id: unsupported_scope_turn_id,
+                conversation_id: conversation_id.clone(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "请在当前会话范围记住：使用临时检查表。".into(),
+                }],
+                selected_skill_id: None,
+                stream: false,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            unsupported_scope.result.provider_invocation_status,
+            ProviderInvocationState::NotAttempted
+        );
+        assert!(unsupported_scope
+            .result
+            .reply
+            .contains("只支持“个人”和“当前 Project”"));
+        assert_eq!(
+            state
+                .memory_lifecycle_store
+                .as_ref()
+                .unwrap()
+                .lock()
+                .await
+                .list_active_records(None, 10)
+                .unwrap()
+                .len(),
+            1
+        );
+
+        let forget_turn_id = uuid::Uuid::new_v4().to_string();
+        let forget = run_canonical_chat(
+            CanonicalChatInput {
+                turn_id: forget_turn_id,
+                conversation_id: conversation_id.clone(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "请忘记：我喜欢先看结论".into(),
+                }],
+                selected_skill_id: None,
+                stream: false,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            forget.result.provider_invocation_status,
+            ProviderInvocationState::NotAttempted
+        );
+        assert!(forget.result.reply.contains("已忘记这条 Agent Memory"));
+        assert!(state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_active_records(None, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn chat_project_preference_memory_completes_and_forgets_without_provider_or_task() {
+        let state = canonical_state("provider must not answer this turn").await;
+        let project_id = uuid::Uuid::new_v4().to_string();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        {
+            let store = state.conversation_store.as_ref().unwrap().lock().await;
+            store
+                .create_project(&project_id, "Project Memory", None)
+                .unwrap();
+            store
+                .create_conversation(&conversation_id, "Project preference")
+                .unwrap();
+            store
+                .assign_conversation_project(&conversation_id, Some(&project_id))
+                .unwrap();
+        }
+
+        let remember = run_canonical_chat(
+            CanonicalChatInput {
+                turn_id: uuid::Uuid::new_v4().to_string(),
+                conversation_id: conversation_id.clone(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "请在当前 Project 记住：STAGE6_MEMORY_TEST 偏好先给结论。".into(),
+                }],
+                selected_skill_id: None,
+                stream: false,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            remember.result.provider_invocation_status,
+            ProviderInvocationState::NotAttempted
+        );
+        assert!(remember.result.reply.contains("已按你的明确要求记住"));
+        let records = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_active_records(None, 10)
+            .unwrap();
+        assert_eq!(records.len(), 1);
+        assert_eq!(
+            records[0].scope,
+            openlife_core::agent::MemoryLifecycleScope::Project
+        );
+        assert_eq!(
+            records[0].scope_owner_ref.as_deref(),
+            Some(
+                openlife_core::agent::memory_scope_owner_ref(
+                    openlife_core::agent::MemoryLifecycleScope::Project,
+                    &project_id,
+                )
+                .unwrap()
+                .as_str()
+            )
+        );
+        assert!(state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_task_snapshots(10)
+            .unwrap()
+            .is_empty());
+
+        let forget = run_canonical_chat(
+            CanonicalChatInput {
+                turn_id: uuid::Uuid::new_v4().to_string(),
+                conversation_id,
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "请忘记：STAGE6_MEMORY_TEST 偏好先给结论".into(),
+                }],
+                selected_skill_id: None,
+                stream: false,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            forget.result.provider_invocation_status,
+            ProviderInvocationState::NotAttempted
+        );
+        assert!(forget.result.reply.contains("已忘记这条 Agent Memory"));
+        assert!(state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_active_records(None, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn chat_no_memory_evidence_boundary_completes_without_a_fake_provider_start() {
+        let state = canonical_state("provider must not answer this turn").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "No Memory evidence")
+            .unwrap();
+
+        let output = run_canonical_chat(
+            CanonicalChatInput {
+                turn_id,
+                conversation_id,
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "只允许使用 Agent Memory 回答：当前发布标记是什么？".into(),
+                }],
+                selected_skill_id: None,
+                stream: false,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            output.result.provider_invocation_status,
+            ProviderInvocationState::NotAttempted
+        );
+        assert!(!output.result.model_invoked);
+        assert!(output.result.reply.contains("未知"));
+        assert!(output.result.blockers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn implicit_stable_fact_completes_chat_then_schedules_review_only_memory() {
+        let state = canonical_state(r#"{"keep":true,"confidence":0.91}"#).await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Idle Memory review")
+            .unwrap();
+
+        let output = run_canonical_chat(
+            CanonicalChatInput {
+                turn_id,
+                conversation_id,
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "My work timezone is Central European Time.".into(),
+                }],
+                selected_skill_id: None,
+                stream: false,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            output.result.provider_invocation_status,
+            ProviderInvocationState::Completed
+        );
+        assert!(output.result.model_invoked);
+
+        let proposal = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            loop {
+                if let Some(proposal) = state
+                    .proposal_store
+                    .as_ref()
+                    .unwrap()
+                    .lock()
+                    .await
+                    .list_all_proposals(10, 0)
+                    .unwrap()
+                    .into_iter()
+                    .find(|proposal| {
+                        proposal.proposal_type == openlife_core::agent::ProposalType::MemoryWrite
+                    })
+                {
+                    break proposal;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("idle Memory review proposal");
+        assert_eq!(
+            proposal.status,
+            openlife_core::agent::ProposalStatus::Pending
+        );
+        assert!(state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_active_records(None, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn completed_turn_replays_without_a_second_provider_request() {
         let state = canonical_state("one reply").await;
         let conversation_id = uuid::Uuid::new_v4().to_string();
@@ -963,6 +1404,54 @@ mod tests {
         .unwrap_err();
 
         assert_eq!(error, "configured_provider_unavailable");
+        let store = state.conversation_store.as_ref().unwrap().lock().await;
+        assert!(store.get_turn(&turn_id).unwrap().is_none());
+        assert!(store.list_items(&conversation_id, 10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn shared_concurrency_admission_rejects_chat_before_turn_persistence() {
+        let state = canonical_state("unused result").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Chat concurrency admission")
+            .unwrap();
+        let execution_slots = state
+            .main_chat_runtime_state
+            .lock()
+            .await
+            .execution_slots
+            .clone();
+        let permit_count = execution_slots.available_permits() as u32;
+        let _all_permits = execution_slots
+            .acquire_many_owned(permit_count)
+            .await
+            .unwrap();
+
+        let error = run_canonical_chat(
+            CanonicalChatInput {
+                turn_id: turn_id.clone(),
+                conversation_id: conversation_id.clone(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "hello".into(),
+                }],
+                selected_skill_id: None,
+                stream: false,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "canonical_chat_concurrency_limit_reached");
         let store = state.conversation_store.as_ref().unwrap().lock().await;
         assert!(store.get_turn(&turn_id).unwrap().is_none());
         assert!(store.list_items(&conversation_id, 10).unwrap().is_empty());

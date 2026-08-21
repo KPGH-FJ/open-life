@@ -11,7 +11,7 @@ import {
   Wrench,
   X,
 } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { FoundationActionButton, FoundationDialog, FoundationNotice } from "@/ui/foundation";
 import type { WorkspaceConversationController } from "./useWorkspaceConversation";
 import { WorkspaceMessageContent } from "./WorkspaceMessageContent";
@@ -81,8 +81,8 @@ function lifeModelInfluenceFeedback(
   const receipt = state.lifeModelInfluence;
   if (receipt.permissionGranted || receipt.durableWriteAuthorized) {
     return (
-      <FoundationNotice title="Life Model 影响凭据无效" tone="error" live>
-        <p>Life Model 不能授予权限或批准持久写入；本轮不会把该凭据解释为有效授权。</p>
+      <FoundationNotice title="Life Model 内容不能作为授权" tone="error" live>
+        <p>Life Model 只能帮助理解你的偏好，不能增加工具、权限或写入能力。</p>
       </FoundationNotice>
     );
   }
@@ -142,7 +142,6 @@ function sourceBoundBasisFeedback(controller: WorkspaceConversationController) {
   const sourceLabels: Record<string, string> = {
     current_message: "本轮消息",
     agent_memory: "Agent Memory",
-    markdown_memory: "Markdown 工作记忆",
     document_or_resource: "选中文档或资源",
   };
   const answerWasBound =
@@ -206,199 +205,6 @@ function resourceFailureText(code: string): string {
   return `文件处理失败（${code}）。`;
 }
 
-function MarkdownMemoryPanel({ controller }: { controller: WorkspaceConversationController }) {
-  const memory = controller.markdownMemory;
-  const model = memory.model;
-  const [scope, setScope] = useState<"workspace" | "project">("project");
-  const [relativePath, setRelativePath] = useState("MEMORY.md");
-  const [newFile, setNewFile] = useState(false);
-  const selected = newFile
-    ? undefined
-    : model?.files.find(file => file.scope === scope && file.relativePath === relativePath);
-  const [content, setContent] = useState("");
-  const selectedKey = selected
-    ? `${selected.scope}:${selected.relativePath}:${selected.contentDigest}`
-    : "";
-
-  useEffect(() => {
-    setContent(selected?.content ?? "");
-  }, [selected?.content, selectedKey]);
-
-  const root = model?.roots.find(item => item.scope === scope);
-  const busy = memory.phase === "submitting" || memory.phase === "selecting_root";
-
-  return (
-    <section className="ol-workspace-markdown-memory" aria-labelledby="workspace-memory-title">
-      <div className="ol-workspace-resources__header">
-        <div>
-          <strong id="workspace-memory-title">Markdown 工作记忆</strong>
-          <span>按 Workspace / Project 隔离；不是 Life Model</span>
-        </div>
-        <button
-          type="button"
-          className="ol-workspace-resources__add"
-          disabled={busy}
-          onClick={() => void controller.reloadMarkdownMemory()}
-        >
-          <RefreshCw size={15} aria-hidden="true" />
-          重新读取
-        </button>
-      </div>
-
-      {memory.phase === "failed" && (
-        <FoundationNotice title="Markdown Memory 状态未确认" tone="error" live>
-          <p>{memory.reason}</p>
-        </FoundationNotice>
-      )}
-      {model?.truncated && (
-        <FoundationNotice title="部分 Markdown Memory 未加载" tone="protection">
-          <p>至少一个文件超出数量、大小或安全边界；当前不会把这次读取解释为完整。</p>
-        </FoundationNotice>
-      )}
-
-      <div className="ol-workspace-markdown-memory__roots">
-        {(["workspace", "project"] as const).map(candidateScope => {
-          const candidate = model?.roots.find(item => item.scope === candidateScope);
-          return (
-            <button
-              key={candidateScope}
-              type="button"
-              className={scope === candidateScope ? "is-active" : undefined}
-              disabled={busy}
-              onClick={() => setScope(candidateScope)}
-            >
-              <strong>{candidateScope === "workspace" ? "Workspace" : "Project"}</strong>
-              <span>{candidate?.status === "ready" ? "已绑定" : "未绑定"}</span>
-            </button>
-          );
-        })}
-        <button
-          type="button"
-          disabled={busy}
-          onClick={() => void controller.selectMarkdownMemoryRoot(scope)}
-        >
-          <FolderOpen size={15} aria-hidden="true" />
-          {root?.configured ? "更换文件夹" : "选择文件夹"}
-        </button>
-      </div>
-
-      {root?.status === "ready" ? (
-        <div className="ol-workspace-markdown-memory__editor">
-          <label>
-            <span>文件</span>
-            <select
-              value={selected ? `${selected.scope}:${selected.relativePath}` : "new"}
-              disabled={busy}
-              onChange={event => {
-                const value = event.target.value;
-                if (value === "new") {
-                  setNewFile(true);
-                  setRelativePath("MEMORY.md");
-                  setContent("");
-                  return;
-                }
-                const [, ...pathParts] = value.split(":");
-                setNewFile(false);
-                setRelativePath(pathParts.join(":"));
-              }}
-            >
-              <option value="new">新建或替换 MEMORY.md</option>
-              {model?.files
-                .filter(file => file.scope === scope)
-                .map(file => (
-                  <option
-                    key={`${file.scope}:${file.relativePath}`}
-                    value={`${file.scope}:${file.relativePath}`}
-                  >
-                    {file.relativePath}
-                  </option>
-                ))}
-            </select>
-          </label>
-          <label>
-            <span>相对路径</span>
-            <input
-              value={relativePath}
-              disabled={Boolean(selected) || busy}
-              onChange={event => setRelativePath(event.target.value)}
-              placeholder="MEMORY.md 或 memories/topic.md"
-            />
-          </label>
-          <label>
-            <span>Markdown 内容</span>
-            <textarea
-              rows={7}
-              value={content}
-              disabled={busy}
-              onChange={event => setContent(event.target.value)}
-            />
-          </label>
-          <div className="ol-workspace-markdown-memory__actions">
-            <FoundationActionButton
-              label="提交到 Review"
-              icon={<Pencil size={15} aria-hidden="true" />}
-              loading={memory.phase === "submitting" && memory.operation === "write"}
-              disabled={busy || !relativePath.trim() || !content.trim()}
-              disabledReason={
-                busy
-                  ? "变更正在提交到 Review；文件仍未修改。"
-                  : !relativePath.trim()
-                    ? "先填写相对路径。"
-                    : !content.trim()
-                      ? "先填写 Markdown 内容。"
-                      : undefined
-              }
-              onClick={() =>
-                void controller.proposeMarkdownMemoryWrite({
-                  scope,
-                  relativePath,
-                  content,
-                  ...(selected ? { expectedCurrentDigest: selected.contentDigest } : {}),
-                })
-              }
-            />
-            {selected && (
-              <FoundationActionButton
-                label="停用"
-                icon={<Trash2 size={15} aria-hidden="true" />}
-                variant="quiet"
-                loading={memory.phase === "submitting" && memory.operation === "deactivate"}
-                disabled={busy}
-                disabledReason={
-                  busy ? "另一项 Memory 变更正在提交；当前文件仍保持启用。" : undefined
-                }
-                onClick={() =>
-                  void controller.proposeMarkdownMemoryDeactivation({
-                    scope,
-                    relativePath: selected.relativePath,
-                    expectedCurrentDigest: selected.contentDigest,
-                  })
-                }
-              />
-            )}
-          </div>
-          <small>
-            提交只创建 Review
-            项；批准并确认物化前，文件不会改变。运行时只选择与当前任务相关的有界段落。
-          </small>
-        </div>
-      ) : (
-        <p>先为当前作用域选择一个真实文件夹；其他文件夹中的 Memory 不会被召回。</p>
-      )}
-
-      {memory.phase === "ready" && memory.lastProposal && (
-        <FoundationNotice title="等待 Review" tone="protection" live>
-          <p>
-            {memory.lastProposal.relativePath} 的
-            {memory.lastProposal.operation === "write" ? "写入" : "停用"}
-            仍待审核；当前不显示为已应用。
-          </p>
-        </FoundationNotice>
-      )}
-    </section>
-  );
-}
-
 export function WorkspaceConversationPanel({
   controller,
   onOpenLifeModel,
@@ -413,6 +219,7 @@ export function WorkspaceConversationPanel({
   const [sessionDialog, setSessionDialog] = useState<"rename" | "delete" | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [projectNameDraft, setProjectNameDraft] = useState("");
+  const [projectComposerOpen, setProjectComposerOpen] = useState(false);
   const action = controller.sendAction(disabledReason);
   const visibleMessages = controller.messages.filter(message => message.role !== "system");
   const selectedSession = controller.sessions.find(
@@ -441,11 +248,11 @@ export function WorkspaceConversationPanel({
       <header className="ol-workspace-conversation__header">
         <div>
           <span>对话</span>
-          <h3 id="workspace-conversation-title">继续当前工作</h3>
+          <h3 id="workspace-conversation-title">{selectedSession?.title ?? "新对话"}</h3>
         </div>
         <div className="ol-workspace-conversation__tools">
           <label>
-            <span className="ol-visually-hidden">选择 Project</span>
+            <span className="ol-workspace-conversation__tool-label">Project</span>
             <select
               value={controller.selectedProjectId ?? ""}
               disabled={!controller.selectedSessionId || controller.busy || sessionMutationBusy}
@@ -459,31 +266,50 @@ export function WorkspaceConversationPanel({
               ))}
             </select>
           </label>
-          <label>
-            <span className="ol-visually-hidden">新 Project 名称</span>
-            <input
-              value={projectNameDraft}
-              placeholder="新 Project"
-              disabled={controller.busy || sessionMutationBusy}
-              onChange={event => setProjectNameDraft(event.target.value)}
-            />
-          </label>
           <button
             type="button"
             className="ol-workspace-conversation__new"
-            disabled={!projectNameDraft.trim() || controller.busy || sessionMutationBusy}
-            onClick={() => {
-              const name = projectNameDraft;
-              void controller.createProject(name).then(created => {
-                if (created) setProjectNameDraft("");
-              });
-            }}
+            aria-expanded={projectComposerOpen}
+            aria-controls="workspace-project-composer"
+            disabled={controller.busy || sessionMutationBusy}
+            onClick={() => setProjectComposerOpen(open => !open)}
           >
-            <FolderOpen size={15} aria-hidden="true" />新 Project
+            <FolderOpen size={15} aria-hidden="true" />
+            新建 Project
           </button>
+          {projectComposerOpen && (
+            <div id="workspace-project-composer" className="ol-workspace-project-composer">
+              <label>
+                <span className="ol-workspace-conversation__tool-label">Project 名称</span>
+                <input
+                  value={projectNameDraft}
+                  placeholder="输入名称"
+                  autoFocus
+                  disabled={controller.busy || sessionMutationBusy}
+                  onChange={event => setProjectNameDraft(event.target.value)}
+                />
+              </label>
+              <button
+                type="button"
+                className="ol-workspace-conversation__new"
+                disabled={!projectNameDraft.trim() || controller.busy || sessionMutationBusy}
+                onClick={() => {
+                  const name = projectNameDraft;
+                  void controller.createProject(name).then(created => {
+                    if (created) {
+                      setProjectNameDraft("");
+                      setProjectComposerOpen(false);
+                    }
+                  });
+                }}
+              >
+                创建 Project
+              </button>
+            </div>
+          )}
           {controller.sessions.length > 0 && (
             <label>
-              <span className="ol-visually-hidden">选择对话</span>
+              <span className="ol-workspace-conversation__tool-label">对话</span>
               <select
                 value={controller.selectedSessionId ?? ""}
                 disabled={conversationSwitchLocked}
@@ -605,10 +431,6 @@ export function WorkspaceConversationPanel({
         </FoundationNotice>
       )}
 
-      {controller.mode === "work" && controller.workStatus === "available" && (
-        <MarkdownMemoryPanel controller={controller} />
-      )}
-
       <form
         className="ol-workspace-composer"
         onSubmit={event => {
@@ -646,149 +468,183 @@ export function WorkspaceConversationPanel({
             {controller.workStatus === "unavailable" && " Work 当前不可用；不会回退到旧执行路径。"}
           </small>
         </fieldset>
-        {controller.mode === "chat" && (
-          <div className="ol-workspace-provider" aria-live="polite">
-            {controller.provider.status === "ready" ? (
-              <span>
-                当前模型：
-                {controller.provider.profiles.find(profile => profile.selected)?.providerId ??
-                  "未知供应商"}
-                {" · "}
-                {controller.provider.profiles.find(profile => profile.selected)?.modelId ??
-                  "未知模型"}
-              </span>
-            ) : controller.provider.status === "unavailable" ? (
-              <span>当前模型不可用；请在设置中选择并配置模型。</span>
-            ) : (
-              <span>正在核对当前模型。</span>
-            )}
-          </div>
-        )}
+        <div className="ol-workspace-provider" aria-live="polite">
+          {controller.provider.status === "ready" ? (
+            <span>
+              当前模型：
+              {controller.provider.profiles.find(profile => profile.selected)?.providerId ??
+                "未知供应商"}
+              {" · "}
+              {controller.provider.profiles.find(profile => profile.selected)?.modelId ??
+                "未知模型"}
+            </span>
+          ) : controller.provider.status === "unavailable" ? (
+            <span>当前模型不可用；请在设置中选择并配置模型。</span>
+          ) : (
+            <span>正在核对当前模型。</span>
+          )}
+        </div>
+        {controller.selectedSessionId ? (
+          <label className="ol-workspace-memory-mode" htmlFor="ol-workspace-memory-mode">
+            <span>记忆</span>
+            <select
+              id="ol-workspace-memory-mode"
+              value={controller.memoryMode}
+              disabled={controller.busy || !controller.globalMemoryEnabled}
+              onChange={event =>
+                void controller.setMemoryMode(
+                  event.target.value as "use_and_learn" | "use_only" | "off"
+                )
+              }
+            >
+              <option value="use_and_learn">使用并学习</option>
+              <option value="use_only">仅使用</option>
+              <option value="off">关闭</option>
+            </select>
+            <small>
+              {controller.globalMemoryEnabled
+                ? "只影响当前对话；明确要求记住或忘记仍由你发起。"
+                : "Agent 记忆已在设置中关闭。"}
+            </small>
+          </label>
+        ) : null}
         {controller.mode === "work" && (
-          <div className="ol-workspace-resources" aria-labelledby="workspace-resources-title">
-            <div className="ol-workspace-resources__header">
-              <div>
-                <strong id="workspace-resources-title">本轮文件</strong>
-                <span>
-                  {pendingResourceCount > 0 ? `已添加 ${pendingResourceCount}/5` : "未添加"}
-                </span>
-              </div>
-              <button
-                type="button"
-                className="ol-workspace-resources__add"
-                disabled={
-                  controller.loadStatus !== "ready" ||
-                  controller.busy ||
-                  resourceMutationBusy ||
-                  pendingResourceCount >= 5
-                }
-                onClick={() => void controller.attachResources()}
-              >
-                <FilePlus2 size={16} aria-hidden="true" />
-                {controller.resourceMutation.phase === "importing" ? "正在读取" : "添加文件"}
-              </button>
-            </div>
-            {pendingResourceCount > 0 ? (
-              <ul className="ol-workspace-resources__list" aria-label="下一次发送包含的文件">
-                {controller.pendingResources.map(resource => (
-                  <li key={resource.resourceId}>
-                    <div>
-                      <strong>{resource.filename}</strong>
-                      <span>{Math.max(1, Math.ceil(resource.byteCount / 1024))} KB</span>
-                    </div>
-                    <button
-                      type="button"
-                      aria-label={`移除 ${resource.filename}`}
-                      disabled={controller.busy || resourceMutationBusy}
-                      onClick={() => void controller.detachResource(resource.resourceId)}
-                    >
-                      <X size={15} aria-hidden="true" />
-                    </button>
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <p>
-                只读取你通过原生选择器明确选中的文件；内容按当前 Provider
-                和已生效隐私许可处理，未授权外传不会执行。
-              </p>
-            )}
-          </div>
-        )}
-        {controller.mode === "work" && (
-          <div className="ol-workspace-capabilities" aria-labelledby="workspace-capabilities-title">
-            <div className="ol-workspace-capabilities__header">
-              <div>
-                <strong id="workspace-capabilities-title">技能与只读工具</strong>
-                <span>
-                  {controller.capabilityState.phase === "loading"
-                    ? "正在核对"
-                    : controller.selectedSkillId
-                      ? "当前对话已选择技能"
-                      : "未选择技能"}
-                </span>
-              </div>
-            </div>
-            <div className="ol-workspace-capabilities__grid">
-              <label>
-                <span>
-                  <Sparkles size={15} aria-hidden="true" />
-                  当前技能
-                </span>
-                <select
-                  value={controller.selectedSkillId ?? ""}
+          <details className="ol-workspace-composer-context">
+            <summary>
+              <span>文件、技能与工具</span>
+              <small>
+                {pendingResourceCount > 0
+                  ? `${pendingResourceCount} 个文件`
+                  : controller.selectedSkillId
+                    ? "已选择技能"
+                    : "按需添加"}
+              </small>
+            </summary>
+            <div className="ol-workspace-resources" aria-labelledby="workspace-resources-title">
+              <div className="ol-workspace-resources__header">
+                <div>
+                  <strong id="workspace-resources-title">本轮文件</strong>
+                  <span>
+                    {pendingResourceCount > 0 ? `已添加 ${pendingResourceCount}/5` : "未添加"}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  className="ol-workspace-resources__add"
                   disabled={
-                    !controller.selectedSessionId ||
+                    controller.loadStatus !== "ready" ||
                     controller.busy ||
-                    controller.capabilityState.phase === "loading" ||
-                    controller.capabilityState.phase === "selecting"
+                    resourceMutationBusy ||
+                    pendingResourceCount >= 5
                   }
-                  onChange={event => void controller.selectSkill(event.target.value || null)}
+                  onClick={() => void controller.attachResources()}
                 >
-                  <option value="">不使用技能</option>
-                  {controller.skills
-                    .filter(skill => skill.available)
-                    .map(skill => (
-                      <option key={skill.skillId} value={skill.skillId}>
-                        {skill.name}
-                      </option>
-                    ))}
-                </select>
-                <small>
-                  {controller.selectedSessionId
-                    ? "技能只提供有界指令，不会扩大模型、网络、工具或写入权限。"
-                    : "先发送第一条消息建立对话，再为后续回合选择技能。"}
-                </small>
-              </label>
-              <div className="ol-workspace-capabilities__tools">
-                <span>
-                  <Wrench size={15} aria-hidden="true" />
-                  已注册只读工具
-                </span>
-                {controller.toolCandidates?.candidates.length ? (
-                  <ul>
-                    {controller.toolCandidates.candidates.slice(0, 4).map(candidate => (
-                      <li key={candidate.candidateId}>
-                        <strong>{candidate.toolName}</strong>
-                        <small>{candidate.capabilityLabels.join(" · ") || "read"}</small>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <small>当前没有后端确认可用的 MCP 只读工具。</small>
-                )}
-                {Boolean(controller.toolCandidates?.blockedTools.length) && (
-                  <small>
-                    另有 {controller.toolCandidates!.blockedTools.length} 个工具因写入、风险或
-                    manifest 状态被后端阻断。
-                  </small>
-                )}
+                  <FilePlus2 size={16} aria-hidden="true" />
+                  {controller.resourceMutation.phase === "importing" ? "正在读取" : "添加文件"}
+                </button>
               </div>
+              {pendingResourceCount > 0 ? (
+                <ul className="ol-workspace-resources__list" aria-label="下一次发送包含的文件">
+                  {controller.pendingResources.map(resource => (
+                    <li key={resource.resourceId}>
+                      <div>
+                        <strong>{resource.filename}</strong>
+                        <span>{Math.max(1, Math.ceil(resource.byteCount / 1024))} KB</span>
+                      </div>
+                      <button
+                        type="button"
+                        aria-label={`移除 ${resource.filename}`}
+                        disabled={controller.busy || resourceMutationBusy}
+                        onClick={() => void controller.detachResource(resource.resourceId)}
+                      >
+                        <X size={15} aria-hidden="true" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p>只读取你明确选择的文件；内容按当前模型与隐私设置处理，未允许的外传不会执行。</p>
+              )}
             </div>
-            {controller.capabilityState.phase === "failed" && (
-              <small role="status">技能或工具状态不可用：{controller.capabilityState.reason}</small>
-            )}
-          </div>
+            <div
+              className="ol-workspace-capabilities"
+              aria-labelledby="workspace-capabilities-title"
+            >
+              <div className="ol-workspace-capabilities__header">
+                <div>
+                  <strong id="workspace-capabilities-title">技能与只读工具</strong>
+                  <span>
+                    {controller.capabilityState.phase === "loading"
+                      ? "正在核对"
+                      : controller.selectedSkillId
+                        ? "当前对话已选择技能"
+                        : "未选择技能"}
+                  </span>
+                </div>
+              </div>
+              <div className="ol-workspace-capabilities__grid">
+                <label>
+                  <span>
+                    <Sparkles size={15} aria-hidden="true" />
+                    当前技能
+                  </span>
+                  <select
+                    value={controller.selectedSkillId ?? ""}
+                    disabled={
+                      !controller.selectedSessionId ||
+                      controller.busy ||
+                      controller.capabilityState.phase === "loading" ||
+                      controller.capabilityState.phase === "selecting"
+                    }
+                    onChange={event => void controller.selectSkill(event.target.value || null)}
+                  >
+                    <option value="">不使用技能</option>
+                    {controller.skills
+                      .filter(skill => skill.available)
+                      .map(skill => (
+                        <option key={skill.skillId} value={skill.skillId}>
+                          {skill.name}
+                        </option>
+                      ))}
+                  </select>
+                  <small>
+                    {controller.selectedSessionId
+                      ? "技能只提供有界指令，不会扩大模型、网络、工具或写入权限。"
+                      : "先发送第一条消息建立对话，再为后续回合选择技能。"}
+                  </small>
+                </label>
+                <div className="ol-workspace-capabilities__tools">
+                  <span>
+                    <Wrench size={15} aria-hidden="true" />
+                    已注册只读工具
+                  </span>
+                  {controller.toolCandidates?.candidates.length ? (
+                    <ul>
+                      {controller.toolCandidates.candidates.slice(0, 4).map(candidate => (
+                        <li key={candidate.candidateId}>
+                          <strong>{candidate.toolName}</strong>
+                          <small>{candidate.capabilityLabels.join(" · ") || "read"}</small>
+                        </li>
+                      ))}
+                    </ul>
+                  ) : (
+                    <small>当前没有可用的只读工具。</small>
+                  )}
+                  {Boolean(controller.toolCandidates?.blockedTools.length) && (
+                    <small>
+                      另有 {controller.toolCandidates!.blockedTools.length}{" "}
+                      个工具因权限或风险保持关闭。
+                    </small>
+                  )}
+                </div>
+              </div>
+              {controller.capabilityState.phase === "failed" && (
+                <small role="status">
+                  技能或工具状态不可用：{controller.capabilityState.reason}
+                </small>
+              )}
+            </div>
+          </details>
         )}
         <label htmlFor="workspace-composer-input">消息</label>
         <textarea
@@ -820,7 +676,7 @@ export function WorkspaceConversationPanel({
                 ? "任务正在执行；可追加指令，或切换对话让它在后台继续"
                 : "正在生成回复；需要改变方向时可先取消，再发送新消息"
               : controller.turnState.phase === "cancelling"
-                ? "正在等待后端确认取消终态"
+                ? "正在确认取消结果"
                 : action.enabled
                   ? "Enter 发送，Shift + Enter 换行"
                   : (action.disabledReason ?? "当前不能发送")}
@@ -836,7 +692,7 @@ export function WorkspaceConversationPanel({
                     disabled={!controller.draft.trim() || !controller.activeTaskId}
                     disabledReason={
                       !controller.activeTaskId
-                        ? "后端尚未返回当前 Work Task 身份。"
+                        ? "当前工作尚未准备好接收追加指令。"
                         : !controller.draft.trim()
                           ? "先输入要追加的指令。"
                           : undefined
@@ -901,7 +757,7 @@ export function WorkspaceConversationPanel({
       <FoundationDialog
         open={sessionDialog === "rename"}
         title="重命名这段对话"
-        description="新名称只有在后端保存并重新读取成功后才会显示为已确认。"
+        description="保存成功后，这段对话会使用新名称。"
         busy={sessionMutationBusy}
         onClose={() => setSessionDialog(null)}
         footer={

@@ -1,11 +1,12 @@
 use crate::{
     artifact_materializer::{
-        commit_artifact_move, commit_staged_artifact, confirmed_artifact_receipt,
-        confirmed_move_receipt, confirmed_move_receipt_from_paths, inspect_artifact_filesystem,
-        inspect_artifact_move, prepare_artifact_materialization,
-        prepare_artifact_materialization_with_precondition_for_artifact, prepare_artifact_move,
-        stage_artifact_bytes, ArtifactFilesystemFailure, ArtifactFilesystemObservation,
-        ArtifactMaterializationReceipt, ArtifactTargetPrecondition,
+        artifact_content_digest, commit_artifact_move, commit_staged_artifact,
+        confirmed_artifact_receipt, confirmed_move_receipt, confirmed_move_receipt_from_paths,
+        inspect_artifact_filesystem, inspect_artifact_move, prepare_artifact_materialization,
+        prepare_artifact_materialization_with_precondition_for_artifact_bytes,
+        prepare_artifact_move, stage_artifact_bytes, stage_artifact_raw_bytes,
+        ArtifactFilesystemFailure, ArtifactFilesystemObservation, ArtifactMaterializationReceipt,
+        ArtifactTargetPrecondition,
     },
     danger_action_confirmation::{
         require_native_danger_action_confirmation, NativeDangerActionRequest,
@@ -19,7 +20,6 @@ use openlife_core::agent::{
     LifeModelLearningReviewDecisionReceipt, MemoryRollbackReport, ProposalSource, ProposalStatus,
     ProposalType, RiskLevel,
 };
-use openlife_core::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -94,74 +94,10 @@ fn reviewed_artifact_target_precondition(
 
 pub(crate) async fn artifact_safe_paths_for_proposal(
     state: &Arc<AppState>,
-    proposal: &AgentProposal,
+    _proposal: &AgentProposal,
 ) -> Result<Vec<String>, String> {
     let config = state.config.lock().await;
-    if proposal.after.get("source").and_then(Value::as_str) != Some("markdown_memory_editor") {
-        return Ok(config.system.safe_paths.clone());
-    }
-    let scope = match proposal.after.get("memoryScope").and_then(Value::as_str) {
-        Some("workspace") => crate::markdown_memory::MarkdownMemoryScope::Workspace,
-        Some("project") => crate::markdown_memory::MarkdownMemoryScope::Project,
-        _ => return Err("Markdown memory proposal scope is missing or invalid".into()),
-    };
-    let relative = proposal
-        .after
-        .get("memoryRelativePath")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Markdown memory proposal relative path is missing".to_string())?;
-    let relative = crate::markdown_memory::validate_markdown_memory_relative_path(relative)?;
-    let configured_root = match scope {
-        crate::markdown_memory::MarkdownMemoryScope::Workspace => {
-            config.system.workspace_memory_root.as_deref()
-        }
-        crate::markdown_memory::MarkdownMemoryScope::Project => {
-            config.system.project_memory_root.as_deref()
-        }
-    }
-    .ok_or_else(|| "Markdown memory proposal root is no longer configured".to_string())?;
-    let root = std::path::PathBuf::from(configured_root)
-        .canonicalize()
-        .map_err(|error| format!("Markdown memory proposal root is unavailable: {error}"))?;
-    let expected_source = root.join(&relative);
-    let operation = proposal
-        .after
-        .get("operation")
-        .and_then(Value::as_str)
-        .unwrap_or("propose_write");
-    if matches!(operation, "move" | "trash" | "restore") {
-        let source = proposal
-            .after
-            .get("source_path")
-            .and_then(Value::as_str)
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| "Markdown memory move source is missing".to_string())?;
-        let target = proposal
-            .after
-            .get("target_path")
-            .and_then(Value::as_str)
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| "Markdown memory move target is missing".to_string())?;
-        let filename = expected_source
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .ok_or_else(|| "Markdown memory move filename is invalid".to_string())?;
-        let expected_target = expected_source.with_file_name(format!("{filename}.disabled.md"));
-        if operation != "move" || source != expected_source || target != expected_target {
-            return Err("Markdown memory move is not bound to the selected scope root".into());
-        }
-    } else {
-        let target = proposal
-            .after
-            .get("path")
-            .and_then(Value::as_str)
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| "Markdown memory write target is missing".to_string())?;
-        if target != expected_source {
-            return Err("Markdown memory write is not bound to the selected scope root".into());
-        }
-    }
-    Ok(vec![root.to_string_lossy().into_owned()])
+    Ok(config.system.safe_paths.clone())
 }
 
 fn require_persistence_write(state: &Arc<AppState>) -> Result<(), String> {
@@ -791,7 +727,7 @@ async fn reconcile_artifact_effects_with_state(
                 continue;
             }
         };
-        let prepared = match prepare_artifact_materialization_with_precondition_for_artifact(
+        let prepared = match prepare_artifact_materialization_with_precondition_for_artifact_bytes(
             &resolved.artifact_id,
             &record.proposal_id,
             &record.dispatch_claim_id,
@@ -1346,9 +1282,9 @@ async fn confirmed_artifact_receipt_from_store(
     }
     let resolved = resolve_artifact_effect_input(state, proposal).await?;
     let path = resolved.path.as_str();
-    let content = resolved.content.as_str();
+    let content = resolved.content.as_slice();
     let safe_paths = artifact_safe_paths_for_proposal(state, proposal).await?;
-    let prepared = prepare_artifact_materialization_with_precondition_for_artifact(
+    let prepared = prepare_artifact_materialization_with_precondition_for_artifact_bytes(
         &resolved.artifact_id,
         &proposal.id,
         &dispatch_claim_id,
@@ -1732,7 +1668,7 @@ async fn ensure_effect_dispatch_projection_pending(
 struct ResolvedArtifactEffectInput {
     artifact_id: String,
     path: String,
-    content: String,
+    content: Vec<u8>,
     target_precondition: ArtifactTargetPrecondition,
 }
 
@@ -1754,7 +1690,7 @@ async fn resolve_artifact_effect_input(
         return Ok(ResolvedArtifactEffectInput {
             artifact_id: artifact_id_for_proposal(proposal),
             path: path.to_string(),
-            content: content.to_string(),
+            content: content.as_bytes().to_vec(),
             target_precondition: reviewed_artifact_target_precondition(&proposal.after)?,
         });
     };
@@ -1799,15 +1735,13 @@ async fn resolve_artifact_effect_input(
     if bytes.len() > EXTERNAL_WRITE_MAX_SIZE {
         return Err("artifact_content_too_large".into());
     }
-    let content =
-        String::from_utf8(bytes).map_err(|_| "canonical_artifact_draft_not_utf8".to_string())?;
-    if openlife_core::agent::metadata_safe_text_digest(&content).1 != artifact.content_digest {
+    if artifact_content_digest(&bytes) != artifact.content_digest {
         return Err("canonical_artifact_draft_digest_mismatch".into());
     }
     Ok(ResolvedArtifactEffectInput {
         artifact_id: artifact_id.to_string(),
         path,
-        content,
+        content: bytes,
         target_precondition,
     })
 }
@@ -1835,7 +1769,7 @@ async fn apply_external_write_artifact(
         }
     };
     let path = resolved.path.as_str();
-    let content = resolved.content.as_str();
+    let content = resolved.content.as_slice();
     if content.len() > EXTERNAL_WRITE_MAX_SIZE {
         let code = "artifact_content_too_large";
         let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
@@ -1850,7 +1784,7 @@ async fn apply_external_write_artifact(
             return ArtifactApplyOutcome::FailedBeforeEffect(error);
         }
     };
-    let prepared = match prepare_artifact_materialization_with_precondition_for_artifact(
+    let prepared = match prepare_artifact_materialization_with_precondition_for_artifact_bytes(
         &resolved.artifact_id,
         &proposal.id,
         claim_id,
@@ -1931,10 +1865,11 @@ async fn apply_external_write_artifact(
     }
 
     let stage_prepared = prepared.clone();
-    let stage_content = content.to_string();
-    let stage_result =
-        tokio::task::spawn_blocking(move || stage_artifact_bytes(&stage_prepared, &stage_content))
-            .await;
+    let stage_content = content.to_vec();
+    let stage_result = tokio::task::spawn_blocking(move || {
+        stage_artifact_raw_bytes(&stage_prepared, &stage_content)
+    })
+    .await;
     match stage_result {
         Ok(Ok(())) => {}
         Ok(Err(ArtifactFilesystemFailure::FailedBeforeEffect(code))) => {
@@ -2735,40 +2670,6 @@ pub(crate) fn memory_archive_owners(
         );
     }
     Ok(parsed)
-}
-
-#[allow(dead_code)]
-fn set_path_value(root: &mut Value, path: &str, value: Value) -> Result<(), String> {
-    let mut current = root;
-    let mut parts = path.split('.').peekable();
-    while let Some(part) = parts.next() {
-        if parts.peek().is_none() {
-            let object = current
-                .as_object_mut()
-                .ok_or_else(|| format!("路径 `{}` 的父节点不是对象。", path))?;
-            if !object.contains_key(part) {
-                return Err(format!("人生模型不包含字段路径 `{}`。", path));
-            }
-            object.insert(part.to_string(), value);
-            return Ok(());
-        }
-
-        current = current
-            .get_mut(part)
-            .ok_or_else(|| format!("人生模型不包含字段路径 `{}`。", path))?;
-    }
-    Err("Proposal affected_path 不能为空。".to_string())
-}
-
-#[allow(dead_code)]
-fn apply_life_model_value(
-    model: &LifeModel,
-    path: &str,
-    after: Value,
-) -> Result<LifeModel, String> {
-    let mut value = serde_json::to_value(model).map_err(|e| e.to_string())?;
-    set_path_value(&mut value, path, after)?;
-    serde_json::from_value(value).map_err(|e| format!("Proposal 值无法转换为 LifeModel：{}", e))
 }
 
 pub(crate) fn validate_proposal_payload(

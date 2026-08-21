@@ -431,20 +431,8 @@ pub(crate) async fn reconcile_lifemodel_learning_materialization_with_state(
 }
 
 pub(crate) async fn current_workspace_ref(state: &Arc<AppState>) -> String {
-    let configured_root = state
-        .config
-        .lock()
-        .await
-        .system
-        .workspace_memory_root
-        .clone();
-    match configured_root.filter(|root| !root.trim().is_empty()) {
-        Some(root) => format!(
-            "workspace:{}",
-            openlife_core::agent::metadata_safe_text_digest(root.trim()).1
-        ),
-        None => "workspace:default".into(),
-    }
+    let _ = state;
+    "workspace:default".into()
 }
 
 pub(crate) async fn capture_explicit_main_chat_candidate(

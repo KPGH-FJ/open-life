@@ -921,14 +921,6 @@ pub struct ArtifactOutputDirectorySelection {
     pub selected_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MarkdownMemoryRootSelection {
-    pub cancelled: bool,
-    pub scope: crate::markdown_memory::MarkdownMemoryScope,
-    pub selected_path: Option<String>,
-}
-
 fn validate_artifact_output_directory(path: &Path) -> Result<PathBuf, AppError> {
     let metadata = path.symlink_metadata().map_err(|error| {
         AppError::permission(format!(
@@ -1021,83 +1013,6 @@ pub async fn select_artifact_output_directory<R: Runtime>(
     let canonical = persist_artifact_output_directory(state, &selected).await?;
     Ok(ArtifactOutputDirectorySelection {
         cancelled: false,
-        selected_path: Some(canonical.to_string_lossy().into_owned()),
-    })
-}
-
-async fn persist_markdown_memory_root(
-    state: &Arc<AppState>,
-    scope: crate::markdown_memory::MarkdownMemoryScope,
-    selected_path: &Path,
-) -> Result<PathBuf, AppError> {
-    require_config_write_admission(state)?;
-    let canonical = validate_artifact_output_directory(selected_path)?;
-    let _config_write_guard = CONFIG_WRITE_COORDINATOR.lock().await;
-    let config_path = app_data_dir().join("config.yaml");
-    let mut persisted = if config_path.exists() {
-        AppConfig::load(&config_path).map_err(|error| {
-            AppError::db_with_hint(
-                format!("Markdown memory root config load failed: {error}"),
-                "canonical_state_unknown",
-            )
-        })?
-    } else {
-        reference_only_config_for_first_persist(state.config.lock().await.clone())
-    };
-    let canonical_string = canonical.to_string_lossy().into_owned();
-    match scope {
-        crate::markdown_memory::MarkdownMemoryScope::Workspace => {
-            persisted.system.workspace_memory_root = Some(canonical_string.clone());
-        }
-        crate::markdown_memory::MarkdownMemoryScope::Project => {
-            persisted.system.project_memory_root = Some(canonical_string.clone());
-        }
-    }
-    persisted.save(&config_path).map_err(AppError::from)?;
-
-    let mut runtime_config = state.config.lock().await;
-    runtime_config.system.workspace_memory_root = persisted.system.workspace_memory_root.clone();
-    runtime_config.system.project_memory_root = persisted.system.project_memory_root.clone();
-    Ok(canonical)
-}
-
-pub(crate) async fn select_markdown_memory_root<R: Runtime>(
-    app_handle: tauri::AppHandle<R>,
-    state: &Arc<AppState>,
-    scope: crate::markdown_memory::MarkdownMemoryScope,
-) -> Result<MarkdownMemoryRootSelection, AppError> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    app_handle
-        .dialog()
-        .file()
-        .set_title(match scope {
-            crate::markdown_memory::MarkdownMemoryScope::Workspace => {
-                "选择 Workspace Markdown Memory 文件夹"
-            }
-            crate::markdown_memory::MarkdownMemoryScope::Project => {
-                "选择 Project Markdown Memory 文件夹"
-            }
-        })
-        .pick_folder(move |path| {
-            let _ = sender.send(path);
-        });
-    let selected = receiver
-        .await
-        .map_err(|_| AppError::internal("Markdown memory root picker closed without a result"))?;
-    let Some(selected) = selected else {
-        return Ok(MarkdownMemoryRootSelection {
-            cancelled: true,
-            scope,
-            selected_path: None,
-        });
-    };
-    let selected = selected.into_path().map_err(|_| {
-        AppError::permission("Markdown memory root picker returned an invalid path")
-    })?;
-    let canonical = persist_markdown_memory_root(state, scope, &selected).await?;
-    Ok(MarkdownMemoryRootSelection {
-        cancelled: false,
-        scope,
         selected_path: Some(canonical.to_string_lossy().into_owned()),
     })
 }

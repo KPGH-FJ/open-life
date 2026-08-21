@@ -69,8 +69,9 @@ This is an engineering baseline, not a claim of market readiness or complete
 future capability coverage.
 
 Earlier development programs remain in Git history. ADR 0018 and ADR 0019
-remain the accepted reconstruction and harness contracts. There is no active
-implementation plan.
+remain the accepted reconstruction and harness contracts. The capable-product
+plan is complete; no implementation plan is active until the next concrete
+capability objective is selected.
 
 Repository governance remains small and conventional: at most one active plan, normal
 source tests, normal CI, and concise architecture and decision records.

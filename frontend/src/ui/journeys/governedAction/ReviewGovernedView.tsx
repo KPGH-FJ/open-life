@@ -335,7 +335,7 @@ export function ReviewGovernedView({
     return (
       <div className="ol-governed-page ol-governed-page--centered">
         <FoundationNotice title="审核状态暂时不可用" tone="error">
-          <p>后端没有返回可确认的审核状态；当前不会从旧建议列表拼出决定页面。</p>
+          <p>当前无法确认待决定事项；为避免误操作，决定按钮保持关闭。</p>
         </FoundationNotice>
         <FoundationActionButton
           label="重新读取"
@@ -377,48 +377,50 @@ export function ReviewGovernedView({
 
   return (
     <div className={`ol-review-layout${embedded ? " ol-review-layout--embedded" : ""}`}>
-      <aside className="ol-review-queue" aria-label="审核项列表">
-        <header>
-          <span>需要逐项决定</span>
-          <h2>建议与权限</h2>
-        </header>
-        <div className="ol-review-queue__items">
-          {queueSections.map(section => (
-            <section
-              key={section.id}
-              className="ol-review-queue-section"
-              aria-labelledby={`review-queue-${section.id}`}
-            >
-              <div className="ol-review-queue-section__heading">
-                <span id={`review-queue-${section.id}`}>{section.label}</span>
-                <small>{section.totalCount} 项 · 逐项决定</small>
-              </div>
-              {section.items.map(item => {
-                const status = reviewItemStatus(item);
-                return (
-                  <button
-                    key={item.id}
-                    type="button"
-                    className="ol-review-queue-item"
-                    data-current={selectedItem?.id === item.id ? "true" : "false"}
-                    aria-current={selectedItem?.id === item.id ? "true" : undefined}
-                    disabled={decisionBusy}
-                    onClick={() => onSelectItem(item)}
-                  >
-                    <span>{item.decisionContext.title}</span>
-                    <small>{status.label}</small>
-                  </button>
-                );
-              })}
-              {section.hiddenCount > 0 && (
-                <p className="ol-review-queue-section__overflow">
-                  其余 {section.hiddenCount} 项 LifeModel 学习记录暂不在当前队列展示。
-                </p>
-              )}
-            </section>
-          ))}
-        </div>
-      </aside>
+      {!embedded && (
+        <aside className="ol-review-queue" aria-label="审核项列表">
+          <header>
+            <span>需要逐项决定</span>
+            <h2>建议与权限</h2>
+          </header>
+          <div className="ol-review-queue__items">
+            {queueSections.map(section => (
+              <section
+                key={section.id}
+                className="ol-review-queue-section"
+                aria-labelledby={`review-queue-${section.id}`}
+              >
+                <div className="ol-review-queue-section__heading">
+                  <span id={`review-queue-${section.id}`}>{section.label}</span>
+                  <small>{section.totalCount} 项 · 逐项决定</small>
+                </div>
+                {section.items.map(item => {
+                  const status = reviewItemStatus(item);
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      className="ol-review-queue-item"
+                      data-current={selectedItem?.id === item.id ? "true" : "false"}
+                      aria-current={selectedItem?.id === item.id ? "true" : undefined}
+                      disabled={decisionBusy}
+                      onClick={() => onSelectItem(item)}
+                    >
+                      <span>{item.decisionContext.title}</span>
+                      <small>{status.label}</small>
+                    </button>
+                  );
+                })}
+                {section.hiddenCount > 0 && (
+                  <p className="ol-review-queue-section__overflow">
+                    其余 {section.hiddenCount} 项 LifeModel 学习记录暂不在当前队列展示。
+                  </p>
+                )}
+              </section>
+            ))}
+          </div>
+        </aside>
+      )}
 
       <article className="ol-review-detail" data-review-item-id={selectedItem?.id ?? "none"}>
         {!selectedItem ? (
@@ -502,40 +504,43 @@ export function ReviewGovernedView({
             )}
 
             {selectedItem.decisionContext.actionContract && (
-              <section className="ol-review-rationale" aria-labelledby="action-contract-title">
-                <div className="ol-governed-section-heading">
-                  <span>动作合同</span>
-                  <h3 id="action-contract-title">这次批准精确允许什么</h3>
-                </div>
-                <dl>
-                  <div>
-                    <dt>能力</dt>
-                    <dd>{selectedItem.decisionContext.actionContract.capabilityId}</dd>
+              <details className="ol-review-progressive-detail">
+                <summary>查看此次允许的精确范围</summary>
+                <section className="ol-review-rationale" aria-labelledby="action-contract-title">
+                  <div className="ol-governed-section-heading">
+                    <span>允许范围</span>
+                    <h3 id="action-contract-title">这次批准精确允许什么</h3>
                   </div>
-                  <div>
-                    <dt>操作</dt>
-                    <dd>{selectedItem.decisionContext.actionContract.operation}</dd>
-                  </div>
-                  <div>
-                    <dt>确认范围</dt>
-                    <dd>{selectedItem.decisionContext.actionContract.confirmationSummary}</dd>
-                  </div>
-                  <div>
-                    <dt>副作用边界</dt>
-                    <dd>{selectedItem.decisionContext.actionContract.effectBoundary}</dd>
-                  </div>
-                  <div>
-                    <dt>完成证据</dt>
-                    <dd>{selectedItem.decisionContext.actionContract.terminalEvidenceSummary}</dd>
-                  </div>
-                </dl>
-                {selectedItem.decisionContext.after.detail && (
-                  <details>
-                    <summary>查看已审核的精确参数</summary>
-                    <pre>{selectedItem.decisionContext.after.detail}</pre>
-                  </details>
-                )}
-              </section>
+                  <dl>
+                    <div>
+                      <dt>能力</dt>
+                      <dd>{selectedItem.decisionContext.actionContract.capabilityId}</dd>
+                    </div>
+                    <div>
+                      <dt>操作</dt>
+                      <dd>{selectedItem.decisionContext.actionContract.operation}</dd>
+                    </div>
+                    <div>
+                      <dt>确认范围</dt>
+                      <dd>{selectedItem.decisionContext.actionContract.confirmationSummary}</dd>
+                    </div>
+                    <div>
+                      <dt>副作用边界</dt>
+                      <dd>{selectedItem.decisionContext.actionContract.effectBoundary}</dd>
+                    </div>
+                    <div>
+                      <dt>完成证据</dt>
+                      <dd>{selectedItem.decisionContext.actionContract.terminalEvidenceSummary}</dd>
+                    </div>
+                  </dl>
+                  {selectedItem.decisionContext.after.detail && (
+                    <details>
+                      <summary>查看已审核的精确参数</summary>
+                      <pre>{selectedItem.decisionContext.after.detail}</pre>
+                    </details>
+                  )}
+                </section>
+              </details>
             )}
 
             {learningContext && (
@@ -705,46 +710,47 @@ export function ReviewGovernedView({
             </section>
 
             {selectedItem.type === "external_write_action" && (
-              <section className="ol-review-rationale" aria-labelledby="artifact-evidence-title">
-                <div className="ol-governed-section-heading">
-                  <span>本地文件动作</span>
-                  <h3 id="artifact-evidence-title">后端终态证据</h3>
-                </div>
-                {selectedItem.artifactEvidence ? (
-                  <dl>
-                    <div>
-                      <dt>状态</dt>
-                      <dd>{selectedItem.artifactEvidence.state}</dd>
-                    </div>
-                    <div>
-                      <dt>大小</dt>
-                      <dd>{selectedItem.artifactEvidence.byteSize} bytes</dd>
-                    </div>
-                    <div>
-                      <dt>类型</dt>
-                      <dd>{selectedItem.artifactEvidence.mediaType}</dd>
-                    </div>
-                    <div>
-                      <dt>内容摘要</dt>
-                      <dd>{selectedItem.artifactEvidence.contentDigest}</dd>
-                    </div>
-                    <div>
-                      <dt>落盘观察</dt>
-                      <dd>{selectedItem.artifactEvidence.observedContentDigest ?? "尚未确认"}</dd>
-                    </div>
-                    <div>
-                      <dt>目标摘要</dt>
-                      <dd>{selectedItem.artifactEvidence.targetReferenceDigest}</dd>
-                    </div>
-                  </dl>
-                ) : (
-                  <FoundationNotice title="尚无文件动作收据" tone="protection" live>
-                    <p>
-                      批准前这是正常状态；批准后若仍无收据，页面不会显示创建、移动、回收或恢复已完成。
-                    </p>
-                  </FoundationNotice>
-                )}
-              </section>
+              <details className="ol-review-progressive-detail">
+                <summary>查看文件写入核验信息</summary>
+                <section className="ol-review-rationale" aria-labelledby="artifact-evidence-title">
+                  <div className="ol-governed-section-heading">
+                    <span>本地文件</span>
+                    <h3 id="artifact-evidence-title">文件写入状态</h3>
+                  </div>
+                  {selectedItem.artifactEvidence ? (
+                    <dl>
+                      <div>
+                        <dt>状态</dt>
+                        <dd>{selectedItem.artifactEvidence.state}</dd>
+                      </div>
+                      <div>
+                        <dt>大小</dt>
+                        <dd>{selectedItem.artifactEvidence.byteSize} bytes</dd>
+                      </div>
+                      <div>
+                        <dt>类型</dt>
+                        <dd>{selectedItem.artifactEvidence.mediaType}</dd>
+                      </div>
+                      <div>
+                        <dt>内容摘要</dt>
+                        <dd>{selectedItem.artifactEvidence.contentDigest}</dd>
+                      </div>
+                      <div>
+                        <dt>落盘观察</dt>
+                        <dd>{selectedItem.artifactEvidence.observedContentDigest ?? "尚未确认"}</dd>
+                      </div>
+                      <div>
+                        <dt>目标摘要</dt>
+                        <dd>{selectedItem.artifactEvidence.targetReferenceDigest}</dd>
+                      </div>
+                    </dl>
+                  ) : (
+                    <FoundationNotice title="尚未写入文件" tone="protection" live>
+                      <p>批准前这是正常状态；批准后仍需核验成功，才会显示写入完成。</p>
+                    </FoundationNotice>
+                  )}
+                </section>
+              </details>
             )}
 
             {feedback && (
@@ -763,7 +769,7 @@ export function ReviewGovernedView({
                 />
                 {!hasEvidenceAction && (
                   <FoundationActionButton
-                    label="状态依据"
+                    label="查看详情"
                     icon={<Eye size={17} aria-hidden="true" />}
                     variant="quiet"
                     onClick={onOpenInspector}

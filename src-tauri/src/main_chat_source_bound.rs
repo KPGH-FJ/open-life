@@ -1,8 +1,8 @@
 //! Bounded source contracts and output verification for Main Chat.
 //!
-//! This module is subordinate to `OpenLifeTurnRuntime` and the Main Chat
-//! kernel. It validates one turn's selected factual basis; it does not own task
-//! lifecycle, provider authorization, tool execution, or durable state.
+//! This module is subordinate to the canonical Chat/Work runtimes and the Main
+//! Chat kernel. It validates one turn's selected factual basis; it does not own
+//! task lifecycle, provider authorization, tool execution, or durable state.
 
 use openlife_core::agent::main_chat_agent_v1::{ContextSourceCandidate, ContextSourceKind};
 use serde::Deserialize;
@@ -73,15 +73,13 @@ impl MainChatSourceBoundContract {
             let content = if request.is_agent_memory_bound() {
                 lifecycle_memory_model_evidence(&candidate.content)
                     .map(|(_, _, content)| content.to_string())
-            } else if (request.is_markdown_bound()
-                && candidate.source_id.starts_with("markdown-memory:"))
-                || (request.is_document_bound()
-                    && matches!(
-                        candidate.source_kind,
-                        ContextSourceKind::MaterializedFile
-                            | ContextSourceKind::SelectedPersonalContext
-                            | ContextSourceKind::Observation
-                    ))
+            } else if request.is_document_bound()
+                && matches!(
+                    candidate.source_kind,
+                    ContextSourceKind::MaterializedFile
+                        | ContextSourceKind::SelectedPersonalContext
+                        | ContextSourceKind::Observation
+                )
             {
                 Some(candidate.content.clone())
             } else {

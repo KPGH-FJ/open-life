@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import {
   acceptProposal,
-  restoreArchivedMemory,
+  archiveMemory,
   startStreamMessage,
   redactInvokeArgs,
   saveConfig,
@@ -68,11 +68,11 @@ describe("canonical Tauri command arguments", () => {
   });
 
   it("sends canonical camelCase command arguments", async () => {
-    await restoreArchivedMemory({ ownerKind: "knowledge_note", ownerId: "note-1" });
+    await archiveMemory("memory:note-1");
     expect(invoke).toHaveBeenCalledWith(
-      "restore_archived_chunks",
+      "archive_memory",
       expect.objectContaining({
-        owner: { ownerKind: "knowledge_note", ownerId: "note-1" },
+        memoryId: "memory:note-1",
       })
     );
   });

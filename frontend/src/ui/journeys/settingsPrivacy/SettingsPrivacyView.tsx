@@ -85,6 +85,7 @@ export function SettingsPrivacyView({
   const searchProvider = draft.system?.search_provider ?? "duckduckgo";
   const searchCredential = searchCredentialState(draft);
   const artifactOutputDirectory = draft.system?.safe_paths?.[0];
+  const agentMemoryEnabled = draft.system?.agent_memory_enabled ?? true;
   const runtimeProfile = controller.snapshot?.productDiagnostics?.runtimeBuild.profile ?? null;
   const localProfileCredentialStore = runtimeProfile === "dev" || runtimeProfile === "qa";
 
@@ -451,6 +452,21 @@ export function SettingsPrivacyView({
                 <option value="deny">拒绝</option>
               </select>
             </label>
+          </section>
+
+          <section className="ol-settings-section" aria-labelledby="ol-settings-memory-title">
+            <div className="ol-settings-section-heading">
+              <span>一个全局开关，对话可单独调整</span>
+              <h2 id="ol-settings-memory-title">Agent 记忆</h2>
+            </div>
+            <FoundationToggle
+              label="允许 OpenLife 使用 Agent 记忆"
+              description="关闭后，对话不会召回或学习 Agent 记忆；已有内容仍可在个人智能中查看、忘记或删除。"
+              state={agentMemoryEnabled ? "on" : "off"}
+              onChange={next =>
+                controller.edit({ field: "agent_memory_enabled", value: next === "on" })
+              }
+            />
           </section>
 
           <section className="ol-settings-section" aria-labelledby="ol-settings-artifact-title">

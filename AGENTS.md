@@ -18,8 +18,7 @@ platform.
 
 - Product: local-first personal Agent OS
 - Stack: Tauri 2, Rust, React 18, TypeScript, SQLite
-- Product routes: `/today`, `/workspace`, `/tasks`, `/review`, `/life-model`,
-  `/settings`
+- Product routes: `/workspace`, `/life-model`, `/settings`
 
 Main Chat has separate send and stream entrypoints that converge on the same
 runtime owner:

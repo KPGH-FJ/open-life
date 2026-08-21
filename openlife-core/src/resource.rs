@@ -35,6 +35,7 @@ pub enum ResourceFormat {
     Docx,
     Csv,
     Xlsx,
+    Pptx,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +59,9 @@ pub enum ResourceProvenance {
         sheet: String,
         range: String,
     },
+    Pptx {
+        slide: u32,
+    },
 }
 
 impl ResourceProvenance {
@@ -74,6 +78,7 @@ impl ResourceProvenance {
                 | (ResourceFormat::Docx, Self::Docx { .. })
                 | (ResourceFormat::Csv, Self::Csv { .. })
                 | (ResourceFormat::Xlsx, Self::Xlsx { .. })
+                | (ResourceFormat::Pptx, Self::Pptx { .. })
         );
         if !valid {
             anyhow::bail!("resource_provenance_format_mismatch");
@@ -101,6 +106,9 @@ impl ResourceProvenance {
                 if sheet.trim().is_empty() || sheet.len() > 128 || !valid_cell_range(range) =>
             {
                 anyhow::bail!("resource_xlsx_provenance_invalid")
+            }
+            Self::Pptx { slide } if *slide == 0 => {
+                anyhow::bail!("resource_pptx_provenance_invalid")
             }
             _ => Ok(()),
         }
@@ -1034,6 +1042,7 @@ fn format_label(format: ResourceFormat) -> &'static str {
         ResourceFormat::Docx => "docx",
         ResourceFormat::Csv => "csv",
         ResourceFormat::Xlsx => "xlsx",
+        ResourceFormat::Pptx => "pptx",
     }
 }
 
@@ -1047,6 +1056,7 @@ fn parse_format(value: &str) -> Result<ResourceFormat> {
         "docx" => Ok(ResourceFormat::Docx),
         "csv" => Ok(ResourceFormat::Csv),
         "xlsx" => Ok(ResourceFormat::Xlsx),
+        "pptx" => Ok(ResourceFormat::Pptx),
         _ => anyhow::bail!("unsupported canonical resource format: {value}"),
     }
 }

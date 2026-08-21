@@ -151,8 +151,6 @@ pub(crate) struct MainChatCancelOutcome {
 #[derive(Debug, Clone)]
 pub(crate) struct MainChatCancellationRequest {
     pub(crate) outcome: MainChatCancelOutcome,
-    #[allow(dead_code)]
-    pub(crate) execution_epoch: Option<MainChatExecutionEpoch>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1020,13 +1018,11 @@ impl MainChatCancellationRegistry {
                 active.token.cancel();
                 MainChatCancellationRequest {
                     outcome: provider_attempt_summary(active),
-                    execution_epoch: Some(active.execution_epoch.clone()),
                 }
             }
             Some(TurnCancellationEntry::CancelledBeforeRegistration { .. }) => {
                 MainChatCancellationRequest {
                     outcome: no_active_turn_cancel_outcome(),
-                    execution_epoch: None,
                 }
             }
             None => {
@@ -1038,7 +1034,6 @@ impl MainChatCancellationRegistry {
                 );
                 MainChatCancellationRequest {
                     outcome: no_active_turn_cancel_outcome(),
-                    execution_epoch: None,
                 }
             }
         }
