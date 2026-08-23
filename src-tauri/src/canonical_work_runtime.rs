@@ -98,7 +98,7 @@ async fn generate_work_provider_with_transient_retry(
     sink: &mut CanonicalChatEventSink<'_>,
 ) -> Result<
     crate::provider_runtime::ProviderModelGeneration,
-    crate::provider_runtime::ProviderModelFailure,
+    Box<crate::provider_runtime::ProviderModelFailure>,
 > {
     #[cfg(test)]
     let live_diagnostic =
@@ -136,18 +136,19 @@ async fn generate_work_provider_with_transient_retry(
             client
                 .generate_direct_answer(request.clone(), &mut emit_progress)
                 .await
+                .map_err(Box::new)
         };
         if let Some(receipt) = match &result {
             Ok(generation) => generation.provider_receipt.as_ref(),
             Err(failure) => failure.provider_receipt.as_ref(),
         } {
             if let Err(code) = emit_provider_receipt(receipt, sink) {
-                return Err(crate::provider_runtime::ProviderModelFailure {
+                return Err(Box::new(crate::provider_runtime::ProviderModelFailure {
                     message: code.clone(),
                     provider_receipt: None,
                     blocker_code: Some(code),
                     proposal_ids: Vec::new(),
-                });
+                }));
             }
         }
         let retryable = result.as_ref().err().is_some_and(|failure| {
