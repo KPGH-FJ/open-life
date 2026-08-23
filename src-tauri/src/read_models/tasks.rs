@@ -1,22 +1,23 @@
-use crate::commands::chat::{get_conversation_view_model_with_state, ConversationViewModel};
-use crate::state::AppState;
+use crate::{artifact_materializer::managed_artifact_root, state::AppState};
 use openlife_core::agent::{
     build_tasks_view_model, build_workspace_view_model, BackendEntityKind, BackendEntityRef,
     EvidenceRef, EvidenceSensitivity, EvidenceSource, ProviderPrivacyBoundarySummary,
-    ReviewCenterViewModel, ReviewItem, TaskArtifactChangeKind, TaskArtifactChangeViewModel,
+    ReviewCenterViewModel, TaskArtifactChangeKind, TaskArtifactChangeViewModel,
     TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel, TaskArtifactUndoViewModel,
     TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel, TaskArtifactViewModel,
-    TaskItemViewModel, TaskLifecycleStatus, TaskTerminalDeliveryStatus, TaskViewModelTaskInput,
-    TaskWorkPlanStepViewModel, TaskWorkPlanViewModel, TasksViewModel, TasksViewModelBuildInput,
-    ViewModelEnvelope, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
-    WorkspaceActivityItem, WorkspaceViewModel, WorkspaceViewModelBuildInput,
+    TaskCompletionDisposition, TaskItemViewModel, TaskLifecycleStatus, TaskTerminalDeliveryStatus,
+    TaskViewModelTaskInput, TaskWorkPlanStepViewModel, TaskWorkPlanViewModel, TasksViewModel,
+    TasksViewModelBuildInput, ViewModelEnvelope, ViewModelStatus, ViewModelWarning,
+    ViewModelWarningSeverity, WorkspaceActivityItem, WorkspaceViewModel,
+    WorkspaceViewModelBuildInput,
 };
+use openlife_core::conversation::ConversationItemKind;
 use openlife_core::task_runtime::{
     CanonicalArtifactSnapshot, CanonicalArtifactStatus, CanonicalTaskSnapshot, CanonicalTaskStatus,
     CanonicalWorkPlanRecord,
 };
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tauri::State;
 
@@ -30,7 +31,6 @@ const TASK_ARTIFACT_READ_MAX_BYTES: u64 = 100 * 1024;
 #[serde(rename_all = "camelCase")]
 pub struct WorkbenchViewModel {
     pub captured_at: String,
-    pub conversation: ViewModelEnvelope<ConversationViewModel>,
     pub workspace: ViewModelEnvelope<WorkspaceViewModel>,
     pub tasks: ViewModelEnvelope<TasksViewModel>,
     pub review: ViewModelEnvelope<ReviewCenterViewModel>,
@@ -59,7 +59,6 @@ pub(crate) async fn get_tasks_view_model_with_state(
 struct TasksReadModelSnapshot {
     envelope: ViewModelEnvelope<TasksViewModel>,
     review_envelope: ViewModelEnvelope<ReviewCenterViewModel>,
-    review_items: Vec<ReviewItem>,
     activity_by_task: BTreeMap<String, Vec<WorkspaceActivityItem>>,
 }
 
@@ -68,8 +67,8 @@ async fn load_tasks_read_model_snapshot(
 ) -> Result<TasksReadModelSnapshot, String> {
     let mut warnings = Vec::new();
     let review_envelope = load_review_envelope(state).await;
-    let (review_items, review_projection_authoritative) =
-        review_items_for_tasks(&review_envelope, &mut warnings);
+    let review_projection_authoritative =
+        review_projection_is_authoritative(&review_envelope, &mut warnings);
     let loaded_tasks =
         load_canonical_task_inputs(state, review_projection_authoritative, &mut warnings).await;
     let model = build_tasks_view_model(TasksViewModelBuildInput {
@@ -111,7 +110,6 @@ async fn load_tasks_read_model_snapshot(
     Ok(TasksReadModelSnapshot {
         envelope,
         review_envelope,
-        review_items,
         activity_by_task: loaded_tasks.activity_by_task,
     })
 }
@@ -121,11 +119,6 @@ pub(crate) async fn get_workbench_view_model_with_state(
     requested_conversation_id: Option<&str>,
 ) -> Result<WorkbenchViewModel, String> {
     let captured_at = chrono::Utc::now().to_rfc3339();
-    let conversation = load_conversation_envelope(state, requested_conversation_id).await;
-    let selected_conversation_id = conversation
-        .data
-        .as_ref()
-        .and_then(|model| model.selected_conversation_id.as_deref());
     let snapshot = load_tasks_read_model_snapshot(state).await?;
     let tasks = snapshot.envelope.clone();
     let review = snapshot.review_envelope.clone();
@@ -133,38 +126,15 @@ pub(crate) async fn get_workbench_view_model_with_state(
     let workspace = compose_workspace_envelope(
         snapshot,
         provider_boundary.clone(),
-        selected_conversation_id,
+        requested_conversation_id,
     );
     Ok(WorkbenchViewModel {
         captured_at,
-        conversation,
         workspace,
         tasks,
         review,
         provider_boundary,
     })
-}
-
-async fn load_conversation_envelope(
-    state: &Arc<AppState>,
-    requested_conversation_id: Option<&str>,
-) -> ViewModelEnvelope<ConversationViewModel> {
-    match get_conversation_view_model_with_state(requested_conversation_id, state).await {
-        Ok(model) => {
-            let status = if model.status == "empty" {
-                ViewModelStatus::Empty
-            } else {
-                ViewModelStatus::Ready
-            };
-            let mut envelope = ViewModelEnvelope::backend_read_model(status, Some(model));
-            envelope.last_updated_at = Some(chrono::Utc::now().to_rfc3339());
-            envelope
-        }
-        Err(error) => error_envelope(
-            "conversation_view_model_unavailable",
-            format!("ConversationViewModel could not be loaded: {error}"),
-        ),
-    }
 }
 
 async fn load_provider_boundary_envelope(
@@ -191,6 +161,7 @@ fn compose_workspace_envelope(
             "TasksViewModel data unavailable for WorkspaceViewModel",
         );
     };
+    let has_task_data = !tasks.items.is_empty();
     let active_task_id = tasks.items.iter().find_map(|item| {
         let in_selected_conversation = conversation_id
             .is_none_or(|selected| item.conversation_id.as_deref() == Some(selected));
@@ -209,16 +180,10 @@ fn compose_workspace_envelope(
         .and_then(|task_id| snapshot.activity_by_task.remove(task_id))
         .unwrap_or_default();
     let provider_status = provider_envelope.status;
-    let provider_summary = provider_envelope
-        .data
-        .clone()
-        .unwrap_or_else(ProviderPrivacyBoundarySummary::unknown);
     let model = build_workspace_view_model(WorkspaceViewModelBuildInput {
         tasks,
         selected_conversation_id: conversation_id.map(str::to_owned),
-        review_items: snapshot.review_items,
         active_task_activity,
-        provider_privacy_boundary_summary: provider_summary,
         source_refs: vec![source_ref(
             "main_chat_task_evidence_view",
             "Metadata-safe Main Chat task activity",
@@ -226,14 +191,10 @@ fn compose_workspace_envelope(
         contract_limitations: vec![
             "Task controls and review actions are requests only; completion requires a refreshed backend read model.".into(),
             "Workspace activity is metadata-only. Resource, Web, and artifact bodies remain behind their typed evidence owners.".into(),
-            "When selectedConversationId is present, tasks, activeTask, review checkpoints, and activity are restricted to that exact Conversation.".into(),
+            "When selectedConversationId is present, activity is restricted to that exact Conversation; Task and Review entities remain in their single Workbench lanes.".into(),
         ],
     });
-    let status = workspace_composition_status(
-        tasks_status,
-        provider_status,
-        !model.recent_task_refs.is_empty(),
-    );
+    let status = workspace_composition_status(tasks_status, provider_status, has_task_data);
     let mut envelope = ViewModelEnvelope::backend_read_model(status, Some(model));
     envelope.last_updated_at = Some(chrono::Utc::now().to_rfc3339());
     envelope.warnings = snapshot.envelope.warnings;
@@ -412,7 +373,7 @@ async fn canonical_task_input(
         .collect::<Vec<_>>();
     let preview = canonical_result_preview(state, &snapshot, &canonical_artifacts)
         .await
-        .or_else(|| Some(canonical_task_preview(&snapshot)));
+        .or_else(|| canonical_task_preview(&snapshot));
     let canonical_evidence = vec![
         source_ref(snapshot.task.id.clone(), "Canonical Task snapshot"),
         source_ref(
@@ -440,11 +401,7 @@ async fn canonical_task_input(
             )
         })
         .collect();
-    let title = match snapshot.task.task_kind.as_str() {
-        "report" => "Generated report",
-        "plan" => "Plan",
-        _ => "Work task",
-    };
+    let title = canonical_task_title(state, &snapshot).await;
     let attention_reason_codes = snapshot
         .attention
         .iter()
@@ -456,18 +413,26 @@ async fn canonical_task_input(
         attention.resolved_at.is_none()
             && attention.kind == openlife_core::task_runtime::CanonicalAttentionKind::ScopeStale
     });
+    let completion_disposition = snapshot.final_result.as_ref().map(|result| {
+        if result.summary_code.ends_with("_with_disclosed_limitations") {
+            TaskCompletionDisposition::CompleteWithDisclosedLimitations
+        } else {
+            TaskCompletionDisposition::Complete
+        }
+    });
     (
         TaskViewModelTaskInput {
             task_id: snapshot.task.id.clone(),
             canonical_task_id: Some(snapshot.task.id.clone()),
             conversation_id: Some(snapshot.task.conversation_id),
-            title: title.into(),
+            title,
             related_run_ids: run_ids,
             final_delivery_present: false,
             final_delivery_status: None,
             canonical_lifecycle_status: Some(lifecycle_status),
             canonical_terminal_delivery_status: Some(terminal_status),
             canonical_final_delivery_evidence_present: Some(delivery_proven),
+            completion_disposition,
             canonical_items,
             work_plan: work_plan.map(|record| TaskWorkPlanViewModel {
                 revision: record.plan_revision,
@@ -511,6 +476,41 @@ async fn canonical_task_input(
         },
         activity,
     )
+}
+
+async fn canonical_task_title(state: &Arc<AppState>, snapshot: &CanonicalTaskSnapshot) -> String {
+    let fallback = "Work";
+    let Some(store) = state.conversation_store.as_ref() else {
+        return fallback.into();
+    };
+    let Ok(items) = store
+        .lock()
+        .await
+        .list_items(&snapshot.task.conversation_id, 200)
+    else {
+        return fallback.into();
+    };
+    items
+        .into_iter()
+        .find(|item| {
+            item.kind == ConversationItemKind::UserMessage
+                && item.content_digest == snapshot.task.initial_outcome_digest
+        })
+        .map(|item| bounded_task_title(&item.content))
+        .filter(|title| !title.is_empty())
+        .unwrap_or_else(|| fallback.into())
+}
+
+fn bounded_task_title(goal: &str) -> String {
+    const MAX_TITLE_CHARS: usize = 120;
+    let normalized = goal.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = normalized.chars();
+    let title = chars.by_ref().take(MAX_TITLE_CHARS).collect::<String>();
+    if chars.next().is_some() {
+        format!("{title}…")
+    } else {
+        title
+    }
 }
 
 fn canonical_item_activity_summary(
@@ -669,10 +669,8 @@ fn canonical_artifact_delivery_status(
     artifact_views: &[TaskArtifactViewModel],
 ) -> (TaskLifecycleStatus, TaskTerminalDeliveryStatus, bool) {
     let final_result_present = snapshot.final_result.as_ref().is_some_and(|result| {
-        let expected_id = openlife_core::task_runtime::report_final_result_item_id(
-            &snapshot.task.id,
-            &result.run_id,
-        );
+        let expected_id =
+            openlife_core::task_runtime::final_result_item_id(&snapshot.task.id, &result.run_id);
         result.item_id == expected_id
             && snapshot.items.iter().any(|item| {
                 item.id == result.item_id
@@ -694,7 +692,7 @@ fn canonical_artifact_delivery_status(
                 .observed_content_digest
                 .as_deref()
                 .unwrap_or("");
-            let expected_verification_id = openlife_core::task_runtime::report_verification_item_id(
+            let expected_verification_id = openlife_core::task_runtime::artifact_verification_item_id(
                 &artifact.artifact.id,
                 artifact.current_version.version,
                 observed_digest,
@@ -802,7 +800,7 @@ async fn canonical_artifact_view(
         .observed_content_digest
         .as_deref()
         .is_some_and(|observed| {
-            let expected = openlife_core::task_runtime::report_verification_item_id(
+            let expected = openlife_core::task_runtime::artifact_verification_item_id(
                 &snapshot.artifact.id,
                 snapshot.current_version.version,
                 observed,
@@ -814,7 +812,8 @@ async fn canonical_artifact_view(
                         == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
             })
         });
-    let presentation = artifact_presentation(state, snapshot, verification_item_present).await;
+    let presentation =
+        artifact_presentation(state, snapshot, task, verification_item_present).await;
     TaskArtifactViewModel {
         artifact_id: snapshot.artifact.id.clone(),
         version: snapshot.current_version.version,
@@ -891,6 +890,7 @@ struct ArtifactPresentation {
 async fn artifact_presentation(
     state: &Arc<AppState>,
     snapshot: &CanonicalArtifactSnapshot,
+    task: &CanonicalTaskSnapshot,
     verification_item_present: bool,
 ) -> ArtifactPresentation {
     let unavailable = |reason: &str| TaskArtifactPreviewViewModel {
@@ -968,7 +968,17 @@ async fn artifact_presentation(
                 verification,
             };
         };
-        let safe_paths = state.config.lock().await.system.safe_paths.clone();
+        let safe_paths = match canonical_artifact_safe_paths(state, snapshot, task).await {
+            Ok(paths) => paths,
+            Err(reason) => {
+                verification.reason_code = Some(reason);
+                return ArtifactPresentation {
+                    change,
+                    preview,
+                    verification,
+                };
+            }
+        };
         match read_verified_artifact(path, &safe_paths, &snapshot.artifact.media_type) {
             Ok((digest, content)) => {
                 verification.observed_content_digest = Some(digest.clone());
@@ -1003,6 +1013,66 @@ async fn artifact_presentation(
         preview,
         verification,
     }
+}
+
+async fn canonical_artifact_safe_paths(
+    state: &Arc<AppState>,
+    artifact: &CanonicalArtifactSnapshot,
+    task: &CanonicalTaskSnapshot,
+) -> Result<Vec<String>, String> {
+    let source_run_id = task
+        .items
+        .iter()
+        .find(|item| item.id == artifact.artifact.source_item_id)
+        .map(|item| item.run_id.as_str())
+        .ok_or_else(|| "artifact_source_run_missing".to_string())?;
+    let run = task
+        .runs
+        .iter()
+        .find(|run| run.run_id == source_run_id)
+        .ok_or_else(|| "artifact_source_run_missing".to_string())?;
+    let root = match run.project_id.as_deref() {
+        Some(project_id) => {
+            let conversation_store = state
+                .conversation_store
+                .as_ref()
+                .ok_or_else(|| "conversation_store_unavailable".to_string())?;
+            let project = conversation_store
+                .lock()
+                .await
+                .get_project(project_id)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "artifact_project_missing".to_string())?;
+            let scope_digest =
+                openlife_core::conversation::ConversationStore::project_scope_digest(&project);
+            if run.project_revision != Some(project.revision)
+                || run.scope_digest.as_deref() != Some(scope_digest.as_str())
+            {
+                return Err("artifact_project_scope_stale".into());
+            }
+            match project.workspace_root {
+                Some(root) => PathBuf::from(root),
+                None => task_managed_artifact_root(state, &task.task.conversation_id).await?,
+            }
+        }
+        None => task_managed_artifact_root(state, &task.task.conversation_id).await?,
+    };
+    let canonical = root
+        .canonicalize()
+        .map_err(|_| "artifact_authorized_root_unavailable".to_string())?;
+    Ok(vec![canonical.to_string_lossy().into_owned()])
+}
+
+async fn task_managed_artifact_root(
+    state: &Arc<AppState>,
+    conversation_id: &str,
+) -> Result<PathBuf, String> {
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let database_path = store.lock().await.db_path().map(Path::to_path_buf);
+    managed_artifact_root(database_path.as_deref(), conversation_id)
 }
 
 fn bounded_artifact_preview(content: &str) -> TaskArtifactPreviewViewModel {
@@ -1162,7 +1232,7 @@ fn artifact_preview_content(
     Ok(content)
 }
 
-fn canonical_task_preview(snapshot: &CanonicalTaskSnapshot) -> String {
+fn canonical_task_preview(snapshot: &CanonicalTaskSnapshot) -> Option<String> {
     let total = snapshot.artifacts.len();
     let materialized = snapshot
         .artifacts
@@ -1170,22 +1240,18 @@ fn canonical_task_preview(snapshot: &CanonicalTaskSnapshot) -> String {
         .filter(|artifact| artifact.artifact.status == CanonicalArtifactStatus::Materialized)
         .count();
     match snapshot.task.status {
-        CanonicalTaskStatus::WaitingReview => {
-            format!("{total} artifact(s) are waiting for Review.")
-        }
+        CanonicalTaskStatus::WaitingReview => Some(format!("{total} 份结果正在等待你的审核。")),
         CanonicalTaskStatus::Completed => {
-            format!("{materialized} of {total} artifact(s) are materialized and verified.")
+            Some(format!("已交付并核验 {materialized} / {total} 份结果。"))
         }
-        CanonicalTaskStatus::Blocked => "The task is blocked.".into(),
+        CanonicalTaskStatus::Blocked => Some("任务尚未交付，需要先处理当前阻塞。".into()),
         CanonicalTaskStatus::EffectUnknown => {
-            "The task effect is unknown and was not replayed.".into()
+            Some("结果写入状态未知，OpenLife 没有自动重放。".into())
         }
-        CanonicalTaskStatus::Failed => "The task failed before verified delivery.".into(),
-        CanonicalTaskStatus::Cancelled => "The task was cancelled.".into(),
-        CanonicalTaskStatus::Interrupted => "The task was interrupted and can be retried.".into(),
-        CanonicalTaskStatus::Running => {
-            format!("The task is running with {total} artifact draft(s).")
-        }
+        CanonicalTaskStatus::Failed => Some("任务在完成可核验交付前失败。".into()),
+        CanonicalTaskStatus::Cancelled => Some("任务已取消，未产生最终交付。".into()),
+        CanonicalTaskStatus::Interrupted => Some("任务已中断，可以从保留的工作记录重试。".into()),
+        CanonicalTaskStatus::Running => None,
     }
 }
 
@@ -1199,19 +1265,19 @@ async fn load_review_envelope(state: &Arc<AppState>) -> ViewModelEnvelope<Review
     }
 }
 
-fn review_items_for_tasks(
+fn review_projection_is_authoritative(
     envelope: &ViewModelEnvelope<ReviewCenterViewModel>,
     warnings: &mut Vec<ViewModelWarning>,
-) -> (Vec<ReviewItem>, bool) {
+) -> bool {
     match envelope.status {
         ViewModelStatus::Ready | ViewModelStatus::Empty => match envelope.data.as_ref() {
-            Some(model) => (model.items.clone(), true),
+            Some(_) => true,
             None => {
                 warnings.push(warning(
                     "review_center_view_model_data_missing",
                     "TasksViewModel could not prove review-item absence because ReviewCenterViewModel returned no data.",
                 ));
-                (Vec::new(), false)
+                false
             }
         },
         _ => {
@@ -1222,7 +1288,7 @@ fn review_items_for_tasks(
                     envelope.status
                 ),
             ));
-            (Vec::new(), false)
+            false
         }
     }
 }
@@ -1253,6 +1319,49 @@ mod tests {
     };
     use openlife_core::agent::ViewModelStatus;
     use std::sync::Arc;
+
+    #[tokio::test]
+    async fn recent_work_uses_the_user_goal_instead_of_a_generic_internal_title() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        crate::main_chat_acceptance_test_support::
+            configure_live_provider_eval_state_with_local_http_provider(
+                &state,
+                "A bounded research result.",
+            )
+            .await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Continuous learning research")
+            .unwrap();
+        let goal = "整理 continuous learning 的核心概念和近期实践";
+        crate::canonical_work_runtime::run_canonical_work(
+            crate::canonical_work_runtime::CanonicalWorkInput {
+                task_id: uuid::Uuid::new_v4().to_string(),
+                run_id: uuid::Uuid::new_v4().to_string(),
+                turn_id: uuid::Uuid::new_v4().to_string(),
+                conversation_id,
+                messages: vec![openlife_core::llm::ChatMessage {
+                    role: "user".into(),
+                    content: goal.into(),
+                }],
+                selected_skill_id: None,
+                stream: false,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap();
+
+        let envelope = get_tasks_view_model_with_state(&state).await.unwrap();
+        let task = envelope.data.unwrap().items.into_iter().next().unwrap();
+        assert_eq!(task.title, goal);
+    }
 
     #[test]
     fn workspace_composition_preserves_upstream_failure_states() {
@@ -1381,7 +1490,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workbench_snapshot_binds_conversation_and_all_read_lanes_once() {
+    async fn workbench_snapshot_filters_work_lanes_by_live_conversation_identity() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let conversation_id = uuid::Uuid::new_v4().to_string();
         crate::commands::chat::create_chat_session_with_state(
@@ -1397,15 +1506,6 @@ mod tests {
             .unwrap();
 
         assert!(!snapshot.captured_at.is_empty());
-        assert_eq!(snapshot.conversation.status, ViewModelStatus::Ready);
-        assert_eq!(
-            snapshot
-                .conversation
-                .data
-                .as_ref()
-                .and_then(|model| model.selected_conversation_id.as_deref()),
-            Some(conversation_id.as_str())
-        );
         assert_eq!(
             snapshot
                 .workspace
@@ -1432,8 +1532,31 @@ mod tests {
         let content = "# Canonical report";
         let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
         let conversation_id = uuid::Uuid::new_v4().to_string();
+        let project_id = uuid::Uuid::new_v4().to_string();
         let task_id = uuid::Uuid::new_v4().to_string();
         let run_id = uuid::Uuid::new_v4().to_string();
+        let project = {
+            let conversation_store = state.conversation_store.as_ref().unwrap().lock().await;
+            conversation_store
+                .create_project(
+                    &project_id,
+                    "Artifact View Project",
+                    Some(&artifact_dir.path().to_string_lossy()),
+                )
+                .unwrap();
+            conversation_store
+                .create_conversation(&conversation_id, "Artifact View")
+                .unwrap();
+            conversation_store
+                .assign_conversation_project(&conversation_id, Some(&project_id))
+                .unwrap();
+            conversation_store
+                .get_project(&project_id)
+                .unwrap()
+                .unwrap()
+        };
+        let scope_digest =
+            openlife_core::conversation::ConversationStore::project_scope_digest(&project);
         state
             .canonical_task_runtime_store
             .as_ref()
@@ -1450,9 +1573,9 @@ mod tests {
                     Sha256::digest(b"artifact view outcome")
                 ),
                 plan_digest: None,
-                project_id: None,
-                project_revision: None,
-                scope_digest: None,
+                project_id: Some(&project_id),
+                project_revision: Some(project.revision),
+                scope_digest: Some(&scope_digest),
             })
             .unwrap();
         let work_plan = openlife_core::work_orchestration::StructuredWorkPlan {
@@ -1486,7 +1609,18 @@ mod tests {
             completion: openlife_core::work_orchestration::WorkCompletionContract {
                 result_kind: openlife_core::work_orchestration::WorkResultKind::Artifact,
                 requires_verification: true,
+                requirements: vec![
+                    openlife_core::work_orchestration::WorkCompletionRequirement {
+                        id: "artifact".into(),
+                        description: "The requested Artifact is complete.".into(),
+                        evidence_kind:
+                            openlife_core::work_orchestration::WorkCompletionEvidenceKind::Result,
+                        allow_transparent_limitation: false,
+                    },
+                ],
+                requires_review_before_write: false,
             },
+            source_constraints: Default::default(),
         };
         state
             .canonical_task_runtime_store
@@ -1537,11 +1671,17 @@ mod tests {
             openlife_core::agent::ProposalType::ExternalWriteAction,
             &format!("filesystem.{artifact_path_text}"),
             serde_json::json!({
+                "reviewSubjectSchema": openlife_core::task_runtime::CANONICAL_ARTIFACT_REVIEW_SUBJECT_SCHEMA,
+                "generatedByProvider": true,
+                "canonicalTaskId": task_id,
+                "sourceRunId": run_id,
+                "artifactDraftItemId": prepared.artifact_draft_item_id,
                 "path": artifact_path_text,
-                "content": content,
+                "operation": "create",
+                "artifactKind": "markdown",
                 "contentDigest": content_digest,
-                "expected_target_absent": true,
-                "expected_target_digest": null,
+                "expectedTargetAbsent": true,
+                "expectedTargetDigest": null,
                 "artifactId": prepared.artifact_id,
                 "artifactVersion": prepared.version,
             }),
@@ -1551,6 +1691,8 @@ mod tests {
             openlife_core::agent::ProposalSource::ChatConversation,
         );
         proposal.id = "proposal-report-view".into();
+        proposal.run_id = Some(run_id.clone());
+        proposal.source_detail = Some(task_id.clone());
         state
             .proposal_store
             .as_ref()

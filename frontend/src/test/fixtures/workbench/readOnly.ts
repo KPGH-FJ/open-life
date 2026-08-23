@@ -5,7 +5,6 @@ import type {
   TasksViewModel,
   ViewModelEnvelope,
 } from "@/tauri";
-import type { ProductBoundaryDataSource } from "@/ui/journeys/productWorkbench";
 
 type TasksReadOnlySnapshot = {
   envelope: ViewModelEnvelope<TasksViewModel>;
@@ -19,11 +18,11 @@ export type WorkbenchFixtureId =
   | "fixture-stale"
   | "fixture-error"
   | "fixture-empty"
-  | "fixture-durable-approved"
-  | "fixture-durable-applying"
-  | "fixture-durable-applied"
-  | "fixture-durable-failed"
-  | "fixture-durable-rolled-back"
+  | "fixture-personal-intelligence-approved"
+  | "fixture-personal-intelligence-applying"
+  | "fixture-personal-intelligence-applied"
+  | "fixture-personal-intelligence-failed"
+  | "fixture-personal-intelligence-rolled-back"
   | "fixture-settings-local-known"
   | "fixture-settings-review-required"
   | "fixture-settings-refresh-unknown"
@@ -380,22 +379,13 @@ export const workbenchFixtureLabels: Record<WorkbenchFixtureId, string> = {
   "fixture-stale": "静态样例：数据陈旧",
   "fixture-error": "静态样例：读取失败",
   "fixture-empty": "静态样例：暂无内容",
-  "fixture-durable-approved": "长期状态：已批准，尚未应用",
-  "fixture-durable-applying": "长期状态：正在应用",
-  "fixture-durable-applied": "长期状态：已应用",
-  "fixture-durable-failed": "长期状态：应用失败",
-  "fixture-durable-rolled-back": "长期状态：已回滚",
+  "fixture-personal-intelligence-approved": "长期状态：已批准，尚未应用",
+  "fixture-personal-intelligence-applying": "长期状态：正在应用",
+  "fixture-personal-intelligence-applied": "长期状态：已应用",
+  "fixture-personal-intelligence-failed": "长期状态：应用失败",
+  "fixture-personal-intelligence-rolled-back": "长期状态：已回滚",
   "fixture-settings-local-known": "设置：本地边界已确认",
   "fixture-settings-review-required": "设置：外部测试需要审核",
   "fixture-settings-refresh-unknown": "设置：保存后边界未知",
   "fixture-settings-save-failed": "设置：保存失败",
 };
-
-export function readOnlyFixtureDataSource(id: WorkbenchFixtureId): ProductBoundaryDataSource {
-  return {
-    async loadBoundary() {
-      const status = id === "fixture-error" ? "error" : id === "fixture-stale" ? "stale" : "ready";
-      return boundaryEnvelope(status, status === "error" ? null : localBoundary);
-    },
-  };
-}

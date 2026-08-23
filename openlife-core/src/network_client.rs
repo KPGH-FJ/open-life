@@ -1628,7 +1628,18 @@ mod tests {
         assert_eq!(deny_decision.disposition, NetworkPolicyDisposition::Deny);
         assert_eq!(deny_decision.reason_code, "network_policy_default_deny");
 
-        let ask = NetworkPolicy::default();
+        let default_policy = NetworkPolicy::default();
+        assert_eq!(
+            resolve_network_policy_decision(&default_policy, url, capability)
+                .unwrap()
+                .disposition,
+            NetworkPolicyDisposition::Allow,
+            "ordinary public networking is a normal Agent capability"
+        );
+        let ask = NetworkPolicy {
+            default_decision: "ask".into(),
+            ..NetworkPolicy::default()
+        };
         let ask_decision = resolve_network_policy_decision(&ask, url, capability).unwrap();
         assert_eq!(ask_decision.disposition, NetworkPolicyDisposition::Ask);
         assert_eq!(ask_decision.reason_code, "network_policy_consent_required");
@@ -1668,7 +1679,10 @@ mod tests {
                 default_decision: "deny".into(),
                 ..NetworkPolicy::default()
             },
-            NetworkPolicy::default(),
+            NetworkPolicy {
+                default_decision: "ask".into(),
+                ..NetworkPolicy::default()
+            },
             NetworkPolicy {
                 default_decision: "allow".into(),
                 domain_denylist: vec!["127.0.0.1".into()],
@@ -1714,7 +1728,10 @@ mod tests {
         });
         let url = "http://127.0.0.1:9/effect";
         for policy in [
-            NetworkPolicy::default(),
+            NetworkPolicy {
+                default_decision: "ask".into(),
+                ..NetworkPolicy::default()
+            },
             NetworkPolicy {
                 default_decision: "deny".into(),
                 ..NetworkPolicy::default()

@@ -1,11 +1,21 @@
 use std::path::{Component, Path, PathBuf};
 
+#[cfg(test)]
 pub(crate) fn resolve_main_chat_workspace_file_target(
     user_text: &str,
 ) -> Result<(String, String), String> {
+    resolve_workspace_file_relative_target(&select_workspace_file_relative_path(user_text))
+}
+
+/// Resolve an already model-selected relative path against the authenticated
+/// workspace scope. Semantic selection and filesystem authorization remain
+/// separate: the model supplies only the relative path, while this boundary
+/// owns traversal and scope enforcement.
+pub(crate) fn resolve_workspace_file_relative_target(
+    relative: &str,
+) -> Result<(String, String), String> {
     let workspace = resolve_workspace_root()?;
-    let relative = select_workspace_file_relative_path(user_text);
-    let safe_relative = validate_relative_workspace_path(&relative)?;
+    let safe_relative = validate_relative_workspace_path(relative)?;
     let candidate = workspace.join(&safe_relative);
     if !candidate.starts_with(&workspace) {
         return Err("file read outside workspace is blocked".into());
@@ -33,6 +43,7 @@ pub(crate) fn resolve_workspace_root() -> Result<PathBuf, String> {
         .map_err(|err| format!("workspace canonicalization failed: {err}"))
 }
 
+#[cfg(test)]
 fn select_workspace_file_relative_path(user_text: &str) -> String {
     if let Some(explicit) = extract_explicit_relative_path(user_text) {
         return explicit;
@@ -50,6 +61,7 @@ fn select_workspace_file_relative_path(user_text: &str) -> String {
     }
 }
 
+#[cfg(test)]
 fn extract_explicit_relative_path(user_text: &str) -> Option<String> {
     user_text
         .split_whitespace()
@@ -58,6 +70,7 @@ fn extract_explicit_relative_path(user_text: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+#[cfg(test)]
 fn trim_path_token(token: &str) -> &str {
     let trimmed = token.trim_matches(|ch: char| {
         matches!(
@@ -68,6 +81,7 @@ fn trim_path_token(token: &str) -> &str {
     trimmed.strip_suffix('.').unwrap_or(trimmed)
 }
 
+#[cfg(test)]
 fn looks_like_workspace_path(token: &str) -> bool {
     if token.is_empty() || token.starts_with("http://") || token.starts_with("https://") {
         return false;

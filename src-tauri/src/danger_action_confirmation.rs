@@ -887,12 +887,11 @@ mod tests {
         assert!(proposal.contains("proposal_requires_native_confirmation(&proposal)"));
         assert!(proposal.contains("proposal_may_dispatch_effect(state.inner(), &proposal)"));
         assert_eq!(capability["windows"], serde_json::json!(["main"]));
-        for shipped_command in ["accept_proposal,"] {
-            assert!(
-                lib.contains(shipped_command),
-                "expected privileged command {shipped_command} to remain shipped behind the Rust authority"
-            );
-        }
+        let shipped_command = "accept_proposal,";
+        assert!(
+            lib.contains(shipped_command),
+            "expected privileged command {shipped_command} to remain shipped behind the Rust authority"
+        );
     }
 
     #[test]

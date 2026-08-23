@@ -4,6 +4,20 @@ use sha2::{Digest, Sha256};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+pub(crate) fn managed_artifact_root(
+    database_path: Option<&Path>,
+    conversation_id: &str,
+) -> Result<PathBuf, String> {
+    match database_path.and_then(Path::parent) {
+        Some(parent) => Ok(parent.join("managed-artifacts").join(conversation_id)),
+        None if cfg!(test) => Ok(std::env::temp_dir()
+            .join("openlife-managed-artifacts-test")
+            .join(std::process::id().to_string())
+            .join(conversation_id)),
+        None => Err("managed_artifact_requires_file_backed_store".into()),
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedArtifactMaterialization {
     pub artifact_id: String,
@@ -98,13 +112,6 @@ fn canonical_safe_paths(safe_paths: &[String]) -> Vec<PathBuf> {
         .collect()
 }
 
-/// Resolves the same first safe root used by the materializer. Planning and
-/// staging must share this boundary so a path cannot be accepted while the
-/// draft is produced and rejected only after canonical Task state exists.
-pub(crate) fn first_canonical_artifact_safe_root(safe_paths: &[String]) -> Option<PathBuf> {
-    canonical_safe_paths(safe_paths).into_iter().next()
-}
-
 fn canonical_parent_in_safe_paths(
     target: &Path,
     safe_paths: &[PathBuf],
@@ -189,6 +196,7 @@ fn media_type_for_path(path: &Path) -> &'static str {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_artifact_materialization(
     proposal_id: &str,
     dispatch_claim_id: &str,
@@ -206,6 +214,7 @@ pub(crate) fn prepare_artifact_materialization(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_artifact_materialization_for_artifact(
     artifact_id: &str,
     proposal_id: &str,
@@ -258,6 +267,7 @@ pub(crate) fn capture_artifact_target_precondition(
     })
 }
 
+#[cfg(test)]
 pub(crate) fn prepare_artifact_materialization_with_precondition_for_artifact(
     artifact_id: &str,
     proposal_id: &str,
@@ -609,6 +619,7 @@ pub(crate) fn confirmed_move_receipt_from_paths(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn stage_artifact_bytes(
     prepared: &PreparedArtifactMaterialization,
     content: &str,

@@ -30,8 +30,6 @@ describe("canonical Tauri command arguments", () => {
   it("redacts stream message content and identifiers from dev invoke logs", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reply: "ok",
-      reasoning_trace: {},
-      tool_calls: [],
       run_id: "run-1",
     });
 
@@ -117,8 +115,6 @@ describe("canonical Tauri command arguments", () => {
   it("passes the selected skill through canonical chat command wrappers", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reply: "ok",
-      reasoning_trace: {},
-      tool_calls: [],
     });
 
     await startStreamMessage("session-skill", [{ role: "user", content: "Summarize this" }], {

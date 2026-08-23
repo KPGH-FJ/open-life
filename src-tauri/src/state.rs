@@ -8,7 +8,7 @@ use openlife_core::feedback::FeedbackStore;
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
 use openlife_core::mcp_audit::McpAuditStore;
-use openlife_core::memory::MemoryStore;
+use openlife_core::memory::KnowledgeNoteProjectionStore;
 use openlife_core::privacy::PrivacyEngine;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::vectors::VectorStore;
@@ -60,8 +60,8 @@ pub struct CredentialBootstrapSnapshot {
 }
 
 impl CredentialBootstrapSnapshot {
-    pub(crate) fn from_statuses(statuses: [CredentialBootstrapStatus; 3]) -> Self {
-        let purpose_names = ["canonical_task_receipts", "task_store", "mcp_audit"];
+    pub(crate) fn from_statuses(statuses: [CredentialBootstrapStatus; 2]) -> Self {
+        let purpose_names = ["canonical_task_receipts", "mcp_audit"];
         let mut purposes = purpose_names
             .into_iter()
             .zip(statuses)
@@ -125,7 +125,7 @@ impl CredentialBootstrapSnapshot {
 
 impl Default for CredentialBootstrapSnapshot {
     fn default() -> Self {
-        Self::from_statuses([CredentialBootstrapStatus::Unknown; 3])
+        Self::from_statuses([CredentialBootstrapStatus::Unknown; 2])
     }
 }
 
@@ -196,7 +196,10 @@ pub struct AppState {
     /// Operation-level serialization for the file journal, canonical rename,
     /// and derived projection protocol. It never owns product data itself.
     pub life_model_write_coordinator: Arc<Mutex<()>>,
-    pub memory_store: Arc<Mutex<MemoryStore>>,
+    /// Canonical KnowledgeNote owner and derived projection store for
+    /// lifecycle-owned Agent Memory. The field name remains aligned with the
+    /// stable on-disk/outbox `MemoryStore` protocol identity.
+    pub memory_store: Arc<Mutex<KnowledgeNoteProjectionStore>>,
     /// Canonical owner for ordinary Chat Conversation, Turn, and Item
     /// lifecycle. It is intentionally independent of Memory and Task stores.
     pub conversation_store: Option<Arc<Mutex<ConversationStore>>>,
@@ -219,18 +222,28 @@ pub struct AppState {
     /// not own proposals or canonical LifeModel state.
     pub life_model_learning_store: Option<Arc<Mutex<openlife_core::agent::LifeModelLearningStore>>>,
     pub main_chat_runtime_state: Arc<Mutex<MainChatRuntimeState>>,
-    pub patch_store: Option<Arc<Mutex<openlife_core::life_model::patch_store::PatchStore>>>,
     pub tool_permission_store: Arc<Mutex<openlife_core::tool_permissions::ToolPermissionStore>>,
     pub skill_registry: Arc<Mutex<openlife_core::skills::SkillRegistry>>,
     pub startup_warnings: Vec<String>,
     pub credential_bootstrap_snapshot: CredentialBootstrapSnapshot,
-    pub scheduled_task_store: Arc<openlife_core::tasks::TaskStore>,
     #[cfg(test)]
     pub web_search_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Controlled provider output for the model-authored Work plan. Product
+    /// builds never expose this seam; behavior tests use it instead of
+    /// substituting deterministic keyword planning.
+    #[cfg(test)]
+    pub work_initial_decision_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Ordered model outputs for typed AgentStep decisions. This seam exists
+    /// only in controlled tests; production always asks the selected provider.
+    #[cfg(test)]
+    pub work_agent_step_fixture_outputs: Arc<tokio::sync::Mutex<Vec<String>>>,
+    /// Ordered semantic verification decisions for source-backed Work
+    /// candidates. Product builds always call the selected provider; tests may
+    /// supply an independent verifier outcome without changing AgentStep
+    /// fixtures.
+    #[cfg(test)]
+    pub work_semantic_verification_fixture_outputs: Arc<tokio::sync::Mutex<Vec<String>>>,
     pub(crate) resource_runtime: Option<Arc<crate::resource_commands::ResourceRuntime>>,
-    /// Canonical ADR 0015 owner. Absence is an explicit degraded state; release
-    /// bootstrap never replaces it with a temporary or in-memory product store.
-    pub(crate) state_store: Option<Arc<openlife_core::state_store::StateStore>>,
 }
 
 impl AppState {

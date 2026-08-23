@@ -32,15 +32,14 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 - `openlife-core/src/life_model/v2.rs`
 - `openlife-core/src/agent/life_model_runtime_context.rs`
 - `openlife-core/src/life_model/patch.rs`
-- `openlife-core/src/life_model/patch_store.rs`
 - `openlife-core/src/life_model_write_gateway.rs`
 - `openlife-core/src/agent/proposal_store.rs`
 - `openlife-core/src/agent/memory_lifecycle.rs`
 - `src-tauri/src/life_model_write_gateway.rs`
-- `src-tauri/src/life_model_materializer_guard.rs`
+- `src-tauri/src/life_model_learning.rs`
+- `src-tauri/src/personal_intelligence_ports.rs`
 - `src-tauri/src/commands/life_model.rs`
 - `src-tauri/src/commands/proposal.rs`
-- `src-tauri/src/main_chat_kernel.rs`
 
 ## Current boundary
 
@@ -48,9 +47,10 @@ ADR 0013's broad LifeModel-HS target is superseded. HeuristicStore and the HS
 asset-authority registry are no longer initialized, reconciled, or attached to
 product state; existing database files remain inert historical data and are not
 deleted during startup. Their selector, lifecycle, materializer and authority
-registry source modules have also been removed. StateStore, PolicyStore, and
-audit-event storage remain only under their current narrow
-product owners. None of them is jointly the canonical LifeModel.
+registry source modules have also been removed. Retired StateStore and
+PolicyStore owners are absent. Current audit and learning evidence remains
+subordinate to the canonical LifeModel owner and cannot become a parallel
+LifeModel truth source.
 
 ## Current Model Shape
 

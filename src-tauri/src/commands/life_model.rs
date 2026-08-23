@@ -5,13 +5,9 @@ use crate::errors::AppError;
 use crate::AppState;
 use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use openlife_core::life_model::v2::{
-    life_model_item_digest_v2, LegacyLifeModelMigrationPreviewV2,
-    LegacyLifeModelMigrationSelectionV2, LifeModelSectionV2, LifeModelTypedDiffV2,
-    LifeModelTypedOperationV2, LifeModelUserValueV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID,
-    LIFE_MODEL_V2_LEGACY_MIGRATION_PATH, LIFE_MODEL_V2_TYPED_DIFF_PATH,
+    life_model_item_digest_v2, LifeModelSectionV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2,
+    LifeModelUserValueV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID, LIFE_MODEL_V2_TYPED_DIFF_PATH,
 };
-#[cfg(test)]
-use openlife_core::life_model::LifeModel;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -79,25 +75,6 @@ pub async fn edit_lifemodel_learning_proposal(
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DraftLegacyLifeModelMigrationRequest {
-    pub source_digest: String,
-    pub selections: Vec<LegacyLifeModelMigrationSelectionV2>,
-    pub non_lifemodel_items_acknowledged: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct DraftLegacyLifeModelMigrationReceipt {
-    pub proposal_id: String,
-    pub status: String,
-    pub source_digest: String,
-    pub included_count: usize,
-    pub excluded_count: usize,
-    pub non_lifemodel_item_count: usize,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum LifeModelV2UserChange {
     Add {
@@ -161,111 +138,6 @@ pub struct LifeModelV2ProposalReceipt {
     pub operation_count: usize,
 }
 
-#[cfg(test)]
-pub(crate) async fn load_legacy_lifemodel_for_test(
-    state: &Arc<AppState>,
-) -> Result<LifeModel, AppError> {
-    state
-        .persistence_coordinator
-        .require_trusted_read("LifeModelFileStore")
-        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
-    let manager = state.life_model_manager.lock().await;
-    if manager
-        .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
-        .is_some()
-        || manager
-            .load_v2_cutover(DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
-            .is_some()
-    {
-        return Err(AppError::internal(
-            "legacy_lifemodel_read_owner_retired_use_lifemodel_view_model",
-        ));
-    }
-    manager.load().map_err(AppError::from)
-}
-
-pub(crate) async fn draft_legacy_lifemodel_migration_with_state(
-    request: DraftLegacyLifeModelMigrationRequest,
-    state: &Arc<AppState>,
-) -> Result<DraftLegacyLifeModelMigrationReceipt, AppError> {
-    let created_at = chrono::Utc::now();
-    let preview = {
-        let manager = state.life_model_manager.lock().await;
-        if manager
-            .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
-            .is_some()
-            || manager
-                .load_v2_cutover(DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
-                .is_some()
-        {
-            return Err(AppError::internal(
-                "lifemodel_v2_migration_existing_canonical_owner",
-            ));
-        }
-        let (_, source) = manager
-            .load_existing_with_source()?
-            .ok_or_else(|| AppError::not_found("legacy_lifemodel_source_missing"))?;
-        LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(&source)?
-    };
-    if preview.source_digest != request.source_digest {
-        return Err(AppError::internal("legacy_lifemodel_source_digest_changed"));
-    }
-    let plan = preview.build_migration_plan(
-        DEFAULT_LIFE_MODEL_V2_MODEL_ID,
-        &request.selections,
-        request.non_lifemodel_items_acknowledged,
-        &created_at.to_rfc3339(),
-    )?;
-    let selected_sensitive = preview.candidates.iter().any(|candidate| {
-        candidate.sensitive
-            && plan
-                .included_candidate_ids
-                .contains(&candidate.candidate_id)
-    });
-    let mut proposal = AgentProposal::new(
-        ProposalType::LifeModelUpdate,
-        LIFE_MODEL_V2_LEGACY_MIGRATION_PATH,
-        serde_json::to_value(&plan)?,
-        "Migrate explicitly reviewed legacy LifeModel fields into the canonical v2 owner.",
-        1.0,
-        if selected_sensitive {
-            RiskLevel::High
-        } else {
-            RiskLevel::Medium
-        },
-        ProposalSource::Manual,
-    );
-    proposal.created_at = created_at;
-    proposal.source_detail = Some("legacy_lifemodel_migration".into());
-    proposal.before = Some(serde_json::json!({
-        "legacySourceDigest": plan.legacy_source_digest,
-        "reviewRequiredCount": preview.review_required_count,
-        "nonLifeModelItemCount": plan.non_lifemodel_item_count,
-        "containsSensitiveItems": preview.contains_sensitive_items,
-    }));
-    let proposal_store = state
-        .proposal_store
-        .as_ref()
-        .ok_or_else(|| AppError::db("proposal_store_unavailable"))?;
-    proposal_store.lock().await.create_proposal(&proposal)?;
-    Ok(DraftLegacyLifeModelMigrationReceipt {
-        proposal_id: proposal.id,
-        status: "review_required".into(),
-        source_digest: plan.legacy_source_digest,
-        included_count: plan.included_candidate_ids.len(),
-        excluded_count: plan.excluded_candidate_ids.len(),
-        non_lifemodel_item_count: plan.non_lifemodel_item_count,
-    })
-}
-
-#[tauri::command]
-pub async fn draft_legacy_lifemodel_migration(
-    request: DraftLegacyLifeModelMigrationRequest,
-    state: State<'_, Arc<AppState>>,
-) -> Result<DraftLegacyLifeModelMigrationReceipt, AppError> {
-    draft_legacy_lifemodel_migration_with_state(request, state.inner()).await
-}
-
 fn ensure_exact_lifemodel_v2_base(
     current: Option<&openlife_core::life_model::v2::LifeModelVersionV2>,
     base_version: Option<u64>,
@@ -308,15 +180,7 @@ pub(crate) async fn draft_lifemodel_v2_change_with_state(
         request.base_version,
         request.base_document_digest.as_deref(),
     )?;
-    if current.is_none() && manager.load_existing()?.is_some() {
-        return Err(AppError::internal(
-            "lifemodel_v2_user_change_requires_legacy_migration",
-        ));
-    }
-    let allow_empty_result = current.is_some()
-        || manager
-            .load_v2_cutover(DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
-            .is_some();
+    let allow_empty_result = current.is_some();
 
     let mut proposal = AgentProposal::new(
         ProposalType::LifeModelUpdate,
@@ -635,7 +499,7 @@ mod tests {
             )),
             life_model_write_coordinator: Arc::new(tokio::sync::Mutex::new(())),
             memory_store: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
+                openlife_core::memory::KnowledgeNoteProjectionStore::new_in_memory().unwrap(),
             )),
             conversation_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::conversation::ConversationStore::new_in_memory().unwrap(),
@@ -684,9 +548,6 @@ mod tests {
                 openlife_core::agent::LifeModelLearningStore::new_in_memory().unwrap(),
             ))),
             main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
-            patch_store: Some(Arc::new(tokio::sync::Mutex::new(
-                openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
-            ))),
             tool_permission_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
             )),
@@ -695,24 +556,14 @@ mod tests {
             )),
             startup_warnings: vec![],
             credential_bootstrap_snapshot: Default::default(),
-            scheduled_task_store: Arc::new(
-                openlife_core::tasks::TaskStore::new_in_memory().unwrap(),
-            ),
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+            work_initial_decision_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+            work_agent_step_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            work_semantic_verification_fixture_outputs: Arc::new(tokio::sync::Mutex::new(
+                Vec::new(),
+            )),
             resource_runtime: None,
-            state_store: None,
         })
-    }
-
-    #[tokio::test]
-    async fn get_life_model_returns_default_when_empty() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let state = test_app_state(&temp_dir);
-
-        let result = load_legacy_lifemodel_for_test(&state).await;
-        assert!(result.is_ok());
-        let model = result.unwrap();
-        assert!(model.is_effectively_empty());
     }
 
     #[tokio::test]

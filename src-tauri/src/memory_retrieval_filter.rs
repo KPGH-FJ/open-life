@@ -76,9 +76,7 @@ pub(crate) async fn filter_canonical_retrievable_memory_results(
             if let Some(memory_id) = lifecycle_memory_id_from_source(&chunk.source) {
                 return active_lifecycle_ids.contains(memory_id);
             }
-            if chunk.source.starts_with("knowledge_note:")
-                || chunk.source.starts_with("memory_record:")
-            {
+            if chunk.source.starts_with("knowledge_note:") {
                 return verified_sources.contains(&chunk.source);
             }
             true
@@ -87,7 +85,7 @@ pub(crate) async fn filter_canonical_retrievable_memory_results(
 }
 
 fn canonical_memory_owner_from_source(source: &str) -> Option<CanonicalVectorOwnerRef> {
-    for kind in ["knowledge_note", "memory_record", "memory_lifecycle"] {
+    for kind in ["knowledge_note", "memory_lifecycle"] {
         if let Some(id) = source.strip_prefix(&format!("{kind}:")) {
             return CanonicalVectorOwnerRef::new(kind, id).ok();
         }

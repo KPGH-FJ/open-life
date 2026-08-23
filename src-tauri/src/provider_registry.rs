@@ -24,7 +24,6 @@ pub struct ProviderProfileViewModel {
 pub(crate) struct SelectedProviderProfile {
     pub binding: ProviderBinding,
     pub profiles: Vec<ProviderProfileViewModel>,
-    pub route: openlife_core::agent::types::ModelRouteTrace,
 }
 
 pub(crate) async fn selected_provider_profile(
@@ -34,7 +33,7 @@ pub(crate) async fn selected_provider_profile(
     if !runtime.coherent {
         return Err("provider_runtime_generation_incoherent".into());
     }
-    let route = runtime.scheduler.preview_chat_route(None).await;
+    let route = runtime.scheduler.resolve_selected_provider_route().await;
     if route.provider == "none" || route.model.trim().is_empty() {
         return Err("configured_provider_unavailable".into());
     }
@@ -66,7 +65,6 @@ pub(crate) async fn selected_provider_profile(
             selected: true,
         }],
         binding,
-        route,
     })
 }
 

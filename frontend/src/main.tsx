@@ -5,10 +5,10 @@ import App from "./App.tsx";
 import "./index.css";
 import "@/ui/foundation/openlife.foundation.css";
 import "@/ui/shell/openlife.shell.css";
-import "@/ui/journeys/productWorkbench/productWorkbench.css";
-import "@/ui/journeys/governedAction/governedAction.css";
-import "@/ui/journeys/durableTruth/durableTruth.css";
-import "@/ui/journeys/settingsPrivacy/settingsPrivacy.css";
+import "@/app/productWorkbench.css";
+import "@/app/workbench.css";
+import "@/features/personalIntelligence/personalIntelligence.css";
+import "@/features/settings/settings.css";
 
 ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>

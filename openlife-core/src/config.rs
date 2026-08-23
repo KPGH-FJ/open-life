@@ -93,7 +93,10 @@ fn default_network_enabled() -> bool {
 }
 
 fn default_network_default_decision() -> String {
-    "ask".to_string()
+    // Public read-only Web tools are part of the normal Agent capability
+    // surface. Users can still disable networking, deny domains, or override a
+    // tool, but ordinary research must not pay a per-request approval tax.
+    "allow".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,10 +115,9 @@ pub struct SystemConfig {
     /// Network access policy for web tools
     #[serde(default)]
     pub network_policy: NetworkPolicy,
-    /// ICS calendar file paths for calendar.read tool
-    #[serde(default)]
-    pub calendar_ics_paths: Vec<String>,
-    /// Web search provider: "duckduckgo" (default), "brave", "deepseek", or "searxng"
+    /// Web search transport. `auto` uses a supported hosted-search capability
+    /// on the user's exact selected provider route. Explicit independent
+    /// backends remain available for deployments that prefer them.
     #[serde(default = "default_search_provider")]
     pub search_provider: String,
     /// Runtime-only API key for the web search provider.
@@ -139,7 +141,6 @@ impl Default for SystemConfig {
             agent_memory_enabled: default_agent_memory_enabled(),
             safe_paths: Vec::new(),
             network_policy: NetworkPolicy::default(),
-            calendar_ics_paths: Vec::new(),
             search_provider: default_search_provider(),
             search_provider_key: String::new(),
             search_provider_key_ref: None,
@@ -162,7 +163,7 @@ fn default_agent_memory_enabled() -> bool {
 }
 
 fn default_search_provider() -> String {
-    "duckduckgo".to_string()
+    "auto".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +187,62 @@ impl Default for AppConfig {
             system: SystemConfig::default(),
         }
     }
+}
+
+impl AppConfig {
+    /// Resolve the configured search transport without switching the selected
+    /// model route or crossing a credential boundary. Provider-hosted search
+    /// support is a wire capability, never an Agent-policy or planning branch.
+    pub fn effective_search_provider(&self) -> Option<&str> {
+        let configured = self.system.search_provider.trim();
+        if !configured.eq_ignore_ascii_case("auto") {
+            return (!configured.is_empty()).then_some(configured);
+        }
+        if self.prefer_local_model {
+            return None;
+        }
+        match self.llm.provider.trim().to_ascii_lowercase().as_str() {
+            "deepseek" if selected_provider_origin_is(self, "api.deepseek.com", &["", "/v1"]) => {
+                Some("deepseek")
+            }
+            "openrouter" if selected_provider_origin_is(self, "openrouter.ai", &["/api/v1"]) => {
+                Some("openrouter")
+            }
+            _ => None,
+        }
+    }
+
+    /// A hosted search adapter may reuse the selected provider credential only
+    /// on that provider's official HTTPS origin. Custom gateways and local
+    /// routes remain separate trust boundaries.
+    pub fn search_reuses_selected_provider_credential(&self) -> bool {
+        if self.prefer_local_model {
+            return false;
+        }
+        match self.effective_search_provider() {
+            Some("deepseek") if self.llm.provider.eq_ignore_ascii_case("deepseek") => {
+                selected_provider_origin_is(self, "api.deepseek.com", &["", "/v1"])
+            }
+            Some("openrouter") if self.llm.provider.eq_ignore_ascii_case("openrouter") => {
+                selected_provider_origin_is(self, "openrouter.ai", &["/api/v1"])
+            }
+            _ => false,
+        }
+    }
+}
+
+fn selected_provider_origin_is(config: &AppConfig, host: &str, allowed_paths: &[&str]) -> bool {
+    reqwest::Url::parse(config.llm.openai_base.trim()).is_ok_and(|url| {
+        let normalized_path = url.path().trim_end_matches('/');
+        url.scheme() == "https"
+            && url.host_str() == Some(host)
+            && url.port_or_known_default() == Some(443)
+            && url.username().is_empty()
+            && url.password().is_none()
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && allowed_paths.contains(&normalized_path)
+    })
 }
 
 fn default_local_model() -> String {
@@ -294,6 +351,46 @@ impl AppConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_search_reuses_only_a_supported_selected_official_provider_route() {
+        let mut config = AppConfig::default();
+        config.prefer_local_model = false;
+        config.llm.provider = "deepseek".into();
+        config.llm.openai_base = "https://api.deepseek.com".into();
+        config.system.search_provider = "auto".into();
+        assert!(config.search_reuses_selected_provider_credential());
+        assert_eq!(config.effective_search_provider(), Some("deepseek"));
+
+        let mut custom_gateway = config.clone();
+        custom_gateway.llm.openai_base = "https://deepseek-proxy.example.com".into();
+        assert!(!custom_gateway.search_reuses_selected_provider_credential());
+
+        let mut local_first = config.clone();
+        local_first.prefer_local_model = true;
+        assert!(!local_first.search_reuses_selected_provider_credential());
+
+        let mut brave = config;
+        brave.system.search_provider = "brave".into();
+        assert!(!brave.search_reuses_selected_provider_credential());
+
+        let mut openrouter = AppConfig::default();
+        openrouter.prefer_local_model = false;
+        openrouter.llm.provider = "openrouter".into();
+        openrouter.llm.openai_base = "https://openrouter.ai/api/v1".into();
+        openrouter.llm.chat_model = "openrouter/test-model".into();
+        openrouter.system.search_provider = "auto".into();
+        assert!(openrouter.search_reuses_selected_provider_credential());
+        assert_eq!(openrouter.effective_search_provider(), Some("openrouter"));
+
+        openrouter.llm.openai_base = "https://openrouter.ai/api/v1/proxy".into();
+        assert!(!openrouter.search_reuses_selected_provider_credential());
+        assert_eq!(openrouter.effective_search_provider(), None);
+
+        openrouter.llm.openai_base = "https://router-proxy.example.com/v1".into();
+        assert!(!openrouter.search_reuses_selected_provider_credential());
+        assert_eq!(openrouter.effective_search_provider(), None);
+    }
     use tempfile::NamedTempFile;
 
     #[test]
@@ -306,6 +403,7 @@ mod tests {
         assert!(config.llm.embedding_enabled);
         assert_eq!(config.local_model, "llama2");
         assert!(config.prefer_local_model);
+        assert_eq!(config.system.search_provider, "auto");
     }
 
     #[test]

@@ -19,8 +19,7 @@ second Memory owner.
 ## Source map
 
 - `openlife-core/src/memory.rs`
-- `openlife-core/src/memory_gateway.rs`
-- `openlife-core/src/agent/main_chat_memory_candidate.rs`
+- `openlife-core/src/agent/memory_candidate.rs`
 - `openlife-core/src/agent/memory_lifecycle.rs`
 - `openlife-core/src/conversation.rs`
 - `src-tauri/src/agent_memory_learning.rs`
@@ -43,10 +42,12 @@ scope, provenance and retrieval disposition. Its SQLite lifecycle store is the
 single fact owner for accepted, corrected, archived, restored, superseded,
 rolled-back and privacy-erased Memory.
 
-`openlife-core/src/memory.rs` defines the separate `MemoryStore` used by
-conversation persistence and explicit knowledge notes. It retains FTS support
-for those non-lifecycle rows, but schema version 9 removes old lifecycle-body
-copies and their projection markers. It is not a second Agent Memory owner.
+`openlife-core/src/memory.rs` defines the separate
+`KnowledgeNoteProjectionStore` (whose on-disk protocol name remains
+`MemoryStore`) for user-authored knowledge notes and rebuildable search
+projection. Conversation persistence belongs only to `ConversationStore`, and
+schema migration removes old lifecycle-body copies and projection markers.
+This store is not a second Agent Memory owner.
 
 `src-tauri/src/commands/memory.rs` owns direct correction, archive, restore and
 privacy erase controls. Correction, archive and restore are exact-owner,
@@ -58,23 +59,14 @@ product commands.
 state. It desensitizes search queries, uses privacy-aware embeddings, and falls
 back when embedding generation is unavailable.
 
-## Memory Gateway
+## Memory service
 
-`openlife-core/src/memory_gateway.rs` classifies memory writes by lane:
-turn context, episodic life event, semantic fact/preference, procedural rule,
-evidence record, or canonical LifeModel truth.
-
-Chat turns are context-only. Episodic events, semantic facts/preferences, and
-metadata-safe evidence can become local memory. Future procedural rules require
-review unless they are being materialized after accepted proposal review.
-Canonical LifeModel truth requests are routed to the LifeModel write gateway
-instead of being written as ordinary memory.
-
-`src-tauri/src/memory_gateway.rs` materializes accepted Memory proposals by
-checking the gateway decision, rejecting canonical-LifeModel writes, checking
-duplicate content, creating a lifecycle record and projecting only a
-rebuildable semantic index. It does not copy the lifecycle body into
-`MemoryStore`.
+`src-tauri/src/memory_gateway.rs` is the application service for explicit
+Memory controls, accepted Memory review effects, retrieval, and rebuildable
+semantic projection. It consumes typed fact descriptors; it does not classify
+free text with a keyword or haystack router. It checks exact scope, risk,
+sensitivity, duplicate identity, and canonical admission before creating a
+lifecycle record. The lifecycle body is not copied into `MemoryStore`.
 
 ## Memory Lifecycle
 
@@ -176,27 +168,24 @@ from canonical Conversation Items through
 `agent/conversation_context.rs`; its deterministic summary is a derived
 projection with a source range and digest, not long-term Memory.
 
-## Main Chat Memory Candidates
+## Agent Memory candidates
 
-`openlife-core/src/agent/main_chat_memory_candidate.rs` extracts candidate
-memory claims from user text. It routes candidates to session-only, life-event,
-Memory proposal, LifeModel proposal, or no-op destinations based on explicit
-memory markers, future-rule language, identity/preference signals, and life
-event expressions.
+`openlife-core/src/agent/memory_candidate.rs` defines the typed candidate
+contract only. It contains no free-text parser and grants no write authority.
+The model-driven Chat/Work actions and the bounded idle-learning lane produce
+typed candidates that deterministic ports validate against the authenticated
+Conversation item, exact scope, risk, sensitivity, and supported destination.
 
-Low-confidence candidates are not routed into durable paths. When global Memory
-and the Conversation's `Use and learn` mode are both enabled, one eligible
-stable, internal candidate may be checked after the latest completed Turn has
-been idle for the bounded delay. The check uses only that Turn's already-bound
-provider profile and model; a changed provider, newer Turn, disabled mode,
-invalid JSON or low confidence produces no proposal. A retained candidate
-creates one Review proposal and never writes Memory directly. Duplicate facts
-are skipped, while a materially clearer fact may explicitly supersede one
-matching owner after Review. Personal future working rules route to Agent
-Memory proposal candidates. Identity and stable
-preference candidates can reach the LifeModel bridge only when the runtime can
-produce an exact supported field path and typed value; otherwise the candidate
-remains blocked and no fake proposal is created.
+When global Memory and the Conversation's `Use and learn` mode are enabled, one
+completed Turn may be checked after a bounded idle delay. The check reuses the
+Turn's exact provider binding and requires a strict JSON decision whose source
+span is an exact bounded substring of the authenticated user message. Provider
+change, newer Turn, disabled mode, invalid JSON, low confidence, sensitive
+content, or an imprecise source span produces no candidate. A retained
+candidate creates one Review item and never writes Memory directly. Duplicate
+facts are skipped; an explicitly clearer replacement remains bound to one
+existing owner. LifeModel suggestions use their own typed field bridge rather
+than being inferred by a Memory keyword classifier.
 
 Memory lifecycle and vector retrieval enrich the Agent. If an optional
 enrichment store is unavailable, Main Chat carries an explicit degraded marker

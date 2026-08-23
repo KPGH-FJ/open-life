@@ -663,51 +663,38 @@ pub(crate) struct OllamaOutputContract {
     pub(crate) deterministic: bool,
 }
 
-pub(crate) fn main_chat_evidence_check_json_schema() -> serde_json::Value {
+pub(crate) fn main_chat_work_semantic_verification_json_schema() -> serde_json::Value {
     json!({
         "type": "object",
         "properties": {
-            "verdict": {
+            "schemaVersion": {
                 "type": "string",
-                "enum": ["supported", "unsupported", "conflict"]
+                "const": "openlife.work-semantic-verification.v1"
             },
-            "claims": {
-                "type": "array",
-                "items": {
-                    "type": "object",
-                    "properties": {
-                        "draft_id": {
-                            "type": "string",
-                            "pattern": "^D[1-9][0-9]*$"
-                        },
-                        "fact_ids": {
-                            "type": "array",
-                            "items": { "type": "string" }
-                        },
-                        "supported": { "type": "boolean" }
-                    },
-                    "required": ["draft_id", "fact_ids", "supported"],
-                    "additionalProperties": false
-                }
+            "status": {
+                "type": "string",
+                "enum": ["complete", "needs_more_evidence"]
             },
-            "unsupported_draft_ids": {
+            "gaps": {
                 "type": "array",
-                "items": {
-                    "type": "string",
-                    "pattern": "^D[1-9][0-9]*$"
-                }
-            },
-            "missing_fact_ids": {
-                "type": "array",
+                "maxItems": 8,
                 "items": { "type": "string" }
             }
         },
-        "required": [
-            "verdict",
-            "claims",
-            "unsupported_draft_ids",
-            "missing_fact_ids"
-        ],
+        "required": ["schemaVersion", "status", "gaps"],
+        "additionalProperties": false
+    })
+}
+
+pub(crate) fn agent_memory_extraction_json_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "keep": { "type": "boolean" },
+            "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
+            "source_span": { "type": "string", "maxLength": 320 }
+        },
+        "required": ["keep", "confidence", "source_span"],
         "additionalProperties": false
     })
 }
@@ -764,7 +751,7 @@ pub(crate) fn main_chat_work_plan_json_schema() -> serde_json::Value {
         "properties": {
             "schemaVersion": {
                 "type": "string",
-                "const": "openlife.work-plan.v2"
+                "const": "openlife.work-plan.v3"
             },
             "steps": {
                 "type": "array",
@@ -800,15 +787,355 @@ pub(crate) fn main_chat_work_plan_json_schema() -> serde_json::Value {
                         "type": "string",
                         "enum": ["answer", "artifact"]
                     },
-                    "requiresVerification": { "type": "boolean" }
+                    "requiresVerification": { "type": "boolean" },
+                    "requirements": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "id": { "type": "string" },
+                                "description": { "type": "string" },
+                                "evidenceKind": {
+                                    "type": "string",
+                                    "enum": ["result", "source"]
+                                }
+                            },
+                            "required": ["id", "description", "evidenceKind"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "requiresReviewBeforeWrite": { "type": "boolean" }
                 },
-                "required": ["resultKind", "requiresVerification"],
+                "required": [
+                    "resultKind",
+                    "requiresVerification",
+                    "requirements",
+                    "requiresReviewBeforeWrite"
+                ],
+                "additionalProperties": false
+            },
+            "sourceConstraints": {
+                "type": "object",
+                "properties": {
+                    "requiredWebDomains": {
+                        "type": "array",
+                        "maxItems": 8,
+                        "items": { "type": "string" }
+                    }
+                },
+                "required": ["requiredWebDomains"],
                 "additionalProperties": false
             }
         },
-        "required": ["schemaVersion", "steps", "completion"],
+        "required": ["schemaVersion", "steps", "completion", "sourceConstraints"],
         "additionalProperties": false
     })
+}
+
+fn agent_step_envelope_schema(step: serde_json::Value) -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "schemaVersion": {
+                "type": "string",
+                "const": "openlife.agent-step.v1"
+            },
+            "step": step
+        },
+        "required": ["schemaVersion", "step"],
+        "additionalProperties": false
+    })
+}
+
+fn agent_tool_call_step_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string", "const": "tool_call" },
+            "payload": {
+                "type": "object",
+                "properties": {
+                    "capabilityId": { "type": "string" },
+                    "arguments": { "type": "object" }
+                },
+                "required": ["capabilityId", "arguments"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["kind", "payload"],
+        "additionalProperties": false
+    })
+}
+
+fn agent_tool_calls_step_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string", "const": "tool_calls" },
+            "payload": {
+                "type": "object",
+                "properties": {
+                    "calls": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 4,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "capabilityId": { "type": "string" },
+                                "arguments": { "type": "object" }
+                            },
+                            "required": ["capabilityId", "arguments"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["calls"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["kind", "payload"],
+        "additionalProperties": false
+    })
+}
+
+fn agent_source_block_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string", "enum": ["heading", "claim"] },
+            "text": { "type": "string" },
+            "sourceRefs": {
+                "type": "array",
+                "items": { "type": "string" }
+            }
+        },
+        "required": ["kind", "text", "sourceRefs"],
+        "additionalProperties": false
+    })
+}
+
+fn agent_final_answer_step_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string", "const": "final_answer" },
+            "payload": {
+                "type": "object",
+                "properties": {
+                    "content": { "type": "string" },
+                    "evidenceRefs": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "artifactRefs": {
+                        "type": "array",
+                        "items": { "type": "string" }
+                    },
+                    "sourceBlocks": {
+                        "type": "array",
+                        "items": agent_source_block_schema()
+                    }
+                },
+                "required": ["content", "evidenceRefs", "artifactRefs"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["kind", "payload"],
+        "additionalProperties": false
+    })
+}
+
+fn agent_artifact_step_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "kind": { "type": "string", "const": "draft_artifact" },
+            "payload": {
+                "type": "object",
+                "properties": {
+                    "artifacts": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 5,
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "format": { "type": "string" },
+                                "suggestedName": { "type": "string" },
+                                "content": {},
+                                "sourceBlocks": {
+                                    "type": "array",
+                                    "items": agent_source_block_schema()
+                                }
+                            },
+                            "required": ["format", "suggestedName", "content"],
+                            "additionalProperties": false
+                        }
+                    },
+                    "reviewBeforeWrite": { "type": "boolean" }
+                },
+                "required": ["artifacts"],
+                "additionalProperties": false
+            }
+        },
+        "required": ["kind", "payload"],
+        "additionalProperties": false
+    })
+}
+
+fn agent_personal_intelligence_step_schemas() -> Vec<serde_json::Value> {
+    vec![
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "const": "personal_intelligence" },
+                "payload": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "remember" },
+                        "sourceSpan": { "type": "string", "maxLength": 320 },
+                        "memoryKind": {
+                            "type": "string",
+                            "enum": ["fact", "preference", "procedure", "life_event"]
+                        },
+                        "scope": { "type": "string", "enum": ["personal", "project"] }
+                    },
+                    "required": ["action", "sourceSpan", "memoryKind", "scope"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["kind", "payload"],
+            "additionalProperties": false
+        }),
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "const": "personal_intelligence" },
+                "payload": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "forget" },
+                        "query": { "type": "string", "maxLength": 320 }
+                    },
+                    "required": ["action", "query"],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["kind", "payload"],
+            "additionalProperties": false
+        }),
+        json!({
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "const": "personal_intelligence" },
+                "payload": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "const": "suggest_life_model" },
+                        "sourceSpan": { "type": "string", "maxLength": 320 },
+                        "lifeModelSection": {
+                            "type": "string",
+                            "enum": [
+                                "identity",
+                                "values",
+                                "stable_preferences",
+                                "personal_boundaries",
+                                "decision_principles",
+                                "collaboration_preferences"
+                            ]
+                        },
+                        "lifeModelStatement": { "type": "string", "maxLength": 320 }
+                    },
+                    "required": [
+                        "action",
+                        "sourceSpan",
+                        "lifeModelSection",
+                        "lifeModelStatement"
+                    ],
+                    "additionalProperties": false
+                }
+            },
+            "required": ["kind", "payload"],
+            "additionalProperties": false
+        }),
+    ]
+}
+
+/// Provider-side grammar for one model-selected tool action. Runtime
+/// validation still narrows `capabilityId` to the exact current capability and
+/// validates the capability-specific argument schema before dispatch.
+pub(crate) fn main_chat_agent_tool_step_json_schema() -> serde_json::Value {
+    agent_step_envelope_schema(agent_tool_call_step_schema())
+}
+
+pub(crate) fn main_chat_agent_artifact_or_tool_step_json_schema() -> serde_json::Value {
+    agent_step_envelope_schema(json!({
+        "oneOf": [
+            agent_tool_call_step_schema(),
+            agent_tool_calls_step_schema(),
+            agent_artifact_step_schema()
+        ]
+    }))
+}
+
+pub(crate) fn main_chat_agent_answer_or_tool_step_json_schema() -> serde_json::Value {
+    agent_step_envelope_schema(json!({
+        "oneOf": [
+            agent_tool_call_step_schema(),
+            agent_tool_calls_step_schema(),
+            agent_final_answer_step_schema()
+        ]
+    }))
+}
+
+pub(crate) fn main_chat_personal_intelligence_step_json_schema() -> serde_json::Value {
+    agent_step_envelope_schema(json!({
+        "oneOf": agent_personal_intelligence_step_schemas()
+    }))
+}
+
+pub(crate) fn main_chat_tool_arguments_json_schema() -> serde_json::Value {
+    json!({ "type": "object" })
+}
+
+pub(crate) fn main_chat_initial_work_decision_json_schema() -> serde_json::Value {
+    let mut direct_steps = vec![
+        agent_final_answer_step_schema(),
+        agent_artifact_step_schema(),
+    ];
+    direct_steps.extend(agent_personal_intelligence_step_schemas());
+    json!({
+        "oneOf": [
+            main_chat_work_plan_json_schema(),
+            agent_step_envelope_schema(json!({ "oneOf": direct_steps }))
+        ]
+    })
+}
+
+/// Provider-side grammar for an ordinary Chat decision. Chat may either
+/// return the user-visible answer or propose one bounded personal-intelligence
+/// action. The runtime still binds any action to the authenticated user Item
+/// and applies scope, sensitivity, dedupe, Review, and write policy itself.
+pub(crate) fn main_chat_conversation_step_json_schema() -> serde_json::Value {
+    let mut steps = vec![agent_final_answer_step_schema()];
+    steps.extend(agent_personal_intelligence_step_schemas());
+    agent_step_envelope_schema(json!({ "oneOf": steps }))
+}
+
+/// Provider-side grammar for one model-authored Artifact draft. The runtime
+/// still validates the selected format, filename extension, semantic content,
+/// citations, safe path, and Review checkpoint before any file write.
+pub(crate) fn main_chat_agent_artifact_step_json_schema() -> serde_json::Value {
+    agent_step_envelope_schema(agent_artifact_step_schema())
+}
+
+/// Provider-side grammar for the terminal answer of one canonical Agent loop.
+/// Evidence and Artifact references are still checked against runtime-owned
+/// identities after parsing; the model cannot mint completion proof.
+pub(crate) fn main_chat_agent_final_step_json_schema() -> serde_json::Value {
+    agent_step_envelope_schema(agent_final_answer_step_schema())
 }
 
 pub(crate) async fn chat_with_ollama_raw_at_endpoint_with_start_observer<F>(
@@ -1279,6 +1606,55 @@ pub fn deterministic_hash_embed_v1(text: &str) -> Vec<f32> {
 mod tests {
     use super::*;
 
+    fn allowed_step_kinds(schema: &serde_json::Value) -> Vec<&str> {
+        schema["properties"]["step"]["oneOf"]
+            .as_array()
+            .expect("step oneOf")
+            .iter()
+            .map(|step| {
+                step["properties"]["kind"]["const"]
+                    .as_str()
+                    .expect("step kind const")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn dynamic_agent_schemas_allow_one_terminal_kind_plus_tools() {
+        assert_eq!(
+            allowed_step_kinds(&main_chat_agent_artifact_or_tool_step_json_schema()),
+            vec!["tool_call", "tool_calls", "draft_artifact"]
+        );
+        assert_eq!(
+            allowed_step_kinds(&main_chat_agent_answer_or_tool_step_json_schema()),
+            vec!["tool_call", "tool_calls", "final_answer"]
+        );
+    }
+
+    #[test]
+    fn artifact_schema_matches_source_bound_runtime_contract() {
+        let schema = main_chat_agent_artifact_step_json_schema();
+        let payload = &schema["properties"]["step"]["properties"]["payload"];
+        assert!(payload["properties"].get("reviewBeforeWrite").is_some());
+        let artifact = &payload["properties"]["artifacts"]["items"];
+        assert!(artifact["properties"].get("sourceBlocks").is_some());
+    }
+
+    #[test]
+    fn initial_decision_schema_supports_plan_or_direct_step() {
+        let schema = main_chat_initial_work_decision_json_schema();
+        let choices = schema["oneOf"].as_array().expect("top-level oneOf");
+        assert_eq!(choices.len(), 2);
+        assert_eq!(
+            choices[0]["properties"]["schemaVersion"]["const"],
+            "openlife.work-plan.v3"
+        );
+        assert_eq!(
+            choices[1]["properties"]["schemaVersion"]["const"],
+            "openlife.agent-step.v1"
+        );
+    }
+
     #[test]
     fn resolves_llama3_preset_to_installed_llama31_tag() {
         let models = vec![
@@ -1727,27 +2103,22 @@ mod tests {
     }
 
     #[test]
-    fn evidence_check_request_uses_typed_json_schema() {
+    fn semantic_verification_request_uses_its_exact_typed_json_schema() {
         let body = ollama_chat_request_body(
             "llama3.1:latest",
-            vec![json!({"role": "user", "content": "check every sentence"})],
-            Some(main_chat_evidence_check_json_schema()),
+            vec![json!({"role": "user", "content": "verify the requested outcome"})],
+            Some(main_chat_work_semantic_verification_json_schema()),
             true,
         );
 
         assert_eq!(body["format"]["type"], "object");
         assert_eq!(
             body["format"]["required"],
-            json!([
-                "verdict",
-                "claims",
-                "unsupported_draft_ids",
-                "missing_fact_ids"
-            ])
+            json!(["schemaVersion", "status", "gaps"])
         );
         assert_eq!(
-            body["format"]["properties"]["claims"]["items"]["properties"]["draft_id"]["pattern"],
-            "^D[1-9][0-9]*$"
+            body["format"]["properties"]["status"]["enum"],
+            json!(["complete", "needs_more_evidence"])
         );
         assert_eq!(body["options"]["temperature"], 0.0);
     }
@@ -1765,7 +2136,11 @@ mod tests {
         assert_eq!(body["format"]["type"], "object");
         assert_eq!(
             body["format"]["required"],
-            json!(["schemaVersion", "steps", "completion"])
+            json!(["schemaVersion", "steps", "completion", "sourceConstraints"])
+        );
+        assert_eq!(
+            body["format"]["properties"]["sourceConstraints"]["required"],
+            json!(["requiredWebDomains"])
         );
         let alternatives = body["format"]["properties"]["steps"]["items"]["oneOf"]
             .as_array()
@@ -1778,6 +2153,34 @@ mod tests {
             json!(["id", "kind", "required", "dependsOn", "targetId"])
         );
         assert_eq!(body["options"]["temperature"], 0.0);
+    }
+
+    #[test]
+    fn conversation_step_schema_allows_only_answer_or_bounded_personal_action() {
+        let schema = main_chat_conversation_step_json_schema();
+        let alternatives = schema["properties"]["step"]["oneOf"]
+            .as_array()
+            .expect("conversation step alternatives");
+        assert_eq!(alternatives.len(), 4);
+        assert_eq!(
+            alternatives[0]["properties"]["kind"]["const"],
+            "final_answer"
+        );
+        assert_eq!(
+            alternatives[1]["properties"]["payload"]["properties"]["action"]["const"],
+            "remember"
+        );
+        assert_eq!(
+            alternatives[2]["properties"]["payload"]["properties"]["action"]["const"],
+            "forget"
+        );
+        assert_eq!(
+            alternatives[3]["properties"]["payload"]["properties"]["action"]["const"],
+            "suggest_life_model"
+        );
+        assert!(alternatives.iter().all(|alternative| {
+            alternative["properties"]["payload"]["additionalProperties"] == false
+        }));
     }
 
     #[test]

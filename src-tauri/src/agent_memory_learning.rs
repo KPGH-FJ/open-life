@@ -2,22 +2,22 @@
 //!
 //! This module deliberately has no direct Memory write path. It may use the
 //! exact provider authorization from one completed Turn to decide whether one
-//! deterministic, low-risk fact is worth suggesting. A retained candidate is
+//! source-bound, low-risk fact is worth suggesting. A retained candidate is
 //! submitted to the existing ReviewWorkflow; only a later explicit user
 //! decision can materialize it.
 
-use crate::main_chat_kernel::{
-    MainChatModelClient, MainChatModelRequest, MainChatProviderAuthorization,
-    SchedulerMainChatModelClient,
+use crate::provider_client::OpenLifeProviderClient;
+use crate::provider_runtime::{
+    ProviderAuthorization as MainChatProviderAuthorization,
+    ProviderModelClient as MainChatModelClient, ProviderModelRequest as MainChatModelRequest,
 };
 use crate::state::AppState;
-use openlife_core::agent::main_chat_agent_v1::AgentIngressDecision;
 use openlife_core::agent::{
     AgentProposal, CanonicalMemoryFactDescriptor, DurableWriteRequest, DurableWriteSource,
-    DurableWriteSubject, MemoryCandidateKind, MemoryDestination, MemoryLifecycleRiskLevel,
-    MemoryLifecycleScope, MemoryLifecycleSensitivity, ProposalSource, ProposalType, ReviewWorkflow,
-    RiskLevel,
+    DurableWriteSubject, MemoryCandidateKind, MemoryLifecycleRiskLevel, MemoryLifecycleScope,
+    MemoryLifecycleSensitivity, ProposalSource, ProposalType, ReviewWorkflow, RiskLevel,
 };
+use openlife_core::conversation::ConversationUserMessageProof;
 use openlife_core::conversation::{ConversationMemoryMode, TurnStatus};
 use openlife_core::llm::{ChatMessage, ProviderPayloadPurpose};
 use serde::Deserialize;
@@ -52,6 +52,7 @@ impl Drop for ExtractionGuard {
 struct ExtractionDecision {
     keep: bool,
     confidence: f32,
+    source_span: Option<String>,
 }
 
 /// Schedule one best-effort extraction without delaying the visible reply.
@@ -62,17 +63,8 @@ pub(crate) fn schedule_after_idle(
     conversation_id: String,
     turn_id: String,
     user_text: String,
-    ingress: AgentIngressDecision,
+    user_message_proof: ConversationUserMessageProof,
 ) {
-    let eligible = ingress
-        .intent_frame
-        .memory_routing
-        .candidates
-        .iter()
-        .any(is_eligible_implicit_candidate);
-    if !eligible {
-        return;
-    }
     {
         let mut active = active_extractions()
             .lock()
@@ -86,7 +78,14 @@ pub(crate) fn schedule_after_idle(
             conversation_id: conversation_id.clone(),
         };
         tokio::time::sleep(IDLE_DELAY).await;
-        if let Err(error) = run_one(&state, &conversation_id, &turn_id, &user_text, &ingress).await
+        if let Err(error) = run_one(
+            &state,
+            &conversation_id,
+            &turn_id,
+            &user_text,
+            &user_message_proof,
+        )
+        .await
         {
             let (_, digest) = openlife_core::agent::metadata_safe_text_digest(&error);
             log::warn!("Agent Memory background extraction skipped: error_digest={digest}");
@@ -94,32 +93,13 @@ pub(crate) fn schedule_after_idle(
     });
 }
 
-fn is_eligible_implicit_candidate(
-    candidate: &openlife_core::agent::MainChatMemoryCandidate,
-) -> bool {
-    candidate.kind == MemoryCandidateKind::SemanticUserFact
-        && candidate.destination == MemoryDestination::MemoryProposal
-        && candidate.explicitness == "implicit"
-        && candidate.stability == "stable"
-        && candidate.sensitivity == "internal"
-        && candidate.confidence >= MIN_EXTRACTION_CONFIDENCE
-}
-
 async fn run_one(
     state: &Arc<AppState>,
     conversation_id: &str,
     turn_id: &str,
     user_text: &str,
-    ingress: &AgentIngressDecision,
+    user_message_proof: &ConversationUserMessageProof,
 ) -> Result<Option<String>, String> {
-    let candidate = ingress
-        .intent_frame
-        .memory_routing
-        .candidates
-        .iter()
-        .find(|candidate| is_eligible_implicit_candidate(candidate))
-        .ok_or_else(|| "agent_memory_background_candidate_missing".to_string())?;
-
     let (conversation, latest_turn) = {
         let store = state
             .conversation_store
@@ -153,13 +133,16 @@ async fn run_one(
     if !runtime.coherent {
         return Ok(None);
     }
-    let authorization = MainChatProviderAuthorization::from_ingress_decision(ingress)?;
+    let authorization = MainChatProviderAuthorization::from_conversation_user_message(
+        user_message_proof,
+        user_text,
+    )?;
     let (_, context_digest) = openlife_core::agent::metadata_safe_text_digest(user_text);
     let messages = vec![ChatMessage {
         role: "user".into(),
         content: user_text.to_string(),
     }];
-    let client = SchedulerMainChatModelClient::new(
+    let client = OpenLifeProviderClient::new(
         runtime.scheduler,
         state.privacy_engine.lock().await.clone(),
         runtime.config.system.network_policy,
@@ -167,14 +150,16 @@ async fn run_one(
     .with_runtime_state(Arc::clone(state));
     let request = MainChatModelRequest {
         session_id: conversation_id.to_string(),
+        citation_scope_id: turn_id.to_string(),
         messages,
         provider_authorization: authorization,
-        system_prompt: extraction_prompt(&candidate.normalized_claim),
+        system_prompt: extraction_prompt(),
         supplemental_context_blocks: Vec::new(),
         context_snapshot_ref: context_digest,
         raw_life_model_included: false,
         raw_unbounded_memory_included: false,
         payload_purpose: ProviderPayloadPurpose::AgentMemoryExtraction,
+        provider_tools: Vec::new(),
         stream_provider_tokens: false,
         additional_resource_context_allowed: false,
         required_resource_selection_digest: None,
@@ -196,6 +181,18 @@ async fn run_one(
     {
         return Ok(None);
     }
+    let source_span = decision
+        .source_span
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| "agent_memory_extraction_source_span_missing".to_string())?;
+    if source_span.chars().count() > 320 || !user_text.contains(source_span) {
+        return Err("agent_memory_extraction_source_span_invalid".into());
+    }
+    if openlife_core::privacy::assess_sensitive_content(source_span).requires_memory_review() {
+        return Ok(None);
+    }
 
     let (scope, scope_owner_ref) = match conversation.project_id.as_deref() {
         Some(project_id) => (
@@ -211,7 +208,7 @@ async fn run_one(
         None => (MemoryLifecycleScope::Global, None),
     };
     let mut fact = CanonicalMemoryFactDescriptor::from_candidate(
-        candidate.normalized_claim.clone(),
+        source_span.to_string(),
         MemoryCandidateKind::SemanticUserFact,
         scope,
         MemoryLifecycleRiskLevel::Low,
@@ -343,25 +340,24 @@ fn comparison_text(value: &str) -> String {
         .collect()
 }
 
-fn extraction_prompt(candidate: &str) -> String {
-    format!(
-        "Decide whether the following deterministic candidate is a stable, low-sensitivity user fact that will probably help future conversations. Candidate: {candidate}\nDo not infer identity, health, finance, secrets, relationships, values, boundaries, or new facts. Return only strict JSON with exactly two fields: {{\"keep\":true|false,\"confidence\":0.0..1.0}}. Use keep=false when uncertain."
-    )
+fn extraction_prompt() -> String {
+    "Decide whether the authenticated user's message contains one stable, low-sensitivity fact that will probably help future conversations. Do not infer identity, health, finance, secrets, relationships, values, boundaries, or any fact not written by the user. If one qualifies, copy one exact contiguous source span from the user message. Return only strict JSON with exactly three fields: {\"keep\":true|false,\"confidence\":0.0..1.0,\"source_span\":\"exact user text or empty\"}. Use keep=false and an empty source_span when uncertain.".into()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use openlife_core::agent::main_chat_agent_v1::AgentIngress;
     use openlife_core::conversation::BeginChatTurn;
 
     #[test]
     fn extraction_decision_is_strict_and_bounded() {
-        let accepted: ExtractionDecision =
-            serde_json::from_str(r#"{"keep":true,"confidence":0.91}"#).unwrap();
+        let accepted: ExtractionDecision = serde_json::from_str(
+            r#"{"keep":true,"confidence":0.91,"source_span":"My timezone is CET."}"#,
+        )
+        .unwrap();
         assert!(accepted.keep);
         assert!(serde_json::from_str::<ExtractionDecision>(
-            r#"{"keep":true,"confidence":0.91,"content":"invented"}"#
+            r#"{"keep":true,"confidence":0.91,"source_span":"fact","content":"invented"}"#
         )
         .is_err());
     }
@@ -379,7 +375,7 @@ mod tests {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         crate::main_chat_acceptance_test_support::configure_live_provider_eval_state_with_local_http_provider(
             &state,
-            r#"{"keep":true,"confidence":0.91}"#,
+            r#"{"keep":true,"confidence":0.91,"source_span":"My work timezone is Central European Time."}"#,
         )
         .await;
         let conversation_id = uuid::Uuid::new_v4().to_string();
@@ -410,16 +406,6 @@ mod tests {
                 provider: &provider,
             })
             .unwrap();
-        let ingress = AgentIngress::default()
-            .decide_with_conversation_user_item(
-                &begun.user_message_proof,
-                user_text,
-                &[ChatMessage {
-                    role: "user".into(),
-                    content: user_text.into(),
-                }],
-            )
-            .unwrap();
         state
             .conversation_store
             .as_ref()
@@ -429,10 +415,16 @@ mod tests {
             .complete_chat_turn(&turn_id, "Understood.")
             .unwrap();
 
-        let proposal_id = run_one(&state, &conversation_id, &turn_id, user_text, &ingress)
-            .await
-            .unwrap()
-            .expect("eligible idle extraction should create one Review proposal");
+        let proposal_id = run_one(
+            &state,
+            &conversation_id,
+            &turn_id,
+            user_text,
+            &begun.user_message_proof,
+        )
+        .await
+        .unwrap()
+        .expect("eligible idle extraction should create one Review proposal");
         let proposal = state
             .proposal_store
             .as_ref()
@@ -449,7 +441,7 @@ mod tests {
         );
         assert_eq!(
             proposal.after["content"],
-            "My work timezone is Central European Time"
+            "My work timezone is Central European Time."
         );
         assert!(state
             .memory_lifecycle_store
@@ -506,16 +498,6 @@ mod tests {
                     provider: &provider,
                 })
                 .unwrap();
-            let ingress = AgentIngress::default()
-                .decide_with_conversation_user_item(
-                    &begun.user_message_proof,
-                    user_text,
-                    &[ChatMessage {
-                        role: "user".into(),
-                        content: user_text.into(),
-                    }],
-                )
-                .unwrap();
             state
                 .conversation_store
                 .as_ref()
@@ -526,9 +508,15 @@ mod tests {
                 .unwrap();
 
             assert_eq!(
-                run_one(&state, &conversation_id, &turn_id, user_text, &ingress)
-                    .await
-                    .unwrap(),
+                run_one(
+                    &state,
+                    &conversation_id,
+                    &turn_id,
+                    user_text,
+                    &begun.user_message_proof,
+                )
+                .await
+                .unwrap(),
                 None
             );
         }

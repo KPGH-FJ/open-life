@@ -1,58 +1,9 @@
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalStatus, ProposalType, RiskLevel};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
-use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ArtifactEffectState {
-    Prepared,
-    Staged,
-    Confirmed,
-    FailedBeforeEffect,
-    Unknown,
-}
-
-impl ArtifactEffectState {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Prepared => "prepared",
-            Self::Staged => "staged",
-            Self::Confirmed => "confirmed",
-            Self::FailedBeforeEffect => "failed_before_effect",
-            Self::Unknown => "unknown",
-        }
-    }
-
-    fn parse(value: &str) -> Result<Self> {
-        match value {
-            "prepared" => Ok(Self::Prepared),
-            "staged" => Ok(Self::Staged),
-            "confirmed" => Ok(Self::Confirmed),
-            "failed_before_effect" => Ok(Self::FailedBeforeEffect),
-            "unknown" => Ok(Self::Unknown),
-            other => anyhow::bail!("unsupported artifact effect state: {other}"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ArtifactEffectRecord {
-    pub proposal_id: String,
-    pub dispatch_claim_id: String,
-    pub proposal_snapshot_digest: String,
-    pub target_reference_digest: String,
-    pub content_digest: String,
-    pub byte_size: u64,
-    pub media_type: String,
-    pub state: ArtifactEffectState,
-    pub observed_content_digest: Option<String>,
-    pub error_code: Option<String>,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub updated_at: chrono::DateTime<chrono::Utc>,
-}
 #[derive(Clone)]
 pub struct ProposalStore {
     conn: Arc<Mutex<Connection>>,
@@ -160,32 +111,6 @@ impl ProposalStore {
              ON proposals(review_idempotency_key)
              WHERE review_idempotency_key IS NOT NULL
                AND status IN ('pending', 'postponed', 'edited');",
-        )?;
-        tx.execute(
-            "CREATE TABLE IF NOT EXISTS artifact_effects (
-                proposal_id TEXT PRIMARY KEY,
-                dispatch_claim_id TEXT NOT NULL,
-                proposal_snapshot_digest TEXT NOT NULL,
-                target_reference_digest TEXT NOT NULL,
-                content_digest TEXT NOT NULL,
-                byte_size INTEGER NOT NULL CHECK(byte_size >= 0),
-                media_type TEXT NOT NULL,
-                state TEXT NOT NULL CHECK(state IN (
-                    'prepared', 'staged', 'confirmed',
-                    'failed_before_effect', 'unknown'
-                )),
-                observed_content_digest TEXT,
-                error_code TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(proposal_id) REFERENCES proposals(id)
-            )",
-            [],
-        )?;
-        tx.execute(
-            "CREATE INDEX IF NOT EXISTS idx_artifact_effects_reconciliation
-             ON artifact_effects(state, updated_at, proposal_id)",
-            [],
         )?;
         crate::sqlite_migration::record_schema_version(&tx, "proposal_store", 11)?;
         tx.commit()?;
@@ -675,384 +600,6 @@ impl ProposalStore {
     /// Persist the exact artifact effect intent before any filesystem bytes are
     /// staged. The record intentionally contains digests and references only;
     /// artifact bodies remain owned by the Proposal snapshot and filesystem.
-    pub fn prepare_artifact_effect(
-        &self,
-        proposal_id: &str,
-        claim_id: &str,
-        target_reference_digest: &str,
-        content_digest: &str,
-        byte_size: u64,
-        media_type: &str,
-    ) -> Result<ArtifactEffectRecord> {
-        for (label, value) in [
-            ("proposal_id", proposal_id),
-            ("claim_id", claim_id),
-            ("target_reference_digest", target_reference_digest),
-            ("content_digest", content_digest),
-            ("media_type", media_type),
-        ] {
-            if value.trim().is_empty() {
-                anyhow::bail!("artifact effect {label} is empty");
-            }
-        }
-        let byte_size = i64::try_from(byte_size).context("artifact byte size exceeds SQLite")?;
-        let now = chrono::Utc::now();
-        let now_text = now.to_rfc3339();
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let snapshot_digest = tx
-            .query_row(
-                "SELECT dispatch_snapshot_digest
-                 FROM proposals
-                 WHERE id = ?1 AND dispatch_claim_id = ?2
-                   AND dispatch_state = 'claimed'
-                   AND dispatch_snapshot_digest IS NOT NULL",
-                params![proposal_id, claim_id],
-                |row| row.get::<_, String>(0),
-            )
-            .optional()?
-            .ok_or_else(|| {
-                anyhow::anyhow!("artifact effect requires the current dispatch claim")
-            })?;
-
-        let existing = tx
-            .query_row(
-                "SELECT proposal_id, dispatch_claim_id, proposal_snapshot_digest,
-                        target_reference_digest, content_digest, byte_size, media_type,
-                        state, observed_content_digest, error_code, created_at, updated_at
-                 FROM artifact_effects WHERE proposal_id = ?1",
-                [proposal_id],
-                Self::row_to_artifact_effect,
-            )
-            .optional()?;
-        if let Some(existing) = existing {
-            if existing.dispatch_claim_id == claim_id {
-                if existing.proposal_snapshot_digest != snapshot_digest
-                    || existing.target_reference_digest != target_reference_digest
-                    || existing.content_digest != content_digest
-                    || existing.byte_size != byte_size as u64
-                    || existing.media_type != media_type
-                {
-                    anyhow::bail!(
-                        "artifact effect replay payload does not match its dispatch claim"
-                    );
-                }
-                tx.commit()?;
-                return Ok(existing);
-            }
-            if existing.state != ArtifactEffectState::FailedBeforeEffect {
-                anyhow::bail!(
-                    "artifact effect has unresolved or completed bytes under another dispatch claim"
-                );
-            }
-            let changed = tx.execute(
-                "UPDATE artifact_effects
-                 SET dispatch_claim_id = ?2,
-                     proposal_snapshot_digest = ?3,
-                     target_reference_digest = ?4,
-                     content_digest = ?5,
-                     byte_size = ?6,
-                     media_type = ?7,
-                     state = 'prepared',
-                     observed_content_digest = NULL,
-                     error_code = NULL,
-                     created_at = ?8,
-                     updated_at = ?8
-                 WHERE proposal_id = ?1 AND state = 'failed_before_effect'",
-                params![
-                    proposal_id,
-                    claim_id,
-                    snapshot_digest,
-                    target_reference_digest,
-                    content_digest,
-                    byte_size,
-                    media_type,
-                    now_text,
-                ],
-            )?;
-            if changed != 1 {
-                anyhow::bail!("artifact effect retry claim lost its compare-and-swap");
-            }
-        } else {
-            tx.execute(
-                "INSERT INTO artifact_effects (
-                    proposal_id, dispatch_claim_id, proposal_snapshot_digest,
-                    target_reference_digest, content_digest, byte_size, media_type,
-                    state, observed_content_digest, error_code, created_at, updated_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'prepared', NULL, NULL, ?8, ?8)",
-                params![
-                    proposal_id,
-                    claim_id,
-                    snapshot_digest,
-                    target_reference_digest,
-                    content_digest,
-                    byte_size,
-                    media_type,
-                    now_text,
-                ],
-            )?;
-        }
-        tx.commit()?;
-        Ok(ArtifactEffectRecord {
-            proposal_id: proposal_id.to_string(),
-            dispatch_claim_id: claim_id.to_string(),
-            proposal_snapshot_digest: snapshot_digest,
-            target_reference_digest: target_reference_digest.to_string(),
-            content_digest: content_digest.to_string(),
-            byte_size: byte_size as u64,
-            media_type: media_type.to_string(),
-            state: ArtifactEffectState::Prepared,
-            observed_content_digest: None,
-            error_code: None,
-            created_at: now,
-            updated_at: now,
-        })
-    }
-
-    pub fn mark_artifact_staged(&self, proposal_id: &str, claim_id: &str) -> Result<bool> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        Ok(conn.execute(
-            "UPDATE artifact_effects
-             SET state = 'staged', updated_at = ?3
-             WHERE proposal_id = ?1 AND dispatch_claim_id = ?2 AND state = 'prepared'",
-            params![proposal_id, claim_id, chrono::Utc::now().to_rfc3339()],
-        )? == 1)
-    }
-
-    /// Atomically records filesystem digest confirmation and advances the
-    /// Proposal receipt to projection-pending. This closes the crash window
-    /// where bytes were durable but the generic Proposal receipt was absent.
-    pub fn finish_artifact_confirmed(
-        &self,
-        proposal_id: &str,
-        claim_id: &str,
-        observed_content_digest: &str,
-    ) -> Result<bool> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let artifact_changed = tx.execute(
-            "UPDATE artifact_effects
-             SET state = 'confirmed', observed_content_digest = ?3,
-                 error_code = NULL, updated_at = ?4
-             WHERE proposal_id = ?1 AND dispatch_claim_id = ?2
-               AND content_digest = ?3
-               AND state IN ('prepared', 'staged', 'unknown')",
-            params![
-                proposal_id,
-                claim_id,
-                observed_content_digest,
-                chrono::Utc::now().to_rfc3339(),
-            ],
-        )?;
-        let proposal_changed = tx.execute(
-            "UPDATE proposals
-             SET dispatch_state = 'confirmed_projection_pending',
-                 dispatch_error_code = 'proposal_status_projection_pending'
-             WHERE id = ?1 AND dispatch_claim_id = ?2
-               AND dispatch_state IN ('claimed', 'unknown')",
-            params![proposal_id, claim_id],
-        )?;
-        if artifact_changed == 1 && proposal_changed == 1 {
-            tx.commit()?;
-            return Ok(true);
-        }
-        let already_confirmed: bool = tx.query_row(
-            "SELECT EXISTS(
-                SELECT 1 FROM artifact_effects AS artifact
-                JOIN proposals AS proposal ON proposal.id = artifact.proposal_id
-                WHERE artifact.proposal_id = ?1
-                  AND artifact.dispatch_claim_id = ?2
-                  AND artifact.state = 'confirmed'
-                  AND artifact.content_digest = ?3
-                  AND artifact.observed_content_digest = ?3
-                  AND proposal.dispatch_claim_id = ?2
-                  AND proposal.dispatch_state IN ('confirmed_projection_pending', 'confirmed')
-             )",
-            params![proposal_id, claim_id, observed_content_digest],
-            |row| row.get(0),
-        )?;
-        if already_confirmed {
-            tx.commit()?;
-            Ok(true)
-        } else {
-            tx.rollback()?;
-            Ok(false)
-        }
-    }
-
-    pub fn finish_artifact_failed_before_effect(
-        &self,
-        proposal_id: &str,
-        claim_id: &str,
-        error_code: &str,
-    ) -> Result<bool> {
-        self.finish_artifact_nonconfirmed(
-            proposal_id,
-            claim_id,
-            ArtifactEffectState::FailedBeforeEffect,
-            error_code,
-        )
-    }
-
-    pub fn finish_artifact_unknown(
-        &self,
-        proposal_id: &str,
-        claim_id: &str,
-        error_code: &str,
-    ) -> Result<bool> {
-        self.finish_artifact_nonconfirmed(
-            proposal_id,
-            claim_id,
-            ArtifactEffectState::Unknown,
-            error_code,
-        )
-    }
-
-    fn finish_artifact_nonconfirmed(
-        &self,
-        proposal_id: &str,
-        claim_id: &str,
-        next_state: ArtifactEffectState,
-        error_code: &str,
-    ) -> Result<bool> {
-        debug_assert!(matches!(
-            next_state,
-            ArtifactEffectState::FailedBeforeEffect | ArtifactEffectState::Unknown
-        ));
-        let next = next_state.as_str();
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let artifact_changed = tx.execute(
-            "UPDATE artifact_effects
-             SET state = ?3, error_code = ?4, updated_at = ?5
-             WHERE proposal_id = ?1 AND dispatch_claim_id = ?2
-               AND state IN ('prepared', 'staged', 'unknown')",
-            params![
-                proposal_id,
-                claim_id,
-                next,
-                error_code,
-                chrono::Utc::now().to_rfc3339(),
-            ],
-        )?;
-        let proposal_changed = tx.execute(
-            "UPDATE proposals SET dispatch_state = ?3, dispatch_error_code = ?4
-             WHERE id = ?1 AND dispatch_claim_id = ?2
-               AND dispatch_state IN ('claimed', 'unknown')",
-            params![proposal_id, claim_id, next, error_code],
-        )?;
-        if artifact_changed == 1 && proposal_changed == 1 {
-            tx.commit()?;
-            Ok(true)
-        } else {
-            tx.rollback()?;
-            Ok(false)
-        }
-    }
-
-    pub fn artifact_effect(&self, proposal_id: &str) -> Result<Option<ArtifactEffectRecord>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        conn.query_row(
-            "SELECT proposal_id, dispatch_claim_id, proposal_snapshot_digest,
-                    target_reference_digest, content_digest, byte_size, media_type,
-                    state, observed_content_digest, error_code, created_at, updated_at
-             FROM artifact_effects WHERE proposal_id = ?1",
-            [proposal_id],
-            Self::row_to_artifact_effect,
-        )
-        .optional()
-        .map_err(Into::into)
-    }
-
-    pub fn list_artifact_effects_for_reconciliation(
-        &self,
-        limit: i64,
-    ) -> Result<Vec<ArtifactEffectRecord>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let mut statement = conn.prepare(
-            "SELECT proposal_id, dispatch_claim_id, proposal_snapshot_digest,
-                    target_reference_digest, content_digest, byte_size, media_type,
-                    state, observed_content_digest, error_code, created_at, updated_at
-             FROM artifact_effects INDEXED BY idx_artifact_effects_reconciliation
-             WHERE state IN ('prepared', 'staged', 'unknown')
-             ORDER BY state ASC, updated_at ASC, proposal_id ASC
-             LIMIT ?1",
-        )?;
-        let records = statement
-            .query_map([limit.clamp(1, 200)], Self::row_to_artifact_effect)?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into);
-        records
-    }
-
-    fn row_to_artifact_effect(row: &rusqlite::Row<'_>) -> rusqlite::Result<ArtifactEffectRecord> {
-        fn parse_time(
-            value: String,
-            column: usize,
-        ) -> rusqlite::Result<chrono::DateTime<chrono::Utc>> {
-            chrono::DateTime::parse_from_rfc3339(&value)
-                .map(|value| value.with_timezone(&chrono::Utc))
-                .map_err(|error| {
-                    rusqlite::Error::FromSqlConversionFailure(
-                        column,
-                        rusqlite::types::Type::Text,
-                        Box::new(error),
-                    )
-                })
-        }
-        let state_text: String = row.get(7)?;
-        let state = ArtifactEffectState::parse(&state_text).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                7,
-                rusqlite::types::Type::Text,
-                Box::new(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    error.to_string(),
-                )),
-            )
-        })?;
-        let byte_size: i64 = row.get(5)?;
-        let byte_size = u64::try_from(byte_size).map_err(|error| {
-            rusqlite::Error::FromSqlConversionFailure(
-                5,
-                rusqlite::types::Type::Integer,
-                Box::new(error),
-            )
-        })?;
-        Ok(ArtifactEffectRecord {
-            proposal_id: row.get(0)?,
-            dispatch_claim_id: row.get(1)?,
-            proposal_snapshot_digest: row.get(2)?,
-            target_reference_digest: row.get(3)?,
-            content_digest: row.get(4)?,
-            byte_size,
-            media_type: row.get(6)?,
-            state,
-            observed_content_digest: row.get(8)?,
-            error_code: row.get(9)?,
-            created_at: parse_time(row.get(10)?, 10)?,
-            updated_at: parse_time(row.get(11)?, 11)?,
-        })
-    }
-
     pub fn confirmed_projection_claim_id(&self, proposal_id: &str) -> Result<Option<String>> {
         let conn = self
             .conn
@@ -1124,41 +671,9 @@ impl ProposalStore {
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
         let mut statement = conn.prepare(
-            "SELECT proposal.id, proposal.dispatch_claim_id
-             FROM proposals proposal
-             LEFT JOIN artifact_effects artifact
-                ON artifact.proposal_id = proposal.id
-             WHERE proposal.proposal_type = 'external_write_action'
-               AND proposal.dispatch_state = 'claimed'
-               AND proposal.dispatch_claim_id IS NOT NULL
-               AND artifact.proposal_id IS NULL
-             ORDER BY proposal.dispatch_claimed_at ASC, proposal.id ASC
-             LIMIT ?1",
-        )?;
-        let rows = statement.query_map([i64::try_from(limit.clamp(1, 250))?], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    }
-
-    /// Startup-only recovery input for reviewed actions whose dispatch crossed
-    /// an operating-system or local execution boundary but has no independently
-    /// inspectable artifact intent. A surviving `claimed` row cannot prove
-    /// whether the handoff happened, so callers must seal it as `unknown` and
-    /// must never turn it back into an automatic retry.
-    pub fn list_claimed_governed_actions_for_unknown_recovery(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<(String, String)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let mut statement = conn.prepare(
             "SELECT id, dispatch_claim_id
-             FROM proposals INDEXED BY idx_proposals_dispatch_reconciliation
-             WHERE proposal_type IN ('scheduled_task', 'data_export')
+             FROM proposals
+             WHERE proposal_type = 'external_write_action'
                AND dispatch_state = 'claimed'
                AND dispatch_claim_id IS NOT NULL
              ORDER BY dispatch_claimed_at ASC, id ASC
@@ -1517,21 +1032,12 @@ impl ProposalStore {
         let expires_at_str: Option<String> = row.get(15)?;
 
         let proposal_type = match type_str.as_str() {
-            "goal_update" => ProposalType::GoalUpdate,
-            "state_update" => ProposalType::StateUpdate,
-            "preference_update" => ProposalType::PreferenceUpdate,
-            "capability_update" => ProposalType::CapabilityUpdate,
             "memory_write" => ProposalType::MemoryWrite,
             "memory_archive" => ProposalType::MemoryArchive,
             "tool_permission" => ProposalType::ToolPermission,
-            "scheduled_task" => ProposalType::ScheduledTask,
             "external_write_action" => ProposalType::ExternalWriteAction,
-            "model_policy_change" => ProposalType::ModelPolicyChange,
-            "data_export" => ProposalType::DataExport,
-            "schedule_checkin" => ProposalType::ScheduleCheckin,
-            "unsupported" => ProposalType::Unsupported,
             "life_model_update" => ProposalType::LifeModelUpdate,
-            _ => ProposalType::Unsupported,
+            _ => return Err(rusqlite::Error::InvalidQuery),
         };
 
         let risk_level = match risk_str.as_str() {
@@ -1611,7 +1117,7 @@ mod tests {
     fn test_create_and_get_proposal() {
         let store = ProposalStore::new_in_memory().unwrap();
         let proposal = AgentProposal::new(
-            ProposalType::GoalUpdate,
+            ProposalType::LifeModelUpdate,
             "identity.name",
             serde_json::json!("New Name"),
             "Builder suggested new name",
@@ -1695,7 +1201,7 @@ mod tests {
     fn test_accept_proposal() {
         let store = ProposalStore::new_in_memory().unwrap();
         let mut proposal = AgentProposal::new(
-            ProposalType::StateUpdate,
+            ProposalType::LifeModelUpdate,
             "identity.name",
             serde_json::json!("New Name"),
             "Builder suggested new name",
@@ -1826,7 +1332,7 @@ mod tests {
     fn confirmed_effect_projection_and_receipt_close_atomically_and_are_retryable() {
         let store = ProposalStore::new_in_memory().unwrap();
         let proposal = AgentProposal::new(
-            ProposalType::ScheduledTask,
+            ProposalType::ExternalWriteAction,
             "tasks.scheduled",
             serde_json::json!({"title": "projection recovery"}),
             "Atomic confirmed effect projection test",
@@ -1889,7 +1395,7 @@ mod tests {
     fn expiration_cleanup_cannot_overwrite_confirmed_projection_pending_truth() {
         let store = ProposalStore::new_in_memory().unwrap();
         let mut proposal = AgentProposal::new(
-            ProposalType::ScheduledTask,
+            ProposalType::ExternalWriteAction,
             "tasks.scheduled",
             serde_json::json!({"title": "confirmed but projection pending"}),
             "Confirmed receipt must outrank expiry cleanup",
@@ -1919,7 +1425,7 @@ mod tests {
     fn confirmed_receipt_repairs_legacy_rejected_or_expired_projection() {
         let store = ProposalStore::new_in_memory().unwrap();
         let proposal = AgentProposal::new(
-            ProposalType::ScheduledTask,
+            ProposalType::ExternalWriteAction,
             "tasks.scheduled",
             serde_json::json!({"title": "repair stale projection"}),
             "Confirmed receipt is the higher-priority fact",
@@ -1989,7 +1495,7 @@ mod tests {
     fn review_mutation_cas_loses_to_concurrent_review_or_dispatch_claim() {
         let store = ProposalStore::new_in_memory().unwrap();
         let original = AgentProposal::new(
-            ProposalType::ScheduledTask,
+            ProposalType::ExternalWriteAction,
             "tasks.scheduled",
             serde_json::json!({"title": "review CAS"}),
             "Review mutation concurrency test",
@@ -2015,7 +1521,7 @@ mod tests {
         );
 
         let claimed = AgentProposal::new(
-            ProposalType::ScheduledTask,
+            ProposalType::ExternalWriteAction,
             "tasks.scheduled",
             serde_json::json!({"title": "dispatch wins"}),
             "Dispatch must block a late review mutation",
@@ -2045,7 +1551,7 @@ mod tests {
         let store = ProposalStore::new_in_memory().unwrap();
         for i in 0..3 {
             let proposal = AgentProposal::new(
-                ProposalType::GoalUpdate,
+                ProposalType::LifeModelUpdate,
                 &format!("path.{}", i),
                 serde_json::json!(format!("value{}", i)),
                 "test",
@@ -2067,7 +1573,7 @@ mod tests {
     fn test_expired_proposal() {
         let store = ProposalStore::new_in_memory().unwrap();
         let mut proposal = AgentProposal::new(
-            ProposalType::GoalUpdate,
+            ProposalType::LifeModelUpdate,
             "identity.name",
             serde_json::json!("New Name"),
             "Test",
@@ -2089,7 +1595,7 @@ mod tests {
     }
 
     #[test]
-    fn test_unknown_proposal_type_maps_to_unsupported() {
+    fn test_unknown_proposal_type_is_rejected() {
         let store = ProposalStore::new_in_memory().unwrap();
         // Insert a proposal with unknown type directly via SQL
         let conn = store.conn.lock().unwrap();
@@ -2116,13 +1622,7 @@ mod tests {
         ).unwrap();
         drop(conn);
 
-        // Should not panic or masquerade as a LifeModel update.
-        let fetched = store.get_proposal("unknown-type-test").unwrap();
-        assert!(fetched.is_some());
-        let fetched = fetched.unwrap();
-        assert_eq!(fetched.proposal_type, ProposalType::Unsupported);
-        assert_eq!(fetched.status, ProposalStatus::Pending);
-        assert_eq!(fetched.risk_level, RiskLevel::Low);
+        assert!(store.get_proposal("unknown-type-test").is_err());
     }
 
     #[test]
@@ -2135,7 +1635,7 @@ mod tests {
             params![
                 "unknown-risk-test",
                 Option::<String>::None,
-                "goal_update",
+                "life_model_update",
                 "manual",
                 Option::<String>::None,
                 "test.path",
@@ -2168,7 +1668,7 @@ mod tests {
             params![
                 "unknown-status-test",
                 Option::<String>::None,
-                "goal_update",
+                "life_model_update",
                 "manual",
                 Option::<String>::None,
                 "test.path",
@@ -2188,176 +1688,5 @@ mod tests {
 
         let error = store.get_proposal("unknown-status-test").unwrap_err();
         assert!(error.to_string().contains("unsupported proposal status"));
-    }
-
-    fn claimed_artifact_proposal(store: &ProposalStore) -> (AgentProposal, String) {
-        let proposal = AgentProposal::new(
-            ProposalType::ExternalWriteAction,
-            "filesystem./tmp/roadshow-summary.md",
-            serde_json::json!({
-                "path": "/tmp/roadshow-summary.md",
-                "content": "PRIVATE_ARTIFACT_BODY_MUST_NOT_BE_COPIED_TO_EFFECT_LEDGER"
-            }),
-            "Materialize a reviewed roadshow artifact.",
-            1.0,
-            RiskLevel::High,
-            ProposalSource::ChatConversation,
-        );
-        store.create_proposal(&proposal).unwrap();
-        let claim_id = store.claim_dispatch(&proposal.id).unwrap().unwrap();
-        (proposal, claim_id)
-    }
-
-    #[test]
-    fn artifact_effect_binds_exact_claim_and_advances_receipt_atomically() {
-        let store = ProposalStore::new_in_memory().unwrap();
-        let (proposal, claim_id) = claimed_artifact_proposal(&store);
-        let record = store
-            .prepare_artifact_effect(
-                &proposal.id,
-                &claim_id,
-                "sha256:target",
-                "sha256:content",
-                42,
-                "text/markdown",
-            )
-            .unwrap();
-        assert_eq!(record.state, ArtifactEffectState::Prepared);
-        assert!(store.mark_artifact_staged(&proposal.id, &claim_id).unwrap());
-        assert!(!store
-            .finish_artifact_confirmed(&proposal.id, &claim_id, "sha256:wrong")
-            .unwrap());
-        assert_eq!(
-            store.artifact_effect(&proposal.id).unwrap().unwrap().state,
-            ArtifactEffectState::Staged
-        );
-        assert!(store
-            .finish_artifact_confirmed(&proposal.id, &claim_id, "sha256:content")
-            .unwrap());
-        let confirmed = store.artifact_effect(&proposal.id).unwrap().unwrap();
-        assert_eq!(confirmed.state, ArtifactEffectState::Confirmed);
-        assert_eq!(
-            confirmed.observed_content_digest.as_deref(),
-            Some("sha256:content")
-        );
-        assert_eq!(
-            store.dispatch_state(&proposal.id).unwrap().as_deref(),
-            Some("confirmed_projection_pending")
-        );
-        assert!(store
-            .finish_artifact_confirmed(&proposal.id, &claim_id, "sha256:content")
-            .unwrap());
-
-        let connection = store.conn.lock().unwrap();
-        let columns = connection
-            .prepare("PRAGMA table_info(artifact_effects)")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(!columns.iter().any(|column| {
-            matches!(
-                column.as_str(),
-                "content" | "body" | "payload" | "after_json"
-            )
-        }));
-    }
-
-    #[test]
-    fn artifact_retry_replaces_only_a_proven_failed_before_effect_claim() {
-        let store = ProposalStore::new_in_memory().unwrap();
-        let (proposal, first_claim) = claimed_artifact_proposal(&store);
-        store
-            .prepare_artifact_effect(
-                &proposal.id,
-                &first_claim,
-                "sha256:target",
-                "sha256:content",
-                42,
-                "text/markdown",
-            )
-            .unwrap();
-        assert!(store
-            .finish_artifact_failed_before_effect(
-                &proposal.id,
-                &first_claim,
-                "artifact_stage_not_created",
-            )
-            .unwrap());
-        let second_claim = store.claim_dispatch(&proposal.id).unwrap().unwrap();
-        assert_ne!(first_claim, second_claim);
-        let retried = store
-            .prepare_artifact_effect(
-                &proposal.id,
-                &second_claim,
-                "sha256:target",
-                "sha256:content",
-                42,
-                "text/markdown",
-            )
-            .unwrap();
-        assert_eq!(retried.dispatch_claim_id, second_claim);
-        assert_eq!(retried.state, ArtifactEffectState::Prepared);
-        assert!(store
-            .mark_artifact_staged(&proposal.id, &second_claim)
-            .unwrap());
-        assert!(store
-            .finish_artifact_unknown(
-                &proposal.id,
-                &second_claim,
-                "artifact_rename_outcome_unknown",
-            )
-            .unwrap());
-        assert!(store.claim_dispatch(&proposal.id).unwrap().is_none());
-        assert!(store
-            .prepare_artifact_effect(
-                &proposal.id,
-                "stale-claim",
-                "sha256:target",
-                "sha256:content",
-                42,
-                "text/markdown",
-            )
-            .is_err());
-        let pending = store.list_artifact_effects_for_reconciliation(10).unwrap();
-        assert_eq!(pending.len(), 1);
-        assert_eq!(pending[0].state, ArtifactEffectState::Unknown);
-    }
-
-    #[test]
-    fn artifact_and_proposal_receipt_cas_failure_rolls_back_both_sides() {
-        let store = ProposalStore::new_in_memory().unwrap();
-        let (proposal, claim_id) = claimed_artifact_proposal(&store);
-        store
-            .prepare_artifact_effect(
-                &proposal.id,
-                &claim_id,
-                "sha256:target",
-                "sha256:content",
-                42,
-                "text/markdown",
-            )
-            .unwrap();
-        store
-            .conn
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE proposals SET dispatch_state = 'confirmed' WHERE id = ?1",
-                [&proposal.id],
-            )
-            .unwrap();
-
-        assert!(!store
-            .finish_artifact_failed_before_effect(
-                &proposal.id,
-                &claim_id,
-                "counterfactual_receipt_cas_mismatch",
-            )
-            .unwrap());
-        let artifact = store.artifact_effect(&proposal.id).unwrap().unwrap();
-        assert_eq!(artifact.state, ArtifactEffectState::Prepared);
-        assert!(artifact.error_code.is_none());
     }
 }

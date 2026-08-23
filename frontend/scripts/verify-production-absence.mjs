@@ -5,12 +5,11 @@ const frontendRoot = process.cwd();
 const distRoot = join(frontendRoot, "dist");
 const sourceRoot = join(frontendRoot, "src");
 const appPath = join(sourceRoot, "App.tsx");
-const routeContractPath = join(sourceRoot, "ui", "productRouteContract.ts");
+const routeContractPath = join(sourceRoot, "app", "routes.ts");
 const lifeModelBuilderPath = join(
   sourceRoot,
-  "ui",
-  "journeys",
-  "durableTruth",
+  "features",
+  "personalIntelligence",
   "LifeModelBuilderPanel.tsx"
 );
 const retiredLifeModelBuilderDataSourcePath = join(
@@ -40,6 +39,7 @@ const forbiddenOldOwners = [
   "src/pages/BuilderPage.tsx",
   "src/pages/AgentRunDetail.tsx",
   "src/pages/TodayV2PreviewPage.tsx",
+  "src/ui/journeys",
   "src/ui/journeys/durableTruth/lifeModelBuilderDataSource.ts",
 ];
 
@@ -57,12 +57,11 @@ for (const owner of forbiddenOldOwners) {
 
 const appSource = readFileSync(appPath, "utf8");
 for (const requiredOwner of [
-  "ProductWorkbenchJourney",
-  "tauriProductBoundaryDataSource",
-  "tauriGovernedActionDataSource",
-  "tauriDurableTruthDataSource",
-  "tauriSettingsPrivacyDataSource",
-  "tauriWorkspaceConversationDataSource",
+  "ProductWorkbench",
+  "tauriWorkbenchDataSource",
+  "tauriPersonalIntelligenceDataSource",
+  "tauriSettingsDataSource",
+  "tauriConversationDataSource",
 ]) {
   if (!appSource.includes(requiredOwner)) {
     throw new Error(`src/App.tsx is missing production owner ${requiredOwner}`);
@@ -175,5 +174,5 @@ if (!workbenchCssPresent) {
 }
 
 console.log(
-  "Production authority guard passed: Workbench journeys are shipped; old shell/pages, compatibility redirects, and dev harnesses are absent."
+  "Production authority guard passed: the app/features/ipc Workbench is shipped; old journeys, shell/pages, compatibility redirects, and dev harnesses are absent."
 );

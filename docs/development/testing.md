@@ -89,6 +89,11 @@ signed updates.
 External-live tests remain opt-in:
 
 ```sh
+# Canonical document + Web + Review + materialization contract. This wrapper
+# fails if the exact ignored test is missing, so a zero-test run cannot count.
+scripts/agent-external-live.zsh
+
+# Other explicitly gated live tests:
 scripts/live-eval.zsh cargo test -p openlife-tauri --locked \
   <ignored-live-test-name> -- --ignored --nocapture
 ```
@@ -97,6 +102,17 @@ scripts/live-eval.zsh cargo test -p openlife-tauri --locked \
 rejects localhost, mock, fixture, scripted, and Ollama endpoints. Never retain
 credentials, provider payloads, private resource bodies, or generated private
 content in plans or test summaries.
+
+Agent capability acceptance prompts must resemble user language. A prompt that
+names an internal capability such as `web.search`, prescribes the implementation
+plan, and requests every checkpoint is only a narrow transport probe; it cannot
+prove semantic task understanding. The external-live Work case therefore asks
+for an official-site research deliverable without naming a tool, then verifies
+the persisted Plan, exact source-domain constraint, real tool receipts,
+request-scoped citations, Review stop condition, and one confirmed
+materialization. Ordinary new-file behavior is covered separately and must not
+inherit a Review checkpoint unless the user requested it or the target effect
+requires it.
 
 Rerun exact-native or external-live evidence only when the corresponding
 runtime, identity/profile boundary, provider, network, Review, or materializer

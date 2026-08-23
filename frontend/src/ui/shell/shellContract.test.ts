@@ -36,7 +36,7 @@ describe("desktop shell contract", () => {
   it("makes the workbench shell the only production shell authority", () => {
     const app = read("src/App.tsx");
 
-    expect(app).toContain("ProductWorkbenchJourney");
+    expect(app).toContain("ProductWorkbench");
     expect(app).not.toMatch(/src\/dev\//);
     expect(existsSync(join(process.cwd(), "src/components/ProductShell.tsx"))).toBe(false);
     expect(existsSync(join(process.cwd(), "src/productShellContract.ts"))).toBe(false);

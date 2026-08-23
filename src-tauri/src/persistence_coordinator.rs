@@ -11,7 +11,6 @@ pub const PERSISTENCE_ADMISSION_INVALIDATED: &str = "persistence_admission_inval
 pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
     "ConfigStore",
     "LifeModelFileStore",
-    "LifeModelFileJournal",
     "PrivacyPolicyStore",
     "McpAuditKeyReferenceStore",
     "MemoryStore",
@@ -21,23 +20,21 @@ pub const EXPECTED_BOOTSTRAP_STORES: &[&str] = &[
     "CanonicalTaskRuntimeStore",
     "ProposalStore",
     "MemoryLifecycleStore",
-    "PatchStore",
     "McpAuditStore",
     "ToolPermissionStore",
-    "TaskStore",
 ];
 
-/// Personalization and learning stores enrich the Agent but do not own its
-/// basic ability to answer or dispatch an otherwise authorized capability.
-/// Their exact read/write gateways still fail closed when the corresponding
-/// feature is used.
-const OPTIONAL_PERSONALIZATION_STORES: &[&str] = &[
+/// Capability-local stores do not own the base Chat/Work lifecycle. Their
+/// exact gateway still fails closed when that capability is selected, but an
+/// unavailable optional capability must not disable unrelated provider,
+/// filesystem, Web, or Artifact work.
+const NON_BASE_AGENT_STORES: &[&str] = &[
     "LifeModelFileStore",
-    "LifeModelFileJournal",
     "FeedbackStore",
     "VectorStore",
     "MemoryLifecycleStore",
-    "PatchStore",
+    "McpAuditKeyReferenceStore",
+    "McpAuditStore",
 ];
 
 #[cfg(test)]
@@ -132,18 +129,14 @@ pub(crate) enum CanonicalWriteOwner {
     LifeModelFileStore,
     MemoryStore,
     VectorStore,
-    StateStore,
 }
 
 impl CanonicalWriteOwner {
     fn required_store_names(self) -> &'static [&'static str] {
         match self {
-            Self::LifeModelFileStore => {
-                &["LifeModelFileStore", "LifeModelFileJournal", "PatchStore"]
-            }
+            Self::LifeModelFileStore => &["LifeModelFileStore"],
             Self::MemoryStore => &["MemoryStore"],
             Self::VectorStore => &["VectorStore"],
-            Self::StateStore => &[],
         }
     }
 }
@@ -507,13 +500,6 @@ impl PersistenceCoordinator {
         })
     }
 
-    pub(crate) fn require_canonical_write(
-        &self,
-        owner: CanonicalWriteOwner,
-    ) -> Result<CanonicalWriteAdmission, PersistenceGateError> {
-        self.admit_canonical_writes(&[owner])
-    }
-
     /// Pre-seal startup reconciliation uses the same process-wide barrier as
     /// product writes, without claiming that ordinary effects are enabled.
     pub(crate) fn admit_startup_reconciliation_writes(
@@ -765,7 +751,7 @@ fn runtime_mode(
 }
 
 fn store_blocks_base_agent_effects(store: &str) -> bool {
-    !OPTIONAL_PERSONALIZATION_STORES.contains(&store)
+    !NON_BASE_AGENT_STORES.contains(&store)
 }
 
 fn canonical_owner_write_error(
@@ -886,9 +872,45 @@ mod tests {
             .require_effects_allowed()
             .expect("base Agent remains available without LifeModel personalization");
         assert!(matches!(
-            coordinator.require_canonical_write(CanonicalWriteOwner::LifeModelFileStore),
+            coordinator.admit_canonical_writes(&[CanonicalWriteOwner::LifeModelFileStore]),
             Err(PersistenceGateError::StoreUnavailable { store, .. })
                 if store == "LifeModelFileStore"
+        ));
+    }
+
+    #[test]
+    fn unavailable_mcp_audit_disables_only_the_mcp_capability() {
+        let coordinator = PersistenceCoordinator::with_expected_stores([
+            "ConversationStore",
+            "CanonicalTaskRuntimeStore",
+            "McpAuditKeyReferenceStore",
+            "McpAuditStore",
+        ]);
+        coordinator.register_read_write("ConversationStore");
+        coordinator.register_read_write("CanonicalTaskRuntimeStore");
+        coordinator.register_unavailable(
+            "McpAuditKeyReferenceStore",
+            "mcp_audit_key_hydration_failed",
+            "MCP audit credential is not initialized",
+        );
+        coordinator.register_unavailable(
+            "McpAuditStore",
+            "mcp_audit_credential_unavailable",
+            "MCP audit store is unavailable",
+        );
+        coordinator.seal();
+
+        assert_eq!(
+            coordinator.snapshot().mode,
+            PersistenceRuntimeMode::ReadWrite
+        );
+        coordinator
+            .require_effects_for_stores(&["ConversationStore", "CanonicalTaskRuntimeStore"])
+            .expect("ordinary Chat and Work must not pay an MCP credential tax");
+        assert!(matches!(
+            coordinator.require_effects_for_stores(&["McpAuditStore"]),
+            Err(PersistenceGateError::StoreUnavailable { store, .. })
+                if store == "McpAuditStore"
         ));
     }
 
@@ -976,7 +998,7 @@ mod tests {
         let snapshot = coordinator.snapshot();
         assert_eq!(snapshot.mode, PersistenceRuntimeMode::UnavailableDegraded);
         assert!(snapshot.stores.iter().any(|health| {
-            health.store == "TaskStore"
+            health.store == "ProposalStore"
                 && health.reason_code.as_deref() == Some("expected_store_not_initialized")
         }));
         assert!(coordinator.require_effects_allowed().is_err());
@@ -1044,9 +1066,9 @@ mod tests {
             assert!(!reason.trim().is_empty());
             assert!(!expected.contains(surface));
         }
-        for required in ["LifeModelFileStore", "LifeModelFileJournal"] {
-            assert!(expected.contains(required));
-        }
+        assert!(!expected.contains("TaskStore"));
+        assert!(!expected.contains("StateStore"));
+        assert!(expected.contains("LifeModelFileStore"));
     }
 
     #[tokio::test]

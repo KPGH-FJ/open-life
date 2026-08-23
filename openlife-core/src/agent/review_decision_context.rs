@@ -3,8 +3,7 @@ use crate::agent::product_read_model::{
 };
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType};
 use crate::life_model::v2::{
-    LegacyLifeModelMigrationPlanV2, LifeModelItemV2, LifeModelTypedDiffV2,
-    LifeModelTypedOperationV2, LifeModelUserValueV2, LIFE_MODEL_V2_LEGACY_MIGRATION_PATH,
+    LifeModelItemV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2, LifeModelUserValueV2,
     LIFE_MODEL_V2_TYPED_DIFF_PATH,
 };
 use crate::tool_permissions::ActionBoundToolPermissionScope;
@@ -189,7 +188,6 @@ pub fn build_review_decision_context(
     evidence_refs: &[EvidenceRef],
 ) -> ReviewDecisionContext {
     let life_model_v2_diff = reviewed_lifemodel_v2_diff(proposal);
-    let legacy_migration = reviewed_legacy_lifemodel_migration(proposal);
     let permission = (proposal.proposal_type == ProposalType::ToolPermission)
         .then(|| build_permission_decision_context(proposal, evidence_refs));
     let life_model_learning = reviewed_lifemodel_learning_context(proposal);
@@ -204,52 +202,21 @@ pub fn build_review_decision_context(
         }
     } else if let Some(diff) = life_model_v2_diff.as_ref() {
         readable_lifemodel_v2_diff(diff)
-    } else if let Some(plan) = legacy_migration.as_ref() {
-        plan.typed_diff.as_ref().map_or_else(
-            || ReviewReadableValue {
-                kind: ReviewReadableValueKind::List,
-                summary: "Create an authoritative empty LifeModel v2".into(),
-                detail: Some(format!(
-                    "0 included; {} explicitly excluded",
-                    plan.excluded_candidate_ids.len()
-                )),
-                sensitivity: EvidenceSensitivity::LocalPrivate,
-                truncated: false,
-            },
-            readable_lifemodel_v2_diff,
-        )
     } else if proposal.proposal_type == ProposalType::MemoryWrite {
         readable_memory_write(proposal)
     } else {
         readable_value(&proposal.after)
     };
-    let before = life_model_v2_diff
-        .as_ref()
-        .map(|diff| ReviewReadableValue {
-            kind: ReviewReadableValueKind::Object,
-            summary: diff.base_version.map_or_else(
-                || "Empty LifeModel v2".into(),
-                |version| format!("LifeModel v2 version {version}"),
-            ),
-            detail: diff.base_document_digest.clone(),
-            sensitivity: EvidenceSensitivity::LocalPrivate,
-            truncated: false,
-        })
-        .or_else(|| {
-            legacy_migration.as_ref().map(|plan| ReviewReadableValue {
-                kind: ReviewReadableValueKind::Object,
-                summary: "Reviewed legacy YAML snapshot".into(),
-                detail: Some(format!(
-            "{}; {} candidate(s) included; {} excluded; {} other legacy field(s) remain outside v2",
-            plan.legacy_source_digest,
-            plan.included_candidate_ids.len(),
-            plan.excluded_candidate_ids.len(),
-            plan.non_lifemodel_item_count,
-        )),
-                sensitivity: EvidenceSensitivity::LocalPrivate,
-                truncated: false,
-            })
-        });
+    let before = life_model_v2_diff.as_ref().map(|diff| ReviewReadableValue {
+        kind: ReviewReadableValueKind::Object,
+        summary: diff.base_version.map_or_else(
+            || "Empty LifeModel v2".into(),
+            |version| format!("LifeModel v2 version {version}"),
+        ),
+        detail: diff.base_document_digest.clone(),
+        sensitivity: EvidenceSensitivity::LocalPrivate,
+        truncated: false,
+    });
 
     ReviewDecisionContext {
         review_item_id: proposal.id.clone(),
@@ -338,16 +305,6 @@ fn reviewed_lifemodel_learning_context(
         observation_ids: strings("observationIds"),
         source_kinds: strings("sourceKinds"),
     })
-}
-
-fn reviewed_legacy_lifemodel_migration(
-    proposal: &AgentProposal,
-) -> Option<LegacyLifeModelMigrationPlanV2> {
-    (proposal.proposal_type == ProposalType::LifeModelUpdate
-        && proposal.affected_path == LIFE_MODEL_V2_LEGACY_MIGRATION_PATH)
-        .then(|| serde_json::from_value(proposal.after.clone()).ok())
-        .flatten()
-        .filter(|plan: &LegacyLifeModelMigrationPlanV2| plan.validate_contract().is_ok())
 }
 
 fn reviewed_lifemodel_v2_diff(proposal: &AgentProposal) -> Option<LifeModelTypedDiffV2> {
@@ -466,65 +423,6 @@ fn build_governed_action_review_contract(
                 effect_boundary: "local_filesystem".into(),
             }
         }
-        ProposalType::ScheduledTask if proposal_tool(proposal) == Some("calendar.propose_event") => {
-            GovernedActionReviewContract {
-                capability_id: "calendar.local_projection".into(),
-                operation: "create_local_calendar_projection".into(),
-                confirmation_summary:
-                    "Confirm the exact local task title, scheduled time, and optional ICS projection."
-                        .into(),
-                terminal_evidence_summary:
-                    "Completion proves the local scheduled task. A configured ICS file is only a local projection and never proves a system or remote calendar event."
-                        .into(),
-                effect_boundary: "local_task_and_optional_ics_projection".into(),
-            }
-        }
-        ProposalType::ScheduledTask => GovernedActionReviewContract {
-            capability_id: "tasks.schedule".into(),
-            operation: "create_scheduled_task".into(),
-            confirmation_summary: "Confirm the exact task title and scheduled time.".into(),
-            terminal_evidence_summary:
-                "Completion requires the refreshed scheduled-task materialization state.".into(),
-            effect_boundary: "local_task_store".into(),
-        },
-        ProposalType::DataExport => match proposal_tool(proposal) {
-            Some("email.propose_draft") => GovernedActionReviewContract {
-                capability_id: "email.draft".into(),
-                operation: "open_email_draft".into(),
-                confirmation_summary: "Confirm the exact recipient, subject, and draft body."
-                    .into(),
-                terminal_evidence_summary:
-                    "Success proves only that the operating system accepted the draft handoff; it never proves send or delivery."
-                        .into(),
-                effect_boundary: "os_mail_handoff_unverified".into(),
-            },
-            Some("browser.open") => GovernedActionReviewContract {
-                capability_id: "browser.open".into(),
-                operation: "open_browser_url".into(),
-                confirmation_summary: "Confirm one exact HTTP(S) address.".into(),
-                terminal_evidence_summary:
-                    "Success proves only that the operating system accepted the browser handoff; page load remains unverified."
-                        .into(),
-                effect_boundary: "os_browser_handoff_unverified".into(),
-            },
-            Some("local.run_utility") => GovernedActionReviewContract {
-                capability_id: "local.utility.read_only".into(),
-                operation: "run_local_utility".into(),
-                confirmation_summary: "Confirm one exact allowlisted command.".into(),
-                terminal_evidence_summary:
-                    "Completion requires a bounded exit result; timeout or interrupted execution is not success."
-                        .into(),
-                effect_boundary: "bounded_local_process".into(),
-            },
-            _ => GovernedActionReviewContract {
-                capability_id: "data.export".into(),
-                operation: "export_data".into(),
-                confirmation_summary: "Confirm the exact export target and content scope.".into(),
-                terminal_evidence_summary:
-                    "Completion requires refreshed export materialization evidence.".into(),
-                effect_boundary: "local_export".into(),
-            },
-        },
         _ => return None,
     };
     Some(contract)
@@ -828,10 +726,6 @@ fn action_bound_transmission_boundary(
     }
 }
 
-fn proposal_tool(proposal: &AgentProposal) -> Option<&str> {
-    proposal.after.get("tool").and_then(Value::as_str)
-}
-
 fn proposal_operation(proposal: &AgentProposal) -> Option<&str> {
     proposal.after.get("operation").and_then(Value::as_str)
 }
@@ -840,17 +734,10 @@ fn proposal_title(proposal: &AgentProposal) -> String {
     if reviewed_lifemodel_learning_context(proposal).is_some() {
         return "Review a learned long-term fact".into();
     }
-    if reviewed_legacy_lifemodel_migration(proposal).is_some() {
-        return "Review legacy LifeModel migration".into();
-    }
     if reviewed_lifemodel_v2_diff(proposal).is_some() {
         return "Review LifeModel changes".into();
     }
     let title = match proposal.proposal_type {
-        ProposalType::GoalUpdate => "Update a goal",
-        ProposalType::StateUpdate => "Update personal state",
-        ProposalType::PreferenceUpdate => "Update a preference",
-        ProposalType::CapabilityUpdate => "Update a capability",
         ProposalType::MemoryWrite => "Add a memory",
         ProposalType::MemoryArchive
             if proposal
@@ -863,12 +750,6 @@ fn proposal_title(proposal: &AgentProposal) -> String {
         }
         ProposalType::MemoryArchive => "Archive a memory",
         ProposalType::ToolPermission => "Allow one action",
-        ProposalType::ScheduledTask
-            if proposal_tool(proposal) == Some("calendar.propose_event") =>
-        {
-            "Create a local task and calendar projection"
-        }
-        ProposalType::ScheduledTask => "Schedule a task",
         ProposalType::ExternalWriteAction => match proposal_operation(proposal) {
             Some("move") => "Move a file",
             Some("trash") => "Move a file to OpenLife recovery",
@@ -876,16 +757,7 @@ fn proposal_title(proposal: &AgentProposal) -> String {
             Some("overwrite") => "Overwrite a file",
             _ => "Create a file",
         },
-        ProposalType::ModelPolicyChange => "Change model policy",
-        ProposalType::DataExport => match proposal_tool(proposal) {
-            Some("email.propose_draft") => "Open an email draft",
-            Some("browser.open") => "Open a reviewed web address",
-            Some("local.run_utility") => "Run a reviewed local utility",
-            _ => "Export data",
-        },
-        ProposalType::ScheduleCheckin => "Schedule a check-in",
         ProposalType::LifeModelUpdate => "Update LifeModel",
-        ProposalType::Unsupported => "Unsupported change",
     };
     title.into()
 }
@@ -893,10 +765,6 @@ fn proposal_title(proposal: &AgentProposal) -> String {
 fn proposal_summary(proposal: &AgentProposal) -> String {
     if reviewed_lifemodel_learning_context(proposal).is_some() {
         return "Review one user-confirmed candidate and its exact sources before it becomes part of LifeModel v2."
-            .into();
-    }
-    if reviewed_legacy_lifemodel_migration(proposal).is_some() {
-        return "Review every selected legacy field before one backed-up, atomic switch to the canonical LifeModel v2 owner."
             .into();
     }
     if reviewed_lifemodel_v2_diff(proposal).is_some() {
@@ -925,20 +793,6 @@ fn proposal_summary(proposal: &AgentProposal) -> String {
             }
             _ => "Review the exact path and content digest before one file write.".into(),
         },
-        ProposalType::ScheduledTask if proposal_tool(proposal) == Some("calendar.propose_event") => {
-            "Review the exact title and time before creating a local task and optional ICS projection."
-                .into()
-        }
-        ProposalType::DataExport if proposal_tool(proposal) == Some("email.propose_draft") => {
-            "Review the recipient, subject, and body before opening a draft; this action never sends email."
-                .into()
-        }
-        ProposalType::DataExport if proposal_tool(proposal) == Some("browser.open") => {
-            "Review the exact HTTP(S) address before handing it to the system browser.".into()
-        }
-        ProposalType::DataExport if proposal_tool(proposal) == Some("local.run_utility") => {
-            "Review one exact allowlisted read-only command before local execution.".into()
-        }
         _ => format!(
             "Proposed change to {}.",
             readable_identifier(&proposal.affected_path)
@@ -949,14 +803,11 @@ fn proposal_summary(proposal: &AgentProposal) -> String {
 fn proposal_source_summary(source: ProposalSource) -> &'static str {
     match source {
         ProposalSource::BuilderReview => "LifeModel Builder review",
-        ProposalSource::CalibrationRun => "Calibration run",
-        ProposalSource::FeedbackEvolution => "Feedback learning",
         ProposalSource::MemoryGovernance => "Memory governance",
         ProposalSource::SkillRuntime => "Selected skill runtime",
         ProposalSource::NetworkConsent => "Explicit network consent",
         ProposalSource::Manual => "User or runtime initiated review",
         ProposalSource::ChatConversation => "Current conversation",
-        ProposalSource::PlanningSession => "Planning session",
     }
 }
 
@@ -968,21 +819,6 @@ fn impact_summary(proposal: &AgentProposal) -> &'static str {
         ProposalType::ExternalWriteAction => {
             "Approval is not proof that the external effect completed; materialization evidence remains separate."
         }
-        ProposalType::ScheduledTask if proposal_tool(proposal) == Some("calendar.propose_event") => {
-            "Approval creates a local scheduled task and may create an ICS projection. It does not prove a system or remote calendar event exists."
-        }
-        ProposalType::DataExport if proposal_tool(proposal) == Some("email.propose_draft") => {
-            "Approval asks the operating system to open a draft. OpenLife does not send the message, and a successful handoff does not prove delivery."
-        }
-        ProposalType::DataExport if proposal_tool(proposal) == Some("browser.open") => {
-            "Approval asks the operating system to open this address. It does not prove the page loaded or that any remote action succeeded."
-        }
-        ProposalType::DataExport if proposal_tool(proposal) == Some("local.run_utility") => {
-            "Approval runs one exact allowlisted read-only utility with an empty environment and a bounded timeout."
-        }
-        ProposalType::DataExport => {
-            "Approval is not proof that the export completed; refreshed backend evidence remains separate."
-        }
         _ => {
             "Approval is a decision only. The change is complete only after refreshed materialization evidence reports applied."
         }
@@ -990,9 +826,6 @@ fn impact_summary(proposal: &AgentProposal) -> &'static str {
 }
 
 fn affected_object_label(proposal: &AgentProposal) -> String {
-    if reviewed_legacy_lifemodel_migration(proposal).is_some() {
-        return "Legacy YAML to LifeModel v2 owner cutover".into();
-    }
     if reviewed_lifemodel_v2_diff(proposal).is_some() {
         return "LifeModel v2 canonical version".into();
     }
@@ -1000,9 +833,6 @@ fn affected_object_label(proposal: &AgentProposal) -> String {
         ProposalType::MemoryWrite | ProposalType::MemoryArchive => "Memory",
         ProposalType::ToolPermission => "Permission",
         ProposalType::ExternalWriteAction => "External target",
-        ProposalType::DataExport => "Export target",
-        ProposalType::ScheduledTask | ProposalType::ScheduleCheckin => "Schedule",
-        ProposalType::ModelPolicyChange => "Model policy",
         _ => "LifeModel",
     };
     format!("{prefix}: {}", readable_identifier(&proposal.affected_path))
@@ -1266,7 +1096,7 @@ mod tests {
     #[test]
     fn readable_review_value_redacts_secret_fields() {
         let proposal = proposal(
-            ProposalType::PreferenceUpdate,
+            ProposalType::LifeModelUpdate,
             json!({"mode": "focused", "apiKey": "must-not-leak"}),
         );
         let context = build_review_decision_context(&proposal, &[]);
@@ -1341,47 +1171,6 @@ mod tests {
     }
 
     #[test]
-    fn legacy_migration_review_explains_atomic_owner_switch_without_raw_yaml() {
-        use crate::life_model::v2::{
-            LegacyLifeModelMigrationDecisionV2, LegacyLifeModelMigrationPreviewV2,
-            LegacyLifeModelMigrationSelectionV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID,
-        };
-        let raw = "metadata:\n  version: '0.1'\nidentity:\n  name: Alice\n";
-        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(raw).unwrap();
-        let selections = preview
-            .candidates
-            .iter()
-            .map(|candidate| LegacyLifeModelMigrationSelectionV2 {
-                candidate_id: candidate.candidate_id.clone(),
-                decision: LegacyLifeModelMigrationDecisionV2::Include,
-                edited_value: None,
-            })
-            .collect::<Vec<_>>();
-        let plan = preview
-            .build_migration_plan(
-                DEFAULT_LIFE_MODEL_V2_MODEL_ID,
-                &selections,
-                true,
-                "2026-08-08T10:00:00Z",
-            )
-            .unwrap();
-        let mut migration = proposal(
-            ProposalType::LifeModelUpdate,
-            serde_json::to_value(plan).unwrap(),
-        );
-        migration.affected_path = LIFE_MODEL_V2_LEGACY_MIGRATION_PATH.into();
-
-        let context = build_review_decision_context(&migration, &[]);
-        assert_eq!(context.title, "Review legacy LifeModel migration");
-        assert!(context.summary.contains("atomic switch"));
-        let before = context.before.unwrap();
-        assert!(before.summary.contains("legacy YAML snapshot"));
-        assert!(before.detail.unwrap().contains(&preview.source_digest));
-        assert!(context.after.summary.contains("LifeModel change"));
-        assert!(!context.reason_summary.contains(raw));
-    }
-
-    #[test]
     fn memory_stop_recall_and_archive_have_distinct_review_language() {
         let paused = build_review_decision_context(
             &proposal(
@@ -1406,8 +1195,8 @@ mod tests {
 
     #[test]
     fn governed_actions_project_exact_capability_confirmation_and_evidence_boundaries() {
-        for (proposal_type, after, capability, operation, evidence_phrase) in [
-            (
+        let context = build_review_decision_context(
+            &proposal(
                 ProposalType::ExternalWriteAction,
                 json!({
                     "operation": "move",
@@ -1415,68 +1204,15 @@ mod tests {
                     "target_path": "/safe/b.md",
                     "source_digest": format!("sha256:{}", "0".repeat(64)),
                 }),
-                "filesystem.write",
-                "move",
-                "filesystem materialization receipt",
             ),
-            (
-                ProposalType::ScheduledTask,
-                json!({
-                    "tool": "calendar.propose_event",
-                    "title": "Review",
-                    "scheduled_at": "2026-08-12T09:00:00+08:00",
-                }),
-                "calendar.local_projection",
-                "create_local_calendar_projection",
-                "local scheduled task",
-            ),
-            (
-                ProposalType::DataExport,
-                json!({
-                    "tool": "email.propose_draft",
-                    "to": "alice@example.com",
-                    "subject": "Review",
-                    "body": "Ready",
-                    "content": "Ready",
-                }),
-                "email.draft",
-                "open_email_draft",
-                "never proves send",
-            ),
-            (
-                ProposalType::DataExport,
-                json!({
-                    "tool": "browser.open",
-                    "url": "https://example.com",
-                    "content": "Open URL",
-                }),
-                "browser.open",
-                "open_browser_url",
-                "page load remains unverified",
-            ),
-            (
-                ProposalType::DataExport,
-                json!({
-                    "tool": "local.run_utility",
-                    "command": "uptime",
-                    "content": "Run uptime",
-                }),
-                "local.utility.read_only",
-                "run_local_utility",
-                "bounded exit result",
-            ),
-        ] {
-            let context = build_review_decision_context(&proposal(proposal_type, after), &[]);
-            let contract = context.action_contract.expect("action contract");
-            assert_eq!(contract.capability_id, capability);
-            assert_eq!(contract.operation, operation);
-            assert!(!contract.confirmation_summary.trim().is_empty());
-            assert!(
-                contract.terminal_evidence_summary.contains(evidence_phrase),
-                "{}",
-                contract.terminal_evidence_summary
-            );
-        }
+            &[],
+        );
+        let contract = context.action_contract.expect("action contract");
+        assert_eq!(contract.capability_id, "filesystem.write");
+        assert_eq!(contract.operation, "move");
+        assert!(contract
+            .terminal_evidence_summary
+            .contains("filesystem materialization receipt"));
     }
 
     #[test]

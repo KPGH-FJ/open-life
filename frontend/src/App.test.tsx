@@ -1,17 +1,14 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type {
-  PublicProductSurfaceId,
-  ProductWorkbenchRouteState,
-} from "@/ui/journeys/productWorkbench";
+import type { PublicProductSurfaceId, ProductWorkbenchRouteState } from "@/app/ProductWorkbench";
 import App from "./App";
 
-vi.mock("@/ui/journeys/productWorkbench", async importOriginal => {
-  const actual = await importOriginal<typeof import("@/ui/journeys/productWorkbench")>();
+vi.mock("@/app/ProductWorkbench", async importOriginal => {
+  const actual = await importOriginal<typeof import("@/app/ProductWorkbench")>();
   return {
     ...actual,
-    ProductWorkbenchJourney: ({
+    ProductWorkbench: ({
       initialMode,
       initialSurface,
       onRouteChange,

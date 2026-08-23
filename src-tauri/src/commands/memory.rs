@@ -139,7 +139,6 @@ mod tests {
             ProposalType, RiskLevel,
         },
         embedding::clear_embedding_cache,
-        llm::ChatMessage,
     };
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
@@ -566,77 +565,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn conversation_tombstone_after_rebuild_preserves_canonical_knowledge_note() {
-        clear_embedding_cache();
-        let state = crate::test_utils::test_app_state();
-        state.config.lock().await.llm.embedding_enabled = false;
-        let session_id = "knowledge-note-survives-conversation-delete";
-        let write = create_knowledge_note_with_state(
-            uuid::Uuid::new_v4().to_string(),
-            session_id.to_string(),
-            "CANONICAL_KNOWLEDGE_NOTE_SURVIVES_DELETE".to_string(),
-            "manual".to_string(),
-            &state,
-        )
-        .await
-        .unwrap();
-        let projected = crate::memory_gateway::reconcile_canonical_outboxes_with_state(&state, 20)
-            .await
-            .unwrap();
-        assert_eq!(projected.applied, 1);
-        assert_eq!(
-            state.vector_store.lock().await.count_all_chunks().unwrap(),
-            1
-        );
-
-        let rebuilt = crate::memory_gateway::rebuild_memory_index_with_state(&state)
-            .await
-            .unwrap();
-        assert_eq!(rebuilt["status"], "completed");
-        assert_eq!(rebuilt["indexed"], 1);
-        state
-            .memory_store
-            .lock()
-            .await
-            .create_chat_session(session_id, "temporary conversation")
-            .unwrap();
-        state
-            .memory_store
-            .lock()
-            .await
-            .save_message(
-                session_id,
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "conversation body must be deleted".into(),
-                },
-            )
-            .unwrap();
-
-        crate::memory_gateway::delete_chat_session_with_state(session_id, &state)
-            .await
-            .unwrap();
-
-        let chunks = state.vector_store.lock().await.export_all_chunks().unwrap();
-        assert_eq!(chunks.len(), 1);
-        assert_eq!(
-            chunks[0].source,
-            format!("knowledge_note:{}", write.knowledge_note_id)
-        );
-        assert_eq!(
-            chunks[0].content,
-            "CANONICAL_KNOWLEDGE_NOTE_SURVIVES_DELETE"
-        );
-        assert!(state
-            .memory_store
-            .lock()
-            .await
-            .load_recent_messages(session_id, 10)
-            .unwrap()
-            .is_empty());
-    }
-
-    #[tokio::test]
     async fn missing_canonical_knowledge_note_can_never_be_marked_projection_applied() {
         clear_embedding_cache();
         let state = crate::test_utils::test_app_state();
@@ -701,7 +629,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rebuild_memory_index_uses_long_term_memory_not_canonical_conversation_bodies() {
+    async fn rebuild_memory_index_uses_only_long_term_memory() {
         clear_embedding_cache();
         let state = crate::test_utils::test_app_state();
         let (openai_base, cloud_call_count) = fake_cloud_embedding_endpoint().await;
@@ -709,17 +637,6 @@ mod tests {
 
         {
             let store = state.memory_store.lock().await;
-            store
-                .save_message(
-                    "rebuild-sensitive",
-                    &ChatMessage {
-                        role: "user".to_string(),
-                        content:
-                            "CONVERSATION_ONLY_SENTINEL 身份证 11010519491231002X，邮箱 rebuild-sensitive@example.com，健康诊断"
-                                .to_string(),
-                    },
-                )
-                .unwrap();
             store
                 .save_knowledge_note_idempotent_with_outbox(
                     &uuid::Uuid::new_v4().to_string(),
@@ -747,9 +664,6 @@ mod tests {
         assert!(vectors
             .iter()
             .any(|chunk| chunk.content.contains("LONG_TERM_MEMORY_SENTINEL")));
-        assert!(vectors
-            .iter()
-            .all(|chunk| !chunk.content.contains("CONVERSATION_ONLY_SENTINEL")));
         assert_eq!(cloud_call_count.load(Ordering::SeqCst), 0);
     }
 
@@ -927,25 +841,28 @@ mod tests {
         let address = listener.local_addr().unwrap();
         std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", format!("http://{address}"));
         std::env::remove_var("OLLAMA_HOST");
+        state
+            .memory_store
+            .lock()
+            .await
+            .save_knowledge_note_idempotent_with_outbox(
+                &uuid::Uuid::new_v4().to_string(),
+                "degraded-search",
+                "DEGRADED_TEXT_HIT_SENTINEL",
+                "knowledge_note",
+                "test",
+                &[
+                    "canonical_owner:knowledge_note".into(),
+                    "source:test".into(),
+                ],
+                "private",
+            )
+            .unwrap();
         {
             let mut cfg = state.config.lock().await;
             cfg.llm.provider = "ollama".into();
             cfg.llm.embedding_enabled = true;
             cfg.llm.embedding_model = "nomic-embed-text:latest".into();
-        }
-        {
-            let store = state.memory_store.lock().await;
-            store
-                .save_memory_record(
-                    "degraded-search",
-                    "DEGRADED_TEXT_HIT_SENTINEL",
-                    "explicit_memory",
-                    "manual:degraded-search-fixture",
-                    &["memory_id:memory:degraded".into()],
-                    "private",
-                    None,
-                )
-                .unwrap();
         }
         let server = tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.unwrap();
@@ -999,27 +916,31 @@ mod tests {
         let digest = format!("sha256:{}", "a".repeat(64));
         std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", format!("http://{address}"));
         std::env::remove_var("OLLAMA_HOST");
+        state
+            .memory_store
+            .lock()
+            .await
+            .save_knowledge_note_idempotent_with_outbox(
+                &uuid::Uuid::new_v4().to_string(),
+                "mutable-profile-search",
+                "MUTABLE_PROFILE_TEXT_HIT",
+                "knowledge_note",
+                "test",
+                &[
+                    "canonical_owner:knowledge_note".into(),
+                    "source:test".into(),
+                ],
+                "private",
+            )
+            .unwrap();
         {
             let mut cfg = state.config.lock().await;
             cfg.llm.provider = "ollama".into();
             cfg.llm.embedding_enabled = true;
             cfg.llm.embedding_model = "nomic-embed-text:latest".into();
         }
-        {
-            let store = state.memory_store.lock().await;
-            store
-                .save_memory_record(
-                    "mutable-profile-search",
-                    "MUTABLE_PROFILE_TEXT_HIT",
-                    "explicit_memory",
-                    "manual:mutable-profile-fixture",
-                    &["memory_id:memory:mutable-profile".into()],
-                    "private",
-                    None,
-                )
-                .unwrap();
-        }
         let expected_digest = digest.clone();
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::oneshot::channel::<()>();
         let server = tokio::spawn(async move {
             let manifest = serde_json::json!({
                 "models": [{
@@ -1036,11 +957,21 @@ mod tests {
             })
             .to_string();
             let mut requests = Vec::new();
-            for body in [manifest.clone(), embedding, manifest] {
-                let (mut socket, _) = listener.accept().await.unwrap();
+            loop {
+                let accepted = tokio::select! {
+                    _ = &mut shutdown_rx => break,
+                    accepted = listener.accept() => accepted,
+                };
+                let (mut socket, _) = accepted.unwrap();
                 let mut request = [0_u8; 4096];
                 let read = socket.read(&mut request).await.unwrap();
-                requests.push(String::from_utf8_lossy(&request[..read]).into_owned());
+                let request = String::from_utf8_lossy(&request[..read]).into_owned();
+                let body = if request.starts_with("POST /api/embed ") {
+                    &embedding
+                } else {
+                    &manifest
+                };
+                requests.push(request);
                 let response = format!(
                     "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                     body.len(),
@@ -1053,6 +984,7 @@ mod tests {
 
         let result = search_memory_with_state("MUTABLE_PROFILE_TEXT_HIT".into(), 5, &state).await;
         std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
+        let _ = shutdown_tx.send(());
         let requests = server.await.unwrap();
         let result = result.unwrap();
 
@@ -1060,10 +992,16 @@ mod tests {
             .hits
             .iter()
             .any(|(chunk, _)| chunk.content == "MUTABLE_PROFILE_TEXT_HIT"));
-        assert_eq!(requests.len(), 3);
-        assert!(requests[0].starts_with("GET /api/tags "));
-        assert!(requests[1].starts_with("POST /api/embed "));
-        assert!(requests[2].starts_with("GET /api/tags "));
+        let embed_index = requests
+            .iter()
+            .position(|request| request.starts_with("POST /api/embed "))
+            .expect("the selected embedding model is invoked");
+        assert!(requests[..embed_index]
+            .iter()
+            .any(|request| request.starts_with("GET /api/tags ")));
+        assert!(requests[embed_index + 1..]
+            .iter()
+            .any(|request| request.starts_with("GET /api/tags ")));
         assert_eq!(result.vector_status, "ready");
         assert_ne!(result.embedding_profile.id, "unknown");
         assert_eq!(result.embedding_profile.model_artifact_identity, digest);

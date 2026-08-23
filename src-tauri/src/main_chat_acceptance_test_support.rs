@@ -7,17 +7,28 @@ pub(crate) async fn configure_live_provider_eval_state(state: &Arc<AppState>) {
     config.llm.openai_base = std::env::var("OPENLIFE_LIVE_EVAL_BASE").unwrap_or_default();
     config.llm.chat_model = std::env::var("OPENLIFE_LIVE_EVAL_MODEL").unwrap_or_default();
     config.llm.openai_key = std::env::var("OPENLIFE_LIVE_EVAL_API_KEY").unwrap_or_default();
-    apply_live_search_eval_env(&mut config);
     config.prefer_local_model = false;
+    apply_live_search_eval_env(&mut config);
     config.system.network_policy.enabled = true;
     config.system.network_policy.default_decision = "allow".into();
     let _provider_generation = state.replace_provider_runtime_config(config).await;
 }
 
 pub(crate) fn apply_live_search_eval_env(config: &mut openlife_core::config::AppConfig) {
-    if let Ok(provider) = std::env::var("OPENLIFE_LIVE_EVAL_SEARCH_PROVIDER") {
-        if !provider.trim().is_empty() {
-            config.system.search_provider = provider;
+    let explicit_provider = std::env::var("OPENLIFE_LIVE_EVAL_SEARCH_PROVIDER")
+        .ok()
+        .filter(|provider| !provider.trim().is_empty());
+    if let Some(provider) = explicit_provider {
+        config.system.search_provider = provider;
+    } else if config.llm.provider.eq_ignore_ascii_case("deepseek")
+        || config.llm.provider.eq_ignore_ascii_case("openrouter")
+    {
+        // Exercise the product's automatic hosted-search capability on the
+        // exact selected provider route. Custom gateways cannot inherit the
+        // selected credential and therefore fail closed here.
+        config.system.search_provider = "auto".into();
+        if !config.search_reuses_selected_provider_credential() {
+            config.system.search_provider = "unavailable".into();
         }
     }
     if let Ok(key) = std::env::var("OPENLIFE_LIVE_EVAL_SEARCH_API_KEY") {
@@ -80,6 +91,20 @@ pub(crate) async fn configure_live_web_eval_state_with_citation_retry_local_http
     captured_requests
 }
 
+pub(crate) async fn configure_live_web_artifact_eval_state_with_citation_echo_local_http_provider(
+    state: &Arc<AppState>,
+) -> Arc<std::sync::Mutex<Vec<String>>> {
+    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let provider_base = fake_local_chat_provider_endpoint(
+        "",
+        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::WebArtifact,
+    )
+    .await;
+    configure_local_http_provider(state, provider_base).await;
+    captured_requests
+}
+
 pub(crate) async fn configure_live_resource_eval_state_with_all_citations_local_http_provider(
     state: &Arc<AppState>,
 ) -> Arc<std::sync::Mutex<Vec<String>>> {
@@ -94,32 +119,14 @@ pub(crate) async fn configure_live_resource_eval_state_with_all_citations_local_
     captured_requests
 }
 
-pub(crate) async fn configure_live_resource_and_web_artifact_eval_state_with_citation_echo_local_http_provider(
+pub(crate) async fn configure_live_resource_and_web_artifact_eval_state_with_citation_retry_local_http_provider(
     state: &Arc<AppState>,
 ) -> Arc<std::sync::Mutex<Vec<String>>> {
     let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
     let provider_base = fake_local_chat_provider_endpoint(
         "",
         Some(Arc::clone(&captured_requests)),
-        LocalCitationEcho::ResourceAndWebArtifact,
-    )
-    .await;
-    configure_local_http_provider(state, provider_base).await;
-    captured_requests
-}
-
-pub(crate) async fn configure_live_provider_eval_state_with_captured_streaming_local_http_provider(
-    state: &Arc<AppState>,
-    chunks: Vec<(&'static str, std::time::Duration)>,
-) -> Arc<std::sync::Mutex<Vec<String>>> {
-    use std::sync::atomic::AtomicBool;
-
-    let captured_requests = Arc::new(std::sync::Mutex::new(Vec::new()));
-    let release_remaining_chunks = Arc::new(AtomicBool::new(true));
-    let provider_base = fake_streaming_local_chat_provider_endpoint(
-        chunks,
-        Arc::clone(&release_remaining_chunks),
-        Some(Arc::clone(&captured_requests)),
+        LocalCitationEcho::ResourceAndWebArtifactAfterRetry,
     )
     .await;
     configure_local_http_provider(state, provider_base).await;
@@ -269,8 +276,9 @@ enum LocalCitationEcho {
     None,
     Web,
     WebAfterRetry,
+    WebArtifact,
     AllResources,
-    ResourceAndWebArtifact,
+    ResourceAndWebArtifactAfterRetry,
 }
 
 impl LocalCitationEcho {
@@ -282,8 +290,16 @@ impl LocalCitationEcho {
                 || suffix.bytes().all(|byte| (b'a'..=b'p').contains(&byte))
         };
         let issued_citation = |prefix: &str, length: usize| {
-            request_text.match_indices(prefix).find_map(|(start, _)| {
-                let candidate = request_text.get(start..start.checked_add(length)?)?;
+            let search_text = if prefix == "cite_" {
+                request_text
+                    .rsplit_once("[TRUSTED OPENLIFE FINAL OUTPUT CHECK")
+                    .map(|(_, tail)| tail)
+                    .unwrap_or(request_text)
+            } else {
+                request_text
+            };
+            search_text.match_indices(prefix).find_map(|(start, _)| {
+                let candidate = search_text.get(start..start.checked_add(length)?)?;
                 let suffix = &candidate[prefix.len()..];
                 let valid = if prefix == "cite_" {
                     is_resource_citation_suffix(suffix)
@@ -293,179 +309,252 @@ impl LocalCitationEcho {
                 valid.then(|| candidate.to_string())
             })
         };
-        match self {
+        let final_answer = |content: String, web: Option<String>| {
+            let source_blocks = web
+                .as_ref()
+                .map(|source_ref| {
+                    content
+                        .split("\n\n")
+                        .map(str::trim)
+                        .filter(|block| !block.is_empty())
+                        .map(|block| {
+                            if block.starts_with('#') {
+                                serde_json::json!({
+                                    "kind": "heading",
+                                    "text": block,
+                                    "sourceRefs": [],
+                                })
+                            } else {
+                                serde_json::json!({
+                                    "kind": "claim",
+                                    "text": block,
+                                    "sourceRefs": [source_ref.clone()],
+                                })
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            serde_json::json!({
+                "schemaVersion": "openlife.agent-step.v1",
+                "step": {
+                    "kind": "final_answer",
+                    "payload": {
+                        "content": if web.is_some() { String::new() } else { content },
+                        "evidenceRefs": [],
+                        "artifactRefs": [],
+                        "sourceBlocks": source_blocks,
+                    }
+                }
+            })
+            .to_string()
+        };
+        let artifact = |name: &str,
+                        content: String,
+                        web: Option<String>,
+                        review_before_write: bool| {
+            let source_blocks = web
+                .as_ref()
+                .map(|source_ref| {
+                    content
+                        .split("\n\n")
+                        .map(str::trim)
+                        .filter(|block| !block.is_empty())
+                        .map(|block| {
+                            if block.starts_with('#') {
+                                serde_json::json!({
+                                    "kind": "heading",
+                                    "text": block,
+                                    "sourceRefs": [],
+                                })
+                            } else {
+                                serde_json::json!({
+                                    "kind": "claim",
+                                    "text": block,
+                                    "sourceRefs": [source_ref.clone()],
+                                })
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            serde_json::json!({
+                    "schemaVersion": "openlife.agent-step.v1",
+                    "step": {
+                        "kind": "draft_artifact",
+                        "payload": {
+                            "artifacts": [{
+                                "format": "markdown",
+                                "suggestedName": name,
+                                "content": if web.is_some() { serde_json::Value::Null } else { serde_json::Value::String(content) },
+                                "sourceBlocks": source_blocks,
+                            }],
+                            "reviewBeforeWrite": review_before_write,
+                        }
+                    }
+                })
+                .to_string()
+        };
+        let content = match self {
             Self::None => reply.to_string(),
             Self::Web => issued_citation("webref_", 31)
-                .map(|citation| format!("The retrieved Web evidence is available [{citation}]."))
+                .map(|citation| {
+                    final_answer(
+                        "The retrieved Web evidence is available.".into(),
+                        Some(citation),
+                    )
+                })
                 .unwrap_or_else(|| "No issued Web citation was observed.".into()),
             Self::WebAfterRetry => {
-                if request_text.contains("TRUSTED OPENLIFE ONE-SHOT CITATION RETRY") {
+                if request_text.contains("TRUSTED OPENLIFE ONE-SHOT SOURCE-BINDING RETRY")
+                {
                     issued_citation("webref_", 31)
                         .map(|citation| {
-                            format!("The retrieved Web evidence is available [{citation}].")
+                            final_answer(
+                                "The retrieved Web evidence is available.".into(),
+                                Some(citation),
+                            )
                         })
                         .unwrap_or_else(|| "No issued Web citation was observed.".into())
                 } else {
-                    "The first draft intentionally omitted its citation.".into()
+                    final_answer("The first draft intentionally omitted its citation.".into(), None)
                 }
             }
+            Self::WebArtifact => issued_citation("webref_", 31)
+                .map(|citation| {
+                    if request_text.contains("TRUSTED OPENLIFE ONE-SHOT SOURCE-BINDING RETRY") {
+                        artifact(
+                            "continuous-learning.md",
+                            "# Continuous learning\n\n现有公开网页证据只支持页面明确陈述的受限结论；无法据此作更广泛的产品外推。".into(),
+                            Some(citation),
+                            false,
+                        )
+                    } else {
+                        artifact(
+                            "continuous-learning.md",
+                            "# Continuous learning\n\n页面标题暗示该结论可以无条件推广到其他产品。".into(),
+                            None,
+                            false,
+                        )
+                    }
+                })
+                .unwrap_or_else(|| {
+                    serde_json::json!({
+                        "schemaVersion": "openlife.agent-step.v1",
+                        "step": {
+                            "kind": "draft_artifact",
+                            "payload": {
+                                "artifacts": [{
+                                    "format": "markdown",
+                                    "suggestedName": "continuous-learning.md",
+                                    "content": "Provider did not observe an issued Web citation."
+                                }],
+                                "reviewBeforeWrite": false
+                            }
+                        }
+                    })
+                    .to_string()
+                }),
             Self::AllResources => {
-                let citations = request_text
+                let resource_contract = request_text
+                    .rsplit_once("[TRUSTED OPENLIFE FINAL OUTPUT CHECK")
+                    .map(|(_, tail)| tail)
+                    .unwrap_or(request_text);
+                let citations = resource_contract
                     .match_indices("cite_")
                     .filter_map(|(start, _)| {
-                        let candidate = request_text.get(start..start.checked_add(29)?)?;
+                        let candidate = resource_contract.get(start..start.checked_add(29)?)?;
                         is_resource_citation_suffix(&candidate[5..]).then(|| candidate.to_string())
                     })
                     .collect::<std::collections::BTreeSet<_>>();
                 if citations.is_empty() {
                     "No issued Resource citation was observed.".into()
                 } else {
-                    format!(
-                        "The bounded comparison and analysis used every selected Resource citation: {}.",
-                        citations
-                            .into_iter()
-                            .map(|citation| format!("[{citation}]"))
-                            .collect::<Vec<_>>()
-                            .join(" ")
-                    )
+                    let source_refs = citations.into_iter().collect::<Vec<_>>();
+                    let content =
+                        "The bounded comparison and analysis used every selected Resource.";
+                    serde_json::json!({
+                        "schemaVersion": "openlife.agent-step.v1",
+                        "step": {
+                            "kind": "final_answer",
+                            "payload": {
+                                "content": "",
+                                "evidenceRefs": [],
+                                "artifactRefs": [],
+                                "sourceBlocks": [{
+                                    "kind": "claim",
+                                    "text": content,
+                                    "sourceRefs": source_refs
+                                }]
+                            }
+                        }
+                    })
+                    .to_string()
                 }
             }
-            Self::ResourceAndWebArtifact => {
+            Self::ResourceAndWebArtifactAfterRetry => {
                 let resource = issued_citation("cite_", 29);
                 let web = issued_citation("webref_", 31);
-                match (resource, web) {
-                    (Some(resource), Some(web)) => serde_json::json!({
-                        "markdown": format!(
-                            "# 带引用的路演报告\n\n附件证据 [{resource}] 与公开网页证据 [{web}] 已共同纳入风险分析。"
-                        )
-                    })
-                    .to_string(),
-                    _ => serde_json::json!({
-                        "markdown": "Provider did not observe both issued citation classes."
-                    })
-                    .to_string(),
-                }
+                let repair = request_text
+                    .contains("TRUSTED OPENLIFE ONE-SHOT SOURCE-BINDING RETRY");
+                let content = match (resource, web, repair) {
+                    (Some(resource), Some(web), true) => serde_json::json!({
+                        "schemaVersion": "openlife.agent-step.v1",
+                        "step": {
+                            "kind": "draft_artifact",
+                            "payload": {
+                                "artifacts": [{
+                                    "format": "markdown",
+                                    "suggestedName": "evidence-report.md",
+                                    "content": null,
+                                    "sourceBlocks": [
+                                        {"kind": "heading", "text": "# 带引用的报告", "sourceRefs": []},
+                                        {"kind": "claim", "text": "附件证据已纳入。", "sourceRefs": [resource]},
+                                        {"kind": "claim", "text": "公开网页证据已纳入。", "sourceRefs": [web]}
+                                    ]
+                                }],
+                                "reviewBeforeWrite": true
+                            }
+                        }
+                    }).to_string(),
+                    (_, Some(web), false) => artifact(
+                        "evidence-report.md",
+                        "# 缺少附件引用的首轮草稿\n\n公开网页证据已纳入。".into(),
+                        Some(web),
+                        true,
+                    ),
+                    _ => artifact(
+                        "evidence-report.md",
+                        "Provider did not observe the issued citation classes.".into(),
+                        None,
+                        true,
+                    ),
+                };
+                content
             }
-        }
-    }
-}
-
-async fn fake_streaming_local_chat_provider_endpoint(
-    chunks: Vec<(&'static str, std::time::Duration)>,
-    release_remaining_chunks: Arc<std::sync::atomic::AtomicBool>,
-    captured_requests: Option<Arc<std::sync::Mutex<Vec<String>>>>,
-) -> String {
-    use std::sync::atomic::Ordering;
-
-    let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").expect("bind local streaming chat provider");
-    let addr = listener
-        .local_addr()
-        .expect("local streaming provider addr");
-    std::thread::spawn(move || {
-        let (mut stream, _) = listener
-            .accept()
-            .expect("accept streaming provider request");
-        let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
-        let _ = stream.set_write_timeout(Some(std::time::Duration::from_secs(2)));
-        let mut request_bytes = Vec::new();
-        let mut buffer = [0u8; 8192];
-        loop {
-            match std::io::Read::read(&mut stream, &mut buffer) {
-                Ok(0) => break,
-                Ok(read) => {
-                    request_bytes.extend_from_slice(&buffer[..read]);
-                    let request = String::from_utf8_lossy(&request_bytes);
-                    let complete = request.find("\r\n\r\n").is_some_and(|header_end| {
-                        let content_length = request[..header_end]
-                            .lines()
-                            .find_map(|line| {
-                                let (name, value) = line.split_once(':')?;
-                                name.eq_ignore_ascii_case("content-length")
-                                    .then(|| value.trim().parse::<usize>().ok())
-                                    .flatten()
-                            })
-                            .unwrap_or(0);
-                        request_bytes.len() >= header_end + 4 + content_length
-                    });
-                    if complete {
-                        break;
+        };
+        if request_text.contains("final_answer")
+            && serde_json::from_str::<openlife_core::work_orchestration::AgentStepEnvelope>(
+                &content,
+            )
+            .is_err()
+        {
+            serde_json::json!({
+                "schemaVersion": "openlife.agent-step.v1",
+                "step": {
+                    "kind": "final_answer",
+                    "payload": {
+                        "content": content,
+                        "evidenceRefs": [],
+                        "artifactRefs": []
                     }
                 }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
-                    ) =>
-                {
-                    break;
-                }
-                Err(_) => break,
-            }
-        }
-        if let Some(captured_requests) = captured_requests.as_ref() {
-            captured_requests
-                .lock()
-                .expect("capture local streaming provider request")
-                .push(String::from_utf8_lossy(&request_bytes).into_owned());
-        }
-
-        let body = chunks
-            .iter()
-            .map(|(chunk, _)| {
-                format!(
-                    "data: {}\n\n",
-                    serde_json::json!({
-                        "id": "chatcmpl-main-chat-streaming-provider",
-                        "object": "chat.completion.chunk",
-                        "choices": [{
-                            "index": 0,
-                            "delta": { "content": chunk },
-                            "finish_reason": serde_json::Value::Null
-                        }]
-                    })
-                )
             })
-            .collect::<String>()
-            + "data: [DONE]\n\n";
-        let header = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nCache-Control: no-cache\r\nConnection: close\r\nContent-Length: {}\r\n\r\n",
-            body.len()
-        );
-        std::io::Write::write_all(&mut stream, header.as_bytes())
-            .expect("write streaming provider headers");
-        std::io::Write::flush(&mut stream).expect("flush streaming provider headers");
-        for (index, (chunk, delay)) in chunks.into_iter().enumerate() {
-            std::thread::sleep(delay);
-            let event = format!(
-                "data: {}\n\n",
-                serde_json::json!({
-                    "id": "chatcmpl-main-chat-streaming-provider",
-                    "object": "chat.completion.chunk",
-                    "choices": [{
-                        "index": 0,
-                        "delta": { "content": chunk },
-                        "finish_reason": serde_json::Value::Null
-                    }]
-                })
-            );
-            std::io::Write::write_all(&mut stream, event.as_bytes())
-                .expect("write streaming provider chunk");
-            std::io::Write::flush(&mut stream).expect("flush streaming provider chunk");
-            if index == 0 {
-                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-                while !release_remaining_chunks.load(Ordering::SeqCst)
-                    && std::time::Instant::now() < deadline
-                {
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-            }
+            .to_string()
+        } else {
+            content
         }
-        std::io::Write::write_all(&mut stream, b"data: [DONE]\n\n")
-            .expect("write streaming provider completion");
-        std::io::Write::flush(&mut stream).expect("flush streaming provider completion");
-    });
-    format!("http://{addr}/v1")
+    }
 }
 
 async fn fake_failing_local_chat_provider_endpoint(

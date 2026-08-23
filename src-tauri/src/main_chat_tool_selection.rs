@@ -28,71 +28,6 @@ pub(crate) struct MainChatGovernedToolCandidate {
     pub(crate) match_reason: String,
 }
 
-impl MainChatGovernedToolCandidate {
-    pub(crate) fn capabilities_digest_label(&self) -> String {
-        let capabilities_digest = openlife_core::agent::metadata_safe::metadata_safe_value_digest(
-            &serde_json::json!(self.capabilities),
-        );
-        format!(
-            "bytes:{} hash:{}",
-            capabilities_digest.0, capabilities_digest.1
-        )
-    }
-
-    pub(crate) fn capability_labels_label(&self) -> String {
-        let mut labels = Vec::new();
-        let mut seen = std::collections::BTreeSet::new();
-        for capability in &self.capabilities {
-            if !main_chat_contract_safe_label(capability, false)
-                || main_chat_surface_contains_write_like_term(capability)
-                || !seen.insert(capability.as_str())
-            {
-                continue;
-            }
-            let next_label = if labels.is_empty() {
-                capability.clone()
-            } else {
-                format!("{}/{}", labels.join("/"), capability)
-            };
-            if next_label.len() > MAIN_CHAT_CONTRACT_SAFE_LABEL_MAX_LEN {
-                break;
-            }
-            labels.push(capability.clone());
-        }
-        if labels.is_empty() {
-            "none".into()
-        } else {
-            labels.join("/")
-        }
-    }
-
-    pub(crate) fn manifest_source_label(&self) -> String {
-        main_chat_contract_label_or(&self.manifest_source, true, "contract_unsafe_source")
-    }
-
-    pub(crate) fn match_reason_label(&self) -> String {
-        main_chat_contract_label_or(&self.match_reason, false, "contract_unsafe")
-    }
-}
-
-/// Produce the exact governed input used for canonical MCP read dispatch.
-/// Deterministic built-in defaults remain runtime-owned rather than copied
-/// into provider output or a second execution plan.
-pub(crate) fn normalize_main_chat_mcp_read_arguments(
-    manifest: &openlife_core::tool_manifest::ToolManifest,
-    supplied_arguments: serde_json::Value,
-) -> serde_json::Value {
-    if manifest.name == "builtin_echo"
-        && supplied_arguments
-            .as_object()
-            .is_some_and(serde_json::Map::is_empty)
-    {
-        serde_json::json!({ "text": "kernel registered MCP read" })
-    } else {
-        supplied_arguments
-    }
-}
-
 pub(crate) fn main_chat_governed_mcp_read_tool_candidates(
     registry: &openlife_core::mcp::McpRegistry,
     selection_query: &str,
@@ -213,7 +148,7 @@ pub(crate) fn main_chat_manifest_is_governed_read_candidate(
     if openlife_core::agent::validate_manifest_execution_contract(manifest).is_err() {
         return false;
     }
-    if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
+    if !manifest.enabled || manifest.declarative_only {
         return false;
     }
     if !main_chat_manifest_has_contract_safe_name(manifest)
@@ -271,14 +206,6 @@ fn main_chat_contract_safe_label(value: &str, allow_colon: bool) -> bool {
                 || matches!(ch, '.' | '_' | '-' | '/')
                 || (allow_colon && ch == ':')
         })
-}
-
-fn main_chat_contract_label_or(value: &str, allow_colon: bool, fallback: &str) -> String {
-    if main_chat_contract_safe_label(value, allow_colon) {
-        value.to_string()
-    } else {
-        fallback.to_string()
-    }
 }
 
 pub(crate) fn main_chat_manifest_has_write_like_surface(

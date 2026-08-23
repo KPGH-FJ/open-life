@@ -1,10 +1,6 @@
-use anyhow::{Context, Result};
-use ring::digest::{digest, SHA256};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::Write;
-#[cfg(unix)]
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -134,7 +130,7 @@ pub struct DailyGoal {
     #[serde(alias = "completed")]
     pub done: bool,
     pub time_block: Option<TimeBlock>,
-    /// RFC3339 due instant used by the StateStore-derived compatibility view.
+    /// Optional RFC3339 due instant retained in the legacy in-memory shape.
     /// Legacy YAML goals may omit it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub due_at: Option<String>,
@@ -448,8 +444,7 @@ impl LifeModel {
                 knowledge_domains: vec![],
             },
             // An unbuilt LifeModel is unknown, not a fictional healthy or
-            // optimistic user state. Existing legacy YAML values are still
-            // loaded as written; only new empty profiles use this skeleton.
+            // optimistic user state.
             state: State::default(),
             relationships: Relationships::default(),
             preferences: Preferences::default(),
@@ -1229,18 +1224,12 @@ impl Default for LifeModelManager {
 
 impl LifeModelManager {
     /// Metadata journal colocated with the current YAML compatibility view.
-    /// The journal is a recovery aid for the file owner; it does not turn file
-    /// and SQLite projections into one transaction.
-    pub fn mutation_journal_path(&self) -> PathBuf {
-        self.data_dir.join("life_model_mutation_journal.db")
-    }
-
     pub fn v2_store_path(&self) -> PathBuf {
         self.data_dir.join("life_model_v2.db")
     }
 
-    /// Open the append-only structured v2 owner. Merely opening or reading an
-    /// empty store does not create a LifeModel version or migrate legacy YAML.
+    /// Open the append-only canonical owner. Merely opening or reading an
+    /// empty store does not create a LifeModel version.
     /// Read the structured owner without creating a database as a side effect
     /// of opening the product surface.
     pub fn load_v2_current(&self, model_id: &str) -> Result<Option<v2::LifeModelVersionV2>> {
@@ -1275,83 +1264,6 @@ impl LifeModelManager {
         v2::LifeModelV2Store::open(path)?.history(model_id, limit)
     }
 
-    pub fn load_v2_cutover(&self, model_id: &str) -> Result<Option<v2::LifeModelV2CutoverReceipt>> {
-        let path = self.v2_store_path();
-        if !path.exists() {
-            return Ok(None);
-        }
-        v2::LifeModelV2Store::open(path)?.cutover(model_id)
-    }
-
-    pub fn prepare_legacy_v2_backup(
-        &self,
-        expected_source_digest: &str,
-    ) -> Result<v2::LegacyLifeModelBackupReceiptV2> {
-        let source_path = self.data_dir.join("life_model.yaml");
-        let source = fs::read(&source_path)
-            .with_context(|| format!("read_legacy_lifemodel_for_backup:{source_path:?}"))?;
-        let source_digest = format!("sha256:{}", sha256_hex(&source));
-        if source_digest != expected_source_digest {
-            anyhow::bail!("legacy_lifemodel_source_digest_changed");
-        }
-        let source_text =
-            std::str::from_utf8(&source).context("legacy_lifemodel_backup_source_not_utf8")?;
-        v2::LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(source_text)?;
-
-        let digest_hex = expected_source_digest
-            .strip_prefix("sha256:")
-            .context("legacy_lifemodel_backup_digest_invalid")?;
-        let backup_dir = self.data_dir.join("legacy-backups");
-        fs::create_dir_all(&backup_dir)
-            .with_context(|| format!("create_legacy_lifemodel_backup_dir:{backup_dir:?}"))?;
-        let backup_file_name = format!("life_model.{digest_hex}.yaml");
-        let backup_path = backup_dir.join(&backup_file_name);
-        let replayed = if backup_path.exists() {
-            true
-        } else {
-            let mut options = fs::OpenOptions::new();
-            options.create_new(true).write(true);
-            #[cfg(unix)]
-            options.mode(0o400);
-            let mut backup = options
-                .open(&backup_path)
-                .with_context(|| format!("create_legacy_lifemodel_backup:{backup_path:?}"))?;
-            backup
-                .write_all(&source)
-                .with_context(|| format!("write_legacy_lifemodel_backup:{backup_path:?}"))?;
-            backup
-                .sync_all()
-                .with_context(|| format!("fsync_legacy_lifemodel_backup:{backup_path:?}"))?;
-            #[cfg(unix)]
-            fs::File::open(&backup_dir)
-                .and_then(|directory| directory.sync_all())
-                .with_context(|| format!("fsync_legacy_lifemodel_backup_dir:{backup_dir:?}"))?;
-            false
-        };
-        let backup = fs::read(&backup_path)
-            .with_context(|| format!("read_legacy_lifemodel_backup:{backup_path:?}"))?;
-        let backup_digest = format!("sha256:{}", sha256_hex(&backup));
-        if backup_digest != source_digest {
-            anyhow::bail!("legacy_lifemodel_backup_digest_mismatch");
-        }
-        Ok(v2::LegacyLifeModelBackupReceiptV2 {
-            source_digest,
-            backup_digest,
-            backup_file_name,
-            replayed,
-        })
-    }
-
-    pub fn verify_legacy_source_digest(&self, expected_source_digest: &str) -> Result<()> {
-        let source_path = self.data_dir.join("life_model.yaml");
-        let source = fs::read(&source_path)
-            .with_context(|| format!("reread_legacy_lifemodel_before_cutover:{source_path:?}"))?;
-        if format!("sha256:{}", sha256_hex(&source)) != expected_source_digest {
-            anyhow::bail!("legacy_lifemodel_source_digest_changed");
-        }
-        Ok(())
-    }
-
     /// Append one exact, already-reviewed typed diff to the canonical v2
     /// owner. The proposal id is both the idempotency identity and the sole
     /// version source reference; callers cannot relabel an accepted review as
@@ -1375,94 +1287,9 @@ impl LifeModelManager {
             created_at,
         )
     }
-
-    pub fn materialize_reviewed_legacy_v2_migration(
-        &self,
-        plan: &v2::LegacyLifeModelMigrationPlanV2,
-        proposal_id: &str,
-        backup_digest: &str,
-        cutover_at: &str,
-    ) -> Result<v2::LifeModelLegacyMigrationMaterializationResultV2> {
-        v2::LifeModelV2Store::open(self.v2_store_path())?.materialize_legacy_migration(
-            plan,
-            proposal_id,
-            backup_digest,
-            cutover_at,
-        )
-    }
-
-    pub fn load_existing(&self) -> Result<Option<LifeModel>> {
-        self.load_existing_with_source()
-            .map(|loaded| loaded.map(|(model, _)| model))
-    }
-
-    /// Load the typed compatibility model and the exact bytes that produced it
-    /// in one read. Migration preview callers use this to avoid binding a
-    /// preview to a different on-disk revision after an external YAML edit.
-    pub fn load_existing_with_source(&self) -> Result<Option<(LifeModel, String)>> {
-        let path = self.data_dir.join("life_model.yaml");
-        if !path.exists() {
-            return Ok(None);
-        }
-        let content =
-            fs::read_to_string(&path).with_context(|| format!("读取人生模型失败: {:?}", path))?;
-        let model: LifeModel =
-            serde_yaml::from_str(&content).with_context(|| "解析人生模型 YAML 失败")?;
-        Ok(Some((model, content)))
-    }
-
-    /// Return the legacy model only while it is still the active compatibility
-    /// owner. Once a v2 head/cutover exists, runtime callers must not keep
-    /// injecting stale YAML; v2 runtime enrichment is introduced separately.
-    pub fn load_active_legacy_runtime_model(&self) -> Result<Option<LifeModel>> {
-        if self
-            .load_v2_current(v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
-            .is_some()
-            || self
-                .load_v2_cutover(v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)?
-                .is_some()
-        {
-            return Ok(None);
-        }
-        self.load_existing()
-    }
-
-    pub fn load(&self) -> Result<LifeModel> {
-        let path = self.data_dir.join("life_model.yaml");
-        if path.exists() {
-            let content = fs::read_to_string(&path)
-                .with_context(|| format!("读取人生模型失败: {:?}", path))?;
-            let model: LifeModel =
-                serde_yaml::from_str(&content).with_context(|| "解析人生模型 YAML 失败")?;
-            Ok(model)
-        } else {
-            // A read of an absent legacy model must not create durable state.
-            // Explicit governed writers own every persisted LifeModel change.
-            Ok(LifeModel::default())
-        }
-    }
-
-    pub fn save(&self, model: &LifeModel) -> Result<()> {
-        let path = self.data_dir.join("life_model.yaml");
-        let content = serde_yaml::to_string(model).with_context(|| "序列化人生模型失败")?;
-        crate::atomic_file::write_atomic(&path, content.as_bytes())
-            .with_context(|| format!("写入人生模型失败: {:?}", path))?;
-        Ok(())
-    }
-}
-
-fn sha256_hex(bytes: &[u8]) -> String {
-    let hash = digest(&SHA256, bytes);
-    let bytes = hash.as_ref();
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        out.push_str(&format!("{:02x}", b));
-    }
-    out
 }
 
 pub mod patch;
-pub mod patch_store;
 pub mod v2;
 
 #[cfg(test)]
@@ -1620,104 +1447,11 @@ mod tests {
     }
 
     #[test]
-    fn manager_save_and_load_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let mgr = LifeModelManager::new(dir.path());
-        let mut model = LifeModel::default_model();
-        model.identity.name = "Test".into();
-        mgr.save(&model).unwrap();
-        let loaded = mgr.load().unwrap();
-        assert_eq!(loaded.identity.name, "Test");
-    }
-
-    #[test]
-    fn manager_load_of_absent_legacy_model_is_read_only() {
-        let directory = tempfile::tempdir().unwrap();
-        let manager = LifeModelManager::new(directory.path());
-
-        let model = manager.load().unwrap();
-
-        assert!(model.is_effectively_empty());
-        assert!(!directory.path().join("life_model.yaml").exists());
-    }
-
-    #[test]
-    fn manager_loads_legacy_model_and_exact_source_from_one_read() {
-        let directory = tempfile::tempdir().unwrap();
-        let manager = LifeModelManager::new(directory.path());
-        let source = "identity:\n  name: Exact source user\n";
-        fs::write(directory.path().join("life_model.yaml"), source).unwrap();
-
-        let (model, loaded_source) = manager
-            .load_existing_with_source()
-            .unwrap()
-            .expect("legacy source");
-
-        assert_eq!(model.identity.name, "Exact source user");
-        assert_eq!(loaded_source, source);
-    }
-
-    #[test]
     fn manager_v2_read_does_not_create_a_store_or_model() {
         let directory = tempfile::tempdir().unwrap();
         let manager = LifeModelManager::new(directory.path());
 
         assert!(manager.load_v2_current("primary").unwrap().is_none());
         assert!(!manager.v2_store_path().exists());
-    }
-
-    #[test]
-    fn legacy_v2_backup_is_exact_read_only_and_idempotent() {
-        let directory = tempfile::tempdir().unwrap();
-        let source = "identity:\n  name: Alice\n";
-        fs::write(directory.path().join("life_model.yaml"), source).unwrap();
-        let preview = v2::LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(source).unwrap();
-        let manager = LifeModelManager::new(directory.path());
-
-        let first = manager
-            .prepare_legacy_v2_backup(&preview.source_digest)
-            .unwrap();
-        assert!(!first.replayed);
-        assert_eq!(first.source_digest, preview.source_digest);
-        assert_eq!(first.backup_digest, preview.source_digest);
-        let backup_path = directory
-            .path()
-            .join("legacy-backups")
-            .join(&first.backup_file_name);
-        assert_eq!(fs::read_to_string(&backup_path).unwrap(), source);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            assert_eq!(
-                fs::metadata(&backup_path).unwrap().permissions().mode() & 0o777,
-                0o400
-            );
-        }
-
-        let replay = manager
-            .prepare_legacy_v2_backup(&preview.source_digest)
-            .unwrap();
-        assert!(replay.replayed);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(&backup_path, fs::Permissions::from_mode(0o600)).unwrap();
-        }
-        fs::write(&backup_path, "corrupt backup").unwrap();
-        assert!(manager
-            .prepare_legacy_v2_backup(&preview.source_digest)
-            .unwrap_err()
-            .to_string()
-            .contains("legacy_lifemodel_backup_digest_mismatch"));
-        fs::write(
-            directory.path().join("life_model.yaml"),
-            "identity:\n  name: Bob\n",
-        )
-        .unwrap();
-        assert!(manager
-            .verify_legacy_source_digest(&preview.source_digest)
-            .unwrap_err()
-            .to_string()
-            .contains("legacy_lifemodel_source_digest_changed"));
     }
 }

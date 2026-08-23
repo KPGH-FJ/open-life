@@ -1,8 +1,6 @@
 use crate::agent::product_read_model::{
     BackendEntityKind, BackendEntityRef, EvidenceRef, EvidenceSensitivity, EvidenceSource,
-    ProviderPrivacyBoundarySummary,
 };
-use crate::agent::review_item::{ReviewItem, ReviewItemDecisionStatus};
 use crate::task_runtime::{
     CanonicalArtifactStatus, CanonicalTaskItemKind, CanonicalTaskItemStatus,
 };
@@ -334,6 +332,13 @@ pub enum TaskArtifactVerificationStatus {
     Unknown,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskCompletionDisposition {
+    Complete,
+    CompleteWithDisclosedLimitations,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskArtifactVerificationViewModel {
@@ -358,6 +363,8 @@ pub struct TaskViewModelItem {
     pub lifecycle_status: TaskLifecycleStatus,
     pub terminal_delivery_status: TaskTerminalDeliveryStatus,
     pub final_delivery_evidence_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub completion_disposition: Option<TaskCompletionDisposition>,
     #[serde(default)]
     pub items: Vec<TaskItemViewModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -569,16 +576,7 @@ pub struct WorkspaceViewModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub selected_conversation_id: Option<String>,
     #[serde(default)]
-    pub tasks: Vec<TaskViewModelItem>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub active_task: Option<TaskViewModelItem>,
-    #[serde(default)]
-    pub recent_task_refs: Vec<BackendEntityRef>,
-    #[serde(default)]
-    pub pending_review_items: Vec<ReviewItem>,
-    #[serde(default)]
     pub activity: Vec<WorkspaceActivityItem>,
-    pub provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary,
     pub activity_redaction_state: String,
     #[serde(default)]
     pub source_refs: Vec<EvidenceRef>,
@@ -598,6 +596,7 @@ pub struct TaskViewModelTaskInput {
     pub canonical_lifecycle_status: Option<TaskLifecycleStatus>,
     pub canonical_terminal_delivery_status: Option<TaskTerminalDeliveryStatus>,
     pub canonical_final_delivery_evidence_present: Option<bool>,
+    pub completion_disposition: Option<TaskCompletionDisposition>,
     pub canonical_items: Vec<TaskItemViewModel>,
     pub work_plan: Option<TaskWorkPlanViewModel>,
     pub canonical_artifacts: Vec<TaskArtifactViewModel>,
@@ -625,9 +624,7 @@ pub struct TasksViewModelBuildInput {
 pub struct WorkspaceViewModelBuildInput {
     pub tasks: TasksViewModel,
     pub selected_conversation_id: Option<String>,
-    pub review_items: Vec<ReviewItem>,
     pub active_task_activity: Vec<WorkspaceActivityItem>,
-    pub provider_privacy_boundary_summary: ProviderPrivacyBoundarySummary,
     pub source_refs: Vec<EvidenceRef>,
     pub contract_limitations: Vec<String>,
 }
@@ -668,30 +665,6 @@ pub fn build_workspace_view_model(input: WorkspaceViewModelBuildInput) -> Worksp
         .iter()
         .find(|item| item.lifecycle_status.is_active())
         .cloned();
-    let recent_task_refs = tasks.iter().take(6).map(task_ref).collect::<Vec<_>>();
-    let active_review_ids = active_task
-        .as_ref()
-        .map(|task| {
-            task.pending_review_item_refs
-                .iter()
-                .map(|item| item.id.as_str())
-                .collect::<BTreeSet<_>>()
-        })
-        .unwrap_or_default();
-    let mut pending_review_items = input
-        .review_items
-        .iter()
-        .filter(|item| {
-            matches!(
-                item.status,
-                ReviewItemDecisionStatus::Pending
-                    | ReviewItemDecisionStatus::Edited
-                    | ReviewItemDecisionStatus::Deferred
-            ) && active_review_ids.contains(item.id.as_str())
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    pending_review_items.sort_by(|left, right| left.id.cmp(&right.id));
     let mut source_refs = input.tasks.source_refs.clone();
     source_refs.extend(input.source_refs);
     source_refs.sort_by(|left, right| left.id.cmp(&right.id));
@@ -704,12 +677,7 @@ pub fn build_workspace_view_model(input: WorkspaceViewModelBuildInput) -> Worksp
 
     WorkspaceViewModel {
         selected_conversation_id,
-        tasks,
-        active_task,
-        recent_task_refs,
-        pending_review_items,
         activity,
-        provider_privacy_boundary_summary: input.provider_privacy_boundary_summary,
         activity_redaction_state: "metadata_only".into(),
         source_refs,
         contract_limitations: input.contract_limitations,
@@ -773,6 +741,7 @@ fn task_item_from_input(input: TaskViewModelTaskInput) -> TaskViewModelItem {
         lifecycle_status,
         terminal_delivery_status,
         final_delivery_evidence_present,
+        completion_disposition: input.completion_disposition,
         items: input.canonical_items,
         work_plan: input.work_plan,
         artifacts: input.canonical_artifacts,
@@ -1008,18 +977,6 @@ fn summarize_tasks(items: &[TaskViewModelItem]) -> TasksViewModelSummary {
         summary.pending_review_count += item.pending_review_item_refs.len();
     }
     summary
-}
-
-fn task_ref(item: &TaskViewModelItem) -> BackendEntityRef {
-    BackendEntityRef {
-        id: item.canonical_task_id.clone(),
-        kind: BackendEntityKind::Task,
-        label: item.title.clone(),
-        href: item
-            .related_run_ids
-            .first()
-            .map(|run_id| format!("/runs/{run_id}")),
-    }
 }
 
 fn dedup_strings(values: Vec<String>) -> Vec<String> {

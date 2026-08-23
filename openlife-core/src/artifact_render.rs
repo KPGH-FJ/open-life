@@ -68,6 +68,10 @@ pub struct RenderedArtifact {
     pub media_type: &'static str,
     pub format: ResourceFormat,
     pub verified_chunk_count: usize,
+    /// Text re-extracted from the rendered bytes. Semantic verification uses
+    /// this observed representation rather than trusting the model's input
+    /// object or opaque binary bytes.
+    pub verified_text: String,
 }
 
 pub fn render_docx(draft: &DocumentArtifactDraft) -> Result<RenderedArtifact> {
@@ -224,6 +228,12 @@ fn verify_docx(bytes: Vec<u8>) -> Result<RenderedArtifact> {
         media_type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         format: ResourceFormat::Docx,
         verified_chunk_count: extraction.chunks.len(),
+        verified_text: extraction
+            .chunks
+            .iter()
+            .map(|chunk| chunk.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
     })
 }
 
@@ -242,6 +252,12 @@ fn verify_xlsx(bytes: Vec<u8>) -> Result<RenderedArtifact> {
         media_type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         format: ResourceFormat::Xlsx,
         verified_chunk_count: extraction.chunks.len(),
+        verified_text: extraction
+            .chunks
+            .iter()
+            .map(|chunk| chunk.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
     })
 }
 
@@ -261,6 +277,12 @@ fn verify_pptx(bytes: Vec<u8>) -> Result<RenderedArtifact> {
         media_type: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         format: ResourceFormat::Pptx,
         verified_chunk_count: extraction.chunks.len(),
+        verified_text: extraction
+            .chunks
+            .iter()
+            .map(|chunk| chunk.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n"),
     })
 }
 

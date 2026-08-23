@@ -1,11 +1,9 @@
-use crate::agent::ActionExecutionContext;
 use crate::mcp::McpArgumentInspection;
 use crate::mcp::McpRegistry;
 use crate::tool_execution_receipt::{ToolExecutionReceiptTracker, ToolTransportStatus};
 use crate::tool_manifest::ToolManifest;
 use crate::tool_permissions::ToolPermissionDecision;
 use anyhow::Result;
-use serde_json::Value;
 use std::net::ToSocketAddrs;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -13,13 +11,16 @@ use std::time::Instant;
 /// Cooldown between web.search calls (5 seconds) to avoid rate limiting.
 static LAST_SEARCH_AT: Mutex<Option<Instant>> = Mutex::new(None);
 pub const EXTERNAL_WRITE_PROPOSAL_MAX_SIZE_BYTES: usize = 100 * 1024;
-pub const EXTERNAL_WRITE_PROPOSAL_PREVIEW_CHARS: usize = 4000;
 
 #[derive(Clone)]
 pub struct SearchProviderConfig {
     pub provider: String,
     pub api_key: String,
     pub searxng_url: String,
+    /// Runtime-only model binding for provider-hosted search. This is copied
+    /// from the user's exact selected route and is never persisted as a second
+    /// model choice.
+    pub model: String,
 }
 
 impl SearchProviderConfig {
@@ -28,6 +29,7 @@ impl SearchProviderConfig {
             provider: config.search_provider.clone(),
             api_key: config.search_provider_key.clone(),
             searxng_url: config.searxng_url.clone(),
+            model: String::new(),
         }
     }
 }
@@ -39,6 +41,7 @@ impl std::fmt::Debug for SearchProviderConfig {
             .field("provider", &self.provider)
             .field("api_key_present", &(!self.api_key.is_empty()))
             .field("searxng_url_present", &(!self.searxng_url.is_empty()))
+            .field("model_present", &(!self.model.is_empty()))
             .finish()
     }
 }
@@ -49,6 +52,7 @@ impl Default for SearchProviderConfig {
             provider: "duckduckgo".to_string(),
             api_key: String::new(),
             searxng_url: String::new(),
+            model: String::new(),
         }
     }
 }
@@ -70,6 +74,13 @@ pub fn configured_web_search_endpoint(
             Err("web_search_deepseek_credential_unavailable")
         }
         "deepseek" => Ok("https://api.deepseek.com/anthropic/v1/messages".into()),
+        "openrouter" if cfg.api_key.trim().is_empty() => {
+            Err("web_search_openrouter_credential_unavailable")
+        }
+        "openrouter" if cfg.model.trim().is_empty() => {
+            Err("web_search_openrouter_model_unavailable")
+        }
+        "openrouter" => Ok(OPENROUTER_SEARCH_ENDPOINT.into()),
         "searxng" if cfg.searxng_url.trim().is_empty() => {
             Err("web_search_searxng_endpoint_unavailable")
         }
@@ -118,8 +129,6 @@ pub fn normalize_tool_name(tool_name: &str, registry: &McpRegistry) -> String {
         "fetch" | ".fetch" => Some("web.fetch"),
         "search" | ".search" => Some("web.search"),
         "read" | ".read" => Some("file.read"),
-        "write_proposal" | ".write_proposal" => Some("file.write_proposal"),
-        "calendar" | ".calendar" => Some("calendar.read"),
         _ => None,
     };
 
@@ -171,83 +180,8 @@ pub fn ensure_external_write_content_size(content_text: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn external_write_content_preview(content_text: &str) -> String {
-    if content_text.chars().count() > EXTERNAL_WRITE_PROPOSAL_PREVIEW_CHARS {
-        let preview: String = content_text
-            .chars()
-            .take(EXTERNAL_WRITE_PROPOSAL_PREVIEW_CHARS)
-            .collect();
-        format!(
-            "{}... [truncated {} bytes]",
-            preview,
-            content_text.len().saturating_sub(preview.len())
-        )
-    } else {
-        content_text.to_string()
-    }
-}
-
-pub fn minimized_external_write_arguments(
-    args: &Value,
-    content_hash: &str,
-    size_bytes: usize,
-    content_preview: &str,
-) -> Value {
-    let Some(args_object) = args.as_object() else {
-        return serde_json::json!({
-            "argument_shape": "non_object",
-            "content_hash": content_hash,
-            "size_bytes": size_bytes,
-            "content_preview": content_preview,
-        });
-    };
-
-    let mut minimized = serde_json::Map::new();
-    for field in [
-        "path",
-        "file_path",
-        "destination",
-        "operation",
-        "encoding",
-        "mime_type",
-        "content_type",
-    ] {
-        if let Some(value) = args_object.get(field) {
-            minimized.insert(field.to_string(), value.clone());
-        }
-    }
-
-    let omitted_fields: Vec<String> = ["content", "body", "data"]
-        .iter()
-        .filter(|field| args_object.contains_key(**field))
-        .map(|field| (*field).to_string())
-        .collect();
-
-    if !omitted_fields.is_empty() {
-        minimized.insert(
-            "omitted_payload_fields".to_string(),
-            serde_json::json!(omitted_fields),
-        );
-    }
-    minimized.insert("content_hash".to_string(), serde_json::json!(content_hash));
-    minimized.insert("size_bytes".to_string(), serde_json::json!(size_bytes));
-    minimized.insert(
-        "content_preview".to_string(),
-        serde_json::json!(content_preview),
-    );
-
-    Value::Object(minimized)
-}
-
-pub fn policy_requires_external_write_proposal(ctx: &ActionExecutionContext<'_>) -> bool {
-    ctx.external_write_requires_proposal
-}
-
 pub fn is_direct_external_write_tool(manifest: &ToolManifest) -> bool {
-    if manifest.name == "mcp.call_tool"
-        || manifest.declarative_only
-        || is_proposal_generation_tool(&manifest.name)
-    {
+    if manifest.declarative_only || is_proposal_generation_tool(&manifest.name) {
         return false;
     }
 
@@ -423,6 +357,18 @@ pub(crate) async fn search_web_async(
             )
             .await
         }
+        "openrouter" if !search_config.api_key.is_empty() && !search_config.model.is_empty() => {
+            search_openrouter_async(
+                query,
+                max_results,
+                &search_config.api_key,
+                &search_config.model,
+                network_policy,
+                receipt_tracker,
+                started_observer,
+            )
+            .await
+        }
         "searxng" if !search_config.searxng_url.is_empty() => {
             search_searxng_async(
                 query,
@@ -443,6 +389,16 @@ pub(crate) async fn search_web_async(
             success: false,
             output: None,
             error: Some("web_search_deepseek_credential_unavailable".into()),
+        }),
+        "openrouter" if search_config.api_key.is_empty() => Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some("web_search_openrouter_credential_unavailable".into()),
+        }),
+        "openrouter" => Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some("web_search_openrouter_model_unavailable".into()),
         }),
         "searxng" => Ok(ToolCallInternalResult {
             success: false,
@@ -558,6 +514,7 @@ const WEB_SEARCH_SNIPPET_MAX_CHARS: usize = 1_000;
 const WEB_SEARCH_RESULT_MAX_ITEMS: usize = 10;
 const DEEPSEEK_SEARCH_ENDPOINT: &str = "https://api.deepseek.com/anthropic/v1/messages";
 const DEEPSEEK_SEARCH_MODEL: &str = "deepseek-v4-flash";
+const OPENROUTER_SEARCH_ENDPOINT: &str = "https://openrouter.ai/api/v1/chat/completions";
 
 fn classify_duckduckgo_html_response(
     query: &str,
@@ -1057,6 +1014,183 @@ fn format_deepseek_search_response(
     Ok(output.to_string())
 }
 
+/// OpenRouter's model-agnostic hosted Web Search transport.
+///
+/// The selected model may synthesize arbitrary prose or reasoning around the
+/// server tool call. Only structured `url_citation` annotations cross this
+/// adapter boundary into the shared `WebSearchObservation` contract.
+async fn search_openrouter_async(
+    query: &str,
+    max_results: usize,
+    api_key: &str,
+    model: &str,
+    network_policy: Option<&crate::config::NetworkPolicy>,
+    receipt_tracker: ToolExecutionReceiptTracker,
+    started_observer: Option<&dyn crate::agent::ToolStartedTransitionObserver>,
+) -> Result<ToolCallInternalResult> {
+    let mut headers = reqwest::header::HeaderMap::new();
+    headers.insert(
+        reqwest::header::AUTHORIZATION,
+        reqwest::header::HeaderValue::from_str(&format!("Bearer {api_key}"))
+            .map_err(|_| anyhow::anyhow!("OpenRouter API key contains invalid header bytes"))?,
+    );
+    headers.insert(
+        reqwest::header::ACCEPT,
+        reqwest::header::HeaderValue::from_static("application/json"),
+    );
+    let body = openrouter_search_request_body(query, max_results, model);
+    let response =
+        crate::network_client::NetworkClient::new(crate::network_client::NetworkClientPolicy {
+            require_https: true,
+            fake_ip_proxy_domain_allowlist: vec!["openrouter.ai".into()],
+            ..Default::default()
+        })
+        .post_json_text_for_capability_with_start_observer(
+            OPENROUTER_SEARCH_ENDPOINT,
+            network_policy,
+            "web.search",
+            headers,
+            &body,
+            {
+                let receipt_tracker = receipt_tracker.clone();
+                move |phase| {
+                    let receipt_tracker = receipt_tracker.clone();
+                    async move {
+                        observe_network_dispatch_phase(&receipt_tracker, started_observer, phase)
+                            .await
+                    }
+                }
+            },
+        )
+        .await;
+    let response = match response {
+        Ok(response) => {
+            receipt_tracker.mark_response_observed();
+            response
+        }
+        Err(error) => {
+            mark_remote_unknown_after_dispatch(&receipt_tracker);
+            return Ok(ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some(format!("OpenRouter search request failed: {error:#}")),
+            });
+        }
+    };
+    if !response.status.is_success() {
+        return Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some(format!(
+                "OpenRouter search HTTP {}",
+                response.status.as_u16()
+            )),
+        });
+    }
+    let json: serde_json::Value = match serde_json::from_str(&response.body) {
+        Ok(json) => json,
+        Err(_) => {
+            return Ok(ToolCallInternalResult {
+                success: false,
+                output: None,
+                error: Some("web_search_openrouter_response_invalid".into()),
+            });
+        }
+    };
+    match format_openrouter_search_response(query, &json, max_results) {
+        Ok(output) => Ok(ToolCallInternalResult {
+            success: true,
+            output: Some(output),
+            error: None,
+        }),
+        Err(code) => Ok(ToolCallInternalResult {
+            success: false,
+            output: None,
+            error: Some(code),
+        }),
+    }
+}
+
+fn openrouter_search_request_body(
+    query: &str,
+    max_results: usize,
+    model: &str,
+) -> serde_json::Value {
+    let bounded_query = bounded_search_text(query, WEB_SEARCH_QUERY_MAX_CHARS);
+    let max_results = max_results.clamp(1, WEB_SEARCH_RESULT_MAX_ITEMS);
+    serde_json::json!({
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Use the Web Search server tool exactly once for the exact user query. Do not substitute a different query. Return one short sentence grounded only in the retrieved results."
+            },
+            {
+                "role": "user",
+                "content": bounded_query,
+            }
+        ],
+        "tools": [{
+            "type": "openrouter:web_search",
+            "parameters": {
+                "engine": "exa",
+                "max_results": max_results,
+                "max_total_results": max_results,
+                "max_uses": 1,
+                "max_characters": WEB_SEARCH_SNIPPET_MAX_CHARS,
+            }
+        }],
+        "max_tool_calls": 1,
+        "max_tokens": 2_048,
+        "reasoning": {
+            "effort": "low",
+            "exclude": true,
+        }
+    })
+}
+
+fn format_openrouter_search_response(
+    query: &str,
+    json: &serde_json::Value,
+    max_results: usize,
+) -> std::result::Result<String, String> {
+    let annotations = json
+        .get("choices")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|choices| choices.first())
+        .and_then(|choice| choice.get("message"))
+        .and_then(|message| message.get("annotations"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| "web_search_openrouter_no_structured_results".to_string())?;
+    let mut seen_urls = std::collections::HashSet::new();
+    let results = annotations
+        .iter()
+        .filter(|annotation| {
+            annotation.get("type").and_then(serde_json::Value::as_str) == Some("url_citation")
+        })
+        .filter_map(|annotation| {
+            let citation = annotation.get("url_citation").unwrap_or(annotation);
+            let title = citation.get("title").and_then(serde_json::Value::as_str)?;
+            let url = citation.get("url").and_then(serde_json::Value::as_str)?;
+            if !seen_urls.insert(url.to_string()) {
+                return None;
+            }
+            Some(SearchResult {
+                title: title.to_string(),
+                url: url.to_string(),
+                snippet: citation
+                    .get("content")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        })
+        .take(max_results.clamp(1, WEB_SEARCH_RESULT_MAX_ITEMS))
+        .collect::<Vec<_>>();
+    format_search_results("openrouter", query, &results)
+        .map_err(|_| "web_search_openrouter_no_structured_results".into())
+}
+
 /// SearXNG API backend.
 async fn search_searxng_async(
     query: &str,
@@ -1399,56 +1533,79 @@ pub fn is_private_url(url: &str) -> bool {
     false
 }
 
-/// Simple HTML to plain text converter.
-/// Strips tags and converts common elements to readable text.
+/// Convert an HTML response into the page's readable text before the bounded
+/// Web observation is created.
+///
+/// Modern documentation sites often ship hundreds of kilobytes of scripts and
+/// styles before a server-rendered `<article>` body. Stripping tags from the
+/// entire response preserves that executable payload as text and can push the
+/// actual article beyond the observation bound. Prefer the semantic article,
+/// then main/body, and remove non-content elements before rendering text.
 fn html_to_text(html: &str) -> String {
-    let mut text = html.to_string();
+    let scoped = [
+        r#"(?is)<article\b[^>]*\bid\s*=\s*["']mainContent["'][^>]*>(.*?)</article>"#,
+        r#"(?is)<article\b[^>]*>(.*?)</article>"#,
+        r#"(?is)<main\b[^>]*>(.*?)</main>"#,
+        r#"(?is)<body\b[^>]*>(.*?)</body>"#,
+    ]
+    .iter()
+    .find_map(|pattern| {
+        regex::Regex::new(pattern)
+            .ok()?
+            .captures(html)?
+            .get(1)
+            .map(|capture| capture.as_str().to_string())
+    })
+    .unwrap_or_else(|| html.to_string());
 
-    let block_replacements = [
-        ("<p>", "\n\n"),
-        ("</p>", ""),
-        ("<div>", "\n"),
-        ("</div>", ""),
-        ("<br>", "\n"),
-        ("<br/>", "\n"),
-        ("<li>", "\n- "),
-        ("</li>", ""),
-        ("<h1>", "\n\n# "),
-        ("</h1>", "\n\n"),
-        ("<h2>", "\n\n## "),
-        ("</h2>", "\n\n"),
-        ("<h3>", "\n\n### "),
-        ("</h3>", "\n\n"),
-        ("<h4>", "\n\n#### "),
-        ("</h4>", "\n\n"),
-        ("<h5>", "\n\n##### "),
-        ("</h5>", "\n\n"),
-        ("<h6>", "\n\n###### "),
-        ("</h6>", "\n\n"),
-        ("<ul>", "\n"),
-        ("</ul>", "\n"),
-        ("<ol>", "\n"),
-        ("</ol>", "\n"),
-        ("<pre>", "\n\n```\n"),
-        ("</pre>", "\n```\n\n"),
-        ("<code>", " `"),
-        ("</code>", "` "),
-        ("<strong>", " **"),
-        ("</strong>", "** "),
-        ("<b>", " **"),
-        ("</b>", "** "),
-        ("<em>", " *"),
-        ("</em>", "* "),
-        ("<i>", " *"),
-        ("</i>", "* "),
-    ];
-
-    for (tag, replacement) in &block_replacements {
-        text = text.replace(tag, replacement);
+    let mut text = scoped;
+    for element in ["script", "style", "noscript", "template", "svg"] {
+        let pattern = format!(r"(?is)<{element}\b[^>]*>.*?</{element}\s*>");
+        if let Ok(regex) = regex::Regex::new(&pattern) {
+            text = regex.replace_all(&text, " ").to_string();
+        }
     }
 
-    let tag_regex =
-        regex::Regex::new(r"<[^>]+>").unwrap_or_else(|_| regex::Regex::new(r"").unwrap());
+    for (level, marker) in [
+        (1, "#"),
+        (2, "##"),
+        (3, "###"),
+        (4, "####"),
+        (5, "#####"),
+        (6, "######"),
+    ] {
+        let opening =
+            regex::Regex::new(&format!(r"(?is)<h{level}\b[^>]*>")).expect("static heading regex");
+        let closing =
+            regex::Regex::new(&format!(r"(?is)</h{level}\s*>")).expect("static heading regex");
+        text = opening
+            .replace_all(&text, format!("\n\n{marker} "))
+            .to_string();
+        text = closing.replace_all(&text, "\n\n").to_string();
+    }
+
+    let structural_replacements = [
+        (r"(?is)<br\b[^>]*?/?>", "\n"),
+        (r"(?is)<li\b[^>]*>", "\n- "),
+        (
+            r"(?is)</?(?:p|div|section|ul|ol|table|tr|blockquote)\b[^>]*>",
+            "\n",
+        ),
+        (r"(?is)<pre\b[^>]*>", "\n\n```\n"),
+        (r"(?is)</pre\s*>", "\n```\n\n"),
+        (r"(?is)<code\b[^>]*>", " `"),
+        (r"(?is)</code\s*>", "` "),
+        (r"(?is)<(?:strong|b)\b[^>]*>", " **"),
+        (r"(?is)</(?:strong|b)\s*>", "** "),
+        (r"(?is)<(?:em|i)\b[^>]*>", " *"),
+        (r"(?is)</(?:em|i)\s*>", "* "),
+    ];
+    for (pattern, replacement) in structural_replacements {
+        let regex = regex::Regex::new(pattern).expect("static HTML structure regex");
+        text = regex.replace_all(&text, replacement).to_string();
+    }
+
+    let tag_regex = regex::Regex::new(r"(?is)<[^>]+>").expect("static remaining HTML tag regex");
     text = tag_regex.replace_all(&text, "").to_string();
 
     let entities = [
@@ -1467,10 +1624,21 @@ fn html_to_text(html: &str) -> String {
         text = text.replace(entity, decoded);
     }
 
-    text = text.replace("\n\n\n", "\n\n");
-    text = text.replace("  ", " ");
-
-    text.trim().to_string()
+    let mut normalized = Vec::new();
+    let mut previous_blank = true;
+    for line in text.lines() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() {
+            if !previous_blank {
+                normalized.push(String::new());
+            }
+            previous_blank = true;
+        } else {
+            normalized.push(line);
+            previous_blank = false;
+        }
+    }
+    normalized.join("\n").trim().to_string()
 }
 
 pub const WEB_CONTENT_OBSERVATION_MAX_CHARS: usize = 4_000;
@@ -1523,11 +1691,29 @@ pub fn prepare_web_content_observation(content: &str, source_url: &str) -> Strin
 mod web_content_observation_tests {
     use super::{
         classify_duckduckgo_html_response, configured_web_search_endpoint,
-        deepseek_search_request_body, format_deepseek_search_response, format_search_results,
-        prepare_web_content_observation, web_fetch_fake_ip_proxy_domain_allowlist,
-        SearchProviderConfig, SearchResult, WEB_CONTENT_OBSERVATION_MAX_CHARS,
-        WEB_SEARCH_QUERY_MAX_CHARS,
+        deepseek_search_request_body, format_deepseek_search_response,
+        format_openrouter_search_response, format_search_results, html_to_text,
+        openrouter_search_request_body, prepare_web_content_observation,
+        web_fetch_fake_ip_proxy_domain_allowlist, SearchProviderConfig, SearchResult,
+        WEB_CONTENT_OBSERVATION_MAX_CHARS, WEB_SEARCH_QUERY_MAX_CHARS,
     };
+
+    #[test]
+    fn web_fetch_prefers_server_rendered_article_over_head_scripts() {
+        let html = format!(
+            r#"<!doctype html><html><head><script>{}</script><style>{}</style></head><body><nav>Navigation noise</nav><main><h1>Models</h1><article id="mainContent"><h2>Choose a model</h2><p>Use the model control below the composer or the /model command in the CLI.</p></article></main><script>TAIL_NOISE</script></body></html>"#,
+            "SCRIPT_NOISE".repeat(10_000),
+            "STYLE_NOISE".repeat(1_000)
+        );
+
+        let text = html_to_text(&html);
+
+        assert!(text.starts_with("## Choose a model"));
+        assert!(text.contains("/model command"));
+        assert!(!text.contains("SCRIPT_NOISE"));
+        assert!(!text.contains("STYLE_NOISE"));
+        assert!(!text.contains("Navigation noise"));
+    }
 
     #[test]
     fn web_fetch_allows_only_the_policy_approved_host_through_a_fake_ip_proxy() {
@@ -1572,6 +1758,7 @@ mod web_content_observation_tests {
             provider: "brave".into(),
             api_key: "test-only-secret".into(),
             searxng_url: String::new(),
+            model: String::new(),
         };
         assert_eq!(
             configured_web_search_endpoint(&brave).as_deref(),
@@ -1595,6 +1782,26 @@ mod web_content_observation_tests {
             configured_web_search_endpoint(&deepseek).as_deref(),
             Ok("https://api.deepseek.com/anthropic/v1/messages")
         );
+
+        let openrouter_missing_model = SearchProviderConfig {
+            provider: "openrouter".into(),
+            api_key: "test-only-secret".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            configured_web_search_endpoint(&openrouter_missing_model),
+            Err("web_search_openrouter_model_unavailable")
+        );
+        let openrouter = SearchProviderConfig {
+            provider: "openrouter".into(),
+            api_key: "test-only-secret".into(),
+            model: "openrouter/test-model".into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            configured_web_search_endpoint(&openrouter).as_deref(),
+            Ok("https://openrouter.ai/api/v1/chat/completions")
+        );
         assert_eq!(
             configured_web_search_endpoint(&duckduckgo).as_deref(),
             Ok("https://duckduckgo.com/html/"),
@@ -1608,6 +1815,78 @@ mod web_content_observation_tests {
         assert_eq!(
             configured_web_search_endpoint(&unsupported),
             Err("web_search_provider_unsupported")
+        );
+    }
+
+    #[test]
+    fn openrouter_search_uses_server_tool_and_projects_only_structured_citations() {
+        let body = openrouter_search_request_body("OpenLife agent", 3, "openrouter/test-model");
+        assert_eq!(body["model"], "openrouter/test-model");
+        assert_eq!(body["tools"][0]["type"], "openrouter:web_search");
+        assert_eq!(body["tools"][0]["parameters"]["engine"], "exa");
+        assert_eq!(body["tools"][0]["parameters"]["max_results"], 3);
+        assert_eq!(body["tools"][0]["parameters"]["max_uses"], 1);
+        assert_eq!(body["max_tool_calls"], 1);
+
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "reasoning": "RAW_REASONING_MUST_NOT_PERSIST",
+                    "content": "Confident prose without a structured citation",
+                    "annotations": [
+                        {
+                            "type": "url_citation",
+                            "url_citation": {
+                                "title": "Official source",
+                                "url": "https://example.com/official",
+                                "content": "Exact provider-returned excerpt"
+                            }
+                        },
+                        {
+                            "type": "not_a_citation",
+                            "url": "https://example.com/forged"
+                        },
+                        {
+                            "type": "url_citation",
+                            "url_citation": {
+                                "title": "Insecure source",
+                                "url": "http://example.com/insecure",
+                                "content": "must be rejected"
+                            }
+                        }
+                    ]
+                }
+            }]
+        });
+        let encoded = format_openrouter_search_response("OpenLife agent", &response, 3)
+            .expect("structured OpenRouter citations");
+        let observation: serde_json::Value = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(observation["provider"], "openrouter");
+        assert_eq!(observation["results"].as_array().map(Vec::len), Some(1));
+        assert_eq!(
+            observation["results"][0]["url"],
+            "https://example.com/official"
+        );
+        assert_eq!(
+            observation["results"][0]["snippet"],
+            "Exact provider-returned excerpt"
+        );
+        crate::web_search::WebSearchObservation::parse_tool_output(&encoded)
+            .expect("OpenRouter output must use the shared Web observation contract");
+        assert!(!encoded.contains("RAW_REASONING_MUST_NOT_PERSIST"));
+        assert!(!encoded.contains("Confident prose"));
+        assert!(!encoded.contains("forged"));
+        assert!(!encoded.contains("insecure"));
+    }
+
+    #[test]
+    fn openrouter_search_without_structured_citations_fails_closed() {
+        let response = serde_json::json!({
+            "choices": [{"message": {"content": "model prose only", "annotations": []}}]
+        });
+        assert_eq!(
+            format_openrouter_search_response("query", &response, 3),
+            Err("web_search_openrouter_no_structured_results".into())
         );
     }
 

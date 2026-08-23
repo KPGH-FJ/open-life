@@ -15,36 +15,34 @@ mod credential_bootstrap;
 pub(crate) mod danger_action_confirmation;
 pub mod errors;
 pub(crate) mod life_model_learning;
-pub(crate) mod life_model_materializer_guard;
 pub(crate) mod life_model_write_gateway;
 pub(crate) mod life_state_projection;
 pub(crate) mod main_chat_cancellation;
 pub(crate) mod main_chat_context_loader;
 #[cfg(test)]
 pub(crate) mod main_chat_eval_state;
-pub(crate) mod main_chat_kernel;
 pub(crate) mod main_chat_send;
 pub(crate) mod main_chat_skills_tools;
-pub(crate) mod main_chat_source_bound;
 pub(crate) mod main_chat_steering;
 pub(crate) mod main_chat_streaming;
-pub(crate) mod main_chat_tool_observation;
 pub(crate) mod main_chat_tool_selection;
 pub(crate) mod memory_gateway;
 pub(crate) mod memory_retrieval_filter;
 pub(crate) mod persistence_coordinator;
 pub(crate) mod personal_intelligence_ports;
 pub(crate) mod product_agent_dto;
+pub(crate) mod provider_client;
 pub(crate) mod provider_invocation_state;
 pub(crate) mod provider_network_consent;
 pub(crate) mod provider_registry;
+pub(crate) mod provider_runtime;
 pub(crate) mod provider_validation;
 pub(crate) mod read_models;
 pub(crate) mod resource_commands;
 pub mod runtime_build_info;
+pub(crate) mod runtime_events;
 pub(crate) mod secret_store;
 pub mod state;
-pub(crate) mod state_projection;
 pub mod storage;
 pub(crate) mod tool_gateway_resources;
 pub(crate) mod workspace_file_resolver;
@@ -66,16 +64,16 @@ use commands::main_chat_tools::{
     select_main_chat_skill,
 };
 
+use commands::artifact::open_artifact_result;
 use commands::chat::{
     assign_conversation_project, create_chat_session, create_project, delete_chat_session,
     get_conversation_view_model, rename_chat_session, set_conversation_memory_mode,
 };
 use commands::life_model::{
     confirm_lifemodel_learning_candidate, delete_lifemodel_learning_candidate,
-    draft_legacy_lifemodel_migration, draft_lifemodel_v2_change, draft_lifemodel_v2_export,
-    draft_lifemodel_v2_rollback, edit_lifemodel_learning_proposal,
-    pause_lifemodel_learning_suggestion_class, reject_lifemodel_learning_candidate,
-    stage_lifemodel_learning_candidate,
+    draft_lifemodel_v2_change, draft_lifemodel_v2_export, draft_lifemodel_v2_rollback,
+    edit_lifemodel_learning_proposal, pause_lifemodel_learning_suggestion_class,
+    reject_lifemodel_learning_candidate, stage_lifemodel_learning_candidate,
 };
 use commands::memory::{
     archive_memory, correct_memory, privacy_erase_memory_asset, restore_memory,
@@ -185,15 +183,14 @@ pub struct SendMessageResult {
     pub reply: String,
     pub status: String,
     pub blockers: Vec<String>,
-    pub reasoning_trace: openlife_core::agent::ProductAgentTrace,
+    #[serde(skip_serializing)]
     pub tool_calls: Vec<ToolCallResult>,
     pub run_id: Option<String>,
-    pub agent_ingress: Option<openlife_core::agent::main_chat_agent_v1::AgentIngressDecision>,
     pub provider_invocation_status: crate::provider_invocation_state::ProviderInvocationState,
     pub model_invoked: bool,
     pub tool_invoked: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub life_model_influence: Option<crate::main_chat_kernel::MainChatLifeModelProductReceipt>,
+    pub life_model_influence: Option<crate::personal_intelligence_ports::LifeModelProductReceipt>,
 }
 
 impl std::fmt::Debug for SendMessageResult {
@@ -203,10 +200,8 @@ impl std::fmt::Debug for SendMessageResult {
             .field("reply", &"[REDACTED]")
             .field("status", &self.status)
             .field("blocker_count", &self.blockers.len())
-            .field("reasoning_trace", &"[REDACTED]")
             .field("tool_call_count", &self.tool_calls.len())
             .field("run_id", &self.run_id)
-            .field("agent_ingress_present", &self.agent_ingress.is_some())
             .field(
                 "provider_invocation_status",
                 &self.provider_invocation_status,
@@ -406,6 +401,17 @@ async fn select_artifact_output_directory<R: tauri::Runtime>(
     state: State<'_, Arc<AppState>>,
 ) -> Result<commands::settings::ArtifactOutputDirectorySelection, errors::AppError> {
     commands::settings::select_artifact_output_directory(app_handle, state.inner()).await
+}
+
+#[tauri::command]
+async fn export_artifact_result<R: tauri::Runtime>(
+    artifact_id: String,
+    version: u64,
+    app_handle: tauri::AppHandle<R>,
+    state: State<'_, Arc<AppState>>,
+) -> Result<commands::artifact::ExportArtifactResult, String> {
+    commands::artifact::export_artifact_result(app_handle, state.inner(), &artifact_id, version)
+        .await
 }
 
 #[tauri::command]
@@ -616,23 +622,6 @@ pub fn run() {
                 .require_effects_allowed()
                 .is_ok()
             {
-                if let Err(error) = tauri::async_runtime::block_on(
-                    state_projection::reconcile_state_store_lifemodel_projection(
-                        &app_state_for_setup,
-                    ),
-                ) {
-                    // StateStore remains the canonical product read owner. A
-                    // failed YAML compatibility projection is explicitly
-                    // degraded and retryable; it must not trigger a temp-store
-                    // fallback or misreport the canonical effect as failed.
-                    log::warn!("[setup] StateStore compatibility projection degraded: {error}");
-                }
-            }
-            if app_state_for_setup
-                .persistence_coordinator
-                .require_effects_allowed()
-                .is_ok()
-            {
                 memory_gateway::start_canonical_outbox_background_worker(Arc::clone(
                     &app_state_for_setup,
                 ));
@@ -658,7 +647,6 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            draft_legacy_lifemodel_migration,
             draft_lifemodel_v2_change,
             draft_lifemodel_v2_rollback,
             draft_lifemodel_v2_export,
@@ -684,6 +672,8 @@ pub fn run() {
             clear_main_chat_skill,
             list_main_chat_tool_candidates,
             open_external_https_source,
+            open_artifact_result,
+            export_artifact_result,
             accept_proposal,
             reject_proposal,
             request_artifact_undo,
@@ -775,6 +765,7 @@ mod release_surface_tests {
         let handler = &lib[start..end];
         let sources = [
             ("lib.rs", lib),
+            ("commands/artifact.rs", include_str!("commands/artifact.rs")),
             ("commands/chat.rs", include_str!("commands/chat.rs")),
             (
                 "commands/life_model.rs",
@@ -849,7 +840,6 @@ mod release_surface_tests {
         for required in [
             "get_life_model_view_model",
             "draft_lifemodel_v2_change",
-            "draft_legacy_lifemodel_migration",
             "correct_memory",
             "archive_memory",
             "restore_memory",

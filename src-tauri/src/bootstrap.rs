@@ -8,22 +8,17 @@ use crate::secret_store::{
     inspect_existing_mcp_audit_keys, selected_secret_store_classification, IntegrityKeyHydration,
     McpAuditKeyHydrationInspection, ProfileSecretStore, ProviderCredentialHydrationStatus,
     SecretReader, StartupProfileSecretStore, CANONICAL_TASK_RECEIPT_KEY_REF,
-    TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::{AppState, CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{load_mcp_audit_keyring_from_path, privacy_policy_path, McpAuditKeyringLoad};
-use openlife_core::agent::{
-    AgentProposal, CanonicalTaskReceiptKey, DurableWriteRequest, DurableWriteSource,
-    DurableWriteSubject, MemoryLifecycleStore, ProposalSource, ProposalStore, ProposalType,
-    ReviewWorkflow, RiskLevel,
-};
+use openlife_core::agent::{CanonicalTaskReceiptKey, MemoryLifecycleStore, ProposalStore};
 use openlife_core::config::AppConfig;
 use openlife_core::conversation::ConversationStore;
 use openlife_core::feedback::FeedbackStore;
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
 use openlife_core::mcp_audit::McpAuditStore;
-use openlife_core::memory::MemoryStore;
+use openlife_core::memory::KnowledgeNoteProjectionStore;
 use openlife_core::privacy::PrivacyEngine;
 use openlife_core::scheduler::InferenceScheduler;
 use openlife_core::vectors::VectorStore;
@@ -78,27 +73,6 @@ const STARTUP_CANONICAL_OUTBOX_PASSES: usize = 20;
 pub(crate) async fn reconcile_startup_canonical_outboxes(
     state: &Arc<AppState>,
 ) -> Result<(), String> {
-    let mut lifemodel_drained = false;
-    for _ in 0..STARTUP_CANONICAL_OUTBOX_PASSES {
-        let report =
-            crate::life_model_write_gateway::reconcile_startup_lifemodel_file_mutations_with_state(
-                state,
-            )
-            .await?;
-        if report.degraded > 0 {
-            return Err(format!(
-                "LifeModel file projection reconciliation degraded: {} delivery attempts",
-                report.degraded
-            ));
-        }
-        if !report.backlog_may_remain {
-            lifemodel_drained = true;
-            break;
-        }
-    }
-    if !lifemodel_drained {
-        return Err("LifeModel file projection backlog exceeded startup bound".into());
-    }
     for _ in 0..STARTUP_CANONICAL_OUTBOX_PASSES {
         let report = crate::memory_gateway::reconcile_blocking_canonical_outboxes_with_state(
             state,
@@ -302,8 +276,8 @@ fn required_store_or_unavailable<T>(
 fn init_memory_store(
     db_path: &Path,
     startup_warnings: &std::cell::RefCell<Vec<String>>,
-) -> Result<MemoryStore, String> {
-    match MemoryStore::new(db_path) {
+) -> Result<KnowledgeNoteProjectionStore, String> {
+    match KnowledgeNoteProjectionStore::new(db_path) {
         Ok(store) => Ok(store),
         Err(primary_err) => {
             if !ephemeral_store_fallback_allowed() {
@@ -316,14 +290,14 @@ fn init_memory_store(
                 "memory.db 初始化失败，正在使用临时数据库：{}",
                 primary_err
             ));
-            match MemoryStore::new(&fallback) {
+            match KnowledgeNoteProjectionStore::new(&fallback) {
                 Ok(store) => Ok(store),
                 Err(fallback_err) => {
                     startup_warnings.borrow_mut().push(format!(
                         "临时 memory.db 初始化也失败，已降级为内存数据库：{}",
                         fallback_err
                     ));
-                    MemoryStore::new_in_memory().map_err(|memory_err| {
+                    KnowledgeNoteProjectionStore::new_in_memory().map_err(|memory_err| {
                         format!(
                             "所有 memory store 初始化失败: primary={}, fallback={}, in_memory={}",
                             primary_err, fallback_err, memory_err
@@ -479,158 +453,6 @@ fn init_memory_lifecycle_store(
     }
 }
 
-fn build_legacy_scheduled_task_review_proposal(
-    candidate: &openlife_core::tasks::LegacyScheduledTaskReviewCandidate,
-) -> Result<(AgentProposal, String), String> {
-    let identity_digest =
-        openlife_core::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
-            "schema": "openlife.legacyScheduledReviewIdentity.v1",
-            "sourceDigest": candidate.source_digest.clone(),
-            "sourceOrdinal": candidate.source_ordinal,
-            "itemDigest": candidate.item_digest.clone(),
-        }))
-        .1;
-    let identity_suffix = identity_digest
-        .strip_prefix("sha256:")
-        .ok_or_else(|| "legacy scheduled review identity digest is invalid".to_string())?;
-    let proposal_id = format!("legacy-scheduled-review-{identity_suffix}");
-    let source_detail = format!(
-        "legacy_scheduled_review:{}:{}:{}",
-        candidate.source_digest, candidate.source_ordinal, candidate.item_digest
-    );
-    let source_run_id_digest = candidate
-        .source_run_id
-        .as_deref()
-        .map(|value| openlife_core::agent::metadata_safe::metadata_safe_text_digest(value).1);
-    let source_proposal_id_digest = candidate
-        .source_proposal_id
-        .as_deref()
-        .map(|value| openlife_core::agent::metadata_safe::metadata_safe_text_digest(value).1);
-    let after = serde_json::json!({
-        "title": candidate.title.clone(),
-        "description": candidate.description.clone(),
-        "due_date": candidate.due_at.clone(),
-        "scheduled_at": candidate.due_at.clone(),
-        "priority": candidate.priority.clone(),
-        "tool": candidate.action_type.clone(),
-        "legacy_migration": {
-            "source_digest": candidate.source_digest.clone(),
-            "source_ordinal": candidate.source_ordinal,
-            "item_digest": candidate.item_digest.clone(),
-            "effect_state": "review_required",
-            "source_run_id_digest": source_run_id_digest,
-            "source_proposal_id_digest": source_proposal_id_digest,
-        }
-    });
-    let mut proposal = AgentProposal::new(
-            ProposalType::ScheduledTask,
-            &format!("tasks.legacy_review.{}", &identity_suffix[..16]),
-            after,
-            "A provably not-yet-due legacy scheduled task requires fresh Review Center approval before it can enter the canonical TaskStore.",
-            1.0,
-            RiskLevel::Medium,
-            ProposalSource::Manual,
-        );
-    proposal.id = proposal_id.clone();
-    proposal.source_detail = Some(source_detail);
-    proposal.created_at = chrono::DateTime::parse_from_rfc3339(&candidate.review_created_at)
-        .map_err(|_| "legacy scheduled review creation snapshot is invalid".to_string())?
-        .with_timezone(&chrono::Utc);
-    proposal.expires_at = Some(
-        chrono::DateTime::parse_from_rfc3339(&candidate.due_at)
-            .map_err(|_| "legacy scheduled review expiry snapshot is invalid".to_string())?
-            .with_timezone(&chrono::Utc),
-    );
-    if proposal
-        .expires_at
-        .is_some_and(|expiry| expiry <= proposal.created_at)
-    {
-        return Err("legacy scheduled review snapshot is not future-bounded".into());
-    }
-    Ok((proposal, proposal_id))
-}
-
-fn stage_legacy_scheduled_task_review_proposals(
-    task_store: &openlife_core::tasks::TaskStore,
-    proposal_store: &ProposalStore,
-    evidence_directory: &Path,
-) -> Result<usize, String> {
-    let candidates = task_store
-        .pending_legacy_review_candidates(evidence_directory)
-        .map_err(|error| error.to_string())?;
-    let mut staged = 0;
-    for candidate in candidates {
-        let (proposal, proposal_id) = build_legacy_scheduled_task_review_proposal(&candidate)?;
-        if let Some(existing) = proposal_store
-            .get_proposal(&proposal_id)
-            .map_err(|error| error.to_string())?
-        {
-            if existing.source_detail != proposal.source_detail
-                || existing.run_id != proposal.run_id
-                || existing.proposal_type != proposal.proposal_type
-                || existing.source != proposal.source
-                || existing.affected_path != proposal.affected_path
-                || existing.base_hash != proposal.base_hash
-                || existing.before != proposal.before
-                || existing.after != proposal.after
-                || existing.reason != proposal.reason
-                || existing.confidence.to_bits() != proposal.confidence.to_bits()
-                || existing.risk_level != proposal.risk_level
-                || existing.created_at != proposal.created_at
-                || existing.expires_at != proposal.expires_at
-                || existing.resolved_at.is_some()
-                || !matches!(
-                    existing.status,
-                    openlife_core::agent::ProposalStatus::Pending
-                        | openlife_core::agent::ProposalStatus::Postponed
-                        | openlife_core::agent::ProposalStatus::Edited
-                )
-                || existing.is_expired()
-            {
-                return Err(
-                    "legacy scheduled review proposal id resolves to a non-exact snapshot".into(),
-                );
-            }
-            if !task_store
-                .mark_legacy_review_proposal_staged(&candidate, &proposal_id)
-                .map_err(|error| error.to_string())?
-            {
-                return Err(
-                    "legacy scheduled review migration journal rejected the exact proposal".into(),
-                );
-            }
-            staged += 1;
-            continue;
-        }
-        let outcome = ReviewWorkflow::new(proposal_store)
-            .submit(
-                DurableWriteRequest::from_agent_proposal(
-                    DurableWriteSource::ManualOverride,
-                    DurableWriteSubject::Calendar,
-                    proposal,
-                    "A legacy future scheduled task is pending fresh Review Center approval; it has not been scheduled or executed.",
-                )
-                .with_existing_proposal_id(Some(proposal_id.clone()))
-                .with_idempotency_key(format!(
-                    "legacy_scheduled_review:{}:{}",
-                    candidate.source_digest, candidate.source_ordinal
-                )),
-            )
-            .map_err(|error| error.to_string())?;
-        if outcome.proposal_id() != proposal_id {
-            return Err("legacy scheduled review did not preserve its deterministic id".into());
-        }
-        if !task_store
-            .mark_legacy_review_proposal_staged(&candidate, &proposal_id)
-            .map_err(|error| error.to_string())?
-        {
-            return Err("legacy scheduled review migration journal rejected the proposal".into());
-        }
-        staged += 1;
-    }
-    Ok(staged)
-}
-
 /// Bootstrap the entire application: config, stores, routers, engines, AppState.
 /// Returns assembled AppState along with startup warnings.
 pub fn bootstrap(data_dir: PathBuf) -> BootstrapResult {
@@ -710,24 +532,15 @@ fn bootstrap_with_secret_store(
             &["task_runtime.db"],
             secret_store,
         );
-    let (task_store_credential_status, task_store_authority_key_material) =
-        inspect_fixed_credential(
-            &data_dir,
-            TASK_STORE_AUTHORITY_KEY_REF,
-            &["tasks.db"],
-            secret_store,
-        );
-
     // Apply system configuration
     openlife_core::ollama::set_ollama_cache_ttl_seconds(config.system.ollama_cache_ttl_seconds);
 
     let life_model_manager = LifeModelManager::new(data_dir.join("life-model").join("current"));
-    // Bootstrap must remain read-only for an absent legacy model. Calling
-    // `load()` here used to manufacture a default-filled YAML document on the
-    // first launch, which then looked like user-authored migration input to the
-    // v2 product path. Canonical creation is owned by an explicitly reviewed
-    // v2 proposal, never by application startup.
-    match life_model_manager.load_existing() {
+    // A missing canonical store is a valid empty profile. An existing store
+    // must be readable before reviewed LifeModel materialization is admitted.
+    match life_model_manager
+        .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+    {
         Ok(_) => persistence.register_read_write("LifeModelFileStore"),
         Err(error) => persistence.register_unavailable(
             "LifeModelFileStore",
@@ -735,28 +548,21 @@ fn bootstrap_with_secret_store(
             &error.to_string(),
         ),
     }
-    match openlife_core::persistence_outbox::FileMutationJournal::new(
-        life_model_manager.mutation_journal_path(),
-    ) {
-        Ok(_) => persistence.register_read_write("LifeModelFileJournal"),
-        Err(error) => persistence.register_unavailable(
-            "LifeModelFileJournal",
-            "lifemodel_journal_open_failed",
-            &error.to_string(),
-        ),
-    }
     let db_path = data_dir.join("memory.db");
     let memory_store = init_store(
         || init_memory_store(&db_path, &startup_warnings),
-        || MemoryStore::open_read_only_existing(&db_path).map_err(|e| e.to_string()),
-        || MemoryStore::new_in_memory().map_err(|e| e.to_string()),
+        || {
+            KnowledgeNoteProjectionStore::open_read_only_existing(&db_path)
+                .map_err(|e| e.to_string())
+        },
+        || KnowledgeNoteProjectionStore::new_in_memory().map_err(|e| e.to_string()),
         "MemoryStore",
         &startup_warnings,
         &persistence,
     );
     let memory_store =
         required_store_or_unavailable(memory_store, "MemoryStore", &startup_warnings, || {
-            MemoryStore::unavailable_sentinel().map_err(|error| error.to_string())
+            KnowledgeNoteProjectionStore::unavailable_sentinel().map_err(|error| error.to_string())
         });
 
     let conversation_db_path = data_dir.join("conversations.db");
@@ -952,46 +758,6 @@ fn bootstrap_with_secret_store(
         "LifeModelLearningStore",
         &startup_warnings,
     );
-
-    let task_store_db_path = data_dir.join("tasks.db");
-    let task_store_authority_key = match task_store_authority_key_material {
-        Some(key) => openlife_core::tasks::TaskStoreAuthorityKey::from_key_material(&key)
-            .map(Some)
-            .unwrap_or_else(|error| {
-                startup_warnings.borrow_mut().push(format!(
-                    "TaskStore authority key is invalid; scheduled execution is disabled: {error}"
-                ));
-                None
-            }),
-        None => {
-            startup_warnings.borrow_mut().push(format!(
-                "TaskStore authority key is unavailable; scheduled execution is disabled: {}",
-                task_store_credential_status.as_str()
-            ));
-            None
-        }
-    };
-    let patches_db_path = data_dir.join("patches.db");
-    let patch_store = init_store(
-        || {
-            openlife_core::life_model::patch_store::PatchStore::new(&patches_db_path)
-                .map_err(|e| e.to_string())
-        },
-        || {
-            openlife_core::life_model::patch_store::PatchStore::open_read_only_existing(
-                &patches_db_path,
-            )
-            .map_err(|e| e.to_string())
-        },
-        || {
-            openlife_core::life_model::patch_store::PatchStore::new_in_memory()
-                .map_err(|e| e.to_string())
-        },
-        "PatchStore",
-        &startup_warnings,
-        &persistence,
-    );
-    let patch_store = optional_store(patch_store, "PatchStore", &startup_warnings);
 
     let scheduler = InferenceScheduler::new(
         config.local_model.clone(),
@@ -1249,159 +1015,6 @@ fn bootstrap_with_secret_store(
                 .map_err(|error| error.to_string())
         },
     );
-    let legacy_scheduled_task_report = std::cell::RefCell::new(None);
-    let legacy_scheduled_task_path = data_dir.join("scheduled_tasks.json");
-    let scheduled_task_store = init_store(
-        || {
-            let authority_key = task_store_authority_key
-                .as_ref()
-                .ok_or_else(|| "task_store_authority_key_unavailable".to_string())?;
-            let store = openlife_core::tasks::TaskStore::new_with_authority_key(
-                &task_store_db_path,
-                authority_key,
-            )
-            .map_err(|e| e.to_string())?;
-            let report = store
-                .migrate_legacy_json_if_present(&legacy_scheduled_task_path)
-                .map_err(|e| e.to_string())?;
-            *legacy_scheduled_task_report.borrow_mut() = Some(report);
-            Ok(store)
-        },
-        || {
-            let authority_key = task_store_authority_key
-                .as_ref()
-                .ok_or_else(|| "task_store_authority_key_unavailable".to_string())?;
-            openlife_core::tasks::TaskStore::open_read_only_existing_with_authority_key(
-                &task_store_db_path,
-                authority_key,
-            )
-            .map_err(|e| e.to_string())
-        },
-        || openlife_core::tasks::TaskStore::new_in_memory().map_err(|e| e.to_string()),
-        "TaskStore",
-        &startup_warnings,
-        &persistence,
-    );
-    if legacy_scheduled_task_path.exists() {
-        persistence.register_unavailable(
-            "LegacyScheduledTaskOwner",
-            "legacy_scheduled_task_quarantine_incomplete",
-            "scheduled_tasks.json remains active because its metadata quarantine or atomic evidence retirement did not complete",
-        );
-        startup_warnings.borrow_mut().push(
-            "Legacy scheduled-task state is unresolved/unknown; all effects remain disabled until scheduled_tasks.json is quarantined."
-                .into(),
-        );
-    } else if let Some(report) = legacy_scheduled_task_report.into_inner() {
-        if report.quarantined_count > 0 {
-            log::warn!(
-                "[startup] quarantined legacy scheduled-task source digest={} items={} unknown={}",
-                report.source_digest.as_deref().unwrap_or("unknown"),
-                report.item_count,
-                report.quarantined_count,
-            );
-            startup_warnings.borrow_mut().push(format!(
-                "Quarantined {} legacy scheduled-task record(s) as unknown; no legacy task was auto-executed.",
-                report.quarantined_count
-            ));
-        }
-        if report.historical_count > 0 {
-            startup_warnings.borrow_mut().push(format!(
-                "Imported {} legacy scheduled-task terminal label(s) as metadata-only history; they are not canonical completion receipts.",
-                report.historical_count
-            ));
-        }
-        if report.review_required_count > 0 {
-            startup_warnings.borrow_mut().push(format!(
-                "Identified {} future legacy scheduled task(s) requiring fresh Review Center review; none is executable before approval.",
-                report.review_required_count
-            ));
-        }
-    }
-    let scheduled_task_store =
-        required_store_or_unavailable(scheduled_task_store, "TaskStore", &startup_warnings, || {
-            openlife_core::tasks::TaskStore::unavailable_sentinel()
-                .map_err(|error| error.to_string())
-        });
-    let pending_reviewed_cloud_tasks = scheduled_task_store
-        .list_tasks(Some("pending"))
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|task| {
-            task.provider_grant.data_route == openlife_core::llm::ProviderDataRoute::PolicyAllowed
-        })
-        .collect::<Vec<_>>();
-    for task in pending_reviewed_cloud_tasks {
-        let restored = proposal_store
-            .as_ref()
-            .ok_or_else(|| "ProposalStore is unavailable".to_string())
-            .and_then(|store| {
-                let proof = ReviewWorkflow::new(store)
-                    .materialized_acceptance_snapshot(&task.id)
-                    .map_err(|error| error.to_string())?;
-                scheduled_task_store
-                    .restore_reviewed_cloud_authority(&proof)
-                    .map_err(|error| error.to_string())
-            });
-        if let Err(error) = restored {
-            match scheduled_task_store.quarantine_unproven_reviewed_cloud_task(&task.id) {
-                Ok(true) => log::warn!(
-                    "[startup] scheduled cloud task {} lacks canonical ReviewWorkflow authority and now requires fresh review: {}",
-                    task.id,
-                    error
-                ),
-                Ok(false) | Err(_) => {
-                    persistence.register_unavailable(
-                        "ScheduledCloudAuthority",
-                        "scheduled_cloud_authority_quarantine_failed",
-                        &error,
-                    );
-                    startup_warnings.borrow_mut().push(format!(
-                        "Scheduled cloud task {} could not prove ReviewWorkflow authority or enter fresh-review quarantine; all effects remain disabled: {}",
-                        task.id, error
-                    ));
-                }
-            }
-        }
-    }
-    match proposal_store.as_ref() {
-        Some(store) => match stage_legacy_scheduled_task_review_proposals(
-            &scheduled_task_store,
-            store,
-            &data_dir,
-        ) {
-            Ok(staged) if staged > 0 => log::warn!(
-                "[startup] staged {} legacy future scheduled task(s) for fresh review",
-                staged
-            ),
-            Ok(_) => {}
-            Err(error) => {
-                persistence.register_unavailable(
-                    "LegacyScheduledTaskReviewMigration",
-                    "legacy_scheduled_review_staging_failed",
-                    &error,
-                );
-                startup_warnings.borrow_mut().push(format!(
-                    "Legacy future scheduled-task review staging failed; all effects remain disabled: {error}"
-                ));
-            }
-        },
-        None => match scheduled_task_store.pending_legacy_review_candidates(&data_dir) {
-            Ok(candidates) if candidates.is_empty() => {}
-            Ok(_) | Err(_) => {
-                persistence.register_unavailable(
-                    "LegacyScheduledTaskReviewMigration",
-                    "proposal_store_unavailable_for_legacy_review",
-                    "future legacy scheduled tasks require ReviewWorkflow but ProposalStore is unavailable",
-                );
-                startup_warnings.borrow_mut().push(
-                    "Legacy future scheduled tasks await ReviewWorkflow, but ProposalStore is unavailable; all effects remain disabled."
-                        .into(),
-                );
-            }
-        },
-    }
-
     let skill_registry = openlife_core::skills::SkillRegistry::built_in();
 
     let resource_runtime = {
@@ -1432,83 +1045,6 @@ fn bootstrap_with_secret_store(
         }
     };
 
-    let state_store = {
-        let store_path = data_dir.join("state.db");
-        match openlife_core::state_store::StateStore::new(&store_path) {
-            Ok(store) => {
-                persistence.register_read_write("StateStore");
-                if persistence.bootstrap_mutations_safe() {
-                    let daily_task_cutover_result = match life_model_manager.load_existing() {
-                        Ok(Some(model)) => crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
-                                &store,
-                                &model,
-                                chrono::Utc::now(),
-                            )
-                            .map(|_| ()),
-                        Ok(None) => Ok(()),
-                        Err(error) => Err(format!(
-                            "LifeModel could not be loaded for legacy daily-task StateStore cutover: {error}"
-                        )),
-                    };
-                    if let Err(error) = daily_task_cutover_result {
-                        // Shipped product reads require the import receipt and
-                        // fail closed. Never merge a partial StateStore view
-                        // with the legacy YAML source after a blocked cutover.
-                        startup_warnings.borrow_mut().push(format!(
-                            "legacy daily-task StateStore cutover remains blocked: {error}"
-                        ));
-                    }
-                    let history_cutover_result = memory_store
-                        .list_legacy_state_history_migration_source()
-                        .map_err(|error| {
-                            format!(
-                                "MemoryStore state history could not be loaded for StateStore cutover: {error}"
-                            )
-                        })
-                        .and_then(|snapshot| {
-                            crate::state_projection::reconcile_legacy_memory_state_history_shadow(
-                                &store,
-                                &snapshot,
-                                chrono::Utc::now(),
-                            )?;
-                            store
-                                .import_legacy_state_history_shadow(chrono::Utc::now())
-                                .map_err(|error| {
-                                    format!(
-                                        "legacy state-history canonical import failed: {error}"
-                                    )
-                                })
-                        });
-                    if let Err(error) = history_cutover_result {
-                        // Product reads fail closed on the absent import
-                        // receipt. MemoryStore remains migration evidence, not
-                        // a hidden product fallback.
-                        startup_warnings.borrow_mut().push(format!(
-                            "legacy state-history StateStore cutover remains blocked: {error}"
-                        ));
-                    }
-                } else {
-                    startup_warnings.borrow_mut().push(
-                        "legacy daily-task and state-history StateStore shadow reconciliation skipped because canonical bootstrap mutations are unsafe"
-                            .into(),
-                    );
-                }
-                Some(Arc::new(store))
-            }
-            Err(error) => {
-                persistence.register_unavailable(
-                    "StateStore",
-                    "state_store_initialization_failed",
-                    &error.to_string(),
-                );
-                startup_warnings.borrow_mut().push(format!(
-                    "state.db 初始化失败；transient-state 写入已禁用且不会降级到临时存储：{error}"
-                ));
-                None
-            }
-        }
-    };
-
     let provider_credential_status = match provider_credential_hydration_status {
         ProviderCredentialHydrationStatus::NotReferenced
         | ProviderCredentialHydrationStatus::Missing => {
@@ -1520,7 +1056,6 @@ fn bootstrap_with_secret_store(
     };
     let credential_bootstrap_snapshot = CredentialBootstrapSnapshot::from_statuses([
         canonical_task_credential_status,
-        task_store_credential_status,
         mcp_audit_credential_status,
     ])
     .with_provider_status(provider_credential_status);
@@ -1546,16 +1081,19 @@ fn bootstrap_with_secret_store(
         life_model_learning_store: life_model_learning_store
             .map(|store| Arc::new(Mutex::new(store))),
         main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
-        patch_store: patch_store.map(|store| Arc::new(Mutex::new(store))),
         tool_permission_store: Arc::new(Mutex::new(tool_permission_store)),
         skill_registry: Arc::new(Mutex::new(skill_registry)),
         startup_warnings: startup_warnings.into_inner(),
         credential_bootstrap_snapshot,
-        scheduled_task_store: Arc::new(scheduled_task_store),
         #[cfg(test)]
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+        #[cfg(test)]
+        work_initial_decision_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+        #[cfg(test)]
+        work_agent_step_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        #[cfg(test)]
+        work_semantic_verification_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         resource_runtime,
-        state_store,
     });
 
     BootstrapResult { state: app_state }

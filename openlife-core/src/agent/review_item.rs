@@ -11,38 +11,20 @@ use std::collections::BTreeMap;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ReviewItemType {
-    GoalUpdate,
-    StateUpdate,
-    PreferenceUpdate,
-    CapabilityUpdate,
     MemoryWrite,
     MemoryArchive,
     ToolPermission,
-    ScheduledTask,
     ExternalWriteAction,
-    ModelPolicyChange,
-    DataExport,
-    ScheduleCheckin,
     LifeModelUpdate,
-    Unsupported,
 }
 
 impl From<ProposalType> for ReviewItemType {
     fn from(value: ProposalType) -> Self {
         match value {
-            ProposalType::GoalUpdate => Self::GoalUpdate,
-            ProposalType::StateUpdate => Self::StateUpdate,
-            ProposalType::PreferenceUpdate => Self::PreferenceUpdate,
-            ProposalType::CapabilityUpdate => Self::CapabilityUpdate,
             ProposalType::MemoryWrite => Self::MemoryWrite,
             ProposalType::MemoryArchive => Self::MemoryArchive,
             ProposalType::ToolPermission => Self::ToolPermission,
-            ProposalType::ScheduledTask => Self::ScheduledTask,
             ProposalType::ExternalWriteAction => Self::ExternalWriteAction,
-            ProposalType::ModelPolicyChange => Self::ModelPolicyChange,
-            ProposalType::DataExport => Self::DataExport,
-            ProposalType::ScheduleCheckin => Self::ScheduleCheckin,
-            ProposalType::Unsupported => Self::Unsupported,
             ProposalType::LifeModelUpdate => Self::LifeModelUpdate,
         }
     }
@@ -281,18 +263,9 @@ fn build_review_batches(proposals: &[AgentProposal], items: &[ReviewItem]) -> Ve
 fn review_batch_domain(proposal_type: ProposalType) -> ReviewBatchDomain {
     match proposal_type {
         ProposalType::MemoryWrite | ProposalType::MemoryArchive => ReviewBatchDomain::Memory,
-        ProposalType::GoalUpdate
-        | ProposalType::StateUpdate
-        | ProposalType::PreferenceUpdate
-        | ProposalType::CapabilityUpdate
-        | ProposalType::ModelPolicyChange
-        | ProposalType::LifeModelUpdate => ReviewBatchDomain::LifeModel,
+        ProposalType::LifeModelUpdate => ReviewBatchDomain::LifeModel,
         ProposalType::ToolPermission => ReviewBatchDomain::ToolPermission,
-        ProposalType::ScheduledTask
-        | ProposalType::ExternalWriteAction
-        | ProposalType::DataExport
-        | ProposalType::ScheduleCheckin => ReviewBatchDomain::ExternalAction,
-        ProposalType::Unsupported => ReviewBatchDomain::Other,
+        ProposalType::ExternalWriteAction => ReviewBatchDomain::ExternalAction,
     }
 }
 
@@ -355,13 +328,19 @@ fn allowed_actions_for(
 ) -> Vec<ReviewAction> {
     let mut actions = Vec::new();
     let approve_blocker = approve_blocker(proposal, decision_context, input);
-    let approve = action(item_id, "approve", "Approve", ReviewActionKind::Approve);
-    actions.push(
+    let approve = action(item_id, "approve", "Approve", ReviewActionKind::Approve)
+        .with_expected_materialization_status(ReviewItemMaterializationStatus::Unknown);
+    // A canonical Artifact card already presents the exact path, preview,
+    // digest-bound scope and decision button. Clicking Approve is the one
+    // requested just-in-time confirmation; do not add a second modal.
+    let approve = if proposal.proposal_type == ProposalType::ExternalWriteAction
+        && external_write_target_precondition_is_complete(proposal)
+    {
         approve
-            .with_expected_materialization_status(ReviewItemMaterializationStatus::Unknown)
-            .requiring_confirmation()
-            .maybe_disabled(approve_blocker),
-    );
+    } else {
+        approve.requiring_confirmation()
+    };
+    actions.push(approve.maybe_disabled(approve_blocker));
     actions.push(
         action(item_id, "reject", "Reject", ReviewActionKind::Reject)
             .maybe_disabled(review_decision_blocker(status)),
@@ -465,9 +444,6 @@ fn edit_blocker(
     if let Some(blocker) = review_decision_blocker(status) {
         return Some(blocker);
     }
-    if is_unsupported_type(proposal.proposal_type) {
-        return Some("This review item type has no backend edit/apply pathway yet.".into());
-    }
     if is_lifemodel_v2_governed_change(proposal) {
         if crate::agent::review_decision_context::is_lifemodel_learning_review(proposal) {
             return None;
@@ -501,11 +477,7 @@ fn edit_blocker(
 
 fn is_lifemodel_v2_governed_change(proposal: &AgentProposal) -> bool {
     proposal.proposal_type == ProposalType::LifeModelUpdate
-        && matches!(
-            proposal.affected_path.as_str(),
-            crate::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
-                | crate::life_model::v2::LIFE_MODEL_V2_LEGACY_MIGRATION_PATH
-        )
+        && proposal.affected_path == crate::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
 }
 
 fn is_retired_lifemodel_patch_batch(proposal: &AgentProposal) -> bool {
@@ -530,9 +502,6 @@ fn approve_blocker(
     if let Some(blocker) = review_decision_blocker(ReviewItemDecisionStatus::from(proposal.status))
     {
         return Some(blocker);
-    }
-    if is_unsupported_type(proposal.proposal_type) {
-        return Some("This review item type has no backend apply pathway yet.".into());
     }
     if is_retired_lifemodel_patch_batch(proposal) {
         return Some(
@@ -573,13 +542,6 @@ fn is_reviewable_status(status: ReviewItemDecisionStatus) -> bool {
         ReviewItemDecisionStatus::Pending
             | ReviewItemDecisionStatus::Edited
             | ReviewItemDecisionStatus::Deferred
-    )
-}
-
-fn is_unsupported_type(proposal_type: ProposalType) -> bool {
-    matches!(
-        proposal_type,
-        ProposalType::ModelPolicyChange | ProposalType::ScheduleCheckin | ProposalType::Unsupported
     )
 }
 
@@ -631,6 +593,12 @@ fn external_write_target_precondition_is_complete(proposal: &AgentProposal) -> b
         .unwrap_or("propose_write");
     if matches!(operation, "move" | "trash" | "restore") {
         return true;
+    }
+    if proposal.after.get("undoOfArtifactId").is_none() {
+        return serde_json::from_value::<crate::task_runtime::CanonicalArtifactReviewSubject>(
+            proposal.after.clone(),
+        )
+        .is_ok_and(|subject| subject.validate().is_ok());
     }
     let Some(expected_absent) = proposal
         .after
@@ -744,11 +712,7 @@ fn target_kind_for(proposal_type: ProposalType) -> BackendEntityKind {
     match proposal_type {
         ProposalType::MemoryWrite | ProposalType::MemoryArchive => BackendEntityKind::Memory,
         ProposalType::ToolPermission => BackendEntityKind::ToolPermission,
-        ProposalType::ExternalWriteAction | ProposalType::DataExport => {
-            BackendEntityKind::ExternalResource
-        }
-        ProposalType::ScheduledTask | ProposalType::ScheduleCheckin => BackendEntityKind::Schedule,
-        ProposalType::ModelPolicyChange => BackendEntityKind::Policy,
+        ProposalType::ExternalWriteAction => BackendEntityKind::ExternalResource,
         _ => BackendEntityKind::LifeModel,
     }
 }
@@ -758,9 +722,6 @@ fn target_label_for(proposal_type: ProposalType) -> &'static str {
         ProposalType::MemoryWrite | ProposalType::MemoryArchive => "Memory",
         ProposalType::ToolPermission => "Tool permission",
         ProposalType::ExternalWriteAction => "External write",
-        ProposalType::DataExport => "Data export",
-        ProposalType::ScheduledTask | ProposalType::ScheduleCheckin => "Schedule",
-        ProposalType::ModelPolicyChange => "Model policy",
         _ => "LifeModel",
     }
 }
@@ -893,11 +854,19 @@ mod tests {
         let mut bound = proposal(ProposalType::ExternalWriteAction);
         bound.id = "proposal:external-write:bound".into();
         bound.after = json!({
-            "operation": "propose_write",
+            "reviewSubjectSchema": crate::task_runtime::CANONICAL_ARTIFACT_REVIEW_SUBJECT_SCHEMA,
+            "generatedByProvider": true,
+            "canonicalTaskId": "task:bound",
+            "sourceRunId": "run:bound",
+            "artifactDraftItemId": "item:draft:bound",
+            "artifactId": "artifact:bound",
+            "artifactVersion": 1,
             "path": "/memory/MEMORY.md",
-            "content": "bounded memory",
-            "expected_target_absent": true,
-            "expected_target_digest": null
+            "operation": "create",
+            "artifactKind": "markdown",
+            "contentDigest": "sha256:bounded",
+            "expectedTargetAbsent": true,
+            "expectedTargetDigest": null
         });
         let mut unrelated = bound.clone();
         unrelated.id = "proposal:external-write:unrelated".into();
@@ -912,6 +881,7 @@ mod tests {
         });
 
         assert!(find_action(&model.items[0], ReviewActionKind::Approve).enabled);
+        assert!(!find_action(&model.items[0], ReviewActionKind::Approve).requires_confirmation);
         let unrelated_approve = find_action(&model.items[1], ReviewActionKind::Approve);
         assert!(!unrelated_approve.enabled);
         assert!(unrelated_approve
@@ -1084,7 +1054,7 @@ mod tests {
 
     #[test]
     fn accepted_proposal_without_materialization_evidence_is_unknown_not_applied() {
-        let mut proposal = proposal(ProposalType::GoalUpdate);
+        let mut proposal = proposal(ProposalType::LifeModelUpdate);
         proposal.status = ProposalStatus::Accepted;
 
         let model = build_review_center_view_model(ReviewCenterBuildInput {

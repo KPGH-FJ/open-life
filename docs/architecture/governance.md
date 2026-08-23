@@ -28,10 +28,9 @@ document rule set.
 - `openlife-core/src/mcp.rs`
 - `openlife-core/src/mcp_audit.rs`
 - `openlife-core/src/agent/tool_gateway.rs`
-- `openlife-core/src/agent/model_router.rs`
 - `openlife-core/src/agent/review_workflow.rs`
-- `src-tauri/src/main_chat_kernel.rs`
 - `src-tauri/src/canonical_work_runtime.rs`
+- `src-tauri/src/provider_runtime.rs`
 - `src-tauri/src/provider_network_consent.rs`
 - `src-tauri/src/read_models/tasks.rs`
 - `src-tauri/src/commands/mcp.rs`
@@ -105,10 +104,10 @@ does not by itself mean a canonical Work scenario has live provider credit.
 
 ## Proposal Governance
 
-Main Chat proposal orchestration lives in `src-tauri/src/main_chat_kernel.rs`;
-tool-governance proposals enter the typed ReviewWorkflow gateway owned by
-ActionExecutor. Provider network-consent staging uses the same canonical Work
-execution epoch and never grants completion credit by itself.
+Canonical Work submits typed durable-write subjects through ReviewWorkflow.
+Provider network-consent staging uses the same canonical Work execution epoch
+and never grants completion credit by itself. Tool execution cannot create a
+second proposal or lifecycle owner behind the canonical Work runtime.
 
 `src-tauri/src/commands/proposal.rs` validates proposal payloads before
 application. Accepting ToolPermission proposals records a permission policy.

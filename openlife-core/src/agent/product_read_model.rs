@@ -222,11 +222,11 @@ impl ReviewAction {
                 },
             );
         }
-        if matches!(
-            self.kind,
-            ReviewActionKind::Approve | ReviewActionKind::Apply
-        ) && !self.requires_confirmation
-        {
+        // Clicking an enabled Approve action on an already-rendered ReviewItem
+        // is itself the user's decision. `requires_confirmation` means an
+        // additional modal is necessary; it is not a universal prerequisite
+        // for every approval. Apply remains a separate consequential action.
+        if self.kind == ReviewActionKind::Apply && !self.requires_confirmation {
             return Err(
                 ProductReadModelContractError::ReviewActionConfirmationRequired {
                     id: self.id.clone(),

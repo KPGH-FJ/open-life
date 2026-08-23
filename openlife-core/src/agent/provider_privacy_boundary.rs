@@ -318,7 +318,10 @@ mod tests {
 
     #[test]
     fn provider_privacy_uses_the_enforced_typed_network_decision() {
-        let policy = crate::config::NetworkPolicy::default();
+        let policy = crate::config::NetworkPolicy {
+            default_decision: "ask".into(),
+            ..crate::config::NetworkPolicy::default()
+        };
         let decision = crate::network_client::resolve_network_policy_decision(
             &policy,
             "https://api.openai.com/v1/models",
