@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const SCHEMA_VERSION: i64 = 2;
+const SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -30,6 +30,42 @@ pub struct ProjectRecord {
 pub enum ConversationStatus {
     Active,
     Archived,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ConversationMemoryMode {
+    #[default]
+    UseAndLearn,
+    UseOnly,
+    Off,
+}
+
+impl ConversationMemoryMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::UseAndLearn => "use_and_learn",
+            Self::UseOnly => "use_only",
+            Self::Off => "off",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self> {
+        match value {
+            "use_and_learn" => Ok(Self::UseAndLearn),
+            "use_only" => Ok(Self::UseOnly),
+            "off" => Ok(Self::Off),
+            _ => anyhow::bail!("conversation_memory_mode_invalid:{value}"),
+        }
+    }
+
+    pub fn uses_memory(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+
+    pub fn learns_memory(self) -> bool {
+        matches!(self, Self::UseAndLearn)
+    }
 }
 
 impl ConversationStatus {
@@ -103,6 +139,7 @@ pub struct ConversationRecord {
     pub title: String,
     pub project_id: Option<String>,
     pub selected_skill_id: Option<String>,
+    pub memory_mode: ConversationMemoryMode,
     pub status: ConversationStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -302,6 +339,9 @@ impl ConversationStore {
                 title TEXT NOT NULL,
                 project_id TEXT,
                 selected_skill_id TEXT,
+                memory_mode TEXT NOT NULL DEFAULT 'use_and_learn' CHECK(memory_mode IN (
+                    'use_and_learn','use_only','off'
+                )),
                 status TEXT NOT NULL CHECK(status IN ('active','archived')),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -351,10 +391,13 @@ impl ConversationStore {
              CREATE INDEX IF NOT EXISTS idx_conversation_items_turn
                 ON conversation_items(turn_id, sequence);
              INSERT INTO conversation_store_metadata(key,value)
-             VALUES('schema_version','2') ON CONFLICT(key) DO NOTHING;",
+             VALUES('schema_version','3') ON CONFLICT(key) DO NOTHING;",
         )?;
         if Self::schema_version(&conn)? == 1 {
             Self::migrate_v1_to_v2(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 2 {
+            Self::migrate_v2_to_v3(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -435,6 +478,26 @@ impl ConversationStore {
         if violation.is_some() {
             anyhow::bail!("conversation_store_v1_migration_foreign_key_violation");
         }
+        Ok(())
+    }
+
+    fn migrate_v2_to_v3(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "ALTER TABLE conversations ADD COLUMN memory_mode TEXT NOT NULL
+                DEFAULT 'use_and_learn' CHECK(memory_mode IN (
+                    'use_and_learn','use_only','off'
+                ));",
+        )?;
+        let changed = tx.execute(
+            "UPDATE conversation_store_metadata SET value='3'
+             WHERE key='schema_version' AND value='2'",
+            [],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("conversation_store_v2_migration_version_conflict");
+        }
+        tx.commit()?;
         Ok(())
     }
 
@@ -576,7 +639,7 @@ impl ConversationStore {
         let limit = limit.clamp(1, 500) as i64;
         let conn = self.lock_conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id,title,project_id,selected_skill_id,status,created_at,updated_at
+            "SELECT id,title,project_id,selected_skill_id,memory_mode,status,created_at,updated_at
              FROM conversations WHERE (?1=1 OR status='active')
              ORDER BY updated_at DESC,id DESC LIMIT ?2",
         )?;
@@ -590,7 +653,7 @@ impl ConversationStore {
     pub fn get_conversation(&self, id: &str) -> Result<Option<ConversationRecord>> {
         let conn = self.lock_conn()?;
         conn.query_row(
-            "SELECT id,title,project_id,selected_skill_id,status,created_at,updated_at
+            "SELECT id,title,project_id,selected_skill_id,memory_mode,status,created_at,updated_at
              FROM conversations WHERE id=?1",
             [id],
             conversation_from_row,
@@ -616,6 +679,16 @@ impl ConversationStore {
             "UPDATE conversations SET selected_skill_id=?2,updated_at=?3
              WHERE id=?1 AND status='active'",
             params![id, skill_id, Utc::now().to_rfc3339()],
+        )?;
+        require_one(changed, "conversation_not_found")
+    }
+
+    pub fn set_memory_mode(&self, id: &str, mode: ConversationMemoryMode) -> Result<()> {
+        validate_uuid("conversation_id", id)?;
+        let changed = self.lock_conn()?.execute(
+            "UPDATE conversations SET memory_mode=?2,updated_at=?3
+             WHERE id=?1 AND status='active'",
+            params![id, mode.as_str(), Utc::now().to_rfc3339()],
         )?;
         require_one(changed, "conversation_not_found")
     }
@@ -1150,15 +1223,17 @@ fn parse_time(value: String) -> rusqlite::Result<DateTime<Utc>> {
 }
 
 fn conversation_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationRecord> {
-    let status: String = row.get(4)?;
+    let memory_mode: String = row.get(4)?;
+    let status: String = row.get(5)?;
     Ok(ConversationRecord {
         id: row.get(0)?,
         title: row.get(1)?,
         project_id: row.get(2)?,
         selected_skill_id: row.get(3)?,
+        memory_mode: ConversationMemoryMode::from_db(&memory_mode).map_err(to_sql_error)?,
         status: ConversationStatus::from_db(&status).map_err(to_sql_error)?,
-        created_at: parse_time(row.get(5)?)?,
-        updated_at: parse_time(row.get(6)?)?,
+        created_at: parse_time(row.get(6)?)?,
+        updated_at: parse_time(row.get(7)?)?,
     })
 }
 
@@ -1351,6 +1426,14 @@ mod tests {
                 .project_id,
             None
         );
+        assert_eq!(
+            store
+                .get_conversation(&conversation_id)
+                .unwrap()
+                .unwrap()
+                .memory_mode,
+            ConversationMemoryMode::UseAndLearn
+        );
         assert_eq!(store.get_turn(&turn_id).unwrap().unwrap().items.len(), 1);
         store
             .append_work_steering(&id(), &conversation_id, &turn_id, "first adjustment")
@@ -1396,6 +1479,39 @@ mod tests {
         assert_eq!(
             completed.items[1].kind,
             ConversationItemKind::AssistantMessage
+        );
+    }
+
+    #[test]
+    fn conversation_memory_mode_is_canonical_and_defaults_to_use_and_learn() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let conversation_id = id();
+        let created = store
+            .create_conversation(&conversation_id, "Memory controls")
+            .unwrap();
+        assert_eq!(created.memory_mode, ConversationMemoryMode::UseAndLearn);
+
+        store
+            .set_memory_mode(&conversation_id, ConversationMemoryMode::UseOnly)
+            .unwrap();
+        assert_eq!(
+            store
+                .get_conversation(&conversation_id)
+                .unwrap()
+                .unwrap()
+                .memory_mode,
+            ConversationMemoryMode::UseOnly
+        );
+        store
+            .set_memory_mode(&conversation_id, ConversationMemoryMode::Off)
+            .unwrap();
+        assert_eq!(
+            store
+                .get_conversation(&conversation_id)
+                .unwrap()
+                .unwrap()
+                .memory_mode,
+            ConversationMemoryMode::Off
         );
     }
 

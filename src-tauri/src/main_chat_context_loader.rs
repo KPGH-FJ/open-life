@@ -1,339 +1,34 @@
-use openlife_core::agent::main_chat_agent_v1::{ContextSourceCandidate, ContextSourceKind};
 use openlife_core::agent::{memory_scope_owner_ref, MemoryLifecycleRecord, MemoryLifecycleScope};
+use openlife_core::agent::{ContextSourceCandidate, ContextSourceKind};
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::AppState;
 
-const MAX_CONTEXT_CHARS_PER_FILE: usize = 1200;
-const CONFIGURED_KNOWLEDGE_ROOT_ENV: &str = "OPENLIFE_KNOWLEDGE_ROOT";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MainChatContextTaskMode {
-    OpenEnded,
-    EvidenceBoundSources,
-    EvidenceBoundMarkdown,
-    EvidenceBoundDocuments,
-    EvidenceBoundAgentMemory,
-    ExactAgentMemoryRead,
-}
-
-impl MainChatContextTaskMode {
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::OpenEnded => "open_ended",
-            Self::EvidenceBoundSources => "evidence_bound_sources",
-            Self::EvidenceBoundMarkdown => "evidence_bound_markdown",
-            Self::EvidenceBoundDocuments => "evidence_bound_documents",
-            Self::EvidenceBoundAgentMemory => "evidence_bound_agent_memory",
-            Self::ExactAgentMemoryRead => "exact_agent_memory_read",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MainChatInlineFact {
-    pub(crate) handle: String,
-    pub(crate) content: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct MainChatContextRequest {
-    pub(crate) task_mode: MainChatContextTaskMode,
-    pub(crate) memory_scopes: Vec<MemoryLifecycleScope>,
-    pub(crate) inline_facts: Vec<MainChatInlineFact>,
-}
-
-impl MainChatContextRequest {
-    pub(crate) fn from_user_text(user_text: &str) -> Self {
-        let lower = user_text.to_lowercase();
-        let positive_source_text = without_negated_source_clauses(&lower);
-        let explicitly_exclusive = [
-            "只允许使用",
-            "只使用",
-            "仅使用",
-            "只根据",
-            "仅根据",
-            "只基于",
-            "仅基于",
-            "only use",
-            "use only",
-            "only rely on",
-            "exclusively use",
-            "based only on",
-            "only based on",
-        ]
-        .iter()
-        .any(|marker| positive_source_text.contains(marker));
-        if !explicitly_exclusive {
-            return Self::open_ended();
-        }
-
-        let explicitly_agent_memory = ["agent memory", "agent-memory", "智能体记忆", "代理记忆"]
-            .iter()
-            .any(|marker| positive_source_text.contains(marker));
-        if !explicitly_agent_memory {
-            let inline_facts = extract_explicit_inline_facts(user_text);
-            let explicitly_names_a_source = [
-                "以下信息",
-                "给定信息",
-                "以下事实",
-                "给定事实",
-                "以下资料",
-                "这些资料",
-                "选中的资料",
-                "文档",
-                "markdown",
-                "these facts",
-                "following facts",
-                "provided information",
-                "selected sources",
-                "selected documents",
-            ]
-            .iter()
-            .any(|marker| positive_source_text.contains(marker));
-            return if !inline_facts.is_empty() {
-                Self {
-                    task_mode: MainChatContextTaskMode::EvidenceBoundSources,
-                    memory_scopes: Vec::new(),
-                    inline_facts,
-                }
-            } else if positive_source_text.contains("markdown") {
-                Self {
-                    task_mode: MainChatContextTaskMode::EvidenceBoundMarkdown,
-                    memory_scopes: Vec::new(),
-                    inline_facts: Vec::new(),
-                }
-            } else if explicitly_names_a_source {
-                Self {
-                    task_mode: MainChatContextTaskMode::EvidenceBoundDocuments,
-                    memory_scopes: Vec::new(),
-                    inline_facts: Vec::new(),
-                }
-            } else {
-                Self::open_ended()
-            };
-        }
-
-        let mut memory_scopes = Vec::new();
-        for (scope, markers) in [
-            (
-                MemoryLifecycleScope::Global,
-                &[
-                    "全局 agent memory",
-                    "全局作用域",
-                    "全局范围",
-                    "global agent memory",
-                    "global scope",
-                    "global-scoped",
-                ][..],
-            ),
-            (
-                MemoryLifecycleScope::Conversation,
-                &[
-                    "当前会话 agent memory",
-                    "当前会话作用域",
-                    "当前会话范围",
-                    "current conversation agent memory",
-                    "conversation scope",
-                    "conversation-scoped",
-                ][..],
-            ),
-            (
-                MemoryLifecycleScope::Workspace,
-                &[
-                    "当前工作区 agent memory",
-                    "当前工作区作用域",
-                    "当前工作区范围",
-                    "current workspace agent memory",
-                    "workspace scope",
-                    "workspace-scoped",
-                ][..],
-            ),
-            (
-                MemoryLifecycleScope::Project,
-                &[
-                    "当前项目 agent memory",
-                    "当前项目作用域",
-                    "当前项目范围",
-                    "current project agent memory",
-                    "project scope",
-                    "project-scoped",
-                ][..],
-            ),
-        ] {
-            if markers
-                .iter()
-                .any(|marker| positive_source_text.contains(marker))
-            {
-                memory_scopes.push(scope);
-            }
-        }
-
-        Self {
-            task_mode: if memory_scopes.is_empty() {
-                MainChatContextTaskMode::EvidenceBoundAgentMemory
-            } else {
-                MainChatContextTaskMode::ExactAgentMemoryRead
-            },
-            memory_scopes,
-            inline_facts: Vec::new(),
-        }
-    }
-
-    fn open_ended() -> Self {
-        Self {
-            task_mode: MainChatContextTaskMode::OpenEnded,
-            memory_scopes: Vec::new(),
-            inline_facts: Vec::new(),
-        }
-    }
-
-    pub(crate) fn is_agent_memory_bound(&self) -> bool {
-        matches!(
-            self.task_mode,
-            MainChatContextTaskMode::EvidenceBoundAgentMemory
-                | MainChatContextTaskMode::ExactAgentMemoryRead
-        )
-    }
-
-    pub(crate) fn is_source_bound(&self) -> bool {
-        self.task_mode != MainChatContextTaskMode::OpenEnded
-    }
-
-    pub(crate) fn is_inline_fact_bound(&self) -> bool {
-        self.task_mode == MainChatContextTaskMode::EvidenceBoundSources
-            && !self.inline_facts.is_empty()
-    }
-
-    pub(crate) fn is_markdown_bound(&self) -> bool {
-        self.task_mode == MainChatContextTaskMode::EvidenceBoundMarkdown
-    }
-
-    pub(crate) fn is_document_bound(&self) -> bool {
-        self.task_mode == MainChatContextTaskMode::EvidenceBoundDocuments
-    }
-}
-
-fn without_negated_source_clauses(value: &str) -> String {
-    value
-        .split(['。', '！', '？', '；', '.', '!', '?', ';'])
-        .filter(|clause| {
-            ![
-                "不要使用",
-                "不要读取",
-                "不要参考",
-                "不使用",
-                "不读取",
-                "不参考",
-                "排除",
-                "do not use",
-                "don't use",
-                "do not read",
-                "don't read",
-                "do not rely on",
-                "don't rely on",
-                "without using",
-                "without reading",
-                "exclude",
-            ]
-            .iter()
-            .any(|marker| clause.contains(marker))
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-const MAX_EXPLICIT_INLINE_FACTS: usize = 16;
-const MAX_EXPLICIT_INLINE_FACT_CHARS: usize = 1_000;
-const MAX_EXPLICIT_INLINE_FACT_TOTAL_CHARS: usize = 6_000;
-
-fn extract_explicit_inline_facts(user_text: &str) -> Vec<MainChatInlineFact> {
-    let lower = user_text.to_lowercase();
-    let source_start = [
-        "以下信息",
-        "给定信息",
-        "以下事实",
-        "给定事实",
-        "以下资料",
-        "these facts",
-        "following facts",
-        "provided information",
-    ]
-    .iter()
-    .filter_map(|marker| lower.find(marker).map(|index| index + marker.len()))
-    .min();
-    let Some(source_start) = source_start else {
-        return Vec::new();
-    };
-    let Some(after_marker) = user_text.get(source_start..) else {
-        return Vec::new();
-    };
-    let Some(separator) = after_marker.find(['：', ':']) else {
-        return Vec::new();
-    };
-    let separator_len = after_marker[separator..]
-        .chars()
-        .next()
-        .map(char::len_utf8)
-        .unwrap_or_default();
-    let mut fact_text = after_marker[separator + separator_len..].trim();
-    let fact_text_lower = fact_text.to_lowercase();
-    if let Some(control_start) = [
-        "不要使用工具",
-        "不要调用工具",
-        "不要执行任何",
-        "不要执行外部",
-        "do not use tools",
-        "do not call tools",
-        "do not execute",
-        "do not perform",
-    ]
-    .iter()
-    .filter_map(|marker| fact_text_lower.find(marker))
-    .min()
-    {
-        fact_text = fact_text[..control_start].trim();
-    }
-    fact_text = fact_text.trim_end_matches(['。', '.', '；', ';', ' ', '\n', '\r']);
-
-    let mut total_chars = 0usize;
-    let mut facts = Vec::new();
-    for part in fact_text.split(['；', ';', '\n']) {
-        let content = part
-            .trim()
-            .trim_start_matches(['-', '*', '•', ' '])
-            .trim()
-            .trim_end_matches(['。', '.'])
-            .trim();
-        let chars = content.chars().count();
-        if chars == 0 || chars > MAX_EXPLICIT_INLINE_FACT_CHARS {
-            continue;
-        }
-        total_chars = total_chars.saturating_add(chars);
-        if total_chars > MAX_EXPLICIT_INLINE_FACT_TOTAL_CHARS
-            || facts.len() >= MAX_EXPLICIT_INLINE_FACTS
-        {
-            return Vec::new();
-        }
-        facts.push(MainChatInlineFact {
-            handle: format!("F{}", facts.len() + 1),
-            content: content.to_string(),
-        });
-    }
-    facts
-}
-
-/// The only Main Chat adapter from canonical lifecycle Memory into prompt
-/// context. Both ordinary send/stream compilation and the command-surface
-/// kernel use this function, so neither can reinterpret a lagging vector or
-/// MemoryStore projection as current lifecycle truth.
+#[cfg(test)]
 pub(crate) async fn retrievable_lifecycle_context_candidates(
     state: &Arc<AppState>,
     conversation_owner_id: &str,
     query: &str,
     life_model_rerank_terms: &[String],
+) -> Result<Vec<ContextSourceCandidate>, String> {
+    retrievable_lifecycle_context_candidates_with_scope_filter(
+        state,
+        conversation_owner_id,
+        query,
+        life_model_rerank_terms,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn retrievable_lifecycle_context_candidates_with_scope_filter(
+    state: &Arc<AppState>,
+    conversation_owner_id: &str,
+    query: &str,
+    life_model_rerank_terms: &[String],
+    exclusive_scopes: Option<&[MemoryLifecycleScope]>,
 ) -> Result<Vec<ContextSourceCandidate>, String> {
     let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() else {
         return Ok(vec![ContextSourceCandidate::new(
@@ -357,7 +52,6 @@ pub(crate) async fn retrievable_lifecycle_context_candidates(
             format!("memory_retrieval_degraded:lifecycle_records_query_failed:{error}")
         })?;
     let scope = runtime_memory_scope(state, conversation_owner_id, &records).await?;
-    let exclusive_scopes = explicit_exclusive_memory_scopes(query);
     let records = records
         .into_iter()
         .filter(|record| {
@@ -468,38 +162,10 @@ pub(crate) async fn retrievable_lifecycle_context_candidates(
     Ok(selected)
 }
 
-fn explicit_exclusive_memory_scopes(query: &str) -> Option<Vec<MemoryLifecycleScope>> {
-    let request = MainChatContextRequest::from_user_text(query);
-    (request.task_mode == MainChatContextTaskMode::ExactAgentMemoryRead)
-        .then_some(request.memory_scopes)
-}
-
+#[cfg(test)]
 pub(crate) fn is_lifecycle_memory_context_candidate(candidate: &ContextSourceCandidate) -> bool {
     candidate.source_kind == ContextSourceKind::SelectedPersonalContext
         && candidate.source_id.starts_with("memory:")
-}
-
-pub(crate) fn lifecycle_memory_candidate_matches_request(
-    candidate: &ContextSourceCandidate,
-    request: &MainChatContextRequest,
-) -> bool {
-    if !is_lifecycle_memory_context_candidate(candidate) {
-        return false;
-    }
-    let Some(scope) = candidate
-        .content
-        .lines()
-        .find_map(|line| line.strip_prefix("scope="))
-        .map(str::trim)
-        .filter(|scope| !scope.is_empty())
-    else {
-        return false;
-    };
-    request.memory_scopes.is_empty()
-        || request
-            .memory_scopes
-            .iter()
-            .any(|allowed| allowed.as_str() == scope)
 }
 
 fn life_model_memory_rerank_bonus(
@@ -574,12 +240,14 @@ impl RuntimeMemoryScope {
                         .as_ref()
                         .is_some_and(|owner| self.legacy_conversations.contains(owner))
             }
-            MemoryLifecycleScope::Workspace => {
-                record.scope_owner_ref.as_deref() == self.workspace.as_deref()
-            }
-            MemoryLifecycleScope::Project => {
-                record.scope_owner_ref.as_deref() == self.project.as_deref()
-            }
+            MemoryLifecycleScope::Workspace => self
+                .workspace
+                .as_deref()
+                .is_some_and(|owner| record.scope_owner_ref.as_deref() == Some(owner)),
+            MemoryLifecycleScope::Project => self
+                .project
+                .as_deref()
+                .is_some_and(|owner| record.scope_owner_ref.as_deref() == Some(owner)),
         }
     }
 }
@@ -589,19 +257,26 @@ async fn runtime_memory_scope(
     conversation_owner_id: &str,
     _records: &[MemoryLifecycleRecord],
 ) -> Result<RuntimeMemoryScope, String> {
-    let (workspace_root, project_root) = {
-        let config = state.config.lock().await;
-        (
-            config.system.workspace_memory_root.clone(),
-            config.system.project_memory_root.clone(),
-        )
-    };
-    let scoped_ref = |scope, identity: Option<String>| {
-        identity
-            .map(|identity| {
-                memory_scope_owner_ref(scope, &identity).map_err(|error| error.to_string())
-            })
-            .transpose()
+    let project = if let Some(store) = state.conversation_store.as_ref() {
+        let store = store.lock().await;
+        let conversation = store
+            .get_conversation(conversation_owner_id)
+            .map_err(|error| format!("memory_scope_conversation_query_failed:{error}"))?;
+        match conversation.and_then(|conversation| conversation.project_id) {
+            Some(project_id) => {
+                let project = store
+                    .get_project(&project_id)
+                    .map_err(|error| format!("memory_scope_project_query_failed:{error}"))?
+                    .ok_or_else(|| "memory_scope_project_missing".to_string())?;
+                Some(
+                    memory_scope_owner_ref(MemoryLifecycleScope::Project, &project.id)
+                        .map_err(|error| error.to_string())?,
+                )
+            }
+            None => None,
+        }
+    } else {
+        None
     };
     Ok(RuntimeMemoryScope {
         conversation: memory_scope_owner_ref(
@@ -613,8 +288,8 @@ async fn runtime_memory_scope(
         // Intelligence, but production recall never guesses a Conversation
         // owner without an exact canonical scope binding.
         legacy_conversations: HashSet::new(),
-        workspace: scoped_ref(MemoryLifecycleScope::Workspace, workspace_root)?,
-        project: scoped_ref(MemoryLifecycleScope::Project, project_root)?,
+        workspace: None,
+        project,
     })
 }
 
@@ -771,239 +446,6 @@ pub(crate) fn ensure_bundled_selected_skill_context_candidate(
     );
 }
 
-// Bounded instruction and user-context surfaces: AGENTS.md, SOUL.md, USER.md,
-// memories/USER.md, and skills/<selected>/SKILL.md. Markdown working memory has
-// its own explicitly selected Workspace/Project roots below; it must not be
-// rediscovered through the process working directory or every knowledge root.
-pub(crate) fn load_current_workspace_knowledge_context_candidates(
-    selected_skill_id: Option<&str>,
-    task_text: &str,
-) -> Vec<ContextSourceCandidate> {
-    let mut roots = Vec::new();
-    if let Ok(workspace) = crate::workspace_file_resolver::resolve_workspace_root() {
-        roots.push(KnowledgeContextRoot::new("workspace", workspace));
-    }
-    if let Some(configured) = configured_knowledge_root() {
-        roots.push(KnowledgeContextRoot::new("configured", configured));
-    }
-
-    load_knowledge_context_candidates_from_roots(&roots, selected_skill_id, task_text)
-}
-
-#[cfg(test)]
-pub(crate) fn load_workspace_knowledge_context_candidates(
-    root: &Path,
-    selected_skill_id: Option<&str>,
-    task_text: &str,
-) -> Vec<ContextSourceCandidate> {
-    let roots = vec![KnowledgeContextRoot::new("workspace", root)];
-    load_knowledge_context_candidates_from_roots(&roots, selected_skill_id, task_text)
-}
-
-fn configured_knowledge_root() -> Option<PathBuf> {
-    let configured = std::env::var(CONFIGURED_KNOWLEDGE_ROOT_ENV).ok()?;
-    let trimmed = configured.trim();
-    if trimmed.is_empty() {
-        return None;
-    }
-    let path = PathBuf::from(trimmed);
-    if path.is_dir() {
-        path.canonicalize().ok().or(Some(path))
-    } else {
-        None
-    }
-}
-
-#[derive(Debug, Clone)]
-struct KnowledgeContextRoot {
-    label: String,
-    path: PathBuf,
-}
-
-impl KnowledgeContextRoot {
-    fn new(label: impl Into<String>, path: impl Into<PathBuf>) -> Self {
-        Self {
-            label: label.into(),
-            path: path.into(),
-        }
-    }
-}
-
-fn load_knowledge_context_candidates_from_roots(
-    roots: &[KnowledgeContextRoot],
-    selected_skill_id: Option<&str>,
-    _task_text: &str,
-) -> Vec<ContextSourceCandidate> {
-    let selected_skill_id = selected_skill_id.and_then(validate_selected_skill_id);
-    let mut candidates = Vec::new();
-    let mut seen = HashSet::new();
-
-    for root in roots {
-        push_known_file(
-            &mut candidates,
-            &mut seen,
-            root,
-            ContextSourceKind::WorkspaceInstruction,
-            "AGENTS.md",
-            "workspace instruction scoped to current task",
-            "internal",
-            28,
-        );
-
-        if let Some(skill_id) = selected_skill_id.as_deref() {
-            let skill_relative = format!("skills/{skill_id}/SKILL.md");
-            push_selected_skill_file(&mut candidates, &mut seen, root, &skill_relative, skill_id);
-        }
-
-        push_known_file(
-            &mut candidates,
-            &mut seen,
-            root,
-            ContextSourceKind::MaterializedFile,
-            "SOUL.md",
-            "bounded materialized identity context; not canonical truth",
-            "private",
-            12,
-        );
-        push_known_file(
-            &mut candidates,
-            &mut seen,
-            root,
-            ContextSourceKind::SelectedPersonalContext,
-            "USER.md",
-            "bounded user context surface; not canonical truth",
-            "private",
-            8,
-        );
-        push_known_file(
-            &mut candidates,
-            &mut seen,
-            root,
-            ContextSourceKind::SelectedPersonalContext,
-            "memories/USER.md",
-            "bounded user context surface; not canonical truth",
-            "private",
-            8,
-        );
-    }
-
-    candidates
-}
-
-fn push_selected_skill_file(
-    candidates: &mut Vec<ContextSourceCandidate>,
-    seen: &mut HashSet<String>,
-    root: &KnowledgeContextRoot,
-    relative: &str,
-    selected_skill_id: &str,
-) {
-    if let Some(candidate) = read_context_file(
-        root,
-        ContextSourceKind::SkillInstruction,
-        relative,
-        "full selected skill instruction; loaded only for selected skill",
-        "internal",
-        18,
-    ) {
-        push_unique(candidates, seen, candidate.for_skill(selected_skill_id));
-    }
-}
-
-#[expect(
-    clippy::too_many_arguments,
-    reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
-)]
-fn push_known_file(
-    candidates: &mut Vec<ContextSourceCandidate>,
-    seen: &mut HashSet<String>,
-    root: &KnowledgeContextRoot,
-    kind: ContextSourceKind,
-    relative: &str,
-    reason: &str,
-    privacy_class: &str,
-    token_estimate: u32,
-) {
-    if let Some(candidate) =
-        read_context_file(root, kind, relative, reason, privacy_class, token_estimate)
-    {
-        push_unique(candidates, seen, candidate);
-    }
-}
-
-fn push_unique(
-    candidates: &mut Vec<ContextSourceCandidate>,
-    seen: &mut HashSet<String>,
-    candidate: ContextSourceCandidate,
-) {
-    if seen.insert(candidate.source_id.clone()) {
-        candidates.push(candidate);
-    }
-}
-
-fn read_context_file(
-    root: &KnowledgeContextRoot,
-    kind: ContextSourceKind,
-    relative: &str,
-    reason: &str,
-    privacy_class: &str,
-    token_estimate: u32,
-) -> Option<ContextSourceCandidate> {
-    let relative_path = validate_context_relative_path(relative)?;
-    let canonical_root = root.path.canonicalize().ok()?;
-    let path = canonical_root.join(relative_path);
-    let canonical = path.canonicalize().ok()?;
-    if !canonical.starts_with(&canonical_root) || !canonical.is_file() {
-        return None;
-    }
-    let content = std::fs::read_to_string(canonical).ok()?;
-    let bounded = content
-        .chars()
-        .take(MAX_CONTEXT_CHARS_PER_FILE)
-        .collect::<String>();
-    Some(ContextSourceCandidate::new(
-        kind,
-        source_id(root, relative),
-        bounded,
-        reason,
-        privacy_class,
-        token_estimate,
-    ))
-}
-
-fn validate_context_relative_path(relative: &str) -> Option<PathBuf> {
-    let path = Path::new(relative);
-    if path.is_absolute() {
-        return None;
-    }
-    let mut safe = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::Normal(part) => safe.push(part),
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir
-            | std::path::Component::RootDir
-            | std::path::Component::Prefix(_) => return None,
-        }
-    }
-    if safe.as_os_str().is_empty() {
-        None
-    } else {
-        Some(safe)
-    }
-}
-
-fn source_id(root: &KnowledgeContextRoot, relative: &str) -> String {
-    if root.label == "workspace" {
-        relative.replace('\\', "/")
-    } else {
-        format!("{}:{}", root.label, relative.replace('\\', "/"))
-    }
-}
-
-fn validate_selected_skill_id(selected_skill_id: &str) -> Option<String> {
-    sanitize_main_chat_selected_skill_id(Some(selected_skill_id))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1069,82 +511,6 @@ mod tests {
     }
 
     #[test]
-    fn generic_knowledge_roots_do_not_gain_markdown_memory_authority() {
-        let dir = tempfile::tempdir().expect("temp knowledge root");
-        std::fs::create_dir_all(dir.path().join("memories")).expect("memories dir");
-        std::fs::create_dir_all(dir.path().join("skills/summarize")).expect("selected skill dir");
-        std::fs::create_dir_all(dir.path().join("skills/other")).expect("other skill dir");
-        std::fs::write(dir.path().join("AGENTS.md"), "workspace instructions").expect("agents");
-        std::fs::write(dir.path().join("SOUL.md"), "soul context").expect("soul");
-        std::fs::write(dir.path().join("USER.md"), "user context").expect("user");
-        std::fs::write(dir.path().join("MEMORY.md"), "memory context").expect("memory");
-        std::fs::write(dir.path().join("memories/USER.md"), "memories user")
-            .expect("memories user");
-        std::fs::write(dir.path().join("memories/MEMORY.md"), "memories memory")
-            .expect("memories memory");
-        std::fs::write(
-            dir.path().join("skills/summarize/SKILL.md"),
-            "selected skill instruction",
-        )
-        .expect("selected skill");
-        std::fs::write(
-            dir.path().join("skills/other/SKILL.md"),
-            "unselected skill instruction",
-        )
-        .expect("other skill");
-
-        let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
-        let candidates = load_knowledge_context_candidates_from_roots(
-            &roots,
-            Some("summarize"),
-            "use this memory context",
-        );
-        let source_ids = candidates
-            .iter()
-            .map(|candidate| candidate.source_id.as_str())
-            .collect::<Vec<_>>();
-
-        for expected in [
-            "AGENTS.md",
-            "SOUL.md",
-            "USER.md",
-            "memories/USER.md",
-            "skills/summarize/SKILL.md",
-        ] {
-            assert!(
-                source_ids.contains(&expected),
-                "missing bounded knowledge source {expected}"
-            );
-        }
-        assert!(!source_ids.contains(&"MEMORY.md"));
-        assert!(!source_ids.contains(&"memories/MEMORY.md"));
-        assert!(!source_ids.contains(&"skills/other/SKILL.md"));
-        assert!(candidates.iter().any(|candidate| {
-            candidate.source_kind == ContextSourceKind::SkillInstruction
-                && candidate.selected_skill_id.as_deref() == Some("summarize")
-        }));
-    }
-
-    #[test]
-    fn rejects_selected_skill_path_traversal() {
-        let dir = tempfile::tempdir().expect("temp knowledge root");
-        std::fs::create_dir_all(dir.path().join("skills/summarize")).expect("skill dir");
-        std::fs::write(
-            dir.path().join("skills/summarize/SKILL.md"),
-            "selected skill instruction",
-        )
-        .expect("selected skill");
-
-        let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
-        let candidates =
-            load_knowledge_context_candidates_from_roots(&roots, Some("../summarize"), "task");
-
-        assert!(!candidates
-            .iter()
-            .any(|candidate| candidate.source_kind == ContextSourceKind::SkillInstruction));
-    }
-
-    #[test]
     fn packaged_evidence_review_does_not_require_a_workspace_file() {
         let mut candidates = Vec::new();
         ensure_bundled_selected_skill_context_candidate(&mut candidates, Some("evidence_review"));
@@ -1181,25 +547,6 @@ mod tests {
             candidates[0].content,
             "workspace-owned selected instruction"
         );
-    }
-
-    #[test]
-    fn bounds_loaded_file_content() {
-        let dir = tempfile::tempdir().expect("temp knowledge root");
-        std::fs::write(
-            dir.path().join("AGENTS.md"),
-            "a".repeat(MAX_CONTEXT_CHARS_PER_FILE + 50),
-        )
-        .expect("agents");
-
-        let roots = vec![KnowledgeContextRoot::new("workspace", dir.path())];
-        let candidates = load_knowledge_context_candidates_from_roots(&roots, None, "task");
-        let agents = candidates
-            .iter()
-            .find(|candidate| candidate.source_id == "AGENTS.md")
-            .expect("agents candidate");
-
-        assert_eq!(agents.content.chars().count(), MAX_CONTEXT_CHARS_PER_FILE);
     }
 
     #[tokio::test]
@@ -1306,27 +653,35 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn project_scope_recall_is_bound_to_the_selected_project_owner() {
+    async fn project_scope_recall_requires_a_canonical_project_binding() {
         const ALLOWED: &str = "PROJECT_SCOPE_ALLOWED_RELEASE_CHECKLIST";
         const BLOCKED: &str = "PROJECT_SCOPE_BLOCKED_RELEASE_CHECKLIST";
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let project_a = tempfile::tempdir().expect("project a");
-        let project_b = tempfile::tempdir().expect("project b");
-        let project_a_path = project_a.path().canonicalize().unwrap();
-        let project_b_path = project_b.path().canonicalize().unwrap();
-        let owner_a = memory_scope_owner_ref(
-            MemoryLifecycleScope::Project,
-            project_a_path.to_str().unwrap(),
-        )
-        .unwrap();
-        let owner_b = memory_scope_owner_ref(
-            MemoryLifecycleScope::Project,
-            project_b_path.to_str().unwrap(),
-        )
-        .unwrap();
-        state.config.lock().await.system.project_memory_root =
-            Some(project_a_path.to_string_lossy().into_owned());
-
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let project_a_id = uuid::Uuid::new_v4().to_string();
+        let project_b_id = uuid::Uuid::new_v4().to_string();
+        {
+            let store = state
+                .conversation_store
+                .as_ref()
+                .expect("conversation store")
+                .lock()
+                .await;
+            store
+                .create_conversation(&conversation_id, "Project Memory isolation")
+                .expect("create conversation");
+            store
+                .create_project(&project_a_id, "Project A", None)
+                .expect("create project A");
+            store
+                .create_project(&project_b_id, "Project B", None)
+                .expect("create project B");
+            store
+                .assign_conversation_project(&conversation_id, Some(&project_a_id))
+                .expect("bind project A");
+        }
+        let owner_a = memory_scope_owner_ref(MemoryLifecycleScope::Project, &project_a_id).unwrap();
+        let owner_b = memory_scope_owner_ref(MemoryLifecycleScope::Project, &project_b_id).unwrap();
         let allowed = accept_and_project_memory(
             &state,
             &lifecycle_memory_proposal(ALLOWED, "project", Some(&owner_a), Vec::new()),
@@ -1340,7 +695,7 @@ mod tests {
 
         let candidates = retrievable_lifecycle_context_candidates(
             &state,
-            "conversation-a",
+            &conversation_id,
             "PROJECT SCOPE RELEASE CHECKLIST",
             &[],
         )
@@ -1355,241 +710,61 @@ mod tests {
         assert!(!candidates
             .iter()
             .any(|candidate| candidate.content.contains(BLOCKED)));
+
+        state
+            .conversation_store
+            .as_ref()
+            .expect("conversation store")
+            .lock()
+            .await
+            .assign_conversation_project(&conversation_id, Some(&project_b_id))
+            .expect("bind project B");
+        let project_b_candidates = retrievable_lifecycle_context_candidates(
+            &state,
+            &conversation_id,
+            "PROJECT SCOPE RELEASE CHECKLIST",
+            &[],
+        )
+        .await
+        .expect("project B lifecycle retrieval");
+        assert!(!project_b_candidates
+            .iter()
+            .any(|candidate| candidate.source_id == allowed.memory_id));
+        assert!(project_b_candidates
+            .iter()
+            .any(|candidate| candidate.source_id == blocked.memory_id));
+
+        state
+            .conversation_store
+            .as_ref()
+            .expect("conversation store")
+            .lock()
+            .await
+            .assign_conversation_project(&conversation_id, None)
+            .expect("remove project binding");
+        let unbound_candidates = retrievable_lifecycle_context_candidates(
+            &state,
+            &conversation_id,
+            "PROJECT SCOPE RELEASE CHECKLIST",
+            &[],
+        )
+        .await
+        .expect("unbound lifecycle retrieval");
+        assert!(!unbound_candidates
+            .iter()
+            .any(|candidate| candidate.source_id == allowed.memory_id));
+        assert!(!unbound_candidates
+            .iter()
+            .any(|candidate| candidate.source_id == blocked.memory_id));
         let projected = state
             .memory_store
             .lock()
             .await
             .export_active_memory_records()
-            .expect("projected Memory rows");
-        let allowed_accesses = projected
+            .expect("non-lifecycle Memory rows");
+        assert!(!projected
             .iter()
-            .find(|memory| memory.content == ALLOWED)
-            .expect("allowed projection")
-            .access_count;
-        let blocked_accesses = projected
-            .iter()
-            .find(|memory| memory.content == BLOCKED)
-            .expect("blocked projection")
-            .access_count;
-        assert!(allowed_accesses > 0);
-        assert_eq!(blocked_accesses, 0);
-        let vectors = state
-            .vector_store
-            .lock()
-            .await
-            .export_all_chunks()
-            .expect("projected vectors");
-        assert_eq!(
-            vectors
-                .iter()
-                .find(|chunk| chunk.content == BLOCKED)
-                .expect("blocked vector projection")
-                .access_count,
-            0
-        );
-    }
-
-    #[tokio::test]
-    async fn explicit_conversation_only_recall_excludes_broader_applicable_scopes() {
-        const GLOBAL: &str = "5.6C GLOBAL SCOPE MUST NOT ENTER CONVERSATION ONLY RECALL";
-        const PROJECT: &str = "5.6C PROJECT SCOPE MUST NOT ENTER CONVERSATION ONLY RECALL";
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let project = tempfile::tempdir().expect("selected project");
-        let project_path = project.path().canonicalize().unwrap();
-        let project_owner = memory_scope_owner_ref(
-            MemoryLifecycleScope::Project,
-            project_path.to_str().unwrap(),
-        )
-        .unwrap();
-        state.config.lock().await.system.project_memory_root =
-            Some(project_path.to_string_lossy().into_owned());
-
-        let global = accept_and_project_memory(
-            &state,
-            &lifecycle_memory_proposal(GLOBAL, "global", None, Vec::new()),
-        )
-        .await;
-        let project = accept_and_project_memory(
-            &state,
-            &lifecycle_memory_proposal(PROJECT, "project", Some(&project_owner), Vec::new()),
-        )
-        .await;
-
-        let candidates = retrievable_lifecycle_context_candidates(
-            &state,
-            "new-conversation-without-memory",
-            "只允许使用当前会话 Agent Memory；5.6C 标记是什么？",
-            &[],
-        )
-        .await
-        .expect("exclusive conversation lifecycle retrieval");
-
-        assert!(!candidates
-            .iter()
-            .any(|candidate| candidate.source_id == global.memory_id));
-        assert!(!candidates
-            .iter()
-            .any(|candidate| candidate.source_id == project.memory_id));
-        assert!(!candidates
-            .iter()
-            .any(|candidate| candidate.source_id.starts_with("memory:")));
-    }
-
-    #[test]
-    fn explicit_memory_scope_filter_requires_exclusive_and_precise_scope_language() {
-        assert_eq!(
-            explicit_exclusive_memory_scopes(
-                "只允许使用当前会话作用域的 Agent Memory；没有依据就回答未知。"
-            ),
-            Some(vec![MemoryLifecycleScope::Conversation])
-        );
-        assert_eq!(
-            explicit_exclusive_memory_scopes("只使用当前会话 Agent Memory；没有依据就回答未知。"),
-            Some(vec![MemoryLifecycleScope::Conversation])
-        );
-        assert_eq!(
-            explicit_exclusive_memory_scopes("仅使用当前工作区 Agent Memory。"),
-            Some(vec![MemoryLifecycleScope::Workspace])
-        );
-        assert_eq!(
-            explicit_exclusive_memory_scopes("只使用全局 Agent Memory。"),
-            Some(vec![MemoryLifecycleScope::Global])
-        );
-        assert_eq!(
-            explicit_exclusive_memory_scopes("Only use the current project Agent Memory."),
-            Some(vec![MemoryLifecycleScope::Project])
-        );
-        assert_eq!(
-            explicit_exclusive_memory_scopes(
-                "Only use the workspace scope and project-scoped Agent Memory."
-            ),
-            Some(vec![
-                MemoryLifecycleScope::Workspace,
-                MemoryLifecycleScope::Project
-            ])
-        );
-        assert_eq!(
-            explicit_exclusive_memory_scopes("当前会话可能有相关记忆。"),
-            None
-        );
-        assert_eq!(explicit_exclusive_memory_scopes("只使用中文回答。"), None);
-    }
-
-    #[test]
-    fn context_request_requires_an_explicit_agent_memory_source_boundary() {
-        let exact = MainChatContextRequest::from_user_text(
-            "只允许使用当前会话作用域的 Agent Memory；没有依据就回答未知。",
-        );
-        assert_eq!(
-            exact.task_mode,
-            MainChatContextTaskMode::ExactAgentMemoryRead
-        );
-        assert_eq!(
-            exact.memory_scopes,
-            vec![MemoryLifecycleScope::Conversation]
-        );
-
-        let source_bound =
-            MainChatContextRequest::from_user_text("Only use Agent Memory to answer this.");
-        assert_eq!(
-            source_bound.task_mode,
-            MainChatContextTaskMode::EvidenceBoundAgentMemory
-        );
-        assert!(source_bound.memory_scopes.is_empty());
-
-        assert_eq!(
-            MainChatContextRequest::from_user_text("只使用中文回答。").task_mode,
-            MainChatContextTaskMode::OpenEnded
-        );
-        assert_eq!(
-            MainChatContextRequest::from_user_text("请参考当前会话继续回答。").task_mode,
-            MainChatContextTaskMode::OpenEnded
-        );
-    }
-
-    #[test]
-    fn context_request_uses_the_positively_selected_source_not_negated_exclusions() {
-        let markdown = MainChatContextRequest::from_user_text(
-            "只允许使用当前已绑定 Project Markdown Memory 回答；不要使用当前对话历史、Agent Memory、LifeModel、文件资料或一般知识。",
-        );
-        assert_eq!(
-            markdown.task_mode,
-            MainChatContextTaskMode::EvidenceBoundMarkdown
-        );
-
-        let document = MainChatContextRequest::from_user_text(
-            "仅使用选中的文档回答；不要使用 Agent Memory、Markdown、LifeModel 或一般知识。",
-        );
-        assert_eq!(
-            document.task_mode,
-            MainChatContextTaskMode::EvidenceBoundDocuments
-        );
-
-        let agent_memory = MainChatContextRequest::from_user_text(
-            "只允许使用当前会话作用域的 Agent Memory 回答；不要使用当前对话历史、Markdown、LifeModel 或一般知识。",
-        );
-        assert_eq!(
-            agent_memory.task_mode,
-            MainChatContextTaskMode::ExactAgentMemoryRead
-        );
-        assert_eq!(
-            agent_memory.memory_scopes,
-            vec![MemoryLifecycleScope::Conversation]
-        );
-
-        let english_markdown = MainChatContextRequest::from_user_text(
-            "Only use the selected Markdown memory. Do not use conversation history, Agent Memory, LifeModel, documents, or general knowledge.",
-        );
-        assert_eq!(
-            english_markdown.task_mode,
-            MainChatContextTaskMode::EvidenceBoundMarkdown
-        );
-    }
-
-    #[test]
-    fn context_request_extracts_turn_local_facts_without_misclassifying_language_constraints() {
-        let request = MainChatContextRequest::from_user_text(
-            "请只根据以下三条给定信息写一段四句话的内部说明，不补充未提供的项目事实：已完成核心流程联调；主要问题是回归验证不足；下一步是补足回归并重新验收。不要使用工具，不要执行任何外部或持久写入。",
-        );
-
-        assert_eq!(
-            request.task_mode,
-            MainChatContextTaskMode::EvidenceBoundSources
-        );
-        assert_eq!(
-            request.inline_facts,
-            vec![
-                MainChatInlineFact {
-                    handle: "F1".into(),
-                    content: "已完成核心流程联调".into(),
-                },
-                MainChatInlineFact {
-                    handle: "F2".into(),
-                    content: "主要问题是回归验证不足".into(),
-                },
-                MainChatInlineFact {
-                    handle: "F3".into(),
-                    content: "下一步是补足回归并重新验收".into(),
-                },
-            ]
-        );
-        assert!(request.is_source_bound());
-        assert!(request.is_inline_fact_bound());
-        assert!(!request.is_agent_memory_bound());
-
-        let language_only = MainChatContextRequest::from_user_text("只使用中文回答。");
-        assert_eq!(language_only.task_mode, MainChatContextTaskMode::OpenEnded);
-        assert!(!language_only.is_source_bound());
-    }
-
-    #[test]
-    fn mixed_document_and_web_work_request_is_open_ended() {
-        let request = MainChatContextRequest::from_user_text(
-            "读取我添加的 selected-source.md，并使用 web.search 搜索 IANA Example Domains 的官方说明。最终回答分两段：1）本地文档事实，必须包含项目代号和验证标记；2）外部来源事实，必须带来源。不要创建或修改文件。",
-        );
-
-        assert_eq!(request.task_mode, MainChatContextTaskMode::OpenEnded);
-        assert!(!request.is_source_bound());
+            .any(|memory| memory.content == ALLOWED || memory.content == BLOCKED));
     }
 
     #[tokio::test]
@@ -1604,10 +779,7 @@ mod tests {
             workspace_path.to_str().unwrap(),
         )
         .unwrap();
-        state.config.lock().await.system.workspace_memory_root =
-            Some(workspace_path.to_string_lossy().into_owned());
-
-        accept_and_project_memory(
+        let conflicted = accept_and_project_memory(
             &state,
             &lifecycle_memory_proposal(
                 CONFLICTED,
@@ -1617,13 +789,16 @@ mod tests {
             ),
         )
         .await;
-        accept_and_project_memory(
+        let unbound = accept_and_project_memory(
             &state,
             &lifecycle_memory_proposal(UNBOUND, "workspace", None, Vec::new()),
         )
         .await;
 
-        for query in [CONFLICTED, UNBOUND] {
+        for (query, memory_id) in [
+            (CONFLICTED, conflicted.memory_id),
+            (UNBOUND, unbound.memory_id),
+        ] {
             let candidates = retrievable_lifecycle_context_candidates(
                 &state,
                 "conversation-a",
@@ -1634,7 +809,7 @@ mod tests {
             .expect("fail-closed lifecycle retrieval");
             assert!(!candidates
                 .iter()
-                .any(|candidate| candidate.content.contains(query)));
+                .any(|candidate| candidate.source_id == memory_id));
         }
     }
 

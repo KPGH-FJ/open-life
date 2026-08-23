@@ -658,7 +658,7 @@ async fn selected_skill_id_for_session(
 }
 
 fn blocked_tool_from_manifest(manifest: ToolManifest) -> Option<MainChatBlockedTool> {
-    if manifest.name == "mcp.call_tool" || !manifest.enabled || manifest.declarative_only {
+    if !manifest.enabled || manifest.declarative_only {
         return Some(MainChatBlockedTool {
             tool_name: safe_tool_name(&manifest),
             reason_code: if manifest.declarative_only {
@@ -863,7 +863,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn registry_skill_without_turn_runtime_native_contract_is_not_selectable() {
+    async fn retired_registry_skill_is_absent_and_not_selectable() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let conversation_id = uuid::Uuid::new_v4().to_string();
         state
@@ -877,16 +877,12 @@ mod tests {
         let skills = list_main_chat_skills_with_state(&state, Some(&conversation_id))
             .await
             .unwrap();
-        let weekly_review = skills
-            .iter()
-            .find(|skill| skill.skill_id == "weekly_review")
-            .expect("registry built-in remains inspectable");
-        assert!(!weekly_review.available);
+        assert!(skills.iter().all(|skill| skill.skill_id != "weekly_review"));
 
         let error = select_main_chat_skill_with_state(&state, &conversation_id, "weekly_review")
             .await
             .expect_err("a skill with no TurnRuntime-native context path must fail closed");
-        assert_eq!(error, "skill_not_available_for_main_chat_context");
+        assert_eq!(error, "skill_not_found");
         let conversation = state
             .conversation_store
             .as_ref()

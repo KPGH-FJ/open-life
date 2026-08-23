@@ -16,9 +16,10 @@ working tree.
 
 ## Current Development Status
 
-There is no active implementation plan. The repository cleanup is complete and
-remains available in Git history. Product direction lives in `PRODUCT.md`;
-accepted architecture lives in ADRs.
+`openlife_agent_capability_rebuild_plan.md` is the one active implementation
+plan. It replaces the completed capable-product plan, which remains available
+in Git history. Product direction lives in `PRODUCT.md`; accepted architecture
+lives in ADRs.
 
 ## Accepted Decisions
 

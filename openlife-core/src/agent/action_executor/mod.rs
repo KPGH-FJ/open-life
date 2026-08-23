@@ -1,5 +1,3 @@
-pub mod core_os_tools;
-pub mod declarative_stubs;
 pub mod execution_tools;
 pub mod helpers;
 pub mod tool_executor;
@@ -8,10 +6,6 @@ pub mod tool_executor;
 pub use helpers::{filesystem_access_error, is_path_in_safe_paths};
 
 use crate::agent::types::{AgentAction, AgentObservation, ContentReceipt};
-use crate::agent::GovernorDecisionReport;
-use crate::agent::{
-    CanonicalWriteAdmission, DurableWriteRequest, ReviewWorkflow, ReviewWorkflowOutcome,
-};
 use crate::mcp::McpRegistry;
 use crate::mcp_audit::McpAuditStore;
 use crate::privacy::PrivacyEngine;
@@ -26,7 +20,6 @@ use serde_json::Value;
 /// Configuration for action execution.
 #[derive(Debug, Clone)]
 pub struct ActionExecutorConfig {
-    pub allow_writes: bool,
     pub allow_cloud: bool,
     pub timeout_seconds: u64,
     /// Whether to consume `allow_once` policies during permission check.
@@ -42,7 +35,6 @@ pub struct ActionExecutorConfig {
 impl Default for ActionExecutorConfig {
     fn default() -> Self {
         Self {
-            allow_writes: true,
             allow_cloud: true,
             timeout_seconds: 120,
             consume_allow_once: true,
@@ -76,7 +68,6 @@ pub struct ActionExecutionResult {
     pub observation: AgentObservation,
     pub status: ActionExecutionStatus,
     pub stop_reason: Option<String>,
-    pub governance_report: Option<GovernorDecisionReport>,
     pub execution_receipt: ToolExecutionReceipt,
     /// One-shot adapter body evidence. It never crosses serde/IPC and is
     /// consumed at the outermost semantic boundary before the result returns.
@@ -89,7 +80,6 @@ impl ActionExecutionResult {
         observation: AgentObservation,
         status: ActionExecutionStatus,
         stop_reason: Option<String>,
-        governance_report: Option<GovernorDecisionReport>,
         execution_receipt: ToolExecutionReceipt,
     ) -> Self {
         Self {
@@ -97,7 +87,6 @@ impl ActionExecutionResult {
             observation,
             status,
             stop_reason,
-            governance_report,
             execution_receipt,
             observed_body_admission: None,
         }
@@ -138,10 +127,6 @@ impl std::fmt::Debug for ActionExecutionResult {
             .field("observation_id", &self.observation.id)
             .field("status", &self.status)
             .field("stop_reason", &self.stop_reason)
-            .field(
-                "governance_report_present",
-                &self.governance_report.is_some(),
-            )
             .field("execution_receipt_id", &self.execution_receipt.receipt_id)
             .field(
                 "observed_body_admission_present",
@@ -457,16 +442,6 @@ impl<'a> ToolDispatchAdmission<'a> {
     }
 }
 
-/// Immutable read snapshot of the StateStore-owned product state used by a
-/// single tool execution. It is a transport value, not another persistence
-/// owner, and can always be rebuilt from StateStore.
-#[derive(Debug, Clone, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanonicalStateSnapshot {
-    pub daily_tasks: Vec<crate::state_store::StateAsset>,
-    pub observations: Vec<crate::state_store::StateObservation>,
-}
-
 /// Dependencies required for action execution.
 ///
 /// Essential fields (registry, permission_store, audit_store, privacy_engine,
@@ -478,69 +453,22 @@ pub struct ActionExecutionContext<'a> {
     pub audit_store: &'a McpAuditStore,
     pub privacy_engine: &'a PrivacyEngine,
     pub safe_paths: &'a [String],
-    pub life_model: Option<&'a crate::life_model::LifeModel>,
-    /// Canonical short-lived state owned by StateStore. This snapshot is
-    /// deliberately separate from the LifeModel YAML compatibility view so
-    /// `goal.read` and `state.read` cannot revive the retired dual authority.
-    pub canonical_state: Option<&'a CanonicalStateSnapshot>,
-    pub memory_store: Option<&'a crate::memory::MemoryStore>,
-    pub memory_lifecycle_retrieval_reader: Option<&'a crate::agent::MemoryLifecycleRetrievalReader>,
     /// Canonical owner for resources explicitly bound to the current task.
     /// `document.read` requires this store plus an exact message identity; it
     /// never scans arbitrary filesystem paths.
     pub resource_store: Option<&'a crate::resource::ResourceStore>,
-    pub proposal_store: Option<&'a crate::agent::ProposalStore>,
     pub(crate) bound_content_receipt_issuer: Option<&'a dyn BoundContentReceiptIssuer>,
     pub network_policy: Option<&'a crate::config::NetworkPolicy>,
     pub web_search_fixture_output: Option<&'a str>,
-    /// Evaluated PolicyStore result for the current task. This is intentionally
-    /// a single action-policy fact rather than an HS/personalization envelope.
-    pub external_write_requires_proposal: bool,
     pub tool_dispatch_observer: Option<&'a dyn ToolDispatchObserver>,
     pub tool_started_transition_observer: Option<&'a dyn ToolStartedTransitionObserver>,
     pub tool_audit_persistence_observer: Option<&'a dyn ToolAuditPersistenceObserver>,
     pub durable_store_failure_observer: Option<&'a dyn DurableStoreFailureObserver>,
-    /// Execution-owner authority that linearizes canonical mutations against
-    /// cancellation. Proposal writes fail closed when this authority is absent.
-    pub canonical_write_admission: Option<&'a dyn CanonicalWriteAdmission>,
     /// Exact one-shot authorization for a reviewed action/input binding. This
     /// is intentionally separate from reusable manifest-level permissions.
     pub action_bound_tool_permission:
         Option<&'a crate::tool_permissions::ActionBoundToolPermissionAuthorization>,
-    /// ICS calendar file paths for calendar.read tool
-    pub calendar_ics_paths: &'a [String],
 }
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MemoryRetrievalAuthorityError {
-    LifecycleReaderUnavailable,
-    LifecycleStoreQueryFailed(String),
-}
-
-impl MemoryRetrievalAuthorityError {
-    pub fn reason_code(&self) -> &'static str {
-        match self {
-            Self::LifecycleReaderUnavailable => "memory_lifecycle_reader_unavailable",
-            Self::LifecycleStoreQueryFailed(_) => "memory_lifecycle_query_failed",
-        }
-    }
-}
-
-impl std::fmt::Display for MemoryRetrievalAuthorityError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::LifecycleReaderUnavailable => {
-                formatter.write_str("canonical MemoryLifecycle retrieval reader unavailable")
-            }
-            Self::LifecycleStoreQueryFailed(error) => write!(
-                formatter,
-                "canonical MemoryLifecycle retrieval query failed: {error}"
-            ),
-        }
-    }
-}
-
-impl std::error::Error for MemoryRetrievalAuthorityError {}
 
 impl<'a> ActionExecutionContext<'a> {
     /// Create a context with the essential dependencies.
@@ -558,47 +486,16 @@ impl<'a> ActionExecutionContext<'a> {
             audit_store,
             privacy_engine,
             safe_paths,
-            life_model: None,
-            canonical_state: None,
-            memory_store: None,
-            memory_lifecycle_retrieval_reader: None,
             resource_store: None,
-            proposal_store: None,
             bound_content_receipt_issuer: None,
             network_policy: None,
             web_search_fixture_output: None,
-            external_write_requires_proposal: false,
             tool_dispatch_observer: None,
             tool_started_transition_observer: None,
             tool_audit_persistence_observer: None,
             durable_store_failure_observer: None,
-            canonical_write_admission: None,
             action_bound_tool_permission: None,
-            calendar_ics_paths: &[],
         }
-    }
-
-    pub fn with_life_model(mut self, life_model: &'a crate::life_model::LifeModel) -> Self {
-        self.life_model = Some(life_model);
-        self
-    }
-
-    pub fn with_canonical_state(mut self, state: &'a CanonicalStateSnapshot) -> Self {
-        self.canonical_state = Some(state);
-        self
-    }
-
-    pub fn with_memory_store(mut self, memory_store: &'a crate::memory::MemoryStore) -> Self {
-        self.memory_store = Some(memory_store);
-        self
-    }
-
-    pub fn with_memory_lifecycle_retrieval_reader(
-        mut self,
-        memory_lifecycle_retrieval_reader: &'a crate::agent::MemoryLifecycleRetrievalReader,
-    ) -> Self {
-        self.memory_lifecycle_retrieval_reader = Some(memory_lifecycle_retrieval_reader);
-        self
     }
 
     pub fn with_resource_store(
@@ -606,41 +503,6 @@ impl<'a> ActionExecutionContext<'a> {
         resource_store: &'a crate::resource::ResourceStore,
     ) -> Self {
         self.resource_store = Some(resource_store);
-        self
-    }
-
-    /// Fail-closed join between the replaceable MemoryStore projection and
-    /// canonical lifecycle retrieval authority. Non-lifecycle rows have
-    /// already passed MemoryStore's own retrieval predicate; lifecycle bodies
-    /// additionally require a current canonical `is_memory_retrievable` fact.
-    pub(crate) fn filter_retrievable_memory_hits(
-        &self,
-        hits: Vec<crate::memory::MemorySearchHit>,
-    ) -> std::result::Result<Vec<crate::memory::MemorySearchHit>, MemoryRetrievalAuthorityError>
-    {
-        let reader = self
-            .memory_lifecycle_retrieval_reader
-            .ok_or(MemoryRetrievalAuthorityError::LifecycleReaderUnavailable)?;
-        reader.ensure_available().map_err(|error| {
-            MemoryRetrievalAuthorityError::LifecycleStoreQueryFailed(error.to_string())
-        })?;
-        let mut filtered = Vec::with_capacity(hits.len());
-        for hit in hits {
-            let Some(memory_id) = hit.chunk.source.strip_prefix("memory_lifecycle:") else {
-                filtered.push(hit);
-                continue;
-            };
-            if reader.is_memory_retrievable(memory_id).map_err(|error| {
-                MemoryRetrievalAuthorityError::LifecycleStoreQueryFailed(error.to_string())
-            })? {
-                filtered.push(hit);
-            }
-        }
-        Ok(filtered)
-    }
-
-    pub fn with_proposal_store(mut self, proposal_store: &'a crate::agent::ProposalStore) -> Self {
-        self.proposal_store = Some(proposal_store);
         self
     }
 
@@ -669,17 +531,6 @@ impl<'a> ActionExecutionContext<'a> {
         self.web_search_fixture_output = Some(output);
         self
     }
-
-    pub fn with_calendar_ics_paths(mut self, paths: &'a [String]) -> Self {
-        self.calendar_ics_paths = paths;
-        self
-    }
-
-    pub fn with_external_write_proposal_policy(mut self, required: bool) -> Self {
-        self.external_write_requires_proposal = required;
-        self
-    }
-
     pub fn with_tool_dispatch_observer(mut self, observer: &'a dyn ToolDispatchObserver) -> Self {
         self.tool_dispatch_observer = Some(observer);
         self
@@ -717,29 +568,6 @@ impl<'a> ActionExecutionContext<'a> {
         if let Some(observer) = self.durable_store_failure_observer {
             observer.durable_store_failed(store_kind, &raw_error.to_string());
         }
-    }
-
-    pub fn with_canonical_write_admission(
-        mut self,
-        admission: &'a dyn CanonicalWriteAdmission,
-    ) -> Self {
-        self.canonical_write_admission = Some(admission);
-        self
-    }
-
-    /// The only ToolGateway-owned entrypoint for creating, updating, or
-    /// idempotently reusing a Review Center Proposal.
-    pub(crate) fn submit_review_proposal(
-        &self,
-        request: DurableWriteRequest,
-    ) -> Result<ReviewWorkflowOutcome> {
-        let proposal_store = self
-            .proposal_store
-            .ok_or_else(|| anyhow::anyhow!("proposal_store_unavailable"))?;
-        let admission = self
-            .canonical_write_admission
-            .ok_or_else(|| anyhow::anyhow!("canonical_write_admission_missing"))?;
-        ReviewWorkflow::new(proposal_store).submit_with_admission(request, admission)
     }
 
     /// Run the fallible policy/claim fence immediately before a concrete
@@ -784,59 +612,6 @@ impl<'a> ActionExecutionContext<'a> {
             self.tool_started_transition_observer,
         ))
     }
-
-    /// Run the same fallible execution-owner fence for a gateway-owned
-    /// internal adapter. Internal reads do not have a registry manifest, but
-    /// they still have a typed gateway contract and must therefore produce the
-    /// same prepared -> adapter-edge transition as registry-backed tools.
-    pub(crate) async fn authorize_internal_tool_dispatch(
-        &self,
-        request: &AgentActionRequest,
-        receipt_tracker: &ToolExecutionReceiptTracker,
-    ) -> Result<ToolDispatchAdmission<'a>> {
-        let receipt = receipt_tracker.snapshot();
-        let manifest_id = receipt
-            .manifest_id
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("internal_tool_dispatch_contract_missing"))?;
-        let (input_length_bytes, input_hash) =
-            crate::agent::metadata_safe::metadata_safe_value_digest(&request.input);
-        let (_, manifest_contract_digest) =
-            crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
-                "source": "tool_gateway_internal",
-                "manifestId": &manifest_id,
-                "actionEffect": receipt.action_effect.as_str(),
-                "idempotencyContract": receipt.idempotency_contract,
-            }));
-        if let Some(observer) = self.tool_dispatch_observer {
-            observer
-                .before_dispatch(&ToolDispatchAttempt {
-                    receipt_id: receipt.receipt_id,
-                    manifest_id,
-                    tool_name: request.action_type.clone(),
-                    manifest_contract_digest,
-                    input_hash,
-                    input_length_bytes: input_length_bytes as u64,
-                    source_run_id: request.source_run_id.clone(),
-                    request_digest: receipt.request_digest,
-                    action_effect: receipt.action_effect,
-                    idempotency_contract: receipt.idempotency_contract,
-                    process_risk: ToolDispatchProcessRisk::ProcessBound,
-                    effect_may_survive_local_process: effect_may_survive_local_process(
-                        receipt.action_effect,
-                    ),
-                })
-                .await?;
-        }
-        Ok(ToolDispatchAdmission::new(
-            receipt_tracker.clone(),
-            self.tool_started_transition_observer,
-        ))
-    }
-}
-
-fn metadata_safe_preview(value: &str, max_chars: usize) -> String {
-    value.chars().take(max_chars).collect()
 }
 
 /// ToolGateway-owned implementation detail for action execution. Product and
@@ -856,44 +631,17 @@ impl ActionExecutor {
         request: AgentActionRequest,
         ctx: &ActionExecutionContext<'_>,
         receipt_tracker: ToolExecutionReceiptTracker,
-        contract: &crate::agent::tool_gateway::ToolGatewayContractEvidence,
     ) -> Result<ActionExecutionResult> {
-        let memory_read_can_dispatch = matches!(
-            request.action_type.as_str(),
-            "memory_search" | "session_search"
-        ) && ctx.memory_store.is_some();
-        if memory_read_can_dispatch {
-            // This is the last fallible fence before the local MemoryStore
-            // adapter is entered. A prepared attempt is not dispatch truth;
-            // the receipt changes only at the concrete local adapter edge.
-            ctx.authorize_internal_tool_dispatch(&request, &receipt_tracker)
-                .await?
-                .observe_local()
-                .await?;
-        }
         let mut result = match request.action_type.as_str() {
             "mcp_tool" | "builtin_tool" | "plugin_tool" => {
                 self.execute_tool(request, ctx, receipt_tracker.clone())
                     .await
             }
-            "memory_search" | "session_search" => {
-                self.execute_memory_search(request, ctx, contract)
-            }
-            "memory_write" => self.execute_memory_write(request),
-            "memory_archive" => self.execute_memory_archive(request),
-            "life_model_patch" => self.execute_life_model_patch(request),
             _ => Err(anyhow::anyhow!(
                 "unsupported action type: {}",
                 request.action_type
             )),
         }?;
-        if memory_read_can_dispatch {
-            receipt_tracker.mark_response_observed();
-            tool_executor::record_effect_outcome(
-                &receipt_tracker,
-                result.status == ActionExecutionStatus::Succeeded,
-            );
-        }
         receipt_tracker.finish();
         result.execution_receipt = receipt_tracker.snapshot();
         Ok(result)
@@ -904,10 +652,10 @@ impl ActionExecutor {
         request: AgentActionRequest,
         ctx: &ActionExecutionContext<'_>,
         receipt_tracker: ToolExecutionReceiptTracker,
-        contract: &crate::agent::tool_gateway::ToolGatewayContractEvidence,
+        _contract: &crate::agent::tool_gateway::ToolGatewayContractEvidence,
         _authority: &crate::agent::tool_gateway::ToolGatewayFinalizationAuthority,
     ) -> Result<PendingToolGatewayActionExecution> {
-        self.execute_with_receipt_tracker(request, ctx, receipt_tracker, contract)
+        self.execute_with_receipt_tracker(request, ctx, receipt_tracker)
             .await
             .map(|result| PendingToolGatewayActionExecution { result })
     }
@@ -915,208 +663,6 @@ impl ActionExecutor {
     pub(crate) fn timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.config.timeout_seconds.max(1))
     }
-
-    pub fn execute_life_model_patch(
-        &self,
-        request: AgentActionRequest,
-    ) -> Result<ActionExecutionResult> {
-        Ok(self.build_proposal_required_action(
-            request,
-            "life_model_patch must be submitted as a LifeModel proposal before persistence",
-        ))
-    }
-
-    pub fn execute_memory_search(
-        &self,
-        request: AgentActionRequest,
-        ctx: &ActionExecutionContext<'_>,
-        contract: &crate::agent::tool_gateway::ToolGatewayContractEvidence,
-    ) -> Result<ActionExecutionResult> {
-        let fallback_receipt = receipt_tracker_for_request(
-            &request,
-            Some(request.action_type.clone()),
-            ToolActionEffect::ReadOnly,
-            crate::tool_manifest::ToolIdempotencyContract::Idempotent,
-        )
-        .snapshot();
-        let Some(memory_store) = ctx.memory_store else {
-            return failed_memory_search_result(
-                self,
-                request,
-                contract,
-                "memory_store_unavailable",
-                "memory store unavailable for read-only search",
-                fallback_receipt,
-            );
-        };
-
-        let query = request
-            .input
-            .get("query")
-            .or_else(|| request.input.get("q"))
-            .and_then(Value::as_str)
-            .unwrap_or_default();
-        let session_id = request.input.get("session_id").and_then(Value::as_str);
-        let exclude_session_id = request
-            .input
-            .get("exclude_session_id")
-            .and_then(Value::as_str);
-        let limit = request
-            .input
-            .get("limit")
-            .and_then(Value::as_u64)
-            .unwrap_or(5)
-            .clamp(1, 10) as usize;
-        let is_session_search = request.action_type == "session_search";
-        let raw_hits = match if is_session_search {
-            memory_store.search_conversation_messages(session_id, exclude_session_id, query, limit)
-        } else {
-            memory_store.search_text_memories(session_id, query, limit)
-        } {
-            Ok(hits) => hits,
-            Err(error) => {
-                return failed_memory_search_result(
-                    self,
-                    request,
-                    contract,
-                    "memory_store_query_failed",
-                    &error.to_string(),
-                    fallback_receipt,
-                );
-            }
-        };
-        let hits = if is_session_search {
-            // Conversation rows are already read from their canonical owner;
-            // the MemoryLifecycle projection authority does not govern them.
-            raw_hits
-        } else {
-            match ctx.filter_retrievable_memory_hits(raw_hits) {
-                Ok(hits) => hits,
-                Err(error) => {
-                    return failed_memory_search_result(
-                        self,
-                        request,
-                        contract,
-                        error.reason_code(),
-                        &error.to_string(),
-                        fallback_receipt,
-                    );
-                }
-            }
-        };
-        let hit_previews = hits
-            .iter()
-            .map(|hit| {
-                serde_json::json!({
-                    "sessionId": hit.chunk.session_id,
-                    "source": hit.chunk.source,
-                    "score": hit.relevance_score,
-                    "preview": metadata_safe_preview(&hit.chunk.content, 160),
-                    "createdAt": hit.chunk.created_at,
-                })
-            })
-            .collect::<Vec<_>>();
-        let content = if hits.is_empty() {
-            format!("No memory/session hits found for query '{}'.", query)
-        } else {
-            let joined = hits
-                .iter()
-                .map(|hit| metadata_safe_preview(&hit.chunk.content, 180))
-                .collect::<Vec<_>>()
-                .join("\n");
-            format!(
-                "Found {} memory/session hit(s) for query '{}':\n{}",
-                hits.len(),
-                query,
-                joined
-            )
-        };
-        let structured_result = serde_json::json!({
-            "success": true,
-            "status": "succeeded",
-            "query": query,
-            "sessionId": session_id,
-            "hitCount": hits.len(),
-            "hits": hit_previews,
-            "directWritesExecuted": false,
-            "promotedToMemory": false,
-        });
-        let (action, observation, observed_body_admission) = self
-            .build_internal_read_action_observation(
-                &request,
-                contract,
-                true,
-                content,
-                structured_result,
-                None,
-            )?;
-
-        Ok(ActionExecutionResult {
-            action,
-            observation,
-            status: ActionExecutionStatus::Succeeded,
-            stop_reason: None,
-            governance_report: None,
-            execution_receipt: fallback_receipt,
-            observed_body_admission,
-        })
-    }
-
-    pub fn execute_memory_write(
-        &self,
-        request: AgentActionRequest,
-    ) -> Result<ActionExecutionResult> {
-        Ok(self.build_proposal_required_action(
-            request,
-            "memory_write must be submitted as a MemoryWrite proposal before persistence",
-        ))
-    }
-
-    pub fn execute_memory_archive(
-        &self,
-        request: AgentActionRequest,
-    ) -> Result<ActionExecutionResult> {
-        Ok(self.build_proposal_required_action(
-            request,
-            "memory_archive must be submitted as a MemoryArchive proposal before persistence",
-        ))
-    }
-}
-
-fn failed_memory_search_result(
-    executor: &ActionExecutor,
-    request: AgentActionRequest,
-    contract: &crate::agent::tool_gateway::ToolGatewayContractEvidence,
-    reason_code: &str,
-    detail: &str,
-    execution_receipt: crate::tool_execution_receipt::ToolExecutionReceipt,
-) -> Result<ActionExecutionResult> {
-    let structured_result = serde_json::json!({
-        "success": false,
-        "status": "degraded",
-        "reasonCode": reason_code,
-        "errorDigest": crate::persistence_outbox::metadata_digest(detail),
-        "hitCount": serde_json::Value::Null,
-        "directWritesExecuted": false,
-    });
-    let (action, observation, observed_body_admission) = executor
-        .build_internal_read_action_observation(
-            &request,
-            contract,
-            false,
-            format!("Memory search degraded: {reason_code}."),
-            structured_result,
-            Some(reason_code.to_string()),
-        )?;
-    Ok(ActionExecutionResult {
-        action,
-        observation,
-        status: ActionExecutionStatus::Failed,
-        stop_reason: Some(reason_code.to_string()),
-        governance_report: None,
-        execution_receipt,
-        observed_body_admission,
-    })
 }
 
 pub(crate) fn receipt_tracker_for_request(

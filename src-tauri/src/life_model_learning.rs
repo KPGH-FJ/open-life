@@ -1,19 +1,20 @@
 use crate::AppState;
 use chrono::{Duration, Utc};
-use openlife_core::agent::main_chat_agent_v1::PolicyDecision;
 use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
 use openlife_core::agent::{
     DurableWriteRequest, DurableWriteSource, DurableWriteSubject, FinalDeliveryWordingContract,
     LifeModelLearningCapture, LifeModelLearningCaptureReceipt, LifeModelLearningDecisionReceipt,
     LifeModelLearningEvidencePolarity, LifeModelLearningExplicitness,
     LifeModelLearningMaterializationEvidence, LifeModelLearningReviewDecisionReceipt,
-    LifeModelLearningSensitivity, LifeModelLearningSourceKind, MainChatMemoryCandidate,
-    MemoryCandidateKind, MemoryDestination, ProposalStatus, ReviewWorkflow,
+    LifeModelLearningSensitivity, LifeModelLearningSourceKind, ProposalStatus, ReviewWorkflow,
 };
+#[cfg(test)]
+use openlife_core::agent::{MemoryCandidate, MemoryCandidateKind, MemoryDestination};
 use openlife_core::life_model::v2::{
     LifeModelItemV2, LifeModelSectionV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2,
     LifeModelUserValueV2, DEFAULT_LIFE_MODEL_V2_MODEL_ID, LIFE_MODEL_V2_TYPED_DIFF_PATH,
 };
+use openlife_core::work_orchestration::AgentLifeModelStatementSection;
 use serde::Serialize;
 use std::sync::Arc;
 
@@ -120,19 +121,7 @@ pub(crate) async fn stage_candidate_for_review_with_state(
     let current = manager
         .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
         .map_err(|error| error.to_string())?;
-    if current.is_none()
-        && manager
-            .load_existing()
-            .map_err(|error| error.to_string())?
-            .is_some()
-    {
-        return Err("lifemodel_learning_requires_legacy_migration".into());
-    }
-    let allow_empty_result = current.is_some()
-        || manager
-            .load_v2_cutover(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
-            .map_err(|error| error.to_string())?
-            .is_some();
+    let allow_empty_result = current.is_some();
     let mut proposal = AgentProposal::new(
         ProposalType::LifeModelUpdate,
         LIFE_MODEL_V2_TYPED_DIFF_PATH,
@@ -431,26 +420,94 @@ pub(crate) async fn reconcile_lifemodel_learning_materialization_with_state(
 }
 
 pub(crate) async fn current_workspace_ref(state: &Arc<AppState>) -> String {
-    let configured_root = state
-        .config
-        .lock()
-        .await
-        .system
-        .workspace_memory_root
-        .clone();
-    match configured_root.filter(|root| !root.trim().is_empty()) {
-        Some(root) => format!(
-            "workspace:{}",
-            openlife_core::agent::metadata_safe_text_digest(root.trim()).1
-        ),
-        None => "workspace:default".into(),
-    }
+    let _ = state;
+    "workspace:default".into()
 }
 
+/// Captures a model-proposed, typed LifeModel statement after binding its
+/// evidence span to the authenticated user message. The model supplies
+/// semantics; this boundary supplies provenance, sensitivity and lifecycle.
+pub(crate) async fn capture_typed_explicit_conversation_candidate(
+    state: &Arc<AppState>,
+    section: AgentLifeModelStatementSection,
+    statement: &str,
+    source_span: &str,
+    user_message_proof: &openlife_core::conversation::ConversationUserMessageProof,
+    source_user_message: &str,
+) -> Result<LifeModelLearningCaptureReceipt, String> {
+    let source_digest = openlife_core::agent::metadata_safe_text_digest(source_user_message).1;
+    if !user_message_proof.is_live()
+        || user_message_proof.content_digest() != source_digest
+        || user_message_proof.content_length_bytes() != source_user_message.len()
+        || !source_user_message.contains(source_span)
+    {
+        return Err("lifemodel_learning_canonical_user_item_mismatch".into());
+    }
+    if openlife_core::privacy::assess_sensitive_content(source_span).requires_memory_review() {
+        return Err("lifemodel_learning_sensitive_content_requires_editor".into());
+    }
+    let statement = statement.trim();
+    if statement.is_empty() || statement.chars().count() > 320 {
+        return Err("lifemodel_learning_statement_invalid".into());
+    }
+    let (section, suggestion_class) = match section {
+        AgentLifeModelStatementSection::Identity => (LifeModelSectionV2::Identity, "identity"),
+        AgentLifeModelStatementSection::Values => (LifeModelSectionV2::Values, "values"),
+        AgentLifeModelStatementSection::StablePreferences => {
+            (LifeModelSectionV2::StablePreferences, "stable_preferences")
+        }
+        AgentLifeModelStatementSection::PersonalBoundaries => (
+            LifeModelSectionV2::PersonalBoundaries,
+            "personal_boundaries",
+        ),
+        AgentLifeModelStatementSection::DecisionPrinciples => (
+            LifeModelSectionV2::DecisionPrinciples,
+            "decision_principles",
+        ),
+        AgentLifeModelStatementSection::CollaborationPreferences => (
+            LifeModelSectionV2::CollaborationPreferences,
+            "collaboration_preferences",
+        ),
+    };
+    let digest = openlife_core::agent::metadata_safe_text_digest(statement).1;
+    capture_typed_candidate_with_source(
+        state,
+        TypedLearningCandidate {
+            section,
+            statement: statement.to_string(),
+            target_key: format!("{suggestion_class}.claim:{}", &digest[7..23]),
+            suggestion_class: suggestion_class.to_string(),
+            replaces_target: false,
+        },
+        &user_message_proof.item_ref(),
+        &source_digest,
+    )
+    .await
+}
+
+#[cfg(test)]
 pub(crate) async fn capture_explicit_main_chat_candidate(
     state: &Arc<AppState>,
-    candidate: &MainChatMemoryCandidate,
-    policy: &PolicyDecision,
+    candidate: &MemoryCandidate,
+    source_user_message: &str,
+) -> Result<LifeModelLearningCaptureReceipt, String> {
+    let source_digest = openlife_core::agent::metadata_safe_text_digest(source_user_message).1;
+    capture_explicit_candidate_with_source(
+        state,
+        candidate,
+        &format!("message:test:{}", &source_digest[7..23]),
+        &source_digest,
+        source_user_message,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn capture_explicit_candidate_with_source(
+    state: &Arc<AppState>,
+    candidate: &MemoryCandidate,
+    source_ref: &str,
+    source_digest: &str,
     source_user_message: &str,
 ) -> Result<LifeModelLearningCaptureReceipt, String> {
     if openlife_core::privacy::assess_sensitive_content(source_user_message)
@@ -466,17 +523,17 @@ pub(crate) async fn capture_explicit_main_chat_candidate(
     {
         return Err("lifemodel_learning_candidate_not_supported_5_3a".into());
     }
-    let source_digest = openlife_core::agent::metadata_safe_text_digest(source_user_message).1;
-    if source_digest != policy.authorized_user_message_digest {
-        return Err("lifemodel_learning_source_digest_mismatch".into());
-    }
-    if policy.authorized_user_message_id.trim().is_empty()
-        || !policy.allows_memory_candidate(&candidate.candidate_id)
-    {
-        return Err("lifemodel_learning_policy_authority_missing".into());
-    }
     let typed = typed_learning_candidate(candidate)
         .ok_or_else(|| "lifemodel_learning_typed_candidate_required".to_string())?;
+    capture_typed_candidate_with_source(state, typed, source_ref, source_digest).await
+}
+
+async fn capture_typed_candidate_with_source(
+    state: &Arc<AppState>,
+    typed: TypedLearningCandidate,
+    source_ref: &str,
+    source_digest: &str,
+) -> Result<LifeModelLearningCaptureReceipt, String> {
     let store = state
         .life_model_learning_store
         .as_ref()
@@ -484,9 +541,9 @@ pub(crate) async fn capture_explicit_main_chat_candidate(
     let now = Utc::now();
     let capture = LifeModelLearningCapture {
         workspace_ref: current_workspace_ref(state).await,
-        source_ref: format!("message:{}", policy.authorized_user_message_id),
-        source_digest,
-        independence_ref: format!("message:{}", policy.authorized_user_message_id),
+        source_ref: source_ref.to_string(),
+        source_digest: source_digest.to_string(),
+        independence_ref: source_ref.to_string(),
         summary: typed.statement.clone(),
         section: typed.section,
         value: LifeModelUserValueV2::Statement {
@@ -609,7 +666,8 @@ pub(crate) async fn pause_candidate_class_with_state(
         .map_err(|error| format!("pause_lifemodel_learning_suggestion_class_failed:{error}"))
 }
 
-fn typed_learning_candidate(candidate: &MainChatMemoryCandidate) -> Option<TypedLearningCandidate> {
+#[cfg(test)]
+fn typed_learning_candidate(candidate: &MemoryCandidate) -> Option<TypedLearningCandidate> {
     let claim = candidate.normalized_claim.trim();
     let lower = claim.to_ascii_lowercase();
     let collaboration_correction = lower.contains("communication style to ")
@@ -666,11 +724,12 @@ fn typed_learning_candidate(candidate: &MainChatMemoryCandidate) -> Option<Typed
     })
 }
 
+#[cfg(test)]
 pub(crate) fn supports_explicit_user_text(user_text: &str) -> bool {
     if openlife_core::privacy::assess_sensitive_content(user_text).requires_memory_review() {
         return false;
     }
-    let candidate = MainChatMemoryCandidate {
+    let candidate = MemoryCandidate {
         candidate_id: "preflight".into(),
         source_span_id: "preflight".into(),
         kind: MemoryCandidateKind::Preference,
@@ -688,6 +747,7 @@ pub(crate) fn supports_explicit_user_text(user_text: &str) -> bool {
     typed_learning_candidate(&candidate).is_some()
 }
 
+#[cfg(test)]
 fn value_after_marker(value: &str, markers: &[&str]) -> Option<String> {
     let lower = value.to_ascii_lowercase();
     markers.iter().find_map(|marker| {
@@ -724,56 +784,11 @@ fn value_after_marker(value: &str, markers: &[&str]) -> Option<String> {
 mod tests {
     use super::*;
 
-    async fn establish_empty_v2_owner(state: &Arc<AppState>) {
-        let source = {
-            let manager = state.life_model_manager.lock().await;
-            if manager.load_existing().unwrap().is_none() {
-                // This helper exercises the governed legacy-to-v2 migration
-                // path. Own its isolated legacy input explicitly instead of
-                // relying on an unrelated retired HS fixture to manufacture
-                // life_model.yaml as a side effect.
-                manager.save(&manager.load().unwrap()).unwrap();
-            }
-            manager
-                .load_existing_with_source()
-                .unwrap()
-                .expect("isolated migration fixture has a legacy source")
-                .1
-        };
-        let preview =
-            openlife_core::life_model::v2::LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
-                &source,
-            )
-            .unwrap();
-        let request = crate::commands::life_model::DraftLegacyLifeModelMigrationRequest {
-            source_digest: preview.source_digest.clone(),
-            selections: preview
-                .candidates
-                .iter()
-                .map(|candidate| {
-                    openlife_core::life_model::v2::LegacyLifeModelMigrationSelectionV2 {
-                        candidate_id: candidate.candidate_id.clone(),
-                        decision: openlife_core::life_model::v2::LegacyLifeModelMigrationDecisionV2::Exclude,
-                        edited_value: None,
-                    }
-                })
-                .collect(),
-            non_lifemodel_items_acknowledged: true,
-        };
-        let migration = crate::commands::life_model::draft_legacy_lifemodel_migration_with_state(
-            request, state,
-        )
-        .await
-        .unwrap();
-        crate::commands::proposal::accept_proposal_with_state(migration.proposal_id, state)
-            .await
-            .unwrap();
-    }
-
-    fn candidate(claim: &str) -> MainChatMemoryCandidate {
-        MainChatMemoryCandidate {
-            candidate_id: "candidate-one".into(),
-            source_span_id: "span-one".into(),
+    fn candidate(claim: &str) -> MemoryCandidate {
+        let (_, digest) = openlife_core::agent::metadata_safe_text_digest(claim);
+        MemoryCandidate {
+            candidate_id: format!("candidate:{digest}"),
+            source_span_id: format!("span:{digest}"),
             kind: MemoryCandidateKind::Preference,
             destination: MemoryDestination::LifeModelProposal,
             evidence_text: claim.into(),
@@ -831,21 +846,7 @@ mod tests {
     async fn production_bridge_stages_candidate_without_proposal_or_canonical_version() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let user_text = "Update my life model: communication style is concise and direct.";
-        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
-            "lifemodel-learning-bridge",
-            user_text,
-            None,
-            openlife_core::agent::AgentTaskKind::Conversation,
-        );
-        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
-        let normal_candidate = routing
-            .candidates
-            .iter()
-            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
-            .expect("exact LifeModel learning candidate");
-        assert!(decision
-            .policy_decision
-            .allows_memory_candidate(&normal_candidate.candidate_id));
+        let normal_candidate = candidate(user_text);
         let proposals_before = state
             .proposal_store
             .as_ref()
@@ -864,14 +865,9 @@ mod tests {
             .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
             .unwrap();
 
-        let receipt = capture_explicit_main_chat_candidate(
-            &state,
-            normal_candidate,
-            &decision.policy_decision,
-            user_text,
-        )
-        .await
-        .unwrap();
+        let receipt = capture_explicit_main_chat_candidate(&state, &normal_candidate, user_text)
+            .await
+            .unwrap();
 
         assert!(!receipt.proposal_created);
         assert!(!receipt.canonical_life_model_changed);
@@ -923,20 +919,12 @@ mod tests {
 
         let sensitive_text = "My long-term preference is user_password=hunter2";
         let sensitive_candidate = candidate(sensitive_text);
-        let mut sensitive_policy = decision.policy_decision.clone();
-        sensitive_policy.authorized_user_message_digest =
-            openlife_core::agent::metadata_safe_text_digest(sensitive_text).1;
-        sensitive_policy.authorized_memory_candidate_ids =
-            vec![sensitive_candidate.candidate_id.clone()];
         assert_eq!(sensitive_candidate.sensitivity, "internal");
-        assert!(capture_explicit_main_chat_candidate(
-            &state,
-            &sensitive_candidate,
-            &sensitive_policy,
-            sensitive_text,
-        )
-        .await
-        .is_err());
+        assert!(
+            capture_explicit_main_chat_candidate(&state, &sensitive_candidate, sensitive_text,)
+                .await
+                .is_err()
+        );
         assert!(state
             .life_model_learning_store
             .as_ref()
@@ -952,26 +940,10 @@ mod tests {
     async fn product_rejection_scrubs_candidate_without_touching_proposal_or_canonical_owner() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let user_text = "Update my life model: communication style is concise and direct.";
-        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
-            "lifemodel-learning-rejection",
-            user_text,
-            None,
-            openlife_core::agent::AgentTaskKind::Conversation,
-        );
-        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
-        let candidate = routing
-            .candidates
-            .iter()
-            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+        let candidate = candidate(user_text);
+        let staged = capture_explicit_main_chat_candidate(&state, &candidate, user_text)
+            .await
             .unwrap();
-        let staged = capture_explicit_main_chat_candidate(
-            &state,
-            candidate,
-            &decision.policy_decision,
-            user_text,
-        )
-        .await
-        .unwrap();
         let proposals_before = state
             .proposal_store
             .as_ref()
@@ -1037,28 +1009,11 @@ mod tests {
     #[tokio::test]
     async fn confirmed_candidate_stages_one_exact_review_without_canonical_write() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        establish_empty_v2_owner(&state).await;
         let user_text = "Update my life model: communication style is concise and direct.";
-        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
-            "lifemodel-learning-review",
-            user_text,
-            None,
-            openlife_core::agent::AgentTaskKind::Conversation,
-        );
-        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
-        let candidate = routing
-            .candidates
-            .iter()
-            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+        let candidate = candidate(user_text);
+        let captured = capture_explicit_main_chat_candidate(&state, &candidate, user_text)
+            .await
             .unwrap();
-        let captured = capture_explicit_main_chat_candidate(
-            &state,
-            candidate,
-            &decision.policy_decision,
-            user_text,
-        )
-        .await
-        .unwrap();
         assert!(captured.candidate.confirmed_at.is_some());
         let canonical_before = state
             .life_model_manager
@@ -1137,28 +1092,11 @@ mod tests {
     #[tokio::test]
     async fn learning_review_uses_schema_aware_edit_without_materializing() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        establish_empty_v2_owner(&state).await;
         let user_text = "Update my life model: communication style is concise and direct.";
-        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
-            "lifemodel-learning-edit",
-            user_text,
-            None,
-            openlife_core::agent::AgentTaskKind::Conversation,
-        );
-        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
-        let candidate = routing
-            .candidates
-            .iter()
-            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+        let candidate = candidate(user_text);
+        let captured = capture_explicit_main_chat_candidate(&state, &candidate, user_text)
+            .await
             .unwrap();
-        let captured = capture_explicit_main_chat_candidate(
-            &state,
-            candidate,
-            &decision.policy_decision,
-            user_text,
-        )
-        .await
-        .unwrap();
         let staged = stage_candidate_for_review_with_state(&state, &captured.candidate.id)
             .await
             .unwrap();
@@ -1226,7 +1164,7 @@ mod tests {
             .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
             .unwrap()
             .unwrap();
-        assert_eq!(version.model_version, 2);
+        assert_eq!(version.model_version, 1);
         assert_eq!(
             version.materialization_id,
             format!("proposal:{}", staged.proposal_id)
@@ -1248,7 +1186,7 @@ mod tests {
             materialized.status,
             openlife_core::agent::LifeModelLearningCandidateStatus::Materialized
         );
-        assert_eq!(materialized.materialized_version, Some(2));
+        assert_eq!(materialized.materialized_version, Some(1));
         assert!(materialized
             .source_kinds
             .contains(&LifeModelLearningSourceKind::UserCorrection));
@@ -1262,28 +1200,11 @@ mod tests {
     #[tokio::test]
     async fn accepted_learning_review_reconciles_a_persisted_edit_after_candidate_write_failure() {
         let mut state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        establish_empty_v2_owner(&state).await;
         let user_text = "Update my life model: communication style is concise and direct.";
-        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
-            "lifemodel-learning-edit-recovery",
-            user_text,
-            None,
-            openlife_core::agent::AgentTaskKind::Conversation,
-        );
-        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
-        let candidate = routing
-            .candidates
-            .iter()
-            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+        let candidate = candidate(user_text);
+        let captured = capture_explicit_main_chat_candidate(&state, &candidate, user_text)
+            .await
             .unwrap();
-        let captured = capture_explicit_main_chat_candidate(
-            &state,
-            candidate,
-            &decision.policy_decision,
-            user_text,
-        )
-        .await
-        .unwrap();
         let staged = stage_candidate_for_review_with_state(&state, &captured.candidate.id)
             .await
             .unwrap();
@@ -1356,28 +1277,11 @@ mod tests {
     #[tokio::test]
     async fn postponed_learning_review_is_not_rejection_and_reject_enters_cooldown_without_write() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        establish_empty_v2_owner(&state).await;
         let user_text = "Update my life model: communication style is concise and direct.";
-        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
-            "lifemodel-learning-decisions",
-            user_text,
-            None,
-            openlife_core::agent::AgentTaskKind::Conversation,
-        );
-        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
-        let candidate = routing
-            .candidates
-            .iter()
-            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+        let candidate = candidate(user_text);
+        let captured = capture_explicit_main_chat_candidate(&state, &candidate, user_text)
+            .await
             .unwrap();
-        let captured = capture_explicit_main_chat_candidate(
-            &state,
-            candidate,
-            &decision.policy_decision,
-            user_text,
-        )
-        .await
-        .unwrap();
         let staged = stage_candidate_for_review_with_state(&state, &captured.candidate.id)
             .await
             .unwrap();
@@ -1443,28 +1347,11 @@ mod tests {
     #[tokio::test]
     async fn stale_learning_review_never_marks_candidate_materialized_or_rebases() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        establish_empty_v2_owner(&state).await;
         let user_text = "Update my life model: communication style is concise and direct.";
-        let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default().decide(
-            "lifemodel-learning-stale",
-            user_text,
-            None,
-            openlife_core::agent::AgentTaskKind::Conversation,
-        );
-        let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
-        let candidate = routing
-            .candidates
-            .iter()
-            .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
+        let candidate = candidate(user_text);
+        let captured = capture_explicit_main_chat_candidate(&state, &candidate, user_text)
+            .await
             .unwrap();
-        let captured = capture_explicit_main_chat_candidate(
-            &state,
-            candidate,
-            &decision.policy_decision,
-            user_text,
-        )
-        .await
-        .unwrap();
         let staged = stage_candidate_for_review_with_state(&state, &captured.candidate.id)
             .await
             .unwrap();
@@ -1474,7 +1361,6 @@ mod tests {
             .lock()
             .await
             .load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID)
-            .unwrap()
             .unwrap();
         let manual_item = LifeModelUserValueV2::Statement {
             statement: "A separate reviewed fact".into(),
@@ -1486,7 +1372,7 @@ mod tests {
         );
         let manual_diff = LifeModelTypedDiffV2::from_operations_for_review(
             DEFAULT_LIFE_MODEL_V2_MODEL_ID,
-            Some(&current),
+            current.as_ref(),
             vec![LifeModelTypedOperationV2::Add {
                 section: LifeModelSectionV2::StablePreferences,
                 item: manual_item,
@@ -1559,42 +1445,18 @@ mod tests {
     #[tokio::test]
     async fn second_v2_learning_review_waits_for_the_active_item() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        establish_empty_v2_owner(&state).await;
         let mut candidate_ids = Vec::new();
-        for (session, user_text) in [
-            (
-                "learning-first",
-                "Update my life model: my long-term preference is morning planning.",
-            ),
-            (
-                "learning-second",
-                "Update my life model: my long-term preference is weekly reviews.",
-            ),
+        for user_text in [
+            "Update my life model: my long-term preference is morning planning.",
+            "Update my life model: my long-term preference is weekly reviews.",
         ] {
-            let decision = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
-                .decide(
-                    session,
-                    user_text,
-                    None,
-                    openlife_core::agent::AgentTaskKind::Conversation,
-                );
-            let routing = openlife_core::agent::plan_main_chat_memory_routing(user_text);
-            let candidate = routing
-                .candidates
-                .iter()
-                .find(|candidate| candidate.destination == MemoryDestination::LifeModelProposal)
-                .unwrap();
+            let candidate = candidate(user_text);
             candidate_ids.push(
-                capture_explicit_main_chat_candidate(
-                    &state,
-                    candidate,
-                    &decision.policy_decision,
-                    user_text,
-                )
-                .await
-                .unwrap()
-                .candidate
-                .id,
+                capture_explicit_main_chat_candidate(&state, &candidate, user_text)
+                    .await
+                    .unwrap()
+                    .candidate
+                    .id,
             );
         }
 

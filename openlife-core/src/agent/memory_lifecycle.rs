@@ -1,8 +1,5 @@
+use crate::agent::memory_candidate::{MemoryCandidate, MemoryCandidateKind};
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
-use crate::agent::{
-    main_chat_agent_v1::{IntentRiskLevel, PolicyMemoryAdmissionProof, PolicySensitivity},
-    main_chat_memory_candidate::MemoryCandidateKind,
-};
 use crate::memory::{
     CanonicalMemoryRetrievalMutation, CanonicalMemoryRetrievalState, MemoryRetrievalDisposition,
 };
@@ -22,7 +19,10 @@ use unicode_normalization::UnicodeNormalization;
 use uuid::Uuid;
 
 const MEMORY_LIFECYCLE_AGGREGATE_KIND: &str = "memory_lifecycle";
-const MEMORY_LIFECYCLE_PROJECTION_TARGETS: [&str; 2] = ["memory_store", "vector_store"];
+// The lifecycle database owns the fact body and lexical truth. VectorStore is
+// a rebuildable semantic index; the KnowledgeNote/projection store must not
+// receive a duplicate canonical body.
+const MEMORY_LIFECYCLE_PROJECTION_TARGETS: [&str; 1] = ["vector_store"];
 const MEMORY_LIFECYCLE_RETRIEVAL_AGGREGATE_KIND: &str = "memory_retrieval";
 const MEMORY_LIFECYCLE_RETRIEVAL_OWNER_KIND: &str = "memory_lifecycle";
 
@@ -256,15 +256,6 @@ impl MemoryLifecycleRiskLevel {
         }
     }
 
-    pub fn from_intent_risk(value: IntentRiskLevel) -> Self {
-        match value {
-            IntentRiskLevel::Low => Self::Low,
-            IntentRiskLevel::Medium => Self::Medium,
-            IntentRiskLevel::High => Self::High,
-            IntentRiskLevel::Critical => Self::IdentityValue,
-        }
-    }
-
     fn conservative_max(self, other: Self) -> Self {
         if self.rank() >= other.rank() {
             self
@@ -308,19 +299,6 @@ impl MemoryLifecycleSensitivity {
         match value {
             "internal" => Self::Internal,
             _ => Self::Sensitive,
-        }
-    }
-
-    pub fn from_policy_and_candidate(
-        policy: PolicySensitivity,
-        candidate_sensitivity: &str,
-    ) -> Self {
-        if policy == PolicySensitivity::Sensitive
-            || Self::from_candidate_label(candidate_sensitivity) == Self::Sensitive
-        {
-            Self::Sensitive
-        } else {
-            Self::Internal
         }
     }
 
@@ -416,6 +394,161 @@ impl CanonicalMemoryFactDescriptor {
             &self.canonical_body,
         )
         .map(|(_, fact_key)| fact_key)
+    }
+}
+
+/// Single-use authority for one exact, reversible Agent Memory write.
+///
+/// The canonical Conversation item, selected candidate, and exact fact are
+/// bound by digest. This capability belongs to the Memory owner rather than a
+/// general intent router and is intentionally not serializable or cloneable.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ExplicitMemoryAdmissionProof {
+    source_message_id: String,
+    source_message_digest: String,
+    candidate_id: String,
+    candidate_digest: String,
+    fact_digest: String,
+    authority_digest: String,
+    binding_digest: String,
+}
+
+impl ExplicitMemoryAdmissionProof {
+    pub fn issue_from_agent_action(
+        user_message_proof: &crate::conversation::ConversationUserMessageProof,
+        source_user_message: &str,
+        candidate: &MemoryCandidate,
+        fact: &CanonicalMemoryFactDescriptor,
+        expected_scope: MemoryLifecycleScope,
+    ) -> Result<Self> {
+        use crate::agent::memory_candidate::MemoryDestination;
+
+        let source_message_digest =
+            crate::agent::metadata_safe::metadata_safe_text_digest(source_user_message).1;
+        if !user_message_proof.is_live()
+            || user_message_proof.content_digest() != source_message_digest
+            || user_message_proof.content_length_bytes() != source_user_message.len()
+        {
+            anyhow::bail!("explicit Memory admission requires the exact canonical user Item");
+        }
+        if candidate.candidate_id.trim().is_empty()
+            || candidate.destination != MemoryDestination::MemoryProposal
+            || candidate.explicitness != "explicit"
+        {
+            anyhow::bail!("explicit Memory admission candidate is not eligible");
+        }
+        if candidate.kind == MemoryCandidateKind::IdentityOrRole
+            || fact.category == MemoryLifecycleCategory::Boundary
+        {
+            anyhow::bail!("identity or boundary Memory cannot use the direct lane");
+        }
+        if !matches!(
+            fact.risk_level,
+            MemoryLifecycleRiskLevel::Low | MemoryLifecycleRiskLevel::Medium
+        ) || fact.sensitivity == MemoryLifecycleSensitivity::Sensitive
+        {
+            anyhow::bail!("high-risk or sensitive Memory requires ReviewWorkflow");
+        }
+        if fact.scope != expected_scope {
+            anyhow::bail!("explicit Memory admission scope does not match the typed Agent action");
+        }
+        if expected_scope != MemoryLifecycleScope::Global && fact.scope_owner_ref.is_none() {
+            anyhow::bail!("explicit non-global Memory admission requires a bound scope owner");
+        }
+        fact.fact_key()?;
+        let mut expected = CanonicalMemoryFactDescriptor::from_candidate(
+            candidate.normalized_claim.clone(),
+            candidate.kind,
+            expected_scope,
+            MemoryLifecycleRiskLevel::Low,
+            MemoryLifecycleSensitivity::from_candidate_label(&candidate.sensitivity),
+        )?;
+        expected.scope_owner_ref = fact.scope_owner_ref.clone();
+        if &expected != fact {
+            anyhow::bail!("explicit Memory admission fact does not match the selected candidate");
+        }
+        let candidate_value = serde_json::to_value(candidate)?;
+        let fact_value = serde_json::to_value(fact)?;
+        let authority_value = serde_json::json!({
+            "authority": "canonical_conversation_user_item",
+            "messageRef": user_message_proof.item_ref(),
+            "candidateId": candidate.candidate_id,
+        });
+        let mut proof = Self {
+            source_message_id: user_message_proof.item_ref(),
+            source_message_digest,
+            candidate_id: candidate.candidate_id.clone(),
+            candidate_digest: crate::agent::metadata_safe::metadata_safe_value_digest(
+                &candidate_value,
+            )
+            .1,
+            fact_digest: crate::agent::metadata_safe::metadata_safe_value_digest(&fact_value).1,
+            authority_digest: crate::agent::metadata_safe::metadata_safe_value_digest(
+                &authority_value,
+            )
+            .1,
+            binding_digest: String::new(),
+        };
+        proof.binding_digest = proof.compute_binding_digest();
+        Ok(proof)
+    }
+
+    fn compute_binding_digest(&self) -> String {
+        crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
+            "sourceMessageId": self.source_message_id,
+            "sourceMessageDigest": self.source_message_digest,
+            "candidateId": self.candidate_id,
+            "candidateDigest": self.candidate_digest,
+            "factDigest": self.fact_digest,
+            "authorityDigest": self.authority_digest,
+        }))
+        .1
+    }
+
+    fn consume_for_explicit_input(self, input: &ExplicitMemoryWriteInput) -> Result<()> {
+        let fact_value = serde_json::to_value(&input.fact)?;
+        let fact_digest = crate::agent::metadata_safe::metadata_safe_value_digest(&fact_value).1;
+        if self.source_message_id != input.source_message_id
+            || self.source_message_digest != input.source_message_digest
+            || self.candidate_id != input.authorized_candidate_id
+            || self.candidate_digest.trim().is_empty()
+            || self.fact_digest != fact_digest
+            || self.authority_digest.trim().is_empty()
+            || self.binding_digest != self.compute_binding_digest()
+        {
+            anyhow::bail!("explicit Memory admission proof does not match canonical write input");
+        }
+        Ok(())
+    }
+
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn test_fixture_for_explicit_input(input: &ExplicitMemoryWriteInput) -> Self {
+        let fact_value = serde_json::to_value(&input.fact).expect("serialize test Memory fact");
+        let candidate_value = serde_json::json!({
+            "candidateId": input.authorized_candidate_id,
+            "testOnly": true,
+        });
+        let authority_value = serde_json::json!({
+            "authority": "memory_test_fixture",
+            "testOnly": true,
+        });
+        let mut proof = Self {
+            source_message_id: input.source_message_id.clone(),
+            source_message_digest: input.source_message_digest.clone(),
+            candidate_id: input.authorized_candidate_id.clone(),
+            candidate_digest: crate::agent::metadata_safe::metadata_safe_value_digest(
+                &candidate_value,
+            )
+            .1,
+            fact_digest: crate::agent::metadata_safe::metadata_safe_value_digest(&fact_value).1,
+            authority_digest: crate::agent::metadata_safe::metadata_safe_value_digest(
+                &authority_value,
+            )
+            .1,
+            binding_digest: String::new(),
+        };
+        proof.binding_digest = proof.compute_binding_digest();
+        proof
     }
 }
 
@@ -520,8 +653,8 @@ pub enum MemoryAdmissionOutcome {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExplicitMemoryWriteInput {
-    pub source_task_id: String,
-    pub source_run_id: String,
+    pub source_task_id: Option<String>,
+    pub source_run_id: Option<String>,
     pub source_message_id: String,
     pub source_message_digest: String,
     pub authorized_candidate_id: String,
@@ -749,6 +882,7 @@ impl MemoryLifecycleStore {
             )",
             [],
         )?;
+        migrate_legacy_source_task_column_tx(&tx)?;
         tx.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_lifecycle_proposal ON memory_lifecycle_records(proposal_id)",
             [],
@@ -1188,7 +1322,7 @@ impl MemoryLifecycleStore {
     pub fn commit_explicit_user_memory(
         &self,
         input: ExplicitMemoryWriteInput,
-        admission_proof: PolicyMemoryAdmissionProof,
+        admission_proof: ExplicitMemoryAdmissionProof,
     ) -> Result<ExplicitMemoryWriteReceipt> {
         admission_proof.consume_for_explicit_input(&input)?;
         if !matches!(
@@ -1346,8 +1480,8 @@ impl MemoryLifecycleStore {
         let mut record = MemoryLifecycleRecord {
             memory_id: memory_id.clone(),
             proposal_id: proposal_id.clone(),
-            source_task_id: Some(input.source_task_id),
-            source_run_id: Some(input.source_run_id),
+            source_task_id: input.source_task_id,
+            source_run_id: input.source_run_id,
             content: input.fact.canonical_body,
             scope: input.fact.scope,
             scope_owner_ref: input.fact.scope_owner_ref,
@@ -1425,7 +1559,7 @@ impl MemoryLifecycleStore {
         &self,
         input: ExplicitMemoryWriteInput,
     ) -> Result<ExplicitMemoryWriteReceipt> {
-        let admission_proof = PolicyMemoryAdmissionProof::test_fixture_for_explicit_input(&input);
+        let admission_proof = ExplicitMemoryAdmissionProof::test_fixture_for_explicit_input(&input);
         self.commit_explicit_user_memory(input, admission_proof)
     }
 
@@ -1567,7 +1701,7 @@ impl MemoryLifecycleStore {
 
     /// Irreversibly remove the canonical Memory body and all content-bearing
     /// lifecycle metadata. The row remains only as a body-free tombstone so
-    /// outbox projections can delete derived MemoryStore/vector content and a
+    /// outbox projections can delete derived note/vector content and a
     /// later replay cannot silently resurrect the erased owner.
     pub fn privacy_erase_memory_asset(&self, memory_id: &str) -> Result<MemoryPrivacyEraseReport> {
         let mut conn = self
@@ -1789,7 +1923,7 @@ impl MemoryLifecycleStore {
     /// Runtime-safe personal Memory context. The lifecycle row and retrieval
     /// disposition live in this one canonical database, so archive/restore,
     /// rollback and context selection are serialized by the same SQLite
-    /// transaction authority. A lagging MemoryStore/VectorStore projection can
+    /// transaction authority. A lagging note/vector projection can
     /// therefore never make an archived lifecycle body eligible for context.
     pub fn list_retrievable_records(
         &self,
@@ -2557,9 +2691,7 @@ fn category_from_proposal(proposal: &AgentProposal) -> Result<MemoryLifecycleCat
         );
     }
     Ok(match proposal.proposal_type {
-        ProposalType::PreferenceUpdate | ProposalType::MemoryWrite => {
-            MemoryLifecycleCategory::Preference
-        }
+        ProposalType::MemoryWrite => MemoryLifecycleCategory::Preference,
         ProposalType::MemoryArchive => MemoryLifecycleCategory::Correction,
         _ => MemoryLifecycleCategory::Fact,
     })
@@ -3462,7 +3594,12 @@ fn rebuild_memory_lifecycle_tables_if_needed_tx(tx: &rusqlite::Transaction<'_>) 
         && records_sql.contains("CHECK(risk_level IN")
         && records_sql.contains("CHECK(sensitivity IN")
         && records_sql.contains("CHECK(scope IN")
-        && records_sql.contains("CHECK(category IN");
+        && records_sql.contains("CHECK(category IN")
+        && !memory_lifecycle_table_has_column_tx(
+            tx,
+            "memory_lifecycle_records",
+            "source_task_session_id",
+        )?;
     let links_strict = links_sql.contains("admitted_memory_id TEXT NOT NULL")
         && links_sql.contains("fact_key TEXT NOT NULL CHECK")
         && links_sql.contains("CHECK(risk_level IN")
@@ -3551,6 +3688,63 @@ fn rebuild_memory_lifecycle_tables_if_needed_tx(tx: &rusqlite::Transaction<'_>) 
          CREATE INDEX idx_memory_lifecycle_proposal_links_memory
          ON memory_lifecycle_proposal_links(memory_id);",
     )?;
+    Ok(())
+}
+
+fn memory_lifecycle_table_has_column_tx(
+    tx: &rusqlite::Transaction<'_>,
+    table: &str,
+    column: &str,
+) -> Result<bool> {
+    if !table
+        .bytes()
+        .chain(column.bytes())
+        .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric())
+    {
+        anyhow::bail!("invalid Memory lifecycle migration identifier");
+    }
+    let mut statement = tx.prepare(&format!("PRAGMA table_info({table})"))?;
+    let columns = statement.query_map([], |row| row.get::<_, String>(1))?;
+    for existing in columns {
+        if existing? == column {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn migrate_legacy_source_task_column_tx(tx: &rusqlite::Transaction<'_>) -> Result<()> {
+    let has_canonical =
+        memory_lifecycle_table_has_column_tx(tx, "memory_lifecycle_records", "source_task_id")?;
+    let has_legacy = memory_lifecycle_table_has_column_tx(
+        tx,
+        "memory_lifecycle_records",
+        "source_task_session_id",
+    )?;
+    match (has_canonical, has_legacy) {
+        (false, true) => {
+            tx.execute_batch(
+                "ALTER TABLE memory_lifecycle_records
+                 RENAME COLUMN source_task_session_id TO source_task_id;",
+            )?;
+        }
+        (true, true) => {
+            tx.execute(
+                "UPDATE memory_lifecycle_records
+                 SET source_task_id = COALESCE(source_task_id, source_task_session_id)",
+                [],
+            )?;
+        }
+        (false, false) => {
+            crate::sqlite_migration::ensure_column(
+                tx,
+                "memory_lifecycle_records",
+                "source_task_id",
+                "TEXT",
+            )?;
+        }
+        (true, false) => {}
+    }
     Ok(())
 }
 
@@ -3940,8 +4134,8 @@ mod tests {
 
     fn explicit_input(message_id: &str, content: &str) -> ExplicitMemoryWriteInput {
         ExplicitMemoryWriteInput {
-            source_task_id: "task".into(),
-            source_run_id: "run".into(),
+            source_task_id: Some("task".into()),
+            source_run_id: Some("run".into()),
             source_message_id: message_id.into(),
             source_message_digest: digest_label(content),
             authorized_candidate_id: format!("candidate:test:{message_id}"),
@@ -4191,8 +4385,8 @@ mod tests {
         let proposed = store.accept_memory_proposal(proposal_input).unwrap();
         let explicit = store
             .commit_test_explicit_user_memory(ExplicitMemoryWriteInput {
-                source_task_id: "task".into(),
-                source_run_id: "run".into(),
+                source_task_id: Some("task".into()),
+                source_run_id: Some("run".into()),
                 source_message_id: "message-typed-semantic-fact".into(),
                 source_message_digest: digest_label("User prefers focused work before lunch."),
                 authorized_candidate_id: "candidate:test:message-typed-semantic-fact".into(),
@@ -4927,6 +5121,57 @@ mod tests {
     }
 
     #[test]
+    fn legacy_source_task_session_column_migrates_losslessly_even_at_current_schema_version() {
+        let directory = tempfile::tempdir().expect("temporary lifecycle directory");
+        let path = directory.path().join("legacy-source-task-column.db");
+        let store = MemoryLifecycleStore::new(&path).unwrap();
+        let committed = store
+            .commit_test_explicit_user_memory(explicit_input(
+                "message-legacy-source-task",
+                "Legacy source task column fact",
+            ))
+            .unwrap();
+        drop(store);
+
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "ALTER TABLE memory_lifecycle_records
+             RENAME COLUMN source_task_id TO source_task_session_id;",
+        )
+        .unwrap();
+        let recorded_version: i64 = conn
+            .query_row(
+                "SELECT version FROM openlife_schema_versions
+                 WHERE component = 'memory_lifecycle_store'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(recorded_version, 7);
+        drop(conn);
+
+        let migrated = MemoryLifecycleStore::new(&path).expect("migrate legacy task column");
+        let record = migrated
+            .get_record(&committed.memory_id)
+            .unwrap()
+            .expect("preserve canonical Memory record");
+        assert_eq!(record.source_task_id.as_deref(), Some("task"));
+
+        let conn = migrated.conn.lock().unwrap();
+        let columns = conn
+            .prepare("PRAGMA table_info(memory_lifecycle_records)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "source_task_id"));
+        assert!(!columns
+            .iter()
+            .any(|column| column == "source_task_session_id"));
+    }
+
+    #[test]
     fn legacy_duplicate_facts_migrate_to_one_conservative_owner() {
         let directory = tempfile::tempdir().expect("temporary lifecycle directory");
         let path = directory.path().join("legacy-duplicates.db");
@@ -5043,7 +5288,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(winner_materialized_events, 1);
-        assert_eq!(winner_deliveries, 2);
+        assert_eq!(winner_deliveries, 1);
         assert_eq!(tombstone_count, 1);
         drop(conn);
 
@@ -5638,8 +5883,8 @@ mod tests {
     fn direct_lane_rejects_boundary_identity_high_and_sensitive_memory() {
         let store = MemoryLifecycleStore::new_in_memory().unwrap();
         let boundary = ExplicitMemoryWriteInput {
-            source_task_id: "task-boundary".into(),
-            source_run_id: "run-boundary".into(),
+            source_task_id: Some("task-boundary".into()),
+            source_run_id: Some("run-boundary".into()),
             source_message_id: "message-boundary".into(),
             source_message_digest: digest_label("I am the finance administrator."),
             authorized_candidate_id: "candidate:test:message-boundary".into(),
@@ -5653,8 +5898,8 @@ mod tests {
             .unwrap(),
         };
         let identity = ExplicitMemoryWriteInput {
-            source_task_id: "task-identity".into(),
-            source_run_id: "run-identity".into(),
+            source_task_id: Some("task-identity".into()),
+            source_run_id: Some("run-identity".into()),
             source_message_id: "message-identity".into(),
             source_message_digest: digest_label("I am the finance administrator."),
             authorized_candidate_id: "candidate:test:message-identity".into(),
@@ -5687,7 +5932,7 @@ mod tests {
                 &format!("message-proof-{mutation}"),
                 "One exact proof-bound Memory fact",
             );
-            let proof = PolicyMemoryAdmissionProof::test_fixture_for_explicit_input(&input);
+            let proof = ExplicitMemoryAdmissionProof::test_fixture_for_explicit_input(&input);
             match mutation {
                 "message" => input.source_message_digest = digest_label("different message"),
                 "candidate" => input.authorized_candidate_id.push_str(":forged"),
@@ -5860,7 +6105,7 @@ mod tests {
                 .projection_summary(repaired.outbox_event_id.as_deref().unwrap())
                 .unwrap()
                 .pending,
-            2
+            1
         );
     }
 

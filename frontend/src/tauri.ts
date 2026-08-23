@@ -1,137 +1,66 @@
-import { invoke } from "@tauri-apps/api/core";
 import type { ChatMessage } from "./types";
-
-function isTauriEnv(): boolean {
-  return typeof window !== "undefined" && !!(window as any).__TAURI_INTERNALS__;
-}
-
-function safeInvoke<T>(cmd: string, args?: Record<string, any>): Promise<T> {
-  if (!isTauriEnv()) {
-    return Promise.reject(
-      new Error("当前不在 OpenLife 桌面应用环境中，无法调用原生功能。请在桌面窗口内操作。")
-    );
-  }
-  if (import.meta.env.DEV && import.meta.env.MODE !== "test") {
-    console.log("[safeInvoke]", cmd, redactInvokeArgs(cmd, args));
-  }
-  return invoke<T>(cmd, args);
-}
-
-type RedactedValue =
-  | null
-  | string
-  | number
-  | boolean
-  | {
-      redacted?: true;
-      type?: string;
-      keys?: string[];
-      length?: number;
-      itemCount?: number;
-      hash?: string;
-      items?: RedactedValue[];
-      [key: string]: any;
-    };
-
-const SECRET_KEY_RE = /(openai_key|api_key|password|token|secret|authorization|credential)/i;
-const PAYLOAD_KEY_RE = /(payload|import|export)/i;
-const TOOL_ARGUMENT_KEY_RE = /^(arguments|args|toolArguments|tool_arguments)$/i;
-const CONTENT_KEY_RE = /^(content|fileContent|file_content|body|emailBody|email_body)$/i;
-const NOTES_KEY_RE = /^(notes|note|testerNotes|tester_notes)$/i;
-const SESSION_KEY_RE = /^(sessionId|session_id)$/;
-
-export function redactInvokeArgs(
-  cmd: string,
-  args?: Record<string, any>
-): Record<string, RedactedValue> | undefined {
-  void cmd;
-  if (!args) return args;
-  const redacted: Record<string, RedactedValue> = {};
-  for (const [key, value] of Object.entries(args)) {
-    redacted[key] = redactValue(value, key);
-  }
-  return redacted;
-}
-
-function redactValue(value: any, key: string): RedactedValue {
-  if (value == null) return value;
-  if (SESSION_KEY_RE.test(key) && typeof value === "string") return value;
-  if (SECRET_KEY_RE.test(key)) return summarizeSensitive(value);
-  if (PAYLOAD_KEY_RE.test(key)) return summarizeSensitive(value);
-  if (TOOL_ARGUMENT_KEY_RE.test(key)) return summarizeSensitive(value);
-  if (CONTENT_KEY_RE.test(key)) return summarizeSensitive(value);
-  if (NOTES_KEY_RE.test(key)) return summarizeSensitive(value);
-
-  if (Array.isArray(value)) {
-    if (key === "messages") {
-      return {
-        type: "array",
-        itemCount: value.length,
-        items: value.map(item =>
-          item && typeof item === "object"
-            ? {
-                role: typeof item.role === "string" ? item.role : summarizeSensitive(item.role),
-                content: summarizeSensitive(item.content),
-              }
-            : summarizeSensitive(item)
-        ),
-      };
-    }
-    return {
-      type: "array",
-      itemCount: value.length,
-      hash: stableHash(JSON.stringify(value)),
-    };
-  }
-
-  if (typeof value === "object") {
-    const output: Record<string, RedactedValue | string[] | undefined> = {
-      type: "object",
-      keys: Object.keys(value).sort(),
-    };
-    for (const [childKey, childValue] of Object.entries(value)) {
-      output[childKey] = redactValue(childValue, childKey);
-    }
-    return output as RedactedValue;
-  }
-
-  if (typeof value === "string") {
-    return summarizeSensitive(value);
-  }
-  return value;
-}
-
-function summarizeSensitive(value: any): RedactedValue {
-  const serialized = typeof value === "string" ? value : JSON.stringify(value);
-  return {
-    redacted: true,
-    type: Array.isArray(value) ? "array" : typeof value,
-    keys:
-      value && typeof value === "object" && !Array.isArray(value)
-        ? Object.keys(value).sort()
-        : undefined,
-    length: serialized.length,
-    hash: stableHash(serialized),
-  };
-}
-
-function stableHash(value: string): string {
-  let hash = 2166136261;
-  for (let i = 0; i < value.length; i += 1) {
-    hash ^= value.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return `fnv1a:${(hash >>> 0).toString(16).padStart(8, "0")}`;
-}
-
-function sessionArgs(sessionId: string): { sessionId: string } {
-  return { sessionId };
-}
-
-function selectedSkillArgs(selectedSkillId?: string): { selectedSkillId: string } | undefined {
-  const trimmed = selectedSkillId?.trim();
-  return trimmed ? { selectedSkillId: trimmed } : undefined;
-}
+export { redactInvokeArgs } from "./ipc/invoke";
+export {
+  assignConversationProject,
+  cancelChatTurn,
+  clearMainChatSkill,
+  createChatSession,
+  createProject,
+  deleteChatSession,
+  detachResourceFromTurn,
+  getConversationViewModel,
+  listMainChatSkills,
+  listMainChatToolCandidates,
+  pickAndImportResources,
+  renameChatSession,
+  selectMainChatSkill,
+  setConversationMemoryMode,
+  startStreamMessage,
+  submitMainChatTaskSteering,
+} from "./ipc/conversation";
+export {
+  cancelWorkTask,
+  exportArtifactResult,
+  getWorkbenchViewModel,
+  openArtifactResult,
+  openExternalHttpsSource,
+  requestArtifactUndo,
+  retryWorkTask,
+} from "./ipc/work";
+export {
+  getConfig,
+  getLifeStateProjection,
+  getProductDiagnosticsViewModel,
+  getProviderPrivacyBoundarySummary,
+  recoverRequiredCredentialAccess,
+  saveConfig,
+  selectArtifactOutputDirectory,
+  testLlmConnection,
+} from "./ipc/settings";
+export {
+  acceptProposal,
+  getReviewCenterViewModel,
+  postponeProposal,
+  rejectProposal,
+} from "./ipc/review";
+export {
+  archiveMemory,
+  confirmLifeModelLearningCandidate,
+  correctMemory,
+  deleteLifeModelLearningCandidate,
+  draftLifeModelV2Change,
+  draftLifeModelV2Export,
+  draftLifeModelV2Rollback,
+  editLifeModelLearningProposal,
+  getLifeModelViewModel,
+  getMemoryViewModel,
+  pauseLifeModelLearningSuggestionClass,
+  privacyEraseMemoryAsset,
+  rejectLifeModelLearningCandidate,
+  restoreMemory,
+  rollbackMemoryAsset,
+  stageLifeModelLearningCandidate,
+} from "./ipc/personalIntelligence";
 
 export type CloudApiValidationStatus =
   | "unconfigured"
@@ -174,10 +103,9 @@ export interface AppConfig {
   system?: {
     ollama_cache_ttl_seconds?: number;
     memory_search_top_k?: number;
+    agent_memory_enabled?: boolean;
     safe_paths?: string[];
-    workspace_memory_root?: string;
-    project_memory_root?: string;
-    search_provider?: "duckduckgo" | "brave" | "deepseek" | "searxng";
+    search_provider?: "auto" | "duckduckgo" | "brave" | "deepseek" | "searxng";
     search_provider_key?: string;
     search_provider_key_ref?: string;
     searxng_url?: string;
@@ -193,101 +121,13 @@ export interface NetworkPolicy {
   tool_overrides?: Record<string, "ask" | "allow" | "deny">;
 }
 
-export async function getConfig(): Promise<AppConfig> {
-  return safeInvoke<AppConfig>("get_config");
-}
-
-export async function saveConfig(config: AppConfig): Promise<void> {
-  return safeInvoke("save_config", { config });
-}
-
 export interface ArtifactOutputDirectorySelection {
   cancelled: boolean;
   selectedPath: string | null;
 }
 
-export async function selectArtifactOutputDirectory(): Promise<ArtifactOutputDirectorySelection> {
-  return safeInvoke<ArtifactOutputDirectorySelection>("select_artifact_output_directory");
-}
-
-export type MarkdownMemoryScope = "workspace" | "project";
-
-export interface MarkdownMemoryRootSelection {
-  cancelled: boolean;
-  scope: MarkdownMemoryScope;
-  selectedPath: string | null;
-}
-
-export interface MarkdownMemoryRootView {
-  scope: MarkdownMemoryScope;
-  configured: boolean;
-  rootPath: string | null;
-  status: "ready" | "unavailable" | "unconfigured";
-}
-
-export interface MarkdownMemoryFileView {
-  scope: MarkdownMemoryScope;
-  relativePath: string;
-  content: string;
-  contentDigest: string;
-  charCount: number;
-  active: boolean;
-}
-
-export interface MarkdownMemoryViewModel {
-  roots: MarkdownMemoryRootView[];
-  files: MarkdownMemoryFileView[];
-  totalCharCount: number;
-  truncated: boolean;
-  sourceRule: string;
-}
-
-export interface MarkdownMemoryProposalReceipt {
-  proposalId: string;
-  scope: MarkdownMemoryScope;
-  relativePath: string;
-  operation: "write" | "deactivate";
-  status: "review_required";
-}
-
-export async function selectMarkdownMemoryRoot(
-  scope: MarkdownMemoryScope
-): Promise<MarkdownMemoryRootSelection> {
-  return safeInvoke<MarkdownMemoryRootSelection>("select_markdown_memory_root", { scope });
-}
-
-export async function getMarkdownMemoryViewModel(): Promise<MarkdownMemoryViewModel> {
-  return safeInvoke<MarkdownMemoryViewModel>("get_markdown_memory_view_model");
-}
-
-export async function draftMarkdownMemoryFileProposal(request: {
-  scope: MarkdownMemoryScope;
-  relativePath: string;
-  content: string;
-  expectedCurrentDigest?: string;
-}): Promise<MarkdownMemoryProposalReceipt> {
-  return safeInvoke<MarkdownMemoryProposalReceipt>("draft_markdown_memory_file_proposal", {
-    request,
-  });
-}
-
-export async function deactivateMarkdownMemoryFileProposal(request: {
-  scope: MarkdownMemoryScope;
-  relativePath: string;
-  expectedCurrentDigest: string;
-}): Promise<MarkdownMemoryProposalReceipt> {
-  return safeInvoke<MarkdownMemoryProposalReceipt>("deactivate_markdown_memory_file_proposal", {
-    request,
-  });
-}
-
 export interface CredentialRecoveryItem {
-  purpose:
-    | "canonical_task_receipts"
-    | "task_store"
-    | "mcp_audit"
-    | "provider_api_key"
-    | "search_provider_api_key";
+  purpose: "canonical_task_receipts" | "mcp_audit" | "provider_api_key" | "search_provider_api_key";
   status:
     | CredentialBootstrapStatus
     | "created"
@@ -305,10 +145,6 @@ export interface CredentialRecoveryReport {
   bootstrapSnapshotDigest: string;
 }
 
-export async function recoverRequiredCredentialAccess(): Promise<CredentialRecoveryReport> {
-  return safeInvoke<CredentialRecoveryReport>("recover_required_credential_access");
-}
-
 export interface MainChatMessageOptions {
   operationId: string;
   selectedSkillId?: string;
@@ -317,182 +153,11 @@ export interface MainChatMessageOptions {
   runId?: string;
 }
 
-export type ToolCallStatus = "success" | "error" | "pending" | "blocked" | "needs_confirmation";
-
-export type ProductToolCallStatus =
-  | "success"
-  | "failed"
-  | "effect_unknown"
-  | "not_dispatched"
-  | "locally_aborted"
-  | "remote_unknown"
-  | "unknown";
-
-export interface ProductToolReference {
-  id: string;
-  source: string;
-}
-
-export type ToolActionEffect =
-  | "read_only"
-  | "local_mutation"
-  | "external_mutation"
-  | "proposal_only"
-  | "unknown";
-
-export type ToolIdempotencyContract = "unspecified" | "non_idempotent" | "idempotent";
-
-export type ToolDispatchKind =
-  | "not_attempted"
-  | "local"
-  | "network"
-  | "mcp_stdio"
-  | "simulated"
-  | "unknown";
-
-export type ToolTransportStatus =
-  | "not_attempted"
-  | "dispatched"
-  | "response_observed"
-  | "local_aborted"
-  | "remote_unknown";
-
-export type ToolEffectStatus = "not_attempted" | "confirmed" | "unknown";
-export type ToolExecutionOutcome = "not_observed" | "succeeded" | "failed" | "unknown";
-export type ToolAuditPersistenceStatus =
-  | "not_required"
-  | "pending"
-  | "committed"
-  | "failed"
-  | "unknown";
-
-export interface ProductToolExecutionReceipt {
-  receiptRef: string;
-  requestDigest: string;
-  actionEffect: ToolActionEffect;
-  idempotencyContract: ToolIdempotencyContract;
-  dispatchKind: ToolDispatchKind;
-  dispatchAttemptCount: number;
-  dispatchObserved: boolean;
-  transportStatus: ToolTransportStatus;
-  effectStatus: ToolEffectStatus;
-  outcome: ToolExecutionOutcome;
-  auditPersistenceStatus: ToolAuditPersistenceStatus;
-  verified: boolean;
-}
-
-export type ProductToolFailureCode =
-  | "tool_failed"
-  | "tool_effect_unknown"
-  | "tool_remote_state_unknown"
-  | "tool_locally_aborted"
-  | "tool_not_dispatched"
-  | "tool_state_unknown"
-  | "tool_evidence_unverified";
-
-export interface ProductToolCallResult {
-  toolRef: ProductToolReference;
-  actionRef: string;
-  runRef?: string;
-  status: ProductToolCallStatus;
-  requiresConfirmation: boolean;
-  failureCode?: ProductToolFailureCode;
-  privacyWarningCount: number;
-  proposalRef?: string;
-  executionReceipt?: ProductToolExecutionReceipt;
-  outputReceipt?: ContentReceipt;
-}
-
-export type ToolCallResult = ProductToolCallResult;
-
-export interface ProductToolActionTrace {
-  actionId: string;
-  stepIndex: number;
-  toolCallIndex: number;
-  actionType: string;
-  toolName: string;
-  toolSource: string;
-  actionCategory: string;
-  riskLevel: string;
-  permissionDecision?: string;
-  status: string;
-  proposalId?: string;
-  observationId?: string;
-  outputPreview?: string;
-  outputReceipt?: ContentReceipt;
-  startedAt?: string;
-  finishedAt?: string;
-  metadataSafe: boolean;
-}
-
-/**
- * Client-only compatibility shape for historical fixtures and archived views.
- * Shipped commands return ProductToolActionTrace and do not promise these
- * legacy optional fields.
- */
-export interface ToolActionTraceEnvelope extends ProductToolActionTrace {
-  runId?: string;
-  toolId?: string;
-  observationStatus?: string;
-  outputItemCount?: number;
-}
-
-export interface ContentReceipt {
-  version: number;
-  kind: "tool_output" | "tool_error";
-  provenance: "observed_tool_adapter_body";
-  byteCount: number;
-  digest: string;
-  verified: boolean;
-}
-
-export interface ProductAgentTrace {
-  generation_result?: MainChatGenerationResult;
-}
-
-export interface MainChatMemoryCandidateTrace {
-  candidateId?: string;
-  kind?: string;
-  destination?: string;
-  sourcePreview?: string;
-  normalizedClaim?: string;
-  sensitivity?: string;
-  stability?: string;
-  explicitness?: string;
-  futureActionability?: string;
-  confidence?: number;
-  reasonCodes?: string[];
-}
-
-export interface MainChatMemoryGovernanceEvidence {
-  candidateCount?: number;
-  candidateTrace?: MainChatMemoryCandidateTrace[];
-  lifeEventIds?: string[];
-  memoryProposalIds?: string[];
-  lifeModelProposalIds?: string[];
-  sessionOnlyCandidateIds?: string[];
-  noOpCandidateIds?: string[];
-  blockers?: string[];
-  directWritesExecuted?: boolean;
-  directLifeModelWrite?: boolean;
-  directMemoryWrite?: boolean;
-  acceptedDurableTruthWritten?: boolean;
-  localLifeEventCaptureExecuted?: boolean;
-}
-
-export interface MainChatGenerationResult {
-  memoryGovernance?: MainChatMemoryGovernanceEvidence;
-  [key: string]: any;
-}
-
 export interface SendMessageResult {
   reply: string;
   status?: MainChatTurnStatus;
   blockers?: string[];
-  reasoning_trace: ProductAgentTrace;
-  tool_calls: ToolCallResult[];
   run_id?: string;
-  agent_ingress?: MainChatAgentIngressDecision;
   provider_invocation_status?: ProviderInvocationStatus;
   model_invoked?: boolean;
   tool_invoked?: boolean;
@@ -581,9 +246,6 @@ export interface StreamMessageStartPayload {
   run_id?: string;
   status?: MainChatTurnStatus;
   blockers?: string[];
-  reasoning_trace?: ProductAgentTrace;
-  tool_calls?: ToolCallResult[];
-  agent_ingress?: MainChatAgentIngressDecision;
   provider_invocation_status?: ProviderInvocationStatus;
   model_invoked?: boolean;
   tool_invoked?: boolean;
@@ -614,115 +276,6 @@ export interface StreamMessageDonePayload {
   model_invoked?: boolean;
   tool_invoked?: boolean;
   life_model_influence?: MainChatLifeModelProductReceipt;
-  reasoning_trace?: ProductAgentTrace;
-  tool_calls?: ToolCallResult[];
-  agent_ingress?: MainChatAgentIngressDecision;
-}
-
-export type MainChatKernelEvent =
-  | {
-      type: "turn_started";
-      session_id: string;
-      selected_skill_id?: string | null;
-    }
-  | {
-      type: "context_loaded";
-      context_snapshot_ref: string;
-      selected_source_count: number;
-      selected_skill_instruction_loaded: boolean;
-    }
-  | {
-      type: "life_model_context_loaded";
-      available: boolean;
-      model_version?: number | null;
-      selected_item_count: number;
-      status: string;
-      source_id?: string | null;
-      selected_item_refs: string[];
-      reason_codes: string[];
-      receipt: MainChatLifeModelProductReceipt;
-    }
-  | {
-      type: "route_selected";
-      route_metadata: {
-        provider: string;
-        model: string;
-        routeType: string;
-        preferLocal: boolean;
-        localModel: string;
-        reason: string;
-        privacyLevel: string;
-        toolsEnabled: boolean;
-        liveEvalRequired: boolean;
-        finalAcceptanceGateRequired: boolean;
-        readinessGateRequired: boolean;
-        scriptedResponseConfigured: boolean;
-      };
-    }
-  | {
-      type: "final_answer";
-      content_preview: string;
-      content_chars: number;
-    }
-  | {
-      type: "tool_decision";
-      tool_name: string;
-      action_type: string;
-      target: string;
-      reason: string;
-      model_arguments_ignored: boolean;
-    }
-  | {
-      type: "tool_observation";
-      tool_name: string;
-      status: string;
-      output_preview: string;
-      blocker?: string | null;
-    }
-  | {
-      type: "write_intent_decision";
-      outcome_kind: string;
-      action_type: string;
-      target: string;
-      reason: string;
-      requires_confirmation: boolean;
-      hard_blocked: boolean;
-    }
-  | {
-      type: "blocker";
-      code: string;
-    };
-
-export type MainChatDisposition =
-  | "direct_answer"
-  | "read_only_tool"
-  | "plan_draft"
-  | "transient_state_command"
-  | "reversible_memory_commit"
-  | "memory_proposal"
-  | "life_model_proposal"
-  | "file_write_proposal"
-  | "action_proposal"
-  | "blocked_confirmation";
-
-export interface MainChatPrivacyRiskSummary {
-  riskLevel: string;
-  privacyClass: string;
-  policyReasonCode: string;
-  localOnlyRequired: boolean;
-  writeLike: boolean;
-  externalWriteLike: boolean;
-}
-
-export interface MainChatAgentIngressDecision {
-  requestId: string;
-  sourceSessionId: string;
-  taskKind: string;
-  disposition: MainChatDisposition;
-  confidence: number;
-  reasonSummary: string;
-  fallbackEligible: boolean;
-  privacyRisk: MainChatPrivacyRiskSummary;
 }
 
 export interface MainChatSkillSummary {
@@ -790,55 +343,17 @@ export interface MainChatToolCandidateList {
   controls: string[];
 }
 
-export async function listMainChatSkills(sessionId?: string): Promise<MainChatSkillSummary[]> {
-  return safeInvoke<MainChatSkillSummary[]>("list_main_chat_skills", {
-    ...(sessionId === undefined ? {} : { sessionId }),
-  });
-}
-
-export async function selectMainChatSkill(
-  sessionId: string,
-  skillId: string
-): Promise<MainChatSelectedSkill> {
-  return safeInvoke<MainChatSelectedSkill>("select_main_chat_skill", {
-    sessionId,
-    skillId,
-  });
-}
-
-export async function clearMainChatSkill(sessionId: string): Promise<MainChatSelectedSkill> {
-  return safeInvoke<MainChatSelectedSkill>("clear_main_chat_skill", {
-    sessionId,
-  });
-}
-
-export async function listMainChatToolCandidates(
-  taskId?: string
-): Promise<MainChatToolCandidateList> {
-  return safeInvoke<MainChatToolCandidateList>("list_main_chat_tool_candidates", {
-    taskId,
-  });
-}
-
-export async function openExternalHttpsSource(url: string): Promise<void> {
-  return safeInvoke("open_external_https_source", { url });
-}
+export type ExportArtifactResult = {
+  cancelled: boolean;
+  savedPath?: string;
+  contentDigest?: string;
+};
 
 export interface CancelChatTurnResult {
   conversationId: string;
   turnId: string;
   status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
   activeTurnFound: boolean;
-}
-
-export async function cancelChatTurn(
-  conversationId: string,
-  turnId: string
-): Promise<CancelChatTurnResult> {
-  return safeInvoke<CancelChatTurnResult>("cancel_chat_turn", {
-    conversationId,
-    turnId,
-  });
 }
 
 export interface CanonicalWorkControlResult {
@@ -854,24 +369,6 @@ export interface CanonicalWorkControlResult {
     | "cancelled"
     | "interrupted"
     | "effect_unknown";
-}
-
-export async function cancelWorkTask(taskId: string): Promise<CanonicalWorkControlResult> {
-  return safeInvoke<CanonicalWorkControlResult>("cancel_work_task", { taskId });
-}
-
-export async function retryWorkTask(
-  taskId: string,
-  priorRunId: string
-): Promise<SendMessageResult> {
-  const newRunId = crypto.randomUUID();
-  const newTurnId = crypto.randomUUID();
-  return safeInvoke<SendMessageResult>("retry_work_task", {
-    taskId,
-    priorRunId,
-    newRunId,
-    newTurnId,
-  });
 }
 
 export type MainChatSteeringStatus = "pending" | "consumed" | "blocked";
@@ -893,57 +390,6 @@ export interface MainChatSteeringRecord {
 export interface SubmitMainChatSteeringResponse {
   steering: MainChatSteeringRecord;
   scopeExpansionBlocked: boolean;
-}
-
-export async function submitMainChatTaskSteering(request: {
-  steeringId: string;
-  taskId: string;
-  runId: string;
-  sessionId: string;
-  content: string;
-}): Promise<SubmitMainChatSteeringResponse> {
-  return safeInvoke<SubmitMainChatSteeringResponse>("submit_main_chat_task_steering", request);
-}
-
-export async function startStreamMessage(
-  sessionId: string,
-  messages: ChatMessage[],
-  options: MainChatMessageOptions
-): Promise<StreamMessageDonePayload> {
-  const payload = {
-    operationId: options.operationId,
-    ...sessionArgs(sessionId),
-    messages,
-    mode: options.mode ?? "chat",
-    taskId: options.taskId,
-    runId: options.runId,
-    ...selectedSkillArgs(options.selectedSkillId),
-  };
-  return safeInvoke<StreamMessageDonePayload>("start_stream_message", {
-    args: payload,
-  });
-}
-
-export async function pickAndImportResources(
-  importOperationId: string,
-  turnOperationId: string
-): Promise<ResourceImportSelectionResult> {
-  return safeInvoke<ResourceImportSelectionResult>("pick_and_import_resources", {
-    importOperationId,
-    turnOperationId,
-  });
-}
-
-export async function detachResourceFromTurn(
-  operationId: string,
-  turnOperationId: string,
-  resourceId: string
-): Promise<ResourceDetachReceipt> {
-  return safeInvoke<ResourceDetachReceipt>("detach_resource_from_turn", {
-    operationId,
-    turnOperationId,
-    resourceId,
-  });
 }
 
 export interface RuntimeBuildInfo {
@@ -992,10 +438,6 @@ export interface ProductDiagnosticsViewModel {
   counts: ProductContentCounts;
   credentialBootstrap: CredentialBootstrapSnapshot;
   blockerCodes: string[];
-}
-
-export async function getProductDiagnosticsViewModel(): Promise<ProductDiagnosticsViewModel> {
-  return safeInvoke<ProductDiagnosticsViewModel>("get_product_diagnostics_view_model");
 }
 
 export type ProviderTransmissionStatus =
@@ -1100,18 +542,6 @@ export interface LifeToolPermissionProjection {
   allowUntilRevokedCount: number;
 }
 
-export interface LifeSurfaceProjection {
-  surface: "today" | "mailbox" | "chat" | "companion" | "life_model" | "settings" | string;
-  pendingReviewCount: number;
-  editedReviewCount: number;
-  totalReviewRequiredCount: number;
-  readinessStatus: "ready" | "partial" | "blocked" | string;
-  taskStatus: string;
-  safeModeActive: boolean;
-  waitingPermissionCount: number;
-  activeToolPermissionCount: number;
-}
-
 export type CredentialBootstrapStatus =
   | "available"
   | "initialization_required"
@@ -1126,7 +556,6 @@ export interface CredentialBootstrapSnapshot {
   purposes: Array<{
     purpose:
       | "canonical_task_receipts"
-      | "task_store"
       | "mcp_audit"
       | "provider_api_key"
       | "search_provider_api_key";
@@ -1145,12 +574,7 @@ export interface LifeStateProjection {
   credentialBootstrap?: CredentialBootstrapSnapshot;
   toolPermissions: LifeToolPermissionProjection;
   safePaths: string[];
-  surfaces: LifeSurfaceProjection[];
   sourceRefs: string[];
-}
-
-export async function getLifeStateProjection(): Promise<LifeStateProjection> {
-  return safeInvoke<LifeStateProjection>("get_life_state_projection");
 }
 
 // Backend-owned shared product read-model contract.
@@ -1268,14 +692,6 @@ export type ProviderPrivacyBoundarySummary = {
   evidenceRefs: EvidenceRef[];
 };
 
-export type MemoryLane =
-  | "turn_context"
-  | "episodic_life_event"
-  | "semantic_fact_preference"
-  | "procedural_rule"
-  | "evidence_record"
-  | "canonical_lifemodel_truth";
-
 export type BackendEntityRef = {
   id: string;
   kind:
@@ -1296,20 +712,11 @@ export type BackendEntityRef = {
 };
 
 export type ReviewItemType =
-  | "goal_update"
-  | "state_update"
-  | "preference_update"
-  | "capability_update"
   | "memory_write"
   | "memory_archive"
   | "tool_permission"
-  | "scheduled_task"
   | "external_write_action"
-  | "model_policy_change"
-  | "data_export"
-  | "schedule_checkin"
-  | "life_model_update"
-  | "unsupported";
+  | "life_model_update";
 
 export type ReviewItemDecisionStatus =
   | "pending"
@@ -1386,8 +793,6 @@ export type ReviewDecisionContext = {
       | "move"
       | "trash"
       | "restore"
-      | "create_local_calendar_projection"
-      | "create_scheduled_task"
       | "open_email_draft"
       | "open_browser_url"
       | "run_local_utility"
@@ -1570,55 +975,6 @@ export type LifeModelHumanProjectionV2 = {
   yaml: string;
 };
 
-export type LegacyLifeModelMigrationItemV2 = {
-  sourcePath: string;
-  valuePreview: string;
-  valueDigest: string;
-  valueTruncated: boolean;
-  disposition:
-    | "review_required"
-    | "external_owner"
-    | "manual_classification"
-    | "not_migrated"
-    | "migration_metadata";
-  targetOwner:
-    | "life_model_v2"
-    | "state_store"
-    | "tasks"
-    | "agent_memory"
-    | "tool_capability"
-    | "migration_metadata"
-    | "legacy_compatibility_projection"
-    | "unassigned";
-  targetSection:
-    | "identity"
-    | "values"
-    | "long_term_goals"
-    | "stable_preferences"
-    | "personal_boundaries"
-    | "important_relationships"
-    | "capabilities"
-    | "resources"
-    | "decision_principles"
-    | "collaboration_preferences"
-    | null;
-  reasonCode: string;
-  sensitive: boolean;
-};
-
-export type LegacyLifeModelMigrationPreviewV2 = {
-  schemaVersion: string;
-  sourceDigest: string;
-  items: LegacyLifeModelMigrationItemV2[];
-  reviewRequiredCount: number;
-  externalOwnerCount: number;
-  manualClassificationCount: number;
-  notMigratedCount: number;
-  migrationMetadataCount: number;
-  containsSensitiveItems: boolean;
-  candidates: LegacyLifeModelMigrationCandidateV2[];
-};
-
 export type LifeModelSectionV2 =
   | "identity"
   | "values"
@@ -1631,7 +987,7 @@ export type LifeModelSectionV2 =
   | "decision_principles"
   | "collaboration_preferences";
 
-export type LegacyLifeModelMigrationCandidateValueV2 =
+export type LifeModelUserValueV2 =
   | { kind: "statement"; value: { statement: string } }
   | { kind: "long_term_goal"; value: { direction: string; meaning: string } }
   | {
@@ -1640,8 +996,6 @@ export type LegacyLifeModelMigrationCandidateValueV2 =
     }
   | { kind: "capability"; value: { name: string; description: string } }
   | { kind: "resource"; value: { name: string; description: string } };
-
-export type LifeModelUserValueV2 = LegacyLifeModelMigrationCandidateValueV2;
 
 export type LifeModelV2UserChange =
   | { operation: "add"; section: LifeModelSectionV2; value: LifeModelUserValueV2 }
@@ -1682,36 +1036,6 @@ export type LifeModelV2ProposalReceipt = {
   baseDocumentDigest: string | null;
   resultDocumentDigest: string | null;
   operationCount: number;
-};
-
-export type LegacyLifeModelMigrationCandidateV2 = {
-  candidateId: string;
-  itemId: string;
-  sourcePaths: string[];
-  targetSection: LifeModelSectionV2;
-  proposedValue: LegacyLifeModelMigrationCandidateValueV2;
-  sensitive: boolean;
-};
-
-export type LegacyLifeModelMigrationSelectionV2 = {
-  candidateId: string;
-  decision: "include" | "exclude";
-  editedValue: LegacyLifeModelMigrationCandidateValueV2 | null;
-};
-
-export type DraftLegacyLifeModelMigrationRequest = {
-  sourceDigest: string;
-  selections: LegacyLifeModelMigrationSelectionV2[];
-  nonLifemodelItemsAcknowledged: boolean;
-};
-
-export type DraftLegacyLifeModelMigrationReceipt = {
-  proposalId: string;
-  status: "review_required";
-  sourceDigest: string;
-  includedCount: number;
-  excludedCount: number;
-  nonLifemodelItemCount: number;
 };
 
 export type LifeModelTrustQualityState = {
@@ -1874,7 +1198,6 @@ export type LifeModelViewModel = {
   truthMode: LifeModelTruthMode;
   canonicalSummary: LifeModelCanonicalSummary | null;
   versionHistory: LifeModelVersionHistoryEntryV2[];
-  legacyMigrationPreview: LegacyLifeModelMigrationPreviewV2 | null;
   trustQualityState: LifeModelTrustQualityState;
   pendingUpdateCounts: LifeModelPendingUpdateCounts;
   provenanceRefs: EvidenceRef[];
@@ -1898,6 +1221,7 @@ export type TaskLifecycleStatus =
   | "failed"
   | "remote_unknown"
   | "cancelled"
+  | "interrupted"
   | "completed"
   | "completed_with_pending_review"
   | "completed_needs_evidence"
@@ -2038,6 +1362,7 @@ export type TaskViewModelItem = {
   lifecycleStatus: TaskLifecycleStatus;
   terminalDeliveryStatus: TaskTerminalDeliveryStatus;
   finalDeliveryEvidencePresent: boolean;
+  completionDisposition?: "complete" | "complete_with_disclosed_limitations";
   items: TaskItemViewModel[];
   workPlan?: {
     revision: number;
@@ -2132,81 +1457,17 @@ export type WorkspaceActivityItem = {
 
 export type WorkspaceViewModel = {
   selectedConversationId?: string;
-  tasks: TaskViewModelItem[];
-  activeTask?: TaskViewModelItem;
-  recentTaskRefs: BackendEntityRef[];
-  pendingReviewItems: ReviewItem[];
   activity: WorkspaceActivityItem[];
-  providerPrivacyBoundarySummary: ProviderPrivacyBoundarySummary;
   activityRedactionState: string;
   sourceRefs: EvidenceRef[];
   contractLimitations: string[];
 };
 
-export type MemoryTierSummary = {
-  total: number;
-  tier1: number;
-  tier2: number;
-  tier3: number;
-  archived: number;
-};
-
-export type MemoryLifecycleSummary = {
-  candidateCount: number;
-  pendingReviewCount: number;
-  editedPendingReviewCount: number;
-  acceptedCount: number;
-  confirmedCount: number;
-  pendingMaterializationCount: number;
-  materializedCount: number;
-  materializationFailedCount: number;
-  rejectedCount: number;
-  deferredCount: number;
-  supersededCount: number;
-  rolledBackCount: number;
-  expiredCount: number;
-  archivedCount: number;
-  byStatus: Record<string, number>;
-  byMaterializationStatus: Record<string, number>;
-};
-
-export type MemoryLaneSummary = {
-  lane: MemoryLane;
-  label: string;
-  totalCount: number;
-  activeCount: number;
-  candidateCount: number;
-  pendingReviewCount: number;
-  confirmedCount: number;
-  materializedCount: number;
-  rolledBackCount: number;
-  archivedCount: number;
-  reviewItemRefs: BackendEntityRef[];
-  evidenceRefs: EvidenceRef[];
-};
-
-export type MemoryLifeModelLinkageSummary = {
-  linkedMemoryCount: number;
-  candidateMemoryCount: number;
-  materializedMemoryCount: number;
-  conflictCount: number;
-  boundaryMemoryCount: number;
-  linkageStatus: "partial" | "unknown";
-  memoryRefs: BackendEntityRef[];
-  evidenceRefs: EvidenceRef[];
-};
-
 export type MemoryViewModelSummary = {
-  totalLifecycleRecords: number;
+  totalMemoryCount: number;
   activeMemoryCount: number;
-  reviewRequiredCount: number;
-  materializedCount: number;
-  pendingMaterializationCount: number;
-  failedMaterializationCount: number;
-  rolledBackCount: number;
-  archivedVectorCount: number;
-  conflictCount: number;
-  tierSummary?: MemoryTierSummary;
+  archivedMemoryCount: number;
+  historicalMemoryCount: number;
 };
 
 export type MemoryItemView = {
@@ -2214,20 +1475,13 @@ export type MemoryItemView = {
   content?: string;
   scope: string;
   category: string;
-  status: string;
-  materializationStatus: string;
   recallState: "active" | "paused" | "archived" | "historical" | "erased" | "unavailable";
-  sensitivity: string;
   whyRemembered: string;
   recallExplanation: string;
   acceptedAt?: string;
-  evidenceIds: string[];
   sourceRefs: EvidenceRef[];
-  supersedesMemoryId?: string;
-  replacementMemoryId?: string;
   privacyErased: boolean;
   canCorrect: boolean;
-  canStopRecall: boolean;
   canArchive: boolean;
   canRestore: boolean;
   canRollback: boolean;
@@ -2236,11 +1490,6 @@ export type MemoryItemView = {
 
 export type MemoryViewModel = {
   summary: MemoryViewModelSummary;
-  lifecycleSummary: MemoryLifecycleSummary;
-  laneSummaries: MemoryLaneSummary[];
-  recentMemoryRefs: BackendEntityRef[];
-  reviewItemRefs: BackendEntityRef[];
-  lifeModelLinkage: MemoryLifeModelLinkageSummary;
   items: MemoryItemView[];
   sourceRefs: EvidenceRef[];
   contractLimitations: string[];
@@ -2269,10 +1518,6 @@ export interface ProviderInvocationReceipt {
   error_digest?: string;
   simulated: boolean;
   policy_evidence?: Record<string, unknown>;
-}
-
-export async function testLlmConnection(config: AppConfig): Promise<LlmConnectionTestResult> {
-  return safeInvoke<LlmConnectionTestResult>("test_llm_connection", { config });
 }
 
 export interface ChatSession {
@@ -2315,6 +1560,8 @@ export interface ConversationViewModel {
   projects: ProjectRecord[];
   selectedProjectId: string | null;
   selectedConversationId: string | null;
+  globalMemoryEnabled: boolean;
+  selectedMemoryMode: ConversationMemoryMode;
   messages: ChatMessage[];
   latestTurn: ConversationTurnViewModel | null;
   providerStatus: "ready" | "unavailable";
@@ -2324,58 +1571,14 @@ export interface ConversationViewModel {
   workStatus: "available" | "unavailable";
 }
 
+export type ConversationMemoryMode = "use_and_learn" | "use_only" | "off";
+
 export interface WorkbenchViewModel {
   capturedAt: string;
-  conversation: ViewModelEnvelope<ConversationViewModel>;
   workspace: ViewModelEnvelope<WorkspaceViewModel>;
   tasks: ViewModelEnvelope<TasksViewModel>;
   review: ViewModelEnvelope<ReviewCenterViewModel>;
   providerBoundary: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
-}
-
-export async function getConversationViewModel(
-  conversationId?: string
-): Promise<ConversationViewModel> {
-  return safeInvoke<ConversationViewModel>("get_conversation_view_model", {
-    conversationId,
-  });
-}
-
-export async function getWorkbenchViewModel(
-  conversationId?: string | null
-): Promise<WorkbenchViewModel> {
-  return safeInvoke<WorkbenchViewModel>("get_workbench_view_model", {
-    ...(conversationId == null || conversationId === "" ? {} : { conversationId }),
-  });
-}
-
-export async function createChatSession(sessionId: string, title: string): Promise<void> {
-  return safeInvoke("create_chat_session", { ...sessionArgs(sessionId), title });
-}
-
-export async function createProject(projectId: string, name: string): Promise<ProjectRecord> {
-  return safeInvoke<ProjectRecord>("create_project", {
-    projectId,
-    name,
-  });
-}
-
-export async function assignConversationProject(
-  conversationId: string,
-  projectId: string | null
-): Promise<void> {
-  return safeInvoke("assign_conversation_project", {
-    conversationId,
-    projectId,
-  });
-}
-
-export async function renameChatSession(sessionId: string, title: string): Promise<void> {
-  return safeInvoke("rename_chat_session", { ...sessionArgs(sessionId), title });
-}
-
-export async function deleteChatSession(sessionId: string): Promise<void> {
-  return safeInvoke("delete_chat_session", sessionArgs(sessionId));
 }
 
 // ── Canonical Memory retrieval / access-tier telemetry ──
@@ -2393,164 +1596,6 @@ export interface MemoryRetrievalMutationResult {
   outboxEventId?: string;
   projectionState: "applied" | "pending" | "degraded" | "superseded" | "compensated";
   projectionErrorDigest?: string;
-}
-
-export async function restoreArchivedMemory(
-  owner: CanonicalMemoryOwner
-): Promise<MemoryRetrievalMutationResult> {
-  return safeInvoke<MemoryRetrievalMutationResult>("restore_archived_chunks", { owner });
-}
-
-export interface ProductModelRouteTrace {
-  provider: string;
-  model: string;
-  routeType: string;
-  reason?: string;
-  privacyLevel: string;
-  retryCount: number;
-  fallbackReason?: string;
-  providerHealthIsEstimated?: boolean;
-}
-
-export interface ProductContextSummary {
-  lifeModelEmpty: boolean;
-  memoryHitCount: number;
-  usedToolsPrompt: boolean;
-  redactionApplied: boolean;
-  redactionLevel: string;
-}
-
-export interface ProductToolActionScope {
-  toolName: string;
-  source: string;
-  riskLevel: string;
-  capabilities: string[];
-}
-
-/** Frontend-only compatibility fields; ProductModelRouteTrace is the IPC contract. */
-export interface ModelRouteTrace extends ProductModelRouteTrace {
-  preferLocal?: boolean;
-  localModel?: string;
-  latencyMs?: number;
-}
-
-/** Frontend-only compatibility fields; ProductContextSummary is the IPC contract. */
-export interface ContextSummary extends ProductContextSummary {
-  includedLifeModelSections?: string[];
-  memorySources?: string[];
-}
-
-/** Frontend-only compatibility fields; ProductToolActionScope is the IPC contract. */
-export interface ToolActionScope extends ProductToolActionScope {
-  toolId?: string;
-  actionType?: string;
-  requiresConfirmation?: boolean;
-  allowed?: boolean;
-}
-
-export async function getReviewCenterViewModel(): Promise<
-  ViewModelEnvelope<ReviewCenterViewModel>
-> {
-  return safeInvoke<ViewModelEnvelope<ReviewCenterViewModel>>("get_review_center_view_model");
-}
-
-export async function getLifeModelViewModel(): Promise<ViewModelEnvelope<LifeModelViewModel>> {
-  return safeInvoke<ViewModelEnvelope<LifeModelViewModel>>("get_life_model_view_model");
-}
-
-export async function deleteLifeModelLearningCandidate(
-  candidateId: string
-): Promise<DeleteLifeModelLearningCandidateReceipt> {
-  return safeInvoke<DeleteLifeModelLearningCandidateReceipt>(
-    "delete_lifemodel_learning_candidate",
-    { candidateId }
-  );
-}
-
-export async function confirmLifeModelLearningCandidate(
-  candidateId: string
-): Promise<ConfirmLifeModelLearningCandidateReceipt> {
-  return safeInvoke<ConfirmLifeModelLearningCandidateReceipt>(
-    "confirm_lifemodel_learning_candidate",
-    { candidateId }
-  );
-}
-
-export async function stageLifeModelLearningCandidate(
-  candidateId: string
-): Promise<StageLifeModelLearningCandidateReceipt> {
-  return safeInvoke<StageLifeModelLearningCandidateReceipt>("stage_lifemodel_learning_candidate", {
-    candidateId,
-  });
-}
-
-export async function editLifeModelLearningProposal(
-  proposalId: string,
-  statement: string
-): Promise<{
-  proposalId: string;
-  status: "edited_pending_review";
-  resultDocumentDigest: string;
-  durableWriteExecuted: false;
-  learning: LifeModelLearningReviewDecisionReceipt;
-}> {
-  return safeInvoke("edit_lifemodel_learning_proposal", {
-    request: { proposalId, statement },
-  });
-}
-
-export async function rejectLifeModelLearningCandidate(
-  candidateId: string
-): Promise<LifeModelLearningDecisionReceipt> {
-  return safeInvoke<LifeModelLearningDecisionReceipt>("reject_lifemodel_learning_candidate", {
-    candidateId,
-  });
-}
-
-export async function pauseLifeModelLearningSuggestionClass(
-  candidateId: string
-): Promise<LifeModelLearningDecisionReceipt> {
-  return safeInvoke<LifeModelLearningDecisionReceipt>("pause_lifemodel_learning_suggestion_class", {
-    candidateId,
-  });
-}
-
-export async function draftLegacyLifeModelMigration(
-  request: DraftLegacyLifeModelMigrationRequest
-): Promise<DraftLegacyLifeModelMigrationReceipt> {
-  return safeInvoke<DraftLegacyLifeModelMigrationReceipt>("draft_legacy_lifemodel_migration", {
-    request,
-  });
-}
-
-export async function draftLifeModelV2Change(
-  request: DraftLifeModelV2ChangeRequest
-): Promise<LifeModelV2ProposalReceipt> {
-  return safeInvoke<LifeModelV2ProposalReceipt>("draft_lifemodel_v2_change", { request });
-}
-
-export async function draftLifeModelV2Rollback(
-  request: DraftLifeModelV2RollbackRequest
-): Promise<LifeModelV2ProposalReceipt> {
-  return safeInvoke<LifeModelV2ProposalReceipt>("draft_lifemodel_v2_rollback", { request });
-}
-
-export async function draftLifeModelV2Export(
-  request: DraftLifeModelV2ExportRequest
-): Promise<LifeModelV2ProposalReceipt> {
-  return safeInvoke<LifeModelV2ProposalReceipt>("draft_lifemodel_v2_export", { request });
-}
-
-export async function getMemoryViewModel(): Promise<ViewModelEnvelope<MemoryViewModel>> {
-  return safeInvoke<ViewModelEnvelope<MemoryViewModel>>("get_memory_view_model");
-}
-
-export async function getProviderPrivacyBoundarySummary(): Promise<
-  ViewModelEnvelope<ProviderPrivacyBoundarySummary>
-> {
-  return safeInvoke<ViewModelEnvelope<ProviderPrivacyBoundarySummary>>(
-    "get_provider_privacy_boundary_summary"
-  );
 }
 
 export interface MemoryLifecycleRecord {
@@ -2643,11 +1688,13 @@ export interface MemoryPrivacyEraseReport {
   projectionErrorDigest?: string;
 }
 
-export interface MemoryActionProposalReceipt {
-  proposalId: string;
+export interface MemoryCorrectionResult {
   memoryId: string;
-  action: "correct" | "stop_recall" | "archive";
-  status: "review_required";
+  replacedMemoryId: string;
+  canonicalCommitted: boolean;
+  projectionState: "pending" | "degraded" | "applied" | "superseded" | "compensated";
+  projectionErrorDigest?: string;
+  undoAvailable: boolean;
 }
 
 export interface PatchApplyResult {
@@ -2678,7 +1725,6 @@ export interface ConfirmedAcceptProposalResult {
   canonicalTaskRuntimeProjectionStatus?: "confirmed" | "reconciliation_required" | "not_applicable";
   proposalId?: string;
   warnings: string[];
-  memoryGateway?: unknown;
   memoryLifecycle?: MemoryLifecycleRecord;
   memoryPersistence?: {
     canonicalCommitted: boolean;
@@ -2713,58 +1759,3 @@ export interface DeferredAcceptProposalResult {
 }
 
 export type AcceptProposalResult = ConfirmedAcceptProposalResult | DeferredAcceptProposalResult;
-
-export async function acceptProposal(proposalId: string): Promise<AcceptProposalResult> {
-  return safeInvoke("accept_proposal", { proposalId });
-}
-
-export async function rollbackMemoryAsset(
-  memoryId: string,
-  reason: string
-): Promise<MemoryRollbackReport> {
-  return safeInvoke("rollback_memory_asset", { memoryId, reason });
-}
-
-export async function draftMemoryCorrectionProposal(
-  memoryId: string,
-  content: string
-): Promise<MemoryActionProposalReceipt> {
-  return safeInvoke("draft_memory_correction_proposal", {
-    memoryId,
-    content,
-  });
-}
-
-export async function draftMemoryArchiveProposal(
-  memoryId: string
-): Promise<MemoryActionProposalReceipt> {
-  return safeInvoke("draft_memory_archive_proposal", { memoryId });
-}
-
-export async function draftMemoryStopRecallProposal(
-  memoryId: string
-): Promise<MemoryActionProposalReceipt> {
-  return safeInvoke("draft_memory_stop_recall_proposal", { memoryId });
-}
-
-export async function privacyEraseMemoryAsset(memoryId: string): Promise<MemoryPrivacyEraseReport> {
-  return safeInvoke("privacy_erase_memory_asset", { memoryId });
-}
-
-export async function rejectProposal(proposalId: string): Promise<void> {
-  return safeInvoke("reject_proposal", { proposalId });
-}
-
-export async function requestArtifactUndo(artifactId: string): Promise<{
-  artifactId: string;
-  proposalId: string;
-  status: "waiting_review";
-}> {
-  return safeInvoke("request_artifact_undo", {
-    artifactId,
-  });
-}
-
-export async function postponeProposal(proposalId: string): Promise<void> {
-  return safeInvoke("postpone_proposal", { proposalId });
-}

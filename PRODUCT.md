@@ -53,6 +53,11 @@ require a separate top-level product page.
   contract.
 - The provider and model selected by the user remain bound to the task. OpenLife
   may retry that route, but it must not silently switch model or provider.
+- Chat and Work use one provider-agnostic Agent harness. Provider adapters may
+  describe authentication, endpoint, streaming, structured-output, reasoning,
+  and tool-call transport capabilities, but they must not define a separate
+  intent router, planner, tool policy, completion rule, or product flow for a
+  vendor or model.
 - Missing, stale, or failed evidence must remain visibly unknown or blocked.
 - Plans, tool activity, streaming text, and proposal acceptance are progress
   evidence, not proof that the requested result was completed.
@@ -69,8 +74,11 @@ This is an engineering baseline, not a claim of market readiness or complete
 future capability coverage.
 
 Earlier development programs remain in Git history. ADR 0018 and ADR 0019
-remain the accepted reconstruction and harness contracts. There is no active
-implementation plan.
+remain the accepted reconstruction and harness contracts. The capable-product
+plan is complete and remains in Git history. The active Agent capability
+rebuild plan replaces the retained keyword-driven and compatibility paths with
+one model-driven harness and closes each capability vertically through the
+runtime, product surface, deletion, and required evidence.
 
 Repository governance remains small and conventional: at most one active plan, normal
 source tests, normal CI, and concise architecture and decision records.

@@ -1,0 +1,225 @@
+import type { EvidenceRef, ReviewItem } from "@/tauri";
+import type {
+  WorkbenchContextSummary,
+  WorkbenchEvidenceReference,
+  WorkbenchInspectorModel,
+} from "@/ui/shell";
+import { toWorkbenchEvidence } from "@/shared/evidencePresentation";
+import { taskLifecyclePresentation } from "@/features/work/taskPresentation";
+import {
+  activeScopedTask,
+  scopedReviewItems,
+  type WorkbenchSnapshot,
+} from "@/app/workbenchDataSource";
+
+function uniqueEvidence(refs: readonly EvidenceRef[]): WorkbenchEvidenceReference[] {
+  const seen = new Set<string>();
+  return refs
+    .filter(ref => {
+      if (seen.has(ref.id)) return false;
+      seen.add(ref.id);
+      return true;
+    })
+    .map(toWorkbenchEvidence);
+}
+
+function diagnosticsText(snapshot: WorkbenchSnapshot): string {
+  return snapshot.diagnostics
+    .map(item => `${item.id}:${item.status}${item.message ? ` (${item.message})` : ""}`)
+    .join(" | ");
+}
+
+export function workspaceContext(snapshot: WorkbenchSnapshot | null): WorkbenchContextSummary {
+  if (!snapshot || snapshot.workspaceEnvelope.status === "loading") {
+    return {
+      eyebrow: "当前执行",
+      title: "工作区",
+      status: { label: "正在读取", status: "neutral" },
+    };
+  }
+  if (snapshot.workspaceEnvelope.status === "error") {
+    return {
+      eyebrow: "当前执行",
+      title: "工作区",
+      status: { label: "状态不可用", status: "error" },
+    };
+  }
+  if (snapshot.workspaceEnvelope.status === "stale") {
+    return {
+      eyebrow: "当前执行",
+      title: "工作区",
+      status: { label: "状态已陈旧", status: "stale" },
+    };
+  }
+  if (snapshot.workspaceEnvelope.status === "empty") {
+    return {
+      eyebrow: "当前执行",
+      title: "工作区",
+      status: { label: "没有当前任务", status: "neutral" },
+    };
+  }
+  const task = activeScopedTask(snapshot);
+  if (!task) {
+    return {
+      eyebrow: "当前执行",
+      title: "工作区",
+      status: { label: "没有当前任务", status: "neutral" },
+    };
+  }
+  const status = taskLifecyclePresentation(task);
+  return { eyebrow: "当前执行", title: "工作区", status };
+}
+
+export function workspaceInspector(
+  snapshot: WorkbenchSnapshot | null,
+  selectedEvidence: string
+): WorkbenchInspectorModel {
+  if (!snapshot) {
+    return {
+      title: "工作区详情",
+      conclusion: "正在读取当前任务。",
+      risk: "读取完成前不开放审核或任务控制。",
+      nextAction: "等待系统读模型返回。",
+      evidence: [],
+    };
+  }
+  const envelopeModel = snapshot.workspaceEnvelope.data;
+  const model = ["ready", "stale"].includes(snapshot.workspaceEnvelope.status)
+    ? envelopeModel
+    : null;
+  const task = activeScopedTask(snapshot);
+  const pendingReviewItems = scopedReviewItems(snapshot);
+  const evidence = uniqueEvidence([
+    ...(model?.sourceRefs ?? []),
+    ...(task?.evidenceRefs ?? []),
+    ...(model?.activity.flatMap(item => item.evidenceRefs) ?? []),
+    ...pendingReviewItems.flatMap(item => item.evidenceRefs),
+    ...(snapshot.boundaryEnvelope.data?.evidenceRefs ?? []),
+  ]);
+  const permissionItem = task && pendingReviewItems.find(item => item.type === "tool_permission");
+
+  return {
+    title: task?.title ?? "工作区详情",
+    conclusion:
+      snapshot.workspaceEnvelope.status === "error"
+        ? "WorkspaceViewModel 未能建立，当前没有可执行产品结论。"
+        : task?.lifecycleStatus === "waiting_permission"
+          ? "任务暂停在一个明确动作之前；被请求的动作尚未执行。"
+          : task?.lifecycleStatus === "waiting_review"
+            ? "报告产物已经生成，但任务要等你审核后才能确认交付。"
+            : task?.lifecycleStatus === "running"
+              ? "刷新后的任务读模型确认同一任务正在处理。"
+              : task
+                ? `系统将当前任务标记为 ${task.lifecycleStatus}。`
+                : "系统没有提供当前活动任务。",
+    risk: permissionItem
+      ? permissionItem.decisionContext.permission?.status === "ready"
+        ? "批准只创建一次精确授权；任务恢复和后续结果仍需独立刷新。"
+        : "权限范围不完整，批准必须保持禁用。"
+      : snapshot.workspaceEnvelope.status === "error" ||
+          snapshot.workspaceEnvelope.status === "stale"
+        ? "错误或陈旧状态不能授权审核决定或任务恢复。"
+        : "当前没有等待决定的精确权限项。",
+    nextAction: permissionItem
+      ? "进入需处理事项核对访问范围并作出决定。"
+      : "查看当前活动与来源；没有系统允许的动作时保持只读。",
+    evidence,
+    evidenceFeedback: selectedEvidence
+      ? `已选择 ${selectedEvidence}；这里只展示引用元数据，不展开敏感正文。`
+      : evidence.length === 0
+        ? "当前没有可展示的系统证据引用。"
+        : undefined,
+    technicalDetails: [
+      { label: "workspaceStatus", value: snapshot.workspaceEnvelope.status },
+      { label: "activeTaskId", value: task?.canonicalTaskId ?? "none" },
+      { label: "lifecycle", value: task?.lifecycleStatus ?? "none" },
+      {
+        label: "reviewItemIds",
+        value: pendingReviewItems.map(item => item.id).join(", ") || "none",
+      },
+      {
+        label: "controlIds",
+        value: task?.allowedControls.map(control => control.id).join(", ") || "none",
+      },
+      { label: "redaction", value: model?.activityRedactionState ?? "unknown" },
+      { label: "diagnostics", value: diagnosticsText(snapshot) },
+    ],
+  };
+}
+
+export function reviewInspector(
+  snapshot: WorkbenchSnapshot | null,
+  item: ReviewItem | null,
+  selectedEvidence: string
+): WorkbenchInspectorModel {
+  if (!snapshot) {
+    return {
+      title: "审核详情",
+      conclusion: "正在读取审核项。",
+      risk: "读取完成前不开放决定动作。",
+      nextAction: "等待系统读模型返回。",
+      evidence: [],
+    };
+  }
+  const permission = item?.decisionContext.permission;
+  const evidence = uniqueEvidence([
+    ...(snapshot.reviewEnvelope.evidenceRefs ?? []),
+    ...(item?.evidenceRefs ?? []),
+    ...(item?.decisionContext.evidenceRefs ?? []),
+    ...(permission?.evidenceRefs ?? []),
+    ...(permission?.transmissionBoundary.evidenceRefs ?? []),
+  ]);
+
+  return {
+    title: item?.decisionContext.title ?? "审核详情",
+    conclusion: item
+      ? item.status === "approved"
+        ? item.type === "tool_permission"
+          ? "一次性权限决定已经记录，但任务是否继续仍取决于刷新后的 TaskControl。"
+          : item.materializationStatus === "applied"
+            ? "刷新后的审核读模型确认变更已经应用。"
+            : item.materializationStatus === "applying"
+              ? "刷新后的审核读模型确认应用过程已经开始，但尚未完成。"
+              : item.materializationStatus === "failed"
+                ? "审核决定仍为已批准，但应用过程失败。"
+                : item.materializationStatus === "rolled_back"
+                  ? "刷新后的审核读模型确认此前应用已经回滚。"
+                  : item.materializationStatus === "unknown"
+                    ? "审核决定已经记录，但应用结果未知。"
+                    : "审核决定已经记录，但没有已应用证明。"
+        : `审核项当前状态为 ${item.status}；打开详情没有改变该状态。`
+      : snapshot.reviewEnvelope.status === "error"
+        ? "ReviewCenterViewModel 未能建立。"
+        : "当前没有选中的审核项。",
+    risk: permission
+      ? permission.status === "ready"
+        ? `${permission.transmissionBoundary.summary} 授权只匹配一次精确动作。`
+        : `权限上下文缺少：${permission.missingFields.join("、") || "未说明字段"}。`
+      : item
+        ? `风险级别由系统标记为 ${item.risk}；不能从页面文本重新分级。`
+        : "没有可用于决定的上下文。",
+    nextAction: item
+      ? ["pending", "edited", "deferred"].includes(item.status)
+        ? "比较范围、影响与来源，再选择拒绝、稍后或批准。"
+        : "查看刷新后的状态与证据；不要从命令回调推断完成。"
+      : "选择一个审核项。",
+    evidence,
+    evidenceFeedback: selectedEvidence
+      ? `已选择 ${selectedEvidence}；这里只展示引用元数据，不展开敏感正文。`
+      : evidence.length === 0
+        ? "当前没有可展示的系统证据引用。"
+        : undefined,
+    technicalDetails: [
+      { label: "reviewStatus", value: snapshot.reviewEnvelope.status },
+      { label: "reviewItemId", value: item?.id ?? "none" },
+      { label: "decision", value: item?.status ?? "none" },
+      { label: "materialization", value: item?.materializationStatus ?? "none" },
+      { label: "proposalId", value: item?.source.proposalId ?? "none" },
+      { label: "scopeKind", value: permission?.scopeKind ?? "none" },
+      { label: "scopeDigest", value: permission?.scopeDigest ?? "none" },
+      { label: "requestDigest", value: permission?.requestDigest ?? "none" },
+      { label: "networkDecision", value: permission?.networkPolicyDecisionId ?? "none" },
+      { label: "diagnostics", value: diagnosticsText(snapshot) },
+    ],
+  };
+}

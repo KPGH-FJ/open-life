@@ -7,7 +7,6 @@ use crate::tool_manifest::{ToolIdempotencyContract, ToolManifest, ToolSource};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -70,12 +69,11 @@ struct JsonRpcResponse {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[allow(dead_code)]
 struct JsonRpcError {
     code: i32,
     message: String,
-    #[serde(default)]
-    data: Option<Value>,
+    #[serde(default, rename = "data")]
+    _data: Option<Value>,
 }
 
 struct McpSession {
@@ -727,69 +725,6 @@ fn registry_execution_instance_key(manifest: &ToolManifest) -> String {
     format!("{}\0{}\0{}", manifest.source, manifest.id, manifest.name)
 }
 
-fn memory_archive_owner_parameters() -> Value {
-    let owner = serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "ownerKind": {
-                "type": "string",
-                "enum": ["memory_lifecycle", "memory_record", "knowledge_note"]
-            },
-            "ownerId": { "type": "string", "minLength": 1, "maxLength": 256 }
-        },
-        "required": ["ownerKind", "ownerId"]
-    });
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "owner": owner.clone(),
-            "owners": {
-                "type": "array",
-                "items": owner,
-                "minItems": 1,
-                "maxItems": 200,
-                "uniqueItems": true
-            },
-            "reason": { "type": "string", "maxLength": 512 }
-        },
-        "oneOf": [
-            { "required": ["owner"], "not": { "required": ["owners"] } },
-            { "required": ["owners"], "not": { "required": ["owner"] } }
-        ]
-    })
-}
-
-fn memory_write_parameters() -> Value {
-    serde_json::json!({
-        "type": "object",
-        "additionalProperties": false,
-        "properties": {
-            "content": { "type": "string", "minLength": 1, "maxLength": 65536 },
-            "scope": {
-                "type": "string",
-                "enum": ["global", "workspace", "conversation", "project"]
-            },
-            "category": {
-                "type": "string",
-                "enum": ["fact", "workflow", "preference", "boundary"]
-            },
-            "candidateKind": {
-                "type": "string",
-                "enum": [
-                    "episodic_life_event",
-                    "semantic_user_fact",
-                    "procedural_rule",
-                    "preference",
-                    "identity_or_role"
-                ]
-            }
-        },
-        "required": ["content"]
-    })
-}
-
 impl McpRegistry {
     pub fn new() -> Self {
         let mut reg = Self {
@@ -809,13 +744,13 @@ impl McpRegistry {
 
     /// Build the registry used by the default product release.
     ///
-    /// Core governed capabilities remain available, including Web, bounded
-    /// file reads, tasks, and Memory proposals. Test utilities and generic
-    /// extension dispatch stay out of the release product path.
+    /// Only capabilities that the current product can execute end to end are
+    /// exposed. Proposal generators and declarative stubs stay out of release;
+    /// future write tools must enter through the canonical Agent step and typed
+    /// Review subject contracts instead of reviving this compatibility layer.
     pub fn new_release_product() -> Self {
         let mut registry = Self::new();
         registry.remove_builtin_by_name("builtin_echo");
-        registry.remove_builtin_by_name("mcp.call_tool");
         registry
     }
 
@@ -875,116 +810,6 @@ impl McpRegistry {
             }),
         );
 
-        // Core OS Tools: Read-only
-        self.register_core_os_tool(
-            "life_model.read",
-            "读取当前 LifeModel 的四维数据（Identity/Goals/Capabilities/State）",
-            "low",
-            vec!["read".into(), "lifemodel".into()],
-            "read",
-            ToolIdempotencyContract::Idempotent,
-        );
-
-        self.register_core_os_tool(
-            "tool.list_available",
-            "列出所有已注册且可用的工具",
-            "low",
-            vec!["read".into()],
-            "read",
-            ToolIdempotencyContract::Idempotent,
-        );
-
-        self.register_core_os_tool(
-            "goal.read",
-            "读取 LifeModel 长期目标与 StateStore 当前每日任务（明确标注各自权威）",
-            "low",
-            vec!["read".into(), "lifemodel".into(), "state_store".into()],
-            "read",
-            ToolIdempotencyContract::Idempotent,
-        );
-
-        self.register_core_os_tool(
-            "state.read",
-            "读取 StateStore 当前任务与状态观察；不从 LifeModel 兼容字段重建事实",
-            "low",
-            vec!["read".into(), "state_store".into()],
-            "read",
-            ToolIdempotencyContract::Idempotent,
-        );
-
-        self.register_core_os_tool(
-            "memory.search",
-            "搜索向量记忆库，返回相关记忆片段",
-            "low",
-            vec!["read".into(), "memory".into()],
-            "read",
-            ToolIdempotencyContract::Idempotent,
-        );
-
-        self.register_core_os_tool(
-            "proposal.list",
-            "列出当前待处理的 Proposal",
-            "low",
-            vec!["read".into()],
-            "read",
-            ToolIdempotencyContract::Idempotent,
-        );
-
-        // Permission tools: let the agent inspect and request tool permissions.
-        self.register_core_os_tool(
-            "permission.check",
-            "查询指定工具当前的权限状态（允许/阻断/需确认及原因）",
-            "low",
-            vec!["read".into()],
-            "read",
-            ToolIdempotencyContract::Idempotent,
-        );
-
-        self.register_core_os_tool(
-            "permission.request",
-            "为指定工具请求权限（生成 ToolPermission Proposal 供用户审批）",
-            "medium",
-            vec!["read".into()],
-            "read",
-            ToolIdempotencyContract::NonIdempotent,
-        );
-
-        // snapshot.create is manifest-only until the Version Control executor is configured.
-        self.register_declarative_stub(
-            "snapshot.create",
-            "创建快照（当前能力需要在 Version Control 页面手动执行）",
-        );
-
-        // Core OS Tools: Write (Proposal-First)
-        self.register_core_os_tool(
-            "life_model.propose_patch",
-            "提议修改 LifeModel（生成 Proposal，不直接写入）",
-            "high",
-            vec!["write".into(), "lifemodel".into()],
-            "write",
-            ToolIdempotencyContract::NonIdempotent,
-        );
-
-        self.register_core_os_tool_with_parameters(
-            "memory.propose_write",
-            "提议写入记忆（生成 Proposal，不直接写入）",
-            "medium",
-            vec!["write".into(), "memory".into()],
-            "write",
-            ToolIdempotencyContract::NonIdempotent,
-            memory_write_parameters(),
-        );
-
-        self.register_core_os_tool_with_parameters(
-            "memory.propose_archive",
-            "提议归档记忆（生成 Proposal，不直接归档）",
-            "medium",
-            vec!["write".into(), "memory".into()],
-            "write",
-            ToolIdempotencyContract::NonIdempotent,
-            memory_archive_owner_parameters(),
-        );
-
         // Execution Tools: P1 (file, web)
         self.register_execution_tool(
             "file.read",
@@ -992,7 +817,16 @@ impl McpRegistry {
             "low",
             vec!["read".into(), "filesystem".into()],
             "read",
-            ToolIdempotencyContract::Idempotent,
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    "workspaceRelativePath": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    "governedInputSource": { "type": "string", "enum": ["canonical_work_agent_step_workspace_scope"] }
+                },
+                "required": ["path"]
+            }),
         );
 
         self.register_builtin(
@@ -1007,7 +841,11 @@ impl McpRegistry {
                         "message_id": { "type": "string", "minLength": 1, "maxLength": 256 },
                         "query": { "type": "string", "minLength": 1, "maxLength": 262144 },
                         "selection_request_id": { "type": "string", "format": "uuid" },
-                        "privacy_decision_id": { "type": "string", "minLength": 1, "maxLength": 256 }
+                        "privacy_decision_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+                        "governedInputSource": {
+                            "type": "string",
+                            "enum": ["canonical_work_agent_step_task_bound_import"]
+                        }
                     },
                     "required": ["message_id", "query", "selection_request_id", "privacy_decision_id"]
                 }),
@@ -1029,21 +867,21 @@ impl McpRegistry {
         );
 
         self.register_execution_tool(
-            "file.write_proposal",
-            "提议写入文件（生成 ExternalWriteAction Proposal，不直接写入）",
-            "high",
-            vec!["write".into(), "filesystem".into()],
-            "write",
-            ToolIdempotencyContract::NonIdempotent,
-        );
-
-        self.register_execution_tool(
             "web.fetch",
             "获取指定 URL 的内容",
             "medium",
             vec!["network".into()],
             "network",
-            ToolIdempotencyContract::Idempotent,
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "url": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    "summarize": { "type": "boolean" },
+                    "governedInputSource": { "type": "string", "enum": ["canonical_work_agent_step_observation_bound"] }
+                },
+                "required": ["url"]
+            }),
         );
 
         self.register_builtin(
@@ -1053,9 +891,14 @@ impl McpRegistry {
                 description: "联网搜索网页，输入 query 返回搜索结果摘要".into(),
                 parameters: serde_json::json!({
                     "type": "object",
+                    "additionalProperties": false,
                     "properties": {
                         "query": { "type": "string", "description": "Search query" },
-                        "max_results": { "type": "integer", "description": "Maximum number of results, default 5" }
+                        "max_results": { "type": "integer", "enum": [1,2,3,4,5,6,7,8,9,10], "description": "Maximum number of results, default 5" },
+                        "governedInputSource": {
+                            "type": "string",
+                            "enum": ["canonical_work_agent_step"]
+                        }
                     },
                     "required": ["query"]
                 }),
@@ -1073,118 +916,16 @@ impl McpRegistry {
             },
             Box::new(|_args| Ok("web.search executed".to_string())),
         );
-
-        self.register_builtin(
-            ToolManifest {
-                id: "mcp.call_tool".into(),
-                name: "mcp.call_tool".into(),
-                description: "调用已注册的 MCP 工具（通用入口）".into(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "tool_name": { "type": "string", "description": "目标 MCP 工具名" },
-                        "server": { "type": "string", "description": "可选：MCP server 名称" },
-                        "arguments": { "type": "object" }
-                    },
-                    "required": ["tool_name", "arguments"]
-                }),
-                permission_level: "medium".into(),
-                risk_level: "medium".into(),
-                version: "1.0.0".into(),
-                source: ToolSource::BuiltIn,
-                capabilities: vec!["network".into(), "external_side_effect".into()],
-                requires_confirmation: false,
-                enabled: true,
-                declarative_only: false,
-                action_type: "external_side_effect".into(),
-                idempotency_contract: ToolIdempotencyContract::NonIdempotent,
-                tags: vec!["execution".into(), "mcp_wrapper".into()],
-            },
-            Box::new(|_args| Ok("mcp.call_tool executed".to_string())),
-        );
-
-        // Execution Tools: P1 calendar.read (reads ICS files).
-        // Note: "filesystem" capability intentionally omitted — the handler validates
-        // against calendar_ics_paths + safe_paths using the "source" arg, not "path".
-        self.register_execution_tool(
-            "calendar.read",
-            "读取日历事件（从配置的 ICS 文件中解析 VEVENT）",
-            "low",
-            vec!["read".into(), "calendar".into()],
-            "read",
-            ToolIdempotencyContract::Idempotent,
-        );
-
-        // Execution Tools: P1 proposal-only governed executors.
-        self.register_execution_tool(
-            "calendar.propose_event",
-            "提议日历事件（仅生成 ScheduledTask Proposal，不直接写入日历）",
-            "medium",
-            vec!["write".into()],
-            "write",
-            ToolIdempotencyContract::NonIdempotent,
-        );
-
-        // email.read remains provider-gated until IMAP config is available.
-        self.register_declarative_stub("email.read", "读取邮件（需要配置 IMAP account 后启用）");
-
-        self.register_execution_tool(
-            "email.propose_draft",
-            "提议邮件草稿（仅生成 DataExport/email-draft Proposal，不发送邮件）",
-            "medium",
-            vec!["write".into()],
-            "write",
-            ToolIdempotencyContract::NonIdempotent,
-        );
-
-        // P1 task.create_proposal: creates real local tasks via TaskStore
-        self.register_execution_tool(
-            "task.create_proposal",
-            "创建本地任务/提醒/待办事项（P1：持久化到本地 TaskStore）",
-            "medium",
-            vec!["write".into()],
-            "write",
-            ToolIdempotencyContract::NonIdempotent,
-        );
     }
 
-    /// Helper to register a Core OS tool with standard metadata.
-    pub fn register_core_os_tool(
+    /// Helper to register an Execution tool.
+    fn register_execution_tool(
         &mut self,
         id: &str,
         description: &str,
         risk_level: &str,
         capabilities: Vec<String>,
         action_type: &str,
-        idempotency_contract: ToolIdempotencyContract,
-    ) {
-        self.register_core_os_tool_with_parameters(
-            id,
-            description,
-            risk_level,
-            capabilities,
-            action_type,
-            idempotency_contract,
-            serde_json::json!({
-                "type": "object",
-                "properties": {}
-            }),
-        );
-    }
-
-    // The typed built-in manifest registers each risk and capability field explicitly.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
-    )]
-    fn register_core_os_tool_with_parameters(
-        &mut self,
-        id: &str,
-        description: &str,
-        risk_level: &str,
-        capabilities: Vec<String>,
-        action_type: &str,
-        idempotency_contract: ToolIdempotencyContract,
         parameters: Value,
     ) {
         let manifest = ToolManifest {
@@ -1201,51 +942,7 @@ impl McpRegistry {
             enabled: true,
             declarative_only: false,
             action_type: action_type.into(),
-            idempotency_contract,
-            tags: vec!["core_os".into()],
-        };
-        let id_owned = id.to_string();
-        self.register_builtin(
-            manifest,
-            Box::new(move |_args| {
-                Ok(format!(
-                    "Core OS tool '{}' completed with the current local capability handler",
-                    id_owned
-                ))
-            }),
-        );
-    }
-
-    /// Helper to register an Execution tool.
-    fn register_execution_tool(
-        &mut self,
-        id: &str,
-        description: &str,
-        risk_level: &str,
-        capabilities: Vec<String>,
-        action_type: &str,
-        idempotency_contract: ToolIdempotencyContract,
-    ) {
-        let manifest = ToolManifest {
-            id: id.into(),
-            name: id.into(),
-            description: description.into(),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "path": { "type": "string", "description": "File path or URL" }
-                }
-            }),
-            permission_level: risk_level.into(),
-            risk_level: risk_level.into(),
-            version: "1.0.0".into(),
-            source: ToolSource::BuiltIn,
-            capabilities,
-            requires_confirmation: risk_level == "high",
-            enabled: true,
-            declarative_only: false,
-            action_type: action_type.into(),
-            idempotency_contract,
+            idempotency_contract: ToolIdempotencyContract::Idempotent,
             tags: vec!["execution".into()],
         };
         let id_owned = id.to_string();
@@ -1256,36 +953,6 @@ impl McpRegistry {
                     "Execution tool '{}' completed with the current governed executor",
                     id_owned
                 ))
-            }),
-        );
-    }
-
-    /// Helper to register a manifest-only tool that requires provider configuration.
-    fn register_declarative_stub(&mut self, id: &str, description: &str) {
-        let manifest = ToolManifest {
-            id: id.into(),
-            name: id.into(),
-            description: description.into(),
-            parameters: serde_json::json!({"type": "object"}),
-            permission_level: "low".into(),
-            risk_level: "low".into(),
-            version: "1.0.0".into(),
-            source: ToolSource::BuiltIn,
-            capabilities: vec!["read".into()],
-            requires_confirmation: false,
-            enabled: true,
-            declarative_only: true,
-            action_type: "read".into(),
-            idempotency_contract: ToolIdempotencyContract::NonIdempotent,
-            tags: vec!["execution".into(), "manifest_only".into()],
-        };
-        self.register_builtin(
-            manifest,
-            Box::new(move |_args| {
-                Ok(
-                    "This capability is manifest-only until the required provider is configured."
-                        .to_string(),
-                )
             }),
         );
     }
@@ -1590,11 +1257,6 @@ impl McpRegistry {
         self.execute_manifest_body(manifest, arguments)
     }
 
-    #[cfg(test)]
-    fn execute_manifest(&self, manifest: &ToolManifest, arguments: Value) -> Result<String> {
-        self.execute_manifest_body(manifest, arguments)
-    }
-
     pub(crate) async fn execute_manifest_async_with_receipt_tracker(
         &self,
         manifest: &ToolManifest,
@@ -1767,44 +1429,6 @@ impl McpRegistry {
     /// and "low" for read-only or safe tools.
     pub fn tool_permission_level(&self, name: &str) -> String {
         ToolManifest::infer_permission_level(name)
-    }
-
-    /// Recommend tools based on goal-capability gap analysis strings.
-    /// Simple v1 engine: score by keyword overlap between gap text and manifest tags.
-    pub fn recommend_manifests(&self, gaps: &[String], top_k: usize) -> Vec<ToolManifest> {
-        let manifests = self.list_manifests();
-        let mut scored: Vec<(i32, &ToolManifest)> = manifests
-            .iter()
-            .map(|m| {
-                let mut score = 0i32;
-                for gap in gaps {
-                    let gap_lower = gap.to_lowercase();
-                    for tag in &m.tags {
-                        if gap_lower.contains(&tag.to_lowercase()) {
-                            score += 1;
-                        }
-                    }
-                    // heuristic boost for keywords in name/description if tags are empty
-                    if m.tags.is_empty() {
-                        let text = format!("{} {}", m.name, m.description).to_lowercase();
-                        let keywords = [
-                            "write", "read", "search", "fetch", "file", "code", "git", "db", "sql",
-                            "web",
-                        ];
-                        for kw in &keywords {
-                            if text.contains(kw) && gap_lower.contains(kw) {
-                                score += 1;
-                            }
-                        }
-                    }
-                }
-                (score, m)
-            })
-            .filter(|(s, _)| *s > 0)
-            .collect();
-        scored.sort_by_key(|item| Reverse(item.0));
-        scored.truncate(top_k);
-        scored.into_iter().map(|(_, m)| m.clone()).collect()
     }
 }
 
@@ -2025,62 +1649,6 @@ mod tests {
     }
 
     #[test]
-    fn memory_write_manifest_exposes_the_reviewed_candidate_contract() {
-        let registry = McpRegistry::new();
-        let manifest = registry
-            .list_manifests()
-            .into_iter()
-            .find(|manifest| manifest.name == "memory.propose_write")
-            .expect("memory write manifest");
-
-        assert_eq!(manifest.parameters["type"], serde_json::json!("object"));
-        assert_eq!(
-            manifest.parameters["additionalProperties"],
-            serde_json::json!(false)
-        );
-        assert_eq!(
-            manifest.parameters["required"],
-            serde_json::json!(["content"])
-        );
-        assert_eq!(
-            manifest.parameters["properties"]["content"]["maxLength"],
-            serde_json::json!(65536)
-        );
-        assert!(manifest.parameters["properties"]["candidateKind"]["enum"]
-            .as_array()
-            .is_some_and(|values| values.iter().any(|value| value == "identity_or_role")));
-    }
-
-    #[test]
-    fn memory_archive_manifest_requires_typed_canonical_owners() {
-        let registry = McpRegistry::new();
-        let manifest = registry
-            .list_manifests()
-            .into_iter()
-            .find(|manifest| manifest.name == "memory.propose_archive")
-            .expect("memory archive manifest");
-
-        assert_eq!(manifest.parameters["type"], serde_json::json!("object"));
-        assert_eq!(
-            manifest.parameters["additionalProperties"],
-            serde_json::json!(false)
-        );
-        assert_eq!(
-            manifest.parameters["properties"]["owner"]["required"],
-            serde_json::json!(["ownerKind", "ownerId"])
-        );
-        assert_eq!(
-            manifest.parameters["properties"]["owners"]["minItems"],
-            serde_json::json!(1)
-        );
-        assert_eq!(
-            manifest.parameters["properties"]["owners"]["maxItems"],
-            serde_json::json!(200)
-        );
-        assert_eq!(manifest.parameters["oneOf"].as_array().unwrap().len(), 2);
-    }
-
-    #[test]
     fn typed_mcp_manifest_without_idempotency_contract_is_rejected_at_registration_boundary() {
         let parameters = serde_json::json!({"type": "object"});
         let discovered = vec![Tool {
@@ -2180,7 +1748,7 @@ mod tests {
     }
 
     #[test]
-    fn release_product_registry_keeps_core_capabilities_without_extension_dispatch() {
+    fn release_product_registry_keeps_essential_read_tools_without_legacy_dispatch() {
         let registry = McpRegistry::new_release_product();
         let names = registry
             .list_manifests()
@@ -2189,38 +1757,23 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
 
         assert!(names.contains("web.search"));
+        assert!(names.contains("web.fetch"));
         assert!(names.contains("file.read"));
         assert!(names.contains("document.read"));
-        assert!(names.contains("memory.propose_write"));
+        assert!(!names.contains("life_model.read"));
+        assert!(!names.contains("tool.list_available"));
+        assert!(!names.contains("memory.search"));
+        assert!(!names.contains("permission.check"));
+        assert!(!names.contains("proposal.list"));
+        assert!(!names.contains("life_model.propose_patch"));
+        assert!(!names.contains("memory.propose_write"));
+        assert!(!names.contains("memory.propose_archive"));
+        assert!(!names.contains("file.write_proposal"));
+        assert!(!names.contains("permission.request"));
+        assert!(!names.contains("snapshot.create"));
+        assert!(!names.contains("calendar.read"));
         assert!(!names.contains("builtin_echo"));
         assert!(!names.contains("mcp.call_tool"));
-    }
-
-    #[test]
-    fn user_visible_tool_result_copy_has_no_legacy_product_terms() {
-        let registry = McpRegistry::new();
-        let legacy_terms = legacy_product_copy_regex();
-        let mut copies = Vec::new();
-
-        let manifest_only = registry
-            .list_manifests()
-            .into_iter()
-            .find(|manifest| manifest.name == "snapshot.create")
-            .expect("snapshot.create manifest");
-        copies.push(
-            registry
-                .execute_manifest(&manifest_only, serde_json::json!({}))
-                .expect("manifest-only capability result"),
-        );
-
-        let violations = copies
-            .into_iter()
-            .filter(|copy| legacy_terms.is_match(copy))
-            .collect::<Vec<_>>();
-        assert!(
-            violations.is_empty(),
-            "legacy product terms leaked in MCP tool result copy: {violations:?}"
-        );
     }
 
     #[test]

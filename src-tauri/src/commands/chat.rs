@@ -18,12 +18,23 @@ pub struct ConversationTurnViewModel {
 
 #[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ConversationListItemViewModel {
+    pub session_id: String,
+    pub title: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ConversationViewModel {
     pub status: String,
-    pub conversations: Vec<openlife_core::memory::ChatSession>,
+    pub conversations: Vec<ConversationListItemViewModel>,
     pub projects: Vec<openlife_core::conversation::ProjectRecord>,
     pub selected_project_id: Option<String>,
     pub selected_conversation_id: Option<String>,
+    pub global_memory_enabled: bool,
+    pub selected_memory_mode: openlife_core::conversation::ConversationMemoryMode,
     pub messages: Vec<ChatMessage>,
     pub latest_turn: Option<ConversationTurnViewModel>,
     pub provider_status: String,
@@ -63,7 +74,7 @@ pub(crate) async fn get_conversation_view_model_with_state(
     };
     let conversations = records
         .into_iter()
-        .map(|record| openlife_core::memory::ChatSession {
+        .map(|record| ConversationListItemViewModel {
             session_id: record.id,
             title: record.title,
             created_at: record.created_at.to_rfc3339(),
@@ -71,13 +82,19 @@ pub(crate) async fn get_conversation_view_model_with_state(
         })
         .collect::<Vec<_>>();
     let projects = store.list_projects(200).map_err(AppError::from)?;
-    let selected_project_id = selected
+    let selected_record = selected
         .as_deref()
         .map(|conversation_id| store.get_conversation(conversation_id))
         .transpose()
         .map_err(AppError::from)?
-        .flatten()
-        .and_then(|conversation| conversation.project_id);
+        .flatten();
+    let selected_project_id = selected_record
+        .as_ref()
+        .and_then(|conversation| conversation.project_id.clone());
+    let selected_memory_mode = selected_record
+        .as_ref()
+        .map(|conversation| conversation.memory_mode)
+        .unwrap_or_default();
     let (messages, latest_turn) = if let Some(conversation_id) = selected.as_deref() {
         let messages = store
             .list_items(conversation_id, 200)
@@ -117,6 +134,7 @@ pub(crate) async fn get_conversation_view_model_with_state(
         (Vec::new(), None)
     };
     drop(store);
+    let global_memory_enabled = state.config.lock().await.system.agent_memory_enabled;
     let (provider_status, provider_profiles, selected_provider_profile_id, provider_error_code) =
         match crate::provider_registry::selected_provider_profile(state).await {
             Ok(provider) => (
@@ -138,6 +156,8 @@ pub(crate) async fn get_conversation_view_model_with_state(
         projects,
         selected_project_id,
         selected_conversation_id: selected,
+        global_memory_enabled,
+        selected_memory_mode,
         messages,
         latest_turn,
         provider_status,
@@ -150,6 +170,26 @@ pub(crate) async fn get_conversation_view_model_with_state(
             "unavailable".into()
         },
     })
+}
+
+#[tauri::command]
+pub async fn set_conversation_memory_mode(
+    conversation_id: String,
+    mode: openlife_core::conversation::ConversationMemoryMode,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_for_stores(&["ConversationStore"])
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
+    state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("conversation_store_unavailable"))?
+        .lock()
+        .await
+        .set_memory_mode(&conversation_id, mode)
+        .map_err(AppError::from)
 }
 
 #[tauri::command]
@@ -287,7 +327,7 @@ mod tests {
             )),
             life_model_write_coordinator: Arc::new(tokio::sync::Mutex::new(())),
             memory_store: Arc::new(tokio::sync::Mutex::new(
-                openlife_core::memory::MemoryStore::new_in_memory().unwrap(),
+                openlife_core::memory::KnowledgeNoteProjectionStore::new_in_memory().unwrap(),
             )),
             conversation_store: Some(Arc::new(tokio::sync::Mutex::new(
                 openlife_core::conversation::ConversationStore::new_in_memory().unwrap(),
@@ -336,9 +376,6 @@ mod tests {
                 openlife_core::agent::LifeModelLearningStore::new_in_memory().unwrap(),
             ))),
             main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
-            patch_store: Some(Arc::new(tokio::sync::Mutex::new(
-                openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
-            ))),
             tool_permission_store: Arc::new(tokio::sync::Mutex::new(
                 openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
             )),
@@ -347,12 +384,13 @@ mod tests {
             )),
             startup_warnings: vec![],
             credential_bootstrap_snapshot: Default::default(),
-            scheduled_task_store: Arc::new(
-                openlife_core::tasks::TaskStore::new_in_memory().unwrap(),
-            ),
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+            work_initial_decision_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+            work_agent_step_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            work_semantic_verification_fixture_outputs: Arc::new(tokio::sync::Mutex::new(
+                Vec::new(),
+            )),
             resource_runtime: None,
-            state_store: None,
         })
     }
 
@@ -435,6 +473,29 @@ mod tests {
         assert_eq!(
             view.selected_project_id.as_deref(),
             Some(project_id.as_str())
+        );
+        assert!(view.global_memory_enabled);
+        assert_eq!(
+            view.selected_memory_mode,
+            openlife_core::conversation::ConversationMemoryMode::UseAndLearn
+        );
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .set_memory_mode(
+                &conversation_id,
+                openlife_core::conversation::ConversationMemoryMode::UseOnly,
+            )
+            .unwrap();
+        let updated = get_conversation_view_model_with_state(Some(&conversation_id), &state)
+            .await
+            .unwrap();
+        assert_eq!(
+            updated.selected_memory_mode,
+            openlife_core::conversation::ConversationMemoryMode::UseOnly
         );
     }
 

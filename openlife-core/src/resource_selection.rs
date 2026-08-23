@@ -17,8 +17,6 @@ pub const MAX_SELECTED_RESOURCE_BLOCKS: usize = 32;
 pub const MAX_SELECTED_RESOURCE_CHARS: usize = 262_144;
 pub const IMPORTED_RESOURCE_CONTEXT_CATEGORY: &str = "imported_resource_untrusted";
 const MAX_RESOURCE_CONTEXT_REF_CHARS: usize = 128;
-const RESOURCE_SOURCE_FOOTER_HEADING: &str = "来源（OpenLife 已核验）";
-const UNVERIFIED_MODEL_SOURCE_HEADING: &str = "来源（模型文本，未验证）";
 
 /// Validates the metadata-only reference persisted with provider lifecycle
 /// evidence. It binds one selected chunk to an issued citation without
@@ -130,53 +128,6 @@ impl ResourceCitationSet {
             resolved.push(citation.clone());
         }
         Ok(resolved)
-    }
-
-    pub fn validate_model_output(
-        &self,
-        request_id: &str,
-        model_output: &str,
-    ) -> Result<Vec<ResourceCitation>> {
-        if request_id != self.request_id {
-            anyhow::bail!("resource_citation_request_mismatch");
-        }
-        if self.entries.is_empty() {
-            return Ok(Vec::new());
-        }
-        let citation_ids = extract_model_citation_ids(model_output)?;
-        if citation_ids.is_empty() {
-            anyhow::bail!("resource_citation_required");
-        }
-        self.validate_model_citation_ids(request_id, &citation_ids)
-    }
-
-    /// Validate every citation-shaped token and append a canonical source list.
-    /// Provider prose cannot invent filenames or provenance because the footer
-    /// is rendered exclusively from this request-scoped authority.
-    pub fn validate_and_render_model_output(
-        &self,
-        request_id: &str,
-        model_output: &str,
-    ) -> Result<String> {
-        let resolved = self.validate_model_output(request_id, model_output)?;
-        if resolved.is_empty() {
-            return Ok(model_output.to_string());
-        }
-        let mut rendered = model_output.trim_end().replace(
-            RESOURCE_SOURCE_FOOTER_HEADING,
-            UNVERIFIED_MODEL_SOURCE_HEADING,
-        );
-        rendered.push_str("\n\n");
-        rendered.push_str(RESOURCE_SOURCE_FOOTER_HEADING);
-        for citation in resolved {
-            rendered.push_str(&format!(
-                "\n- `{}` — {} — {}",
-                citation.citation_id,
-                escape_markdown(&citation.filename),
-                provenance_label(&citation.provenance)
-            ));
-        }
-        Ok(rendered)
     }
 }
 
@@ -403,55 +354,6 @@ fn is_canonical_citation_id(candidate: &str) -> bool {
     legacy_hex || privacy_safe_v1
 }
 
-fn extract_model_citation_ids(model_output: &str) -> Result<Vec<String>> {
-    let mut citation_ids = Vec::new();
-    let mut seen = BTreeSet::new();
-    for (start, _) in model_output.match_indices("cite_") {
-        let candidate = model_output[start..].chars().take(29).collect::<String>();
-        let valid = is_canonical_citation_id(&candidate);
-        let trailing = model_output[start + candidate.len()..].chars().next();
-        if !valid
-            || trailing.is_some_and(|character| character.is_alphanumeric() || character == '_')
-        {
-            anyhow::bail!("resource_citation_malformed");
-        }
-        if seen.insert(candidate.clone()) {
-            citation_ids.push(candidate);
-        }
-    }
-    Ok(citation_ids)
-}
-
-fn escape_markdown(value: &str) -> String {
-    value
-        .chars()
-        .flat_map(|character| {
-            if matches!(
-                character,
-                '\\' | '`'
-                    | '*'
-                    | '_'
-                    | '{'
-                    | '}'
-                    | '['
-                    | ']'
-                    | '('
-                    | ')'
-                    | '#'
-                    | '+'
-                    | '-'
-                    | '.'
-                    | '!'
-                    | '|'
-            ) {
-                vec!['\\', character]
-            } else {
-                vec![character]
-            }
-        })
-        .collect()
-}
-
 fn relevance_score(
     candidate: &ResourceContextChunk,
     query_terms: &BTreeSet<String>,
@@ -583,6 +485,7 @@ fn provenance_label(provenance: &ResourceProvenance) -> String {
         ResourceProvenance::Xlsx { sheet, range } => {
             format!("sheet {sheet}, range {range}")
         }
+        ResourceProvenance::Pptx { slide } => format!("slide {slide}"),
     }
 }
 
@@ -705,15 +608,6 @@ mod tests {
             .citation_set
             .validate_model_citation_ids(&Uuid::new_v4().to_string(), &issued)
             .is_err());
-        let rendered = selected
-            .citation_set
-            .validate_and_render_model_output(
-                selected.citation_set.request_id(),
-                &format!("结论基于附件证据 [{}]。", issued[0]),
-            )
-            .unwrap();
-        assert!(rendered.contains("来源（OpenLife 已核验）"));
-        assert!(rendered.contains("comparison"));
         let first_digest = selected.citation_set.selection_digest();
         let reissued = select(
             &store,
@@ -729,40 +623,6 @@ mod tests {
             selected.citation_set.issued_ids(),
             reissued.citation_set.issued_ids()
         );
-        let forged = selected
-            .citation_set
-            .validate_and_render_model_output(
-                selected.citation_set.request_id(),
-                &format!(
-                    "结论 [{}]。\n\n{RESOURCE_SOURCE_FOOTER_HEADING}\n- `forged` — fake.md — model",
-                    issued[0]
-                ),
-            )
-            .unwrap();
-        assert_eq!(forged.matches(RESOURCE_SOURCE_FOOTER_HEADING).count(), 1);
-        assert!(forged.contains(UNVERIFIED_MODEL_SOURCE_HEADING));
-        assert!(selected
-            .citation_set
-            .validate_and_render_model_output(
-                selected.citation_set.request_id(),
-                "结论没有任何引用。",
-            )
-            .is_err());
-        assert!(selected
-            .citation_set
-            .validate_and_render_model_output(
-                selected.citation_set.request_id(),
-                "伪造引用 cite_000000000000000000000000。",
-            )
-            .is_err());
-        assert!(selected
-            .citation_set
-            .validate_and_render_model_output(
-                selected.citation_set.request_id(),
-                "格式错误 cite_short。",
-            )
-            .is_err());
-
         let summary = select(&store, "message-compare", "请总结附件");
         let summary_filenames = summary
             .citation_set

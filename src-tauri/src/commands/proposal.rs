@@ -1,25 +1,22 @@
 use crate::{
     artifact_materializer::{
-        commit_artifact_move, commit_staged_artifact, confirmed_artifact_receipt,
-        confirmed_move_receipt, confirmed_move_receipt_from_paths, inspect_artifact_filesystem,
-        inspect_artifact_move, prepare_artifact_materialization,
-        prepare_artifact_materialization_with_precondition_for_artifact, prepare_artifact_move,
-        stage_artifact_bytes, ArtifactFilesystemFailure, ArtifactFilesystemObservation,
-        ArtifactMaterializationReceipt, ArtifactTargetPrecondition,
+        artifact_content_digest, commit_artifact_move, commit_staged_artifact,
+        confirmed_artifact_receipt, confirmed_move_receipt, confirmed_move_receipt_from_paths,
+        inspect_artifact_filesystem, inspect_artifact_move,
+        prepare_artifact_materialization_with_precondition_for_artifact_bytes,
+        prepare_artifact_move, stage_artifact_raw_bytes, ArtifactFilesystemFailure,
+        ArtifactFilesystemObservation, ArtifactMaterializationReceipt, ArtifactTargetPrecondition,
     },
     danger_action_confirmation::{
         require_native_danger_action_confirmation, NativeDangerActionRequest,
     },
-    life_model_write_gateway, memory_gateway,
-    storage::app_data_dir,
-    AppState,
+    life_model_write_gateway, memory_gateway, AppState,
 };
 use openlife_core::agent::{
-    AgentProposal, ArtifactEffectState, LifeModelLearningCandidateStatus,
-    LifeModelLearningReviewDecisionReceipt, MemoryRollbackReport, ProposalSource, ProposalStatus,
-    ProposalType, RiskLevel,
+    AgentProposal, LifeModelLearningCandidateStatus, LifeModelLearningReviewDecisionReceipt,
+    MemoryRollbackReport, ProposalSource, ProposalStatus, ProposalType, RiskLevel,
 };
-use openlife_core::life_model::LifeModel;
+use openlife_core::task_runtime::{CanonicalArtifactEffectState, CanonicalArtifactReviewSubject};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::Arc;
@@ -30,59 +27,53 @@ const EXTERNAL_WRITE_MAX_SIZE: usize = 100 * 1024;
 pub(crate) const COMMUNICATION_STYLE_CANONICAL_PATH: &str = "preferences.communication_style";
 
 fn canonical_work_artifact_id(proposal: &AgentProposal) -> Option<&str> {
-    let artifact_undo = proposal
-        .after
+    canonical_work_artifact_id_from_after(&proposal.after)
+}
+
+fn canonical_work_artifact_id_from_after(after: &Value) -> Option<&str> {
+    let artifact_undo = after
         .get("undoOfArtifactId")
         .and_then(Value::as_str)
         .is_some();
-    if (!artifact_undo
-        && proposal
-            .after
-            .get("generatedByProvider")
-            .and_then(Value::as_bool)
-            != Some(true))
-        || proposal
-            .after
-            .get("artifactVersion")
-            .and_then(Value::as_u64)
-            .is_none_or(|version| version == 0)
-        || proposal
-            .after
-            .get("canonicalTaskId")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
-        || proposal
-            .after
-            .get("artifactDraftItemId")
-            .and_then(Value::as_str)
-            .is_none_or(str::is_empty)
-    {
-        return None;
+    if !artifact_undo {
+        let subject =
+            serde_json::from_value::<CanonicalArtifactReviewSubject>(after.clone()).ok()?;
+        subject.validate().ok()?;
     }
-    proposal
-        .after
+    after
         .get("artifactId")
         .and_then(Value::as_str)
         .filter(|value| value.starts_with("artifact:") && value.len() <= 512)
 }
 
+fn canonical_artifact_review_subject(
+    proposal: &AgentProposal,
+) -> Result<CanonicalArtifactReviewSubject, String> {
+    let subject = serde_json::from_value::<CanonicalArtifactReviewSubject>(proposal.after.clone())
+        .map_err(|_| "canonical_artifact_review_subject_invalid".to_string())?;
+    subject.validate().map_err(|error| error.to_string())?;
+    if proposal.run_id.as_deref() != Some(subject.source_run_id.as_str())
+        || proposal.source_detail.as_deref() != Some(subject.canonical_task_id.as_str())
+    {
+        return Err("canonical_artifact_review_origin_mismatch".into());
+    }
+    Ok(subject)
+}
+
 fn artifact_id_for_proposal(proposal: &AgentProposal) -> String {
     canonical_work_artifact_id(proposal)
         .map(str::to_string)
-        .unwrap_or_else(|| format!("artifact:{}", proposal.id))
+        .expect("validated ExternalWriteAction must bind a canonical Artifact")
 }
 
 fn reviewed_artifact_target_precondition(
     after: &Value,
 ) -> Result<ArtifactTargetPrecondition, String> {
-    let expected_absent = after
-        .get("expected_target_absent")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| "Artifact Proposal 缺少 expected_target_absent。".to_string())?;
-    let expected_digest = after
-        .get("expected_target_digest")
-        .and_then(Value::as_str)
-        .filter(|digest| !digest.trim().is_empty());
+    let subject = serde_json::from_value::<CanonicalArtifactReviewSubject>(after.clone())
+        .map_err(|_| "canonical_artifact_review_subject_invalid".to_string())?;
+    subject.validate().map_err(|error| error.to_string())?;
+    let expected_absent = subject.expected_target_absent;
+    let expected_digest = subject.expected_target_digest.as_deref();
     match (expected_absent, expected_digest) {
         (true, None) => Ok(ArtifactTargetPrecondition::Absent),
         (false, Some(digest)) if digest.starts_with("sha256:") => Ok(
@@ -90,78 +81,6 @@ fn reviewed_artifact_target_precondition(
         ),
         _ => Err("Artifact Proposal 必须精确绑定目标不存在或审核时的目标内容摘要。".into()),
     }
-}
-
-pub(crate) async fn artifact_safe_paths_for_proposal(
-    state: &Arc<AppState>,
-    proposal: &AgentProposal,
-) -> Result<Vec<String>, String> {
-    let config = state.config.lock().await;
-    if proposal.after.get("source").and_then(Value::as_str) != Some("markdown_memory_editor") {
-        return Ok(config.system.safe_paths.clone());
-    }
-    let scope = match proposal.after.get("memoryScope").and_then(Value::as_str) {
-        Some("workspace") => crate::markdown_memory::MarkdownMemoryScope::Workspace,
-        Some("project") => crate::markdown_memory::MarkdownMemoryScope::Project,
-        _ => return Err("Markdown memory proposal scope is missing or invalid".into()),
-    };
-    let relative = proposal
-        .after
-        .get("memoryRelativePath")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "Markdown memory proposal relative path is missing".to_string())?;
-    let relative = crate::markdown_memory::validate_markdown_memory_relative_path(relative)?;
-    let configured_root = match scope {
-        crate::markdown_memory::MarkdownMemoryScope::Workspace => {
-            config.system.workspace_memory_root.as_deref()
-        }
-        crate::markdown_memory::MarkdownMemoryScope::Project => {
-            config.system.project_memory_root.as_deref()
-        }
-    }
-    .ok_or_else(|| "Markdown memory proposal root is no longer configured".to_string())?;
-    let root = std::path::PathBuf::from(configured_root)
-        .canonicalize()
-        .map_err(|error| format!("Markdown memory proposal root is unavailable: {error}"))?;
-    let expected_source = root.join(&relative);
-    let operation = proposal
-        .after
-        .get("operation")
-        .and_then(Value::as_str)
-        .unwrap_or("propose_write");
-    if matches!(operation, "move" | "trash" | "restore") {
-        let source = proposal
-            .after
-            .get("source_path")
-            .and_then(Value::as_str)
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| "Markdown memory move source is missing".to_string())?;
-        let target = proposal
-            .after
-            .get("target_path")
-            .and_then(Value::as_str)
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| "Markdown memory move target is missing".to_string())?;
-        let filename = expected_source
-            .file_stem()
-            .and_then(|stem| stem.to_str())
-            .ok_or_else(|| "Markdown memory move filename is invalid".to_string())?;
-        let expected_target = expected_source.with_file_name(format!("{filename}.disabled.md"));
-        if operation != "move" || source != expected_source || target != expected_target {
-            return Err("Markdown memory move is not bound to the selected scope root".into());
-        }
-    } else {
-        let target = proposal
-            .after
-            .get("path")
-            .and_then(Value::as_str)
-            .map(std::path::PathBuf::from)
-            .ok_or_else(|| "Markdown memory write target is missing".to_string())?;
-        if target != expected_source {
-            return Err("Markdown memory write is not bound to the selected scope root".into());
-        }
-    }
-    Ok(vec![root.to_string_lossy().into_owned()])
 }
 
 fn require_persistence_write(state: &Arc<AppState>) -> Result<(), String> {
@@ -175,14 +94,16 @@ fn require_proposal_write_for(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
 ) -> Result<(), String> {
-    if canonical_work_artifact_id(proposal).is_some() {
+    if proposal.proposal_type == ProposalType::ExternalWriteAction {
+        if canonical_work_artifact_id(proposal).is_none() {
+            return Err("noncanonical_artifact_effect_retired".into());
+        }
         state
             .persistence_coordinator
             .require_effects_for_stores(&["ProposalStore", "CanonicalTaskRuntimeStore"])
             .map_err(|error| error.to_string())
     } else {
-        require_persistence_write(state)?;
-        check_safe_mode(state)
+        require_persistence_write(state)
     }
 }
 
@@ -430,16 +351,6 @@ fn proposal_store_missing() -> String {
     "Proposal store is unavailable. Please check Settings > 试用就绪检查.".to_string()
 }
 
-fn check_safe_mode(state: &Arc<AppState>) -> Result<(), String> {
-    if !state.startup_warnings.is_empty() {
-        return Err(format!(
-            "系统处于 Safe Mode，无法应用 Proposal：{}",
-            state.startup_warnings.join("；")
-        ));
-    }
-    Ok(())
-}
-
 fn ensure_pending_or_postponed(proposal: &AgentProposal) -> Result<(), String> {
     match proposal.status {
         ProposalStatus::Pending | ProposalStatus::Postponed | ProposalStatus::Edited => Ok(()),
@@ -483,12 +394,6 @@ fn is_lifemodel_v2_typed_diff(proposal: &AgentProposal) -> bool {
         && proposal.affected_path == openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
 }
 
-fn is_legacy_lifemodel_v2_migration(proposal: &AgentProposal) -> bool {
-    proposal.proposal_type == ProposalType::LifeModelUpdate
-        && proposal.affected_path
-            == openlife_core::life_model::v2::LIFE_MODEL_V2_LEGACY_MIGRATION_PATH
-}
-
 fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
     matches!(
         operation,
@@ -514,7 +419,6 @@ fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
             | "lifemodel_legacy_owner_retired"
             | "memory_write_not_committed"
             | "memory_write_duplicate_no_effect"
-            | "scheduled_task_review_snapshot_missing"
             | "scheduled_cloud_due_time_missing"
             | "scheduled_cloud_due_time_invalid"
             | "scheduled_cloud_provider_preflight_failed"
@@ -580,7 +484,7 @@ struct ArtifactEffectRecoveryRecord {
     content_digest: String,
     byte_size: u64,
     media_type: String,
-    state: ArtifactEffectState,
+    state: CanonicalArtifactEffectState,
 }
 
 async fn reconcile_artifact_effects_with_state(
@@ -602,44 +506,12 @@ async fn reconcile_artifact_effects_with_state(
                 content_digest: record.content_digest,
                 byte_size: record.byte_size,
                 media_type: record.media_type,
-                state: match record.state {
-                    openlife_core::task_runtime::CanonicalArtifactEffectState::Prepared => {
-                        ArtifactEffectState::Prepared
-                    }
-                    openlife_core::task_runtime::CanonicalArtifactEffectState::Staged => {
-                        ArtifactEffectState::Staged
-                    }
-                    _ => unreachable!("only open canonical effects are listed"),
-                },
+                state: record.state,
             })
             .collect::<Vec<_>>()
     } else {
         Vec::new()
     };
-    let legacy_records = {
-        let store = state
-            .proposal_store
-            .as_ref()
-            .ok_or_else(proposal_store_missing)?
-            .lock()
-            .await;
-        store
-            .list_artifact_effects_for_reconciliation(bounded_limit)
-            .map_err(|error| runtime_proposal_store_error(state, error))?
-    };
-    records.extend(
-        legacy_records
-            .into_iter()
-            .map(|record| ArtifactEffectRecoveryRecord {
-                proposal_id: record.proposal_id,
-                dispatch_claim_id: record.dispatch_claim_id,
-                target_reference_digest: record.target_reference_digest,
-                content_digest: record.content_digest,
-                byte_size: record.byte_size,
-                media_type: record.media_type,
-                state: record.state,
-            }),
-    );
     records.sort_by(|left, right| left.proposal_id.cmp(&right.proposal_id));
     records.truncate(bounded_limit as usize);
     let backlog_may_remain = records.len() == bounded_limit as usize;
@@ -670,20 +542,23 @@ async fn reconcile_artifact_effects_with_state(
             reconciled += 1;
             continue;
         }
-        let safe_paths = match artifact_safe_paths_for_proposal(state, &proposal).await {
-            Ok(safe_paths) => safe_paths,
-            Err(_) => {
-                persist_artifact_unknown(
-                    state,
-                    &record.proposal_id,
-                    &record.dispatch_claim_id,
-                    "artifact_recovery_scope_binding_failed",
-                )
-                .await?;
-                reconciled += 1;
-                continue;
-            }
-        };
+        let safe_paths =
+            match crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, &proposal)
+                .await
+            {
+                Ok(safe_paths) => safe_paths,
+                Err(_) => {
+                    persist_artifact_unknown(
+                        state,
+                        &record.proposal_id,
+                        &record.dispatch_claim_id,
+                        "artifact_recovery_scope_binding_failed",
+                    )
+                    .await?;
+                    reconciled += 1;
+                    continue;
+                }
+            };
         let operation = proposal
             .after
             .get("operation")
@@ -752,7 +627,7 @@ async fn reconcile_artifact_effects_with_state(
                     .await?;
                 }
                 ArtifactFilesystemObservation::NoStagedOrFinalBytes
-                    if record.state == ArtifactEffectState::Prepared =>
+                    if record.state == CanonicalArtifactEffectState::Prepared =>
                 {
                     persist_artifact_failed_before_effect(
                         state,
@@ -791,7 +666,7 @@ async fn reconcile_artifact_effects_with_state(
                 continue;
             }
         };
-        let prepared = match prepare_artifact_materialization_with_precondition_for_artifact(
+        let prepared = match prepare_artifact_materialization_with_precondition_for_artifact_bytes(
             &resolved.artifact_id,
             &record.proposal_id,
             &record.dispatch_claim_id,
@@ -885,7 +760,7 @@ async fn reconcile_artifact_effects_with_state(
                 reconciled += 1;
             }
             ArtifactFilesystemObservation::NoStagedOrFinalBytes
-                if record.state == ArtifactEffectState::Prepared =>
+                if record.state == CanonicalArtifactEffectState::Prepared =>
             {
                 persist_artifact_failed_before_effect(
                     state,
@@ -1025,130 +900,6 @@ async fn release_startup_artifact_claims_proven_before_effect(
     Ok((released, backlog_may_remain))
 }
 
-fn claimed_local_scheduled_task_matches_canonical_effect(
-    state: &Arc<AppState>,
-    proposal: &AgentProposal,
-) -> Result<bool, String> {
-    if proposal.proposal_type != ProposalType::ScheduledTask
-        || parse_reviewed_scheduled_provider_route(&proposal.after)?.is_some()
-    {
-        return Ok(false);
-    }
-    let Some(task) = state
-        .scheduled_task_store
-        .get_task_by_source_proposal_id(&proposal.id)
-        .map_err(|error| format!("load claimed scheduled task effect failed: {error}"))?
-    else {
-        return Ok(false);
-    };
-    let reviewed_due_at = proposal
-        .after
-        .get("scheduled_at")
-        .or_else(|| proposal.after.get("due_date"))
-        .or_else(|| proposal.after.get("date"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let reviewed_due_at = parse_scheduled_at(reviewed_due_at)?.map(|value| value.to_rfc3339());
-    let reviewed_title = proposal
-        .after
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("Untitled Task");
-    let reviewed_description = proposal
-        .after
-        .get("description")
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let reviewed_priority = proposal
-        .after
-        .get("priority")
-        .and_then(Value::as_str)
-        .unwrap_or("medium");
-    let reviewed_action_type = proposal
-        .after
-        .get("tool")
-        .and_then(Value::as_str)
-        .unwrap_or("scheduled_task");
-
-    Ok(task.id == proposal.id
-        && task.source_proposal_id.as_deref() == Some(proposal.id.as_str())
-        && task.source_run_id == proposal.run_id
-        && task.title == reviewed_title
-        && task.description == reviewed_description
-        && task.due_date == reviewed_due_at
-        && task.priority == reviewed_priority
-        && task.action_type == reviewed_action_type
-        && task.provider_grant.data_route == openlife_core::llm::ProviderDataRoute::LocalOnly)
-}
-
-async fn seal_startup_governed_action_claims_as_unknown(
-    state: &Arc<AppState>,
-    limit: i64,
-) -> Result<(usize, bool), String> {
-    let bounded_limit = limit.clamp(1, 200);
-    let claims = {
-        let store = state
-            .proposal_store
-            .as_ref()
-            .ok_or_else(proposal_store_missing)?
-            .lock()
-            .await;
-        store
-            .list_claimed_governed_actions_for_unknown_recovery(bounded_limit as usize)
-            .map_err(|error| runtime_proposal_store_error(state, error))?
-    };
-    let backlog_may_remain = claims.len() == bounded_limit as usize;
-    let mut sealed = 0usize;
-    for (proposal_id, claim_id) in claims {
-        let proposal = {
-            let store = state
-                .proposal_store
-                .as_ref()
-                .ok_or_else(proposal_store_missing)?
-                .lock()
-                .await;
-            store
-                .get_proposal(&proposal_id)
-                .map_err(|error| runtime_proposal_store_error(state, error))?
-                .ok_or_else(|| format!("startup_claimed_governed_action_missing:{proposal_id}"))?
-        };
-        if claimed_local_scheduled_task_matches_canonical_effect(state, &proposal)? {
-            let store = state
-                .proposal_store
-                .as_ref()
-                .ok_or_else(proposal_store_missing)?
-                .lock()
-                .await;
-            if !store
-                .mark_effect_confirmed_projection_pending(&proposal_id, &claim_id)
-                .map_err(|error| runtime_proposal_store_error(state, error))?
-            {
-                return Err(format!(
-                    "startup_scheduled_task_confirmation_cas_lost:{proposal_id}"
-                ));
-            }
-            continue;
-        }
-        let store = state
-            .proposal_store
-            .as_ref()
-            .ok_or_else(proposal_store_missing)?
-            .lock()
-            .await;
-        if store
-            .mark_dispatch_unknown(
-                &proposal_id,
-                &claim_id,
-                "startup_governed_action_effect_unknown",
-            )
-            .map_err(|error| runtime_proposal_store_error(state, error))?
-        {
-            sealed += 1;
-        }
-    }
-    Ok((sealed, backlog_may_remain))
-}
-
 pub(crate) async fn reconcile_durable_proposal_projections_with_state(
     state: &Arc<AppState>,
     limit: i64,
@@ -1186,18 +937,21 @@ async fn reconcile_durable_proposal_projections_inner(
         } else {
             (0, false)
         };
-    let (ambiguous_action_effects_marked_unknown, action_effect_backlog_may_remain) =
-        if matches!(admission, ProposalReconciliationAdmission::StartupInternal) {
-            seal_startup_governed_action_claims_as_unknown(state, bounded_limit).await?
-        } else {
-            (0, false)
-        };
+    let (reconciled_direct_artifact_effects, direct_artifact_backlog_may_remain) =
+        crate::canonical_work_runtime::reconcile_direct_artifact_effects_with_state(
+            state,
+            bounded_limit as u64,
+        )
+        .await?;
+    let (ambiguous_action_effects_marked_unknown, action_effect_backlog_may_remain) = (0, false);
     let (reconciled_artifact_effects, artifact_effect_backlog_may_remain) =
         reconcile_artifact_effects_with_state(state, bounded_limit).await?;
-    let artifact_effects_reconciled =
-        orphaned_claims_released.saturating_add(reconciled_artifact_effects);
-    let artifact_backlog_may_remain =
-        orphaned_claim_backlog_may_remain || artifact_effect_backlog_may_remain;
+    let artifact_effects_reconciled = orphaned_claims_released
+        .saturating_add(reconciled_artifact_effects)
+        .saturating_add(reconciled_direct_artifact_effects);
+    let artifact_backlog_may_remain = orphaned_claim_backlog_may_remain
+        || artifact_effect_backlog_may_remain
+        || direct_artifact_backlog_may_remain;
     let confirmed_projection_pending = {
         let store = state
             .proposal_store
@@ -1248,44 +1002,19 @@ async fn confirmed_artifact_receipt_from_store(
     if proposal.proposal_type != ProposalType::ExternalWriteAction {
         return Ok(None);
     }
-    let canonical_record = if canonical_work_artifact_id(proposal).is_some() {
-        match state.canonical_task_runtime_store.as_ref() {
-            Some(store) => store
-                .lock()
-                .await
-                .load_artifact_effect(&proposal.id)
-                .map_err(|error| error.to_string())?,
-            None => None,
-        }
-    } else {
-        None
-    };
-    let legacy_record = if canonical_record.is_none() {
-        let store = state
-            .proposal_store
-            .as_ref()
-            .ok_or_else(proposal_store_missing)?
-            .lock()
-            .await;
-        store
-            .artifact_effect(&proposal.id)
-            .map_err(|error| runtime_proposal_store_error(state, error))?
-    } else {
-        None
-    };
-    let effect = if let Some(record) = canonical_record.filter(|record| {
-        record.state == openlife_core::task_runtime::CanonicalArtifactEffectState::Confirmed
-    }) {
-        (
-            record.dispatch_claim_id,
-            record.target_reference_digest,
-            record.content_digest,
-            record.byte_size,
-            record.media_type,
-            record.observed_content_digest,
-        )
-    } else if let Some(record) =
-        legacy_record.filter(|record| record.state == ArtifactEffectState::Confirmed)
+    if canonical_work_artifact_id(proposal).is_none() {
+        return Err("noncanonical_artifact_effect_retired".into());
+    }
+    let canonical_record = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
+        .lock()
+        .await
+        .load_artifact_effect(&proposal.id)
+        .map_err(|error| error.to_string())?;
+    let effect = if let Some(record) =
+        canonical_record.filter(|record| record.state == CanonicalArtifactEffectState::Confirmed)
     {
         (
             record.dispatch_claim_id,
@@ -1322,7 +1051,9 @@ async fn confirmed_artifact_receipt_from_store(
             .get("target_path")
             .and_then(Value::as_str)
             .ok_or_else(|| "confirmed artifact move lost target_path".to_string())?;
-        let safe_paths = artifact_safe_paths_for_proposal(state, proposal).await?;
+        let safe_paths =
+            crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, proposal)
+                .await?;
         let (target_reference_digest, observation) =
             inspect_artifact_move(source, target, &content_digest, &safe_paths)?;
         if target_reference_digest != expected_target_reference_digest
@@ -1346,9 +1077,10 @@ async fn confirmed_artifact_receipt_from_store(
     }
     let resolved = resolve_artifact_effect_input(state, proposal).await?;
     let path = resolved.path.as_str();
-    let content = resolved.content.as_str();
-    let safe_paths = artifact_safe_paths_for_proposal(state, proposal).await?;
-    let prepared = prepare_artifact_materialization_with_precondition_for_artifact(
+    let content = resolved.content.as_slice();
+    let safe_paths =
+        crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, proposal).await?;
+    let prepared = prepare_artifact_materialization_with_precondition_for_artifact_bytes(
         &resolved.artifact_id,
         &proposal.id,
         &dispatch_claim_id,
@@ -1582,44 +1314,39 @@ async fn persist_artifact_failed_before_effect(
     claim_id: &str,
     error_code: &str,
 ) -> Result<(), String> {
-    if let Some(store) = state.canonical_task_runtime_store.as_ref() {
-        let store = store.lock().await;
-        if store
-            .load_artifact_by_proposal(proposal_id)
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            if store
-                .load_artifact_effect(proposal_id)
-                .map_err(|error| error.to_string())?
-                .is_some()
-                && !store
-                    .finish_artifact_effect_failed_before_effect(proposal_id, claim_id, error_code)
-                    .map_err(|error| error.to_string())?
-            {
-                return Err("canonical_artifact_failed_before_effect_cas_lost".into());
-            }
-            return Ok(());
-        }
+    let canonical_store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let store = canonical_store.lock().await;
+    let artifact_exists = store
+        .load_artifact_by_proposal(proposal_id)
+        .map_err(|error| error.to_string())?
+        .is_some();
+    if !artifact_exists {
+        return Err("noncanonical_artifact_effect_retired".into());
     }
-    let store = state
+    let effect_exists = store
+        .load_artifact_effect(proposal_id)
+        .map_err(|error| error.to_string())?
+        .is_some();
+    if effect_exists {
+        if !store
+            .finish_artifact_effect_failed_before_effect(proposal_id, claim_id, error_code)
+            .map_err(|error| error.to_string())?
+        {
+            return Err("canonical_artifact_failed_before_effect_cas_lost".into());
+        }
+        return Ok(());
+    }
+    drop(store);
+    let proposal_store = state
         .proposal_store
         .as_ref()
         .ok_or_else(proposal_store_missing)?
         .lock()
         .await;
-    if store
-        .artifact_effect(proposal_id)
-        .map_err(|error| runtime_proposal_store_error(state, error))?
-        .is_some()
-    {
-        if !store
-            .finish_artifact_failed_before_effect(proposal_id, claim_id, error_code)
-            .map_err(|error| runtime_proposal_store_error(state, error))?
-        {
-            return Err("artifact_failed_before_effect_receipt_cas_lost".into());
-        }
-    } else if !store
+    if !proposal_store
         .mark_dispatch_failed_before_effect(proposal_id, claim_id, error_code)
         .map_err(|error| runtime_proposal_store_error(state, error))?
     {
@@ -1634,33 +1361,17 @@ async fn persist_artifact_unknown(
     claim_id: &str,
     error_code: &str,
 ) -> Result<(), String> {
-    if let Some(store) = state.canonical_task_runtime_store.as_ref() {
-        let store = store.lock().await;
-        if store
-            .load_artifact_by_proposal(proposal_id)
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            if !store
-                .finish_artifact_effect_unknown(proposal_id, claim_id, error_code)
-                .map_err(|error| error.to_string())?
-            {
-                return Err("canonical_artifact_unknown_receipt_cas_lost".into());
-            }
-            return Ok(());
-        }
-    }
     let store = state
-        .proposal_store
+        .canonical_task_runtime_store
         .as_ref()
-        .ok_or_else(proposal_store_missing)?
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
         .lock()
         .await;
     if !store
-        .finish_artifact_unknown(proposal_id, claim_id, error_code)
-        .map_err(|error| runtime_proposal_store_error(state, error))?
+        .finish_artifact_effect_unknown(proposal_id, claim_id, error_code)
+        .map_err(|error| error.to_string())?
     {
-        return Err("artifact_unknown_receipt_cas_lost".into());
+        return Err("canonical_artifact_unknown_receipt_cas_lost".into());
     }
     Ok(())
 }
@@ -1671,37 +1382,21 @@ async fn persist_artifact_confirmed(
     claim_id: &str,
     observed_content_digest: &str,
 ) -> Result<(), String> {
-    if let Some(store) = state.canonical_task_runtime_store.as_ref() {
-        let store = store.lock().await;
-        if store
-            .load_artifact_effect(proposal_id)
-            .map_err(|error| error.to_string())?
-            .is_some()
-        {
-            if !store
-                .finish_artifact_effect_confirmed(proposal_id, claim_id, observed_content_digest)
-                .map_err(|error| error.to_string())?
-            {
-                return Err("canonical_artifact_confirmed_receipt_cas_lost".into());
-            }
-            drop(store);
-            if !ensure_effect_dispatch_projection_pending(state, proposal_id, claim_id).await? {
-                return Err("canonical_artifact_dispatch_projection_receipt_cas_lost".into());
-            }
-            return Ok(());
-        }
-    }
     let store = state
-        .proposal_store
+        .canonical_task_runtime_store
         .as_ref()
-        .ok_or_else(proposal_store_missing)?
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
         .lock()
         .await;
     if !store
-        .finish_artifact_confirmed(proposal_id, claim_id, observed_content_digest)
-        .map_err(|error| runtime_proposal_store_error(state, error))?
+        .finish_artifact_effect_confirmed(proposal_id, claim_id, observed_content_digest)
+        .map_err(|error| error.to_string())?
     {
-        return Err("artifact_confirmed_receipt_cas_lost".into());
+        return Err("canonical_artifact_confirmed_receipt_cas_lost".into());
+    }
+    drop(store);
+    if !ensure_effect_dispatch_projection_pending(state, proposal_id, claim_id).await? {
+        return Err("canonical_artifact_dispatch_projection_receipt_cas_lost".into());
     }
     Ok(())
 }
@@ -1732,7 +1427,7 @@ async fn ensure_effect_dispatch_projection_pending(
 struct ResolvedArtifactEffectInput {
     artifact_id: String,
     path: String,
-    content: String,
+    content: Vec<u8>,
     target_precondition: ArtifactTargetPrecondition,
 }
 
@@ -1740,29 +1435,9 @@ async fn resolve_artifact_effect_input(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
 ) -> Result<ResolvedArtifactEffectInput, String> {
-    let Some(artifact_id) = canonical_work_artifact_id(proposal) else {
-        let path = proposal
-            .after
-            .get("path")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "artifact_path_missing".to_string())?;
-        let content = proposal
-            .after
-            .get("content")
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        return Ok(ResolvedArtifactEffectInput {
-            artifact_id: artifact_id_for_proposal(proposal),
-            path: path.to_string(),
-            content: content.to_string(),
-            target_precondition: reviewed_artifact_target_precondition(&proposal.after)?,
-        });
-    };
-    let expected_version = proposal
-        .after
-        .get("artifactVersion")
-        .and_then(Value::as_u64)
-        .ok_or_else(|| "canonical_artifact_version_missing".to_string())?;
+    let subject = canonical_artifact_review_subject(proposal)?;
+    let artifact_id = subject.artifact_id.as_str();
+    let expected_version = subject.artifact_version;
     let store = state
         .canonical_task_runtime_store
         .as_ref()
@@ -1799,15 +1474,13 @@ async fn resolve_artifact_effect_input(
     if bytes.len() > EXTERNAL_WRITE_MAX_SIZE {
         return Err("artifact_content_too_large".into());
     }
-    let content =
-        String::from_utf8(bytes).map_err(|_| "canonical_artifact_draft_not_utf8".to_string())?;
-    if openlife_core::agent::metadata_safe_text_digest(&content).1 != artifact.content_digest {
+    if artifact_content_digest(&bytes) != artifact.content_digest {
         return Err("canonical_artifact_draft_digest_mismatch".into());
     }
     Ok(ResolvedArtifactEffectInput {
         artifact_id: artifact_id.to_string(),
         path,
-        content,
+        content: bytes,
         target_precondition,
     })
 }
@@ -1835,13 +1508,17 @@ async fn apply_external_write_artifact(
         }
     };
     let path = resolved.path.as_str();
-    let content = resolved.content.as_str();
+    let content = resolved.content.as_slice();
     if content.len() > EXTERNAL_WRITE_MAX_SIZE {
         let code = "artifact_content_too_large";
         let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
         return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
     }
-    let safe_paths = match artifact_safe_paths_for_proposal(state, proposal).await {
+    let safe_paths = match crate::canonical_work_runtime::artifact_safe_paths_for_proposal(
+        state, proposal,
+    )
+    .await
+    {
         Ok(safe_paths) => safe_paths,
         Err(error) => {
             let code = "artifact_scope_binding_failed";
@@ -1850,7 +1527,7 @@ async fn apply_external_write_artifact(
             return ArtifactApplyOutcome::FailedBeforeEffect(error);
         }
     };
-    let prepared = match prepare_artifact_materialization_with_precondition_for_artifact(
+    let prepared = match prepare_artifact_materialization_with_precondition_for_artifact_bytes(
         &resolved.artifact_id,
         &proposal.id,
         claim_id,
@@ -1867,57 +1544,34 @@ async fn apply_external_write_artifact(
             return ArtifactApplyOutcome::FailedBeforeEffect(error);
         }
     };
-    if let Some(expected_hash) = proposal
-        .after
-        .get("content_hash")
-        .and_then(Value::as_str)
-        .filter(|hash| !hash.is_empty())
-    {
-        let expected_hash = if expected_hash.starts_with("sha256:") {
-            expected_hash.to_string()
-        } else {
-            format!("sha256:{expected_hash}")
-        };
-        if expected_hash != prepared.content_digest {
-            let code = "artifact_content_digest_mismatch";
+    let expected_hash = match canonical_artifact_review_subject(proposal) {
+        Ok(subject) => subject.content_digest,
+        Err(error) => {
+            let code = "artifact_review_subject_invalid";
             let _ =
                 persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
-            return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
+            return ArtifactApplyOutcome::FailedBeforeEffect(error);
         }
+    };
+    if expected_hash != prepared.content_digest {
+        let code = "artifact_content_digest_mismatch";
+        let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
+        return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
     }
-    let canonical_effect = canonical_work_artifact_id(proposal).is_some();
-    let prepared_record: Result<(), String> = if canonical_effect {
-        match state.canonical_task_runtime_store.as_ref() {
-            Some(store) => match store.lock().await.prepare_artifact_effect(
-                &proposal.id,
-                claim_id,
-                &prepared.target_reference_digest,
-                &prepared.content_digest,
-                prepared.byte_size,
-                &prepared.media_type,
-            ) {
-                Ok(Some(_)) => Ok(()),
-                Ok(None) => Err("canonical_artifact_effect_owner_missing".into()),
-                Err(error) => Err(error.to_string()),
-            },
-            None => Err("canonical_task_runtime_store_unavailable".into()),
-        }
-    } else {
-        let store = match state.proposal_store.as_ref() {
-            Some(store) => store.lock().await,
-            None => return ArtifactApplyOutcome::FailedBeforeEffect(proposal_store_missing()),
-        };
-        store
-            .prepare_artifact_effect(
-                &proposal.id,
-                claim_id,
-                &prepared.target_reference_digest,
-                &prepared.content_digest,
-                prepared.byte_size,
-                &prepared.media_type,
-            )
-            .map(|_| ())
-            .map_err(|error| runtime_proposal_store_error(state, error))
+    let prepared_record = match state.canonical_task_runtime_store.as_ref() {
+        Some(store) => match store.lock().await.prepare_artifact_effect(
+            &proposal.id,
+            claim_id,
+            &prepared.target_reference_digest,
+            &prepared.content_digest,
+            prepared.byte_size,
+            &prepared.media_type,
+        ) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err("canonical_artifact_effect_owner_missing".into()),
+            Err(error) => Err(error.to_string()),
+        },
+        None => Err("canonical_task_runtime_store_unavailable".into()),
     };
     if let Err(error) = prepared_record {
         let _ = persist_artifact_failed_before_effect(
@@ -1931,10 +1585,11 @@ async fn apply_external_write_artifact(
     }
 
     let stage_prepared = prepared.clone();
-    let stage_content = content.to_string();
-    let stage_result =
-        tokio::task::spawn_blocking(move || stage_artifact_bytes(&stage_prepared, &stage_content))
-            .await;
+    let stage_content = content.to_vec();
+    let stage_result = tokio::task::spawn_blocking(move || {
+        stage_artifact_raw_bytes(&stage_prepared, &stage_content)
+    })
+    .await;
     match stage_result {
         Ok(Ok(())) => {}
         Ok(Err(ArtifactFilesystemFailure::FailedBeforeEffect(code))) => {
@@ -1952,25 +1607,13 @@ async fn apply_external_write_artifact(
             return ArtifactApplyOutcome::Unknown(code.into());
         }
     }
-    let staged: Result<bool, String> = if canonical_effect {
-        match state.canonical_task_runtime_store.as_ref() {
-            Some(store) => store
-                .lock()
-                .await
-                .mark_artifact_effect_staged(&proposal.id, claim_id)
-                .map_err(|error| error.to_string()),
-            None => Err("canonical_task_runtime_store_unavailable".into()),
-        }
-    } else {
-        let store = state
-            .proposal_store
-            .as_ref()
-            .expect("ProposalStore checked before artifact staging")
+    let staged = match state.canonical_task_runtime_store.as_ref() {
+        Some(store) => store
             .lock()
-            .await;
-        store
-            .mark_artifact_staged(&proposal.id, claim_id)
-            .map_err(|error| runtime_proposal_store_error(state, error))
+            .await
+            .mark_artifact_effect_staged(&proposal.id, claim_id)
+            .map_err(|error| error.to_string()),
+        None => Err("canonical_task_runtime_store_unavailable".into()),
     };
     if !matches!(staged, Ok(true)) {
         let code = "artifact_staged_receipt_unconfirmed";
@@ -1997,25 +1640,13 @@ async fn apply_external_write_artifact(
             return ArtifactApplyOutcome::Unknown(code.into());
         }
     };
-    let confirmed: Result<bool, String> = if canonical_effect {
-        match state.canonical_task_runtime_store.as_ref() {
-            Some(store) => store
-                .lock()
-                .await
-                .finish_artifact_effect_confirmed(&proposal.id, claim_id, &observed_digest)
-                .map_err(|error| error.to_string()),
-            None => Err("canonical_task_runtime_store_unavailable".into()),
-        }
-    } else {
-        let store = state
-            .proposal_store
-            .as_ref()
-            .expect("ProposalStore checked before artifact confirmation")
+    let confirmed = match state.canonical_task_runtime_store.as_ref() {
+        Some(store) => store
             .lock()
-            .await;
-        store
-            .finish_artifact_confirmed(&proposal.id, claim_id, &observed_digest)
-            .map_err(|error| runtime_proposal_store_error(state, error))
+            .await
+            .finish_artifact_effect_confirmed(&proposal.id, claim_id, &observed_digest)
+            .map_err(|error| error.to_string()),
+        None => Err("canonical_task_runtime_store_unavailable".into()),
     };
     if !matches!(confirmed, Ok(true)) {
         return ArtifactApplyOutcome::Unknown("artifact_confirmed_receipt_unavailable".into());
@@ -2059,7 +1690,11 @@ async fn apply_external_move_artifact(
         let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
         return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
     }
-    let safe_paths = match artifact_safe_paths_for_proposal(state, proposal).await {
+    let safe_paths = match crate::canonical_work_runtime::artifact_safe_paths_for_proposal(
+        state, proposal,
+    )
+    .await
+    {
         Ok(safe_paths) => safe_paths,
         Err(error) => {
             let code = "artifact_move_scope_binding_failed";
@@ -2078,39 +1713,20 @@ async fn apply_external_move_artifact(
                 return ArtifactApplyOutcome::FailedBeforeEffect(error);
             }
         };
-    let canonical_effect = canonical_work_artifact_id(proposal).is_some();
-    let prepared_record: Result<(), String> = if canonical_effect {
-        match state.canonical_task_runtime_store.as_ref() {
-            Some(store) => match store.lock().await.prepare_artifact_effect(
-                &proposal.id,
-                claim_id,
-                &prepared.target_reference_digest,
-                &prepared.content_digest,
-                prepared.byte_size,
-                &prepared.media_type,
-            ) {
-                Ok(Some(_)) => Ok(()),
-                Ok(None) => Err("canonical_artifact_effect_owner_missing".into()),
-                Err(error) => Err(error.to_string()),
-            },
-            None => Err("canonical_task_runtime_store_unavailable".into()),
-        }
-    } else {
-        let store = match state.proposal_store.as_ref() {
-            Some(store) => store.lock().await,
-            None => return ArtifactApplyOutcome::FailedBeforeEffect(proposal_store_missing()),
-        };
-        store
-            .prepare_artifact_effect(
-                &proposal.id,
-                claim_id,
-                &prepared.target_reference_digest,
-                &prepared.content_digest,
-                prepared.byte_size,
-                &prepared.media_type,
-            )
-            .map(|_| ())
-            .map_err(|error| runtime_proposal_store_error(state, error))
+    let prepared_record = match state.canonical_task_runtime_store.as_ref() {
+        Some(store) => match store.lock().await.prepare_artifact_effect(
+            &proposal.id,
+            claim_id,
+            &prepared.target_reference_digest,
+            &prepared.content_digest,
+            prepared.byte_size,
+            &prepared.media_type,
+        ) {
+            Ok(Some(_)) => Ok(()),
+            Ok(None) => Err("canonical_artifact_effect_owner_missing".into()),
+            Err(error) => Err(error.to_string()),
+        },
+        None => Err("canonical_task_runtime_store_unavailable".into()),
     };
     if let Err(error) = prepared_record {
         let _ = persist_artifact_failed_before_effect(
@@ -2144,25 +1760,13 @@ async fn apply_external_move_artifact(
             return ArtifactApplyOutcome::Unknown(code.into());
         }
     };
-    let confirmed: Result<bool, String> = if canonical_effect {
-        match state.canonical_task_runtime_store.as_ref() {
-            Some(store) => store
-                .lock()
-                .await
-                .finish_artifact_effect_confirmed(&proposal.id, claim_id, &observed_digest)
-                .map_err(|error| error.to_string()),
-            None => Err("canonical_task_runtime_store_unavailable".into()),
-        }
-    } else {
-        let store = state
-            .proposal_store
-            .as_ref()
-            .expect("ProposalStore checked before artifact move")
+    let confirmed = match state.canonical_task_runtime_store.as_ref() {
+        Some(store) => store
             .lock()
-            .await;
-        store
-            .finish_artifact_confirmed(&proposal.id, claim_id, &observed_digest)
-            .map_err(|error| runtime_proposal_store_error(state, error))
+            .await
+            .finish_artifact_effect_confirmed(&proposal.id, claim_id, &observed_digest)
+            .map_err(|error| error.to_string()),
+        None => Err("canonical_task_runtime_store_unavailable".into()),
     };
     if !matches!(confirmed, Ok(true)) {
         return ArtifactApplyOutcome::Unknown("artifact_move_confirmed_receipt_unavailable".into());
@@ -2198,464 +1802,6 @@ pub(crate) fn memory_source(after: &Value) -> String {
         .and_then(Value::as_str)
         .unwrap_or("proposal")
         .to_string()
-}
-
-/// Validate that a DataExport filename is a single plain filename.
-/// Rejects path traversal, absolute paths, and empty names.
-fn validate_export_filename(name: &str) -> Result<(), String> {
-    if name.is_empty() || name == "." || name == ".." {
-        return Err("Filename cannot be empty, '.', or '..'.".to_string());
-    }
-    if name.contains('/') || name.contains('\\') {
-        return Err("Filename cannot contain path separators.".to_string());
-    }
-    if name.contains("..") {
-        return Err("Filename cannot contain parent directory references.".to_string());
-    }
-    // Ensure it parses as a single normal filename component
-    let path = std::path::Path::new(name);
-    if path.components().count() != 1 {
-        return Err("Filename must be a single component.".to_string());
-    }
-    if !matches!(
-        path.components().next(),
-        Some(std::path::Component::Normal(_))
-    ) {
-        return Err("Filename must be a normal file name.".to_string());
-    }
-    Ok(())
-}
-
-fn urlencoding(s: &str) -> String {
-    let mut encoded = String::with_capacity(s.len());
-    for byte in s.as_bytes() {
-        if byte.is_ascii_alphanumeric() || matches!(*byte, b'-' | b'_' | b'.' | b'~') {
-            encoded.push(char::from(*byte));
-        } else {
-            encoded.push_str(&format!("%{byte:02X}"));
-        }
-    }
-    encoded
-}
-
-fn validate_browser_open_url(raw: &str) -> Result<reqwest::Url, String> {
-    match reqwest::Url::parse(raw) {
-        Ok(url)
-            if matches!(url.scheme(), "http" | "https")
-                && url.host_str().is_some()
-                && url.username().is_empty()
-                && url.password().is_none() =>
-        {
-            Ok(url)
-        }
-        _ => {
-            Err("Browser handoff requires a valid http(s) URL without embedded credentials.".into())
-        }
-    }
-}
-
-async fn run_bounded_local_utility(command: &str, timeout_ms: u64) -> Result<String, String> {
-    let executable = local_utility_executable(command)
-        .ok_or_else(|| "Local utility is not in the exact read-only allowlist.".to_string())?;
-    if !(100..=3_000).contains(&timeout_ms) {
-        return Err("Local utility timeout must be between 100 and 3000 ms.".into());
-    }
-    let timeout = std::time::Duration::from_millis(timeout_ms);
-    let executable = executable.to_string();
-    tokio::task::spawn_blocking(move || {
-        use std::io::Read;
-        use std::process::{Command, Stdio};
-        let mut child = Command::new(&executable)
-            .env_clear()
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("Failed to start local utility: {error}"))?;
-        let started = std::time::Instant::now();
-        let status = loop {
-            match child.try_wait() {
-                Ok(Some(status)) => break status,
-                Ok(None) if started.elapsed() < timeout => {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                }
-                Ok(None) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err("Local utility timed out and was terminated.".into());
-                }
-                Err(error) => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(format!("Failed to observe local utility: {error}"));
-                }
-            }
-        };
-        let mut stdout = String::new();
-        let mut stderr = String::new();
-        if let Some(mut pipe) = child.stdout.take() {
-            pipe.read_to_string(&mut stdout)
-                .map_err(|error| format!("Failed to read local utility output: {error}"))?;
-        }
-        if let Some(mut pipe) = child.stderr.take() {
-            pipe.read_to_string(&mut stderr)
-                .map_err(|error| format!("Failed to read local utility error output: {error}"))?;
-        }
-        if !status.success() {
-            return Err(format!(
-                "Local utility exited with {}: {}",
-                status,
-                stderr.chars().take(500).collect::<String>()
-            ));
-        }
-        Ok(stdout.chars().take(4_000).collect::<String>())
-    })
-    .await
-    .map_err(|_| "Local utility worker outcome is unknown.".to_string())?
-}
-
-fn local_utility_executable(command: &str) -> Option<&'static str> {
-    match command {
-        "date" => Some("/bin/date"),
-        "uptime" => Some("/usr/bin/uptime"),
-        "uname" => Some("/usr/bin/uname"),
-        "whoami" => Some("/usr/bin/whoami"),
-        _ => None,
-    }
-}
-
-#[cfg(test)]
-mod browser_handoff_contract_tests {
-    use super::{
-        run_bounded_local_utility, urlencoding, validate_browser_open_url,
-        validate_proposal_payload,
-    };
-    use openlife_core::agent::ProposalType;
-
-    #[test]
-    fn browser_handoff_accepts_only_http_without_embedded_credentials() {
-        assert!(validate_browser_open_url("https://example.com/report").is_ok());
-        for rejected in [
-            "file:///tmp/private",
-            "javascript:alert(1)",
-            "https://user:secret@example.com/private",
-            "not a url",
-        ] {
-            assert!(validate_browser_open_url(rejected).is_err(), "{rejected}");
-        }
-    }
-
-    #[test]
-    fn mailto_components_are_encoded_as_utf8_bytes() {
-        assert_eq!(
-            urlencoding("会议 & update"),
-            "%E4%BC%9A%E8%AE%AE%20%26%20update"
-        );
-    }
-
-    #[tokio::test]
-    async fn local_utility_is_exact_allowlist_only() {
-        let output = run_bounded_local_utility("whoami", 3_000).await.unwrap();
-        assert!(!output.trim().is_empty());
-        for rejected in ["whoami --help", "sh", "/bin/date", "rm"] {
-            assert!(run_bounded_local_utility(rejected, 3_000).await.is_err());
-        }
-    }
-
-    #[test]
-    fn governed_data_export_actions_validate_exact_arguments_before_dispatch() {
-        assert!(validate_proposal_payload(
-            ProposalType::DataExport,
-            &serde_json::json!({
-                "tool": "browser.open",
-                "url": "https://example.com/report",
-                "content": "Open reviewed URL",
-            }),
-        )
-        .is_ok());
-        assert!(validate_proposal_payload(
-            ProposalType::DataExport,
-            &serde_json::json!({
-                "tool": "browser.open",
-                "url": "file:///tmp/private",
-                "content": "Invalid browser target",
-            }),
-        )
-        .is_err());
-        assert!(validate_proposal_payload(
-            ProposalType::DataExport,
-            &serde_json::json!({
-                "tool": "email.propose_draft",
-                "to": "alice@example.com",
-                "subject": "Review",
-                "content": "Missing exact body",
-            }),
-        )
-        .is_err());
-        for (command, timeout_ms) in [("whoami --help", 3_000), ("whoami", 3_001)] {
-            assert!(validate_proposal_payload(
-                ProposalType::DataExport,
-                &serde_json::json!({
-                    "tool": "local.run_utility",
-                    "command": command,
-                    "timeout_ms": timeout_ms,
-                    "content": "Run reviewed utility",
-                }),
-            )
-            .is_err());
-        }
-    }
-}
-
-fn parse_scheduled_at(value: &str) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
-    let value = value.trim();
-    if value.is_empty() {
-        return Ok(None);
-    }
-    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(value) {
-        return Ok(Some(parsed.with_timezone(&chrono::Utc)));
-    }
-    if let Ok(parsed) = chrono::NaiveDateTime::parse_from_str(value, "%Y-%m-%dT%H:%M:%S") {
-        return Ok(Some(parsed.and_utc()));
-    }
-    if let Ok(parsed) = chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-        return Ok(Some(
-            parsed
-                .and_hms_opt(0, 0, 0)
-                .ok_or_else(|| "ScheduledTask 日期超出有效范围。".to_string())?
-                .and_utc(),
-        ));
-    }
-    Err(
-        "ScheduledTask scheduled_at/date 必须是 RFC3339、YYYY-MM-DDTHH:MM:SS 或 YYYY-MM-DD。"
-            .to_string(),
-    )
-}
-
-fn ics_escape(value: &str) -> String {
-    value
-        .replace('\\', "\\\\")
-        .replace(';', "\\;")
-        .replace(',', "\\,")
-        .replace("\r\n", "\\n")
-        .replace(['\r', '\n'], "\\n")
-}
-
-/// Build a deterministic ICS (iCalendar) VEVENT from the reviewed proposal.
-/// Stable UID/DTSTAMP values make an exact acceptance replay byte-identical.
-fn build_ics_event(proposal: &AgentProposal, after: &Value) -> Result<String, String> {
-    let now = proposal.created_at.format("%Y%m%dT%H%M%SZ").to_string();
-    let uid = format!("openlife-{}@local", proposal.id);
-    let title = ics_escape(
-        after
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or("Untitled Event"),
-    );
-    let description = ics_escape(
-        after
-            .get("description")
-            .and_then(Value::as_str)
-            .unwrap_or(""),
-    );
-    let scheduled_at = after
-        .get("scheduled_at")
-        .or_else(|| after.get("date"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let scheduled = parse_scheduled_at(scheduled_at)?;
-    let dtstart = scheduled
-        .map(|value| value.format("%Y%m%dT%H%M%SZ").to_string())
-        .unwrap_or_default();
-    let dtend = scheduled
-        .map(|value| {
-            (value + chrono::Duration::hours(1))
-                .format("%Y%m%dT%H%M%SZ")
-                .to_string()
-        })
-        .unwrap_or_default();
-
-    Ok(format!(
-        "BEGIN:VCALENDAR\r\n\
-         VERSION:2.0\r\n\
-         PRODID:-//OpenLife//Calendar//EN\r\n\
-         BEGIN:VEVENT\r\n\
-         DTSTAMP:{now}\r\n\
-         UID:{uid}\r\n\
-         DTSTART:{dtstart}\r\n\
-         DTEND:{dtend}\r\n\
-         SUMMARY:{title}\r\n\
-         DESCRIPTION:{description}\r\n\
-         END:VEVENT\r\n\
-         END:VCALENDAR\r\n"
-    ))
-}
-
-/// Replace path-unsafe characters in a filename.
-fn sanitize_filename(name: &str) -> String {
-    name.chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == ' ' || c == '.' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect()
-}
-
-fn calendar_projection_filename(proposal: &AgentProposal, title: &str) -> String {
-    let mut title = sanitize_filename(title).trim().to_string();
-    if title.is_empty() {
-        title = "OpenLife event".into();
-    }
-    let digest = openlife_core::agent::metadata_safe_text_digest(&proposal.id).1;
-    let token = digest
-        .strip_prefix("sha256:")
-        .unwrap_or(&digest)
-        .chars()
-        .take(16)
-        .collect::<String>();
-    format!("{title}-{token}.ics")
-}
-
-fn write_calendar_projection_once(
-    proposal: &AgentProposal,
-    after: &Value,
-    safe_paths: &[String],
-) -> Result<Option<std::path::PathBuf>, String> {
-    if safe_paths.is_empty() {
-        return Ok(None);
-    }
-    let title = after
-        .get("title")
-        .and_then(Value::as_str)
-        .unwrap_or("Untitled Event");
-    let content = build_ics_event(proposal, after)?;
-    let filename = calendar_projection_filename(proposal, title);
-    let prepared = safe_paths
-        .iter()
-        .find_map(|safe_path| {
-            let requested = std::path::Path::new(safe_path).join(&filename);
-            prepare_artifact_materialization(
-                &proposal.id,
-                "calendar-ics-projection",
-                &requested.to_string_lossy(),
-                &content,
-                safe_paths,
-            )
-            .ok()
-        })
-        .ok_or_else(|| "No valid safe path is available for the ICS projection.".to_string())?;
-
-    if prepared.target_path.exists() {
-        let existing = std::fs::read(&prepared.target_path).map_err(|error| {
-            format!(
-                "Failed to inspect existing ICS projection '{}': {error}",
-                prepared.target_path.display()
-            )
-        })?;
-        if existing != content.as_bytes() {
-            return Err(format!(
-                "ICS projection target '{}' already exists with different content.",
-                prepared.target_path.display()
-            ));
-        }
-    }
-
-    stage_artifact_bytes(&prepared, &content)
-        .map_err(|error| format!("Failed to stage ICS projection: {}", error.code()))?;
-    commit_staged_artifact(&prepared, safe_paths)
-        .map_err(|error| format!("Failed to commit ICS projection: {}", error.code()))?;
-    Ok(Some(prepared.target_path))
-}
-
-#[cfg(test)]
-mod calendar_projection_tests {
-    use super::{build_ics_event, write_calendar_projection_once};
-    use crate::artifact_materializer::{prepare_artifact_materialization, stage_artifact_bytes};
-    use openlife_core::agent::{AgentProposal, ProposalSource, ProposalType, RiskLevel};
-    use serde_json::json;
-
-    fn proposal() -> AgentProposal {
-        AgentProposal::new(
-            ProposalType::ScheduledTask,
-            "calendar.events",
-            json!({
-                "tool": "calendar.propose_event",
-                "title": "Planning Review",
-                "scheduled_at": "2026-08-12T09:00:00+08:00",
-                "description": "Review current proposal",
-            }),
-            "reviewed local calendar projection",
-            0.9,
-            RiskLevel::Medium,
-            ProposalSource::ChatConversation,
-        )
-    }
-
-    #[test]
-    fn calendar_projection_is_deterministic_idempotent_and_never_overwrites_conflict() {
-        let directory = tempfile::tempdir().unwrap();
-        let proposal = proposal();
-        let first_ics = build_ics_event(&proposal, &proposal.after).unwrap();
-        let second_ics = build_ics_event(&proposal, &proposal.after).unwrap();
-        assert_eq!(first_ics, second_ics);
-
-        let safe_root = directory.path().canonicalize().unwrap();
-        let safe_paths = vec![safe_root.to_string_lossy().into_owned()];
-        let path = write_calendar_projection_once(&proposal, &proposal.after, &safe_paths)
-            .unwrap()
-            .expect("configured safe path creates a projection");
-        let original = std::fs::read(&path).unwrap();
-        assert_eq!(original, first_ics.as_bytes());
-
-        assert_eq!(
-            write_calendar_projection_once(&proposal, &proposal.after, &safe_paths)
-                .unwrap()
-                .as_deref(),
-            Some(path.as_path())
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), original);
-
-        std::fs::write(&path, b"unrelated existing file").unwrap();
-        let error =
-            write_calendar_projection_once(&proposal, &proposal.after, &safe_paths).unwrap_err();
-        assert!(error.contains("already exists with different content"));
-        assert_eq!(std::fs::read(&path).unwrap(), b"unrelated existing file");
-    }
-
-    #[test]
-    fn calendar_projection_commits_and_cleans_a_matching_staged_file() {
-        let directory = tempfile::tempdir().unwrap();
-        let proposal = proposal();
-        let content = build_ics_event(&proposal, &proposal.after).unwrap();
-        let safe_root = directory.path().canonicalize().unwrap();
-        let safe_paths = vec![safe_root.to_string_lossy().into_owned()];
-        let filename = super::calendar_projection_filename(
-            &proposal,
-            proposal.after["title"].as_str().unwrap(),
-        );
-        let target = safe_root.join(filename);
-        let prepared = prepare_artifact_materialization(
-            &proposal.id,
-            "calendar-ics-projection",
-            &target.to_string_lossy(),
-            &content,
-            &safe_paths,
-        )
-        .unwrap();
-        stage_artifact_bytes(&prepared, &content).unwrap();
-        assert!(prepared.stage_path.exists());
-
-        let path = write_calendar_projection_once(&proposal, &proposal.after, &safe_paths)
-            .unwrap()
-            .unwrap();
-
-        assert_eq!(path, prepared.target_path);
-        assert_eq!(std::fs::read(&path).unwrap(), content.as_bytes());
-        assert!(!prepared.stage_path.exists());
-    }
 }
 
 pub(crate) fn memory_content(after: &Value) -> Result<String, String> {
@@ -2737,50 +1883,12 @@ pub(crate) fn memory_archive_owners(
     Ok(parsed)
 }
 
-#[allow(dead_code)]
-fn set_path_value(root: &mut Value, path: &str, value: Value) -> Result<(), String> {
-    let mut current = root;
-    let mut parts = path.split('.').peekable();
-    while let Some(part) = parts.next() {
-        if parts.peek().is_none() {
-            let object = current
-                .as_object_mut()
-                .ok_or_else(|| format!("路径 `{}` 的父节点不是对象。", path))?;
-            if !object.contains_key(part) {
-                return Err(format!("人生模型不包含字段路径 `{}`。", path));
-            }
-            object.insert(part.to_string(), value);
-            return Ok(());
-        }
-
-        current = current
-            .get_mut(part)
-            .ok_or_else(|| format!("人生模型不包含字段路径 `{}`。", path))?;
-    }
-    Err("Proposal affected_path 不能为空。".to_string())
-}
-
-#[allow(dead_code)]
-fn apply_life_model_value(
-    model: &LifeModel,
-    path: &str,
-    after: Value,
-) -> Result<LifeModel, String> {
-    let mut value = serde_json::to_value(model).map_err(|e| e.to_string())?;
-    set_path_value(&mut value, path, after)?;
-    serde_json::from_value(value).map_err(|e| format!("Proposal 值无法转换为 LifeModel：{}", e))
-}
-
 pub(crate) fn validate_proposal_payload(
     proposal_type: ProposalType,
     after: &Value,
 ) -> Result<(), String> {
     match proposal_type {
-        ProposalType::LifeModelUpdate
-        | ProposalType::GoalUpdate
-        | ProposalType::StateUpdate
-        | ProposalType::PreferenceUpdate
-        | ProposalType::CapabilityUpdate => {
+        ProposalType::LifeModelUpdate => {
             // LifeModel proposals require after to be a non-null value
             if after.is_null() {
                 return Err("LifeModel Proposal 的 after 值不能为 null。".to_string());
@@ -2881,6 +1989,17 @@ pub(crate) fn validate_proposal_payload(
             Ok(())
         }
         ProposalType::ExternalWriteAction => {
+            if canonical_work_artifact_id_from_after(after).is_none() {
+                return Err("noncanonical_artifact_effect_retired".into());
+            }
+            if after.get("undoOfArtifactId").is_none() {
+                let subject =
+                    serde_json::from_value::<CanonicalArtifactReviewSubject>(after.clone())
+                        .map_err(|_| "canonical_artifact_review_subject_invalid".to_string())?;
+                subject.validate().map_err(|error| error.to_string())?;
+                reviewed_artifact_target_precondition(after)?;
+                return Ok(());
+            }
             let operation = after
                 .get("operation")
                 .and_then(Value::as_str)
@@ -2919,87 +2038,6 @@ pub(crate) fn validate_proposal_payload(
                 )),
             }
         }
-        ProposalType::ScheduledTask => {
-            let title = after
-                .get("title")
-                .and_then(Value::as_str)
-                .filter(|s| !s.is_empty());
-            if title.is_none() {
-                return Err("ScheduledTask Proposal 缺少 after.title（非空字符串）。".to_string());
-            }
-            if let Some(scheduled_at) = after
-                .get("scheduled_at")
-                .or_else(|| after.get("due_date"))
-                .or_else(|| after.get("date"))
-                .and_then(Value::as_str)
-            {
-                parse_scheduled_at(scheduled_at)?;
-            }
-            parse_reviewed_scheduled_provider_route(after)?;
-            Ok(())
-        }
-        ProposalType::DataExport => {
-            let content = after.get("content").and_then(Value::as_str);
-            if content.is_none() {
-                return Err("DataExport Proposal 缺少 after.content（字符串）。".to_string());
-            }
-            match after.get("tool").and_then(Value::as_str) {
-                Some("browser.open") => {
-                    let url = after
-                        .get("url")
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.trim().is_empty())
-                        .ok_or_else(|| "browser.open Proposal 缺少精确 after.url。".to_string())?;
-                    validate_browser_open_url(url).map(|_| ())
-                }
-                Some("email.propose_draft") => {
-                    for field in ["to", "subject", "body"] {
-                        if after
-                            .get(field)
-                            .and_then(Value::as_str)
-                            .is_none_or(|value| value.trim().is_empty())
-                        {
-                            return Err(format!(
-                                "email.propose_draft Proposal 缺少精确 after.{field}。"
-                            ));
-                        }
-                    }
-                    Ok(())
-                }
-                Some("local.run_utility") => {
-                    let command = after
-                        .get("command")
-                        .and_then(Value::as_str)
-                        .filter(|value| local_utility_executable(value).is_some())
-                        .ok_or_else(|| {
-                            "local.run_utility Proposal 必须使用精确只读 allowlist command。"
-                                .to_string()
-                        })?;
-                    debug_assert!(local_utility_executable(command).is_some());
-                    let timeout_ms =
-                        after
-                            .get("timeout_ms")
-                            .and_then(Value::as_u64)
-                            .ok_or_else(|| {
-                                "local.run_utility Proposal 缺少精确 after.timeout_ms。".to_string()
-                            })?;
-                    if !(100..=3_000).contains(&timeout_ms) {
-                        return Err(
-                            "local.run_utility Proposal timeout_ms 必须在 100..=3000。".to_string()
-                        );
-                    }
-                    Ok(())
-                }
-                Some(other) => Err(format!("DataExport Proposal 工具不受支持：{other}。")),
-                None => Ok(()),
-            }
-        }
-        ProposalType::ModelPolicyChange
-        | ProposalType::ScheduleCheckin
-        | ProposalType::Unsupported => {
-            // These types are not yet implemented; validation passes but apply will fail
-            Ok(())
-        }
     }
 }
 
@@ -3014,22 +2052,6 @@ fn validate_proposal_for_acceptance(proposal: &AgentProposal) -> Result<(), Stri
             .map_err(|error| error.to_string())?;
         if proposal.base_hash.as_deref() != diff.base_document_digest.as_deref() {
             return Err("lifemodel_v2_typed_diff_proposal_base_mismatch".into());
-        }
-    }
-    if is_legacy_lifemodel_v2_migration(proposal) {
-        if proposal.source != ProposalSource::Manual
-            || proposal.source_detail.as_deref() != Some("legacy_lifemodel_migration")
-        {
-            return Err("lifemodel_v2_migration_proposal_source_mismatch".into());
-        }
-        let plan = serde_json::from_value::<
-            openlife_core::life_model::v2::LegacyLifeModelMigrationPlanV2,
-        >(proposal.after.clone())
-        .map_err(|_| "invalid_lifemodel_v2_migration_payload".to_string())?;
-        plan.validate_contract()
-            .map_err(|error| error.to_string())?;
-        if proposal.base_hash.is_some() {
-            return Err("lifemodel_v2_migration_proposal_base_must_be_empty".into());
         }
     }
     if proposal.proposal_type == ProposalType::ToolPermission
@@ -3054,75 +2076,6 @@ fn validate_proposal_for_acceptance(proposal: &AgentProposal) -> Result<(), Stri
         .map_err(|error| format!("MemoryWrite Proposal 审阅契约无效：{error}"))?;
     }
     Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct ReviewedScheduledProviderRoute {
-    provider: String,
-    model: String,
-    expires_at: chrono::DateTime<chrono::Utc>,
-}
-
-fn parse_reviewed_scheduled_provider_route(
-    after: &Value,
-) -> Result<Option<ReviewedScheduledProviderRoute>, String> {
-    let Some(route) = after.get("provider_route") else {
-        return Ok(None);
-    };
-    let route = route
-        .as_object()
-        .ok_or_else(|| "ScheduledTask provider_route 必须是对象。".to_string())?;
-    if route.get("data_route").and_then(Value::as_str) != Some("policy_allowed")
-        || route.get("grant_scope").and_then(Value::as_str) != Some("single_execution")
-        || route.get("consent_scope").and_then(Value::as_str) != Some("scheduled_provider_once")
-    {
-        return Err(
-            "ScheduledTask 云路由必须显式声明 policy_allowed、single_execution 和 scheduled_provider_once。"
-                .into(),
-        );
-    }
-    let bounded_target = |name: &str| -> Result<String, String> {
-        let value = route
-            .get(name)
-            .and_then(Value::as_str)
-            .filter(|value| {
-                !value.trim().is_empty()
-                    && value.chars().count() <= 256
-                    && !value
-                        .chars()
-                        .any(|character| character.is_control() || character.is_whitespace())
-            })
-            .ok_or_else(|| format!("ScheduledTask provider_route.{name} 无效。"))?;
-        Ok(value.to_string())
-    };
-    let expires_at = route
-        .get("expires_at")
-        .and_then(Value::as_str)
-        .ok_or_else(|| "ScheduledTask provider_route.expires_at 缺失。".to_string())?;
-    let expires_at = chrono::DateTime::parse_from_rfc3339(expires_at)
-        .map_err(|_| "ScheduledTask provider_route.expires_at 必须是 RFC3339。".to_string())?
-        .with_timezone(&chrono::Utc);
-    if after
-        .get("description")
-        .and_then(Value::as_str)
-        .is_none_or(|value| value.trim().is_empty())
-    {
-        return Err("ScheduledTask 云路由必须绑定非空 description。".into());
-    }
-    if after
-        .get("scheduled_at")
-        .or_else(|| after.get("due_date"))
-        .or_else(|| after.get("date"))
-        .and_then(Value::as_str)
-        .is_none()
-    {
-        return Err("ScheduledTask 云路由必须绑定 scheduled_at。".into());
-    }
-    Ok(Some(ReviewedScheduledProviderRoute {
-        provider: bounded_target("provider")?,
-        model: bounded_target("model")?,
-        expires_at,
-    }))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -3321,21 +2274,7 @@ async fn apply_proposal_to_state(
     }
 
     match proposal.proposal_type {
-        ProposalType::LifeModelUpdate
-        | ProposalType::GoalUpdate
-        | ProposalType::StateUpdate
-        | ProposalType::PreferenceUpdate
-        | ProposalType::CapabilityUpdate => {
-            if is_legacy_lifemodel_v2_migration(proposal) {
-                let plan = serde_json::from_value::<
-                    openlife_core::life_model::v2::LegacyLifeModelMigrationPlanV2,
-                >(after)
-                .map_err(|_| "invalid_lifemodel_v2_migration_payload".to_string())?;
-                return life_model_write_gateway::materialize_accepted_legacy_lifemodel_migration_with_state(
-                    state, proposal, &plan,
-                )
-                .await;
-            }
+        ProposalType::LifeModelUpdate => {
             if is_lifemodel_v2_typed_diff(proposal) {
                 let diff = serde_json::from_value::<
                     openlife_core::life_model::v2::LifeModelTypedDiffV2,
@@ -3473,329 +2412,6 @@ async fn apply_proposal_to_state(
         ProposalType::ExternalWriteAction => {
             Err("ExternalWriteAction must execute through ArtifactMaterializer.".into())
         }
-        ProposalType::ScheduledTask => {
-            let Some(review_acceptance) = review_acceptance else {
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "scheduled_task_review_snapshot_missing",
-                    Some("Scheduled task has no exact ReviewWorkflow acceptance snapshot.".into()),
-                ));
-            };
-            let title = after
-                .get("title")
-                .and_then(Value::as_str)
-                .unwrap_or("Untitled Task");
-            let scheduled_at = after
-                .get("scheduled_at")
-                .or_else(|| after.get("due_date"))
-                .or_else(|| after.get("date"))
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let normalized_scheduled_at =
-                parse_scheduled_at(scheduled_at)?.map(|value| value.to_rfc3339());
-
-            let mut task = openlife_core::tasks::ScheduledTask::new(
-                title,
-                after
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or(""),
-                normalized_scheduled_at.clone(),
-                after
-                    .get("priority")
-                    .and_then(Value::as_str)
-                    .unwrap_or("medium"),
-            );
-            task.id = proposal.id.clone();
-            task.source_run_id = proposal.run_id.clone();
-            task.source_proposal_id = Some(proposal.id.clone());
-            task.action_type = after
-                .get("tool")
-                .and_then(Value::as_str)
-                .unwrap_or("scheduled_task")
-                .to_string();
-            if let Some(route) = parse_reviewed_scheduled_provider_route(&after)? {
-                let Some(due_at) = normalized_scheduled_at.as_deref() else {
-                    return Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "scheduled_cloud_due_time_missing",
-                        Some("Scheduled cloud route requires a due time.".into()),
-                    ));
-                };
-                let due_at = match chrono::DateTime::parse_from_rfc3339(due_at) {
-                    Ok(value) => value.with_timezone(&chrono::Utc),
-                    Err(_) => {
-                        return Ok(patch_result_for_proposal(
-                            proposal,
-                            false,
-                            "scheduled_cloud_due_time_invalid",
-                            Some("Scheduled cloud route due time is invalid.".into()),
-                        ))
-                    }
-                };
-                let config = state.config.lock().await.clone();
-                if route.provider != config.llm.provider
-                    || route.model != config.llm.chat_model
-                    || config.effective_cloud_api_key().trim().is_empty()
-                {
-                    return Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "scheduled_cloud_provider_preflight_failed",
-                        Some(
-                            "Reviewed scheduled provider/model is not the configured credentialed cloud target."
-                                .into(),
-                        ),
-                    ));
-                }
-                let endpoint = openlife_core::llm::chat_completions_url(
-                    &route.provider,
-                    &config.effective_openai_base(),
-                );
-                let capability = format!("provider.{}", route.provider);
-                let network_decision =
-                    match openlife_core::network_client::resolve_network_policy_decision(
-                        &config.system.network_policy,
-                        &endpoint,
-                        &capability,
-                    ) {
-                        Ok(decision) => decision,
-                        Err(error) => {
-                            return Ok(patch_result_for_proposal(
-                                proposal,
-                                false,
-                                "scheduled_cloud_network_policy_invalid",
-                                Some(error.to_string()),
-                            ))
-                        }
-                    };
-                if network_decision.disposition
-                    != openlife_core::network_client::NetworkPolicyDisposition::Allow
-                {
-                    return Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "scheduled_cloud_network_policy_not_allowed",
-                        Some(
-                            "Scheduled cloud execution requires an already-allowed exact network policy; Ask or Deny cannot run unattended."
-                                .into(),
-                        ),
-                    ));
-                }
-                let decision = match openlife_core::agent::main_chat_agent_v1::PolicyRouter
-                    .authorize_scheduled_provider_route(
-                        review_acceptance,
-                        openlife_core::agent::main_chat_agent_v1::ScheduledProviderRouteRequest {
-                            task_id: task.id.clone(),
-                            description: task.description.clone(),
-                            action_type: task.action_type.clone(),
-                            due_at,
-                            provider: route.provider,
-                            model: route.model,
-                            requested_data_route:
-                                openlife_core::llm::ProviderDataRoute::PolicyAllowed,
-                            grant_expires_at: route.expires_at,
-                        },
-                    ) {
-                    Ok(decision) => decision,
-                    Err(error) => {
-                        return Ok(patch_result_for_proposal(
-                            proposal,
-                            false,
-                            "scheduled_cloud_policy_rejected",
-                            Some(error.to_string()),
-                        ))
-                    }
-                };
-                if let Err(error) = task.seal_reviewed_cloud_provider_grant(&decision) {
-                    return Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "scheduled_cloud_grant_seal_rejected",
-                        Some(error.to_string()),
-                    ));
-                }
-            } else {
-                task.seal_deterministic_local_provider_grant();
-            }
-
-            if let Err(e) = state.scheduled_task_store.create_task_idempotent(&task) {
-                return Ok(patch_result_for_proposal(
-                    proposal,
-                    false,
-                    "scheduled_task",
-                    Some(format!("Failed to commit scheduled task: {}", e)),
-                ));
-            }
-
-            // For calendar.propose_event, also write an .ics file if safe_paths allow
-            let tool = after.get("tool").and_then(Value::as_str).unwrap_or("");
-            let mut projection_warning = None;
-            if tool == "calendar.propose_event" {
-                let safe_paths = {
-                    let cfg = state.config.lock().await;
-                    cfg.system.safe_paths.clone()
-                };
-                if let Err(error) = write_calendar_projection_once(proposal, &after, &safe_paths) {
-                    log::warn!("[proposal] Failed to create ICS projection: {error}");
-                    projection_warning = Some(format!(
-                        "projection_degraded: failed to materialize ICS view: {error}"
-                    ));
-                }
-            }
-
-            Ok(patch_result_for_proposal(
-                proposal,
-                true,
-                if projection_warning.is_some() {
-                    "scheduled_task_projection_degraded"
-                } else {
-                    "scheduled_task"
-                },
-                projection_warning,
-            ))
-        }
-        ProposalType::DataExport => {
-            let content = after.get("content").and_then(Value::as_str).unwrap_or("");
-            let filename = after
-                .get("filename")
-                .and_then(Value::as_str)
-                .unwrap_or("export.txt");
-            let tool = after.get("tool").and_then(Value::as_str).unwrap_or("");
-
-            if tool == "browser.open" {
-                let raw_url = after.get("url").and_then(Value::as_str).unwrap_or("");
-                let url = match validate_browser_open_url(raw_url) {
-                    Ok(url) => url,
-                    Err(error) => {
-                        return Ok(patch_result_for_proposal(
-                            proposal,
-                            false,
-                            "browser_open",
-                            Some(error),
-                        ))
-                    }
-                };
-                match open::that(url.as_str()) {
-                    Ok(_) => Ok(patch_result_for_proposal(
-                        proposal,
-                        true,
-                        "browser_handoff_opened",
-                        Some("The system accepted the browser handoff; page load and remote outcome remain unverified.".into()),
-                    )),
-                    Err(error) => Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "browser_open",
-                        Some(format!("Failed to open system browser: {error}")),
-                    )),
-                }
-            } else if tool == "local.run_utility" {
-                let command = after.get("command").and_then(Value::as_str).unwrap_or("");
-                let timeout_ms = after
-                    .get("timeout_ms")
-                    .and_then(Value::as_u64)
-                    .unwrap_or(3_000);
-                match run_bounded_local_utility(command, timeout_ms).await {
-                    Ok(output) => Ok(patch_result_for_proposal(
-                        proposal,
-                        true,
-                        "local_utility_completed",
-                        Some(format!(
-                            "Reviewed read-only utility completed. Output: {}",
-                            output.trim()
-                        )),
-                    )),
-                    Err(error) => Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "local_utility_failed",
-                        Some(error),
-                    )),
-                }
-            // email.propose_draft: open system mail client via mailto: URI
-            } else if tool == "email.propose_draft" {
-                let to = after.get("to").and_then(Value::as_str).unwrap_or("");
-                let subject = after.get("subject").and_then(Value::as_str).unwrap_or("");
-                let body = after.get("body").and_then(Value::as_str).unwrap_or(content);
-                let mailto = format!(
-                    "mailto:{}?subject={}&body={}",
-                    urlencoding(to),
-                    urlencoding(subject),
-                    urlencoding(body)
-                );
-                match open::that(&mailto) {
-                    Ok(_) => Ok(patch_result_for_proposal(
-                        proposal,
-                        true,
-                        "email_draft_handoff_opened",
-                        Some("The system accepted the email-draft handoff; OpenLife did not send the message and delivery remains unverified.".into()),
-                    )),
-                    Err(e) => Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "email_draft_handoff_failed",
-                        Some(format!("Failed to open mail client: {}", e)),
-                    )),
-                }
-            } else {
-                // Default: write to file
-                if let Err(e) = validate_export_filename(filename) {
-                    return Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "data_export",
-                        Some(e),
-                    ));
-                }
-                let safe_paths = {
-                    let cfg = state.config.lock().await;
-                    cfg.system.safe_paths.clone()
-                };
-                let export_dir = if !safe_paths.is_empty() {
-                    std::path::PathBuf::from(&safe_paths[0])
-                } else {
-                    app_data_dir().join("exports")
-                };
-
-                if let Err(e) = std::fs::create_dir_all(&export_dir) {
-                    return Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "data_export",
-                        Some(format!("Failed to create export directory: {}", e)),
-                    ));
-                }
-
-                let export_path = export_dir.join(filename);
-                match openlife_core::atomic_file::write_atomic(&export_path, content.as_bytes()) {
-                    Ok(_) => Ok(patch_result_for_proposal(
-                        proposal,
-                        true,
-                        "data_export",
-                        None,
-                    )),
-                    Err(e) => Ok(patch_result_for_proposal(
-                        proposal,
-                        false,
-                        "data_export",
-                        Some(format!(
-                            "Failed to write export file '{}': {}",
-                            export_path.display(),
-                            e
-                        )),
-                    )),
-                }
-            } // end else (non-email DataExport)
-        }
-        ProposalType::ModelPolicyChange
-        | ProposalType::ScheduleCheckin
-        | ProposalType::Unsupported => Err(format!(
-            "{} Proposal 尚未接入应用器，已保持 pending。",
-            proposal.proposal_type
-        )),
     }
 }
 
@@ -3999,15 +2615,6 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
     }
     ensure_pending_or_postponed(&proposal)?;
     validate_proposal_for_acceptance(&proposal)?;
-    if matches!(
-        proposal.proposal_type,
-        ProposalType::ModelPolicyChange | ProposalType::ScheduleCheckin | ProposalType::Unsupported
-    ) {
-        return Err(format!(
-            "{} Proposal 尚未接入应用器，已保持 pending。",
-            proposal.proposal_type
-        ));
-    }
     let dispatch_claim_id = {
         let store = state
             .proposal_store
@@ -4214,36 +2821,29 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
     let learning_materialization =
         reconcile_lifemodel_learning_materialization_response(state, &proposal, &mut warnings)
             .await;
-    let canonical_artifact_effect =
-        artifact_materialization.is_some() && canonical_work_artifact_id(&proposal).is_some();
-    let effect_receipt_persisted = if artifact_materialization.is_some()
-        && !canonical_artifact_effect
+    // Canonical domain stores own their effect receipts. ProposalStore owns only
+    // the Review dispatch checkpoint and projection lifecycle.
+    let effect_receipt_persisted = match ensure_effect_dispatch_projection_pending(
+        state,
+        &proposal_id,
+        &dispatch_claim_id,
+    )
+    .await
     {
-        // Legacy Artifact effects advance the generic dispatch receipt atomically
-        // inside ProposalStore::finish_artifact_confirmed.
-        true
-    } else {
-        // Canonical Artifact effects are owned by CanonicalTaskRuntimeStore. The
-        // ProposalStore still owns the Review dispatch checkpoint, so advance only
-        // that generic receipt after the canonical effect is durably confirmed.
-        match ensure_effect_dispatch_projection_pending(state, &proposal_id, &dispatch_claim_id)
-            .await
-        {
-            Ok(true) => true,
-            Ok(false) => {
-                warnings.push(
+        Ok(true) => true,
+        Ok(false) => {
+            warnings.push(
                     "Effect 已确认，但 dispatch receipt claim 已变化；禁止重复执行并等待 reconciliation。"
                         .to_string(),
                 );
-                false
-            }
-            Err(error) => {
-                warnings.push(format!(
-                    "Effect 已确认，但 dispatch receipt 持久化失败并等待 reconciliation: {}",
-                    error
-                ));
-                false
-            }
+            false
+        }
+        Err(error) => {
+            warnings.push(format!(
+                "Effect 已确认，但 dispatch receipt 持久化失败并等待 reconciliation: {}",
+                error
+            ));
+            false
         }
     };
     proposal.accept();
@@ -4297,13 +2897,6 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
         response["lifeModelLearning"] = learning;
     }
     if proposal.proposal_type == ProposalType::MemoryWrite {
-        let decision = memory_gateway::memory_gateway_decision_for_proposal(
-            &proposal,
-            "accepted_proposal_materialization",
-            Vec::new(),
-        );
-        response["memoryGateway"] =
-            serde_json::to_value(&decision).unwrap_or(serde_json::Value::Null);
         if let Some(lifecycle_store) = state.memory_lifecycle_store.as_ref() {
             let store = lifecycle_store.lock().await;
             if let Ok(Some(record)) = store.get_record_by_proposal_id(&proposal.id) {
@@ -4384,7 +2977,6 @@ pub(crate) async fn edit_lifemodel_learning_proposal_with_state(
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, String> {
     require_persistence_write(state)?;
-    check_safe_mode(state)?;
     let statement = statement.trim();
     if statement.is_empty() || statement.chars().count() > 500 {
         return Err("LifeModel learning statement must contain 1 to 500 characters.".into());
@@ -4434,11 +3026,7 @@ pub(crate) async fn edit_lifemodel_learning_proposal_with_state(
             "LifeModel learning proposal base is stale; create a fresh review item.".into(),
         );
     }
-    let allow_empty_result = current.is_some()
-        || manager
-            .load_v2_cutover(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
-            .map_err(|error| error.to_string())?
-            .is_some();
+    let allow_empty_result = current.is_some();
     let revised = openlife_core::life_model::v2::LifeModelTypedDiffV2::from_operations_for_review(
         openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID,
         current.as_ref(),
@@ -4556,13 +3144,18 @@ fn proposal_native_confirmation_digest(proposal: &AgentProposal) -> String {
 }
 
 fn proposal_requires_native_confirmation(proposal: &AgentProposal) -> bool {
+    if proposal.proposal_type == ProposalType::ExternalWriteAction
+        && canonical_work_artifact_id(proposal).is_some()
+    {
+        // The canonical ReviewItem is already an exact, user-visible,
+        // digest-bound just-in-time confirmation. A second native prompt adds
+        // no authority and creates approval fatigue.
+        return false;
+    }
     matches!(proposal.risk_level, RiskLevel::High | RiskLevel::Critical)
         || matches!(
             proposal.proposal_type,
-            ProposalType::ToolPermission
-                | ProposalType::ExternalWriteAction
-                | ProposalType::ModelPolicyChange
-                | ProposalType::DataExport
+            ProposalType::ToolPermission | ProposalType::ExternalWriteAction
         )
 }
 
@@ -4712,7 +3305,9 @@ pub(crate) async fn request_artifact_undo_with_state(
     {
         return Err("canonical_artifact_undo_unavailable_without_original_bytes".into());
     }
-    let safe_paths = artifact_safe_paths_for_proposal(state, &original_proposal).await?;
+    let safe_paths =
+        crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, &original_proposal)
+            .await?;
     let target = crate::artifact_materializer::trash_target_for_source(&source, &safe_paths)?;
     let prepared = crate::artifact_materializer::prepare_artifact_move(
         "artifact-undo-preview",

@@ -18,26 +18,32 @@ platform.
 
 - Product: local-first personal Agent OS
 - Stack: Tauri 2, Rust, React 18, TypeScript, SQLite
-- Product routes: `/today`, `/workspace`, `/tasks`, `/review`, `/life-model`,
-  `/settings`
+- Product routes: `/workspace`, `/life-model`, `/settings`
 
 Main Chat has separate send and stream entrypoints that converge on the same
 runtime owner:
 
 ```text
-frontend/src/tauri.ts
+frontend/src/ipc/conversation.ts
   -> src-tauri/src/lib.rs
   -> main_chat_send.rs | main_chat_streaming.rs
   -> canonical_chat_runtime.rs | canonical_work_runtime.rs
-  -> main_chat_kernel.rs
-  -> openlife-core/src/agent/main_chat_agent_v1.rs
+  -> provider_runtime.rs | provider_client.rs | ToolGateway | ReviewWorkflow
 ```
+
+Chat and Work use model-authored typed steps. Deterministic code validates
+capability scope, arguments, permissions, receipts, completion, and durable
+effects; it must not replace semantic intent understanding with keyword routes.
 
 ## Product Rules
 
-- Never silently write LifeModel, memory, files, calendar, email, provider,
-  plugin, shell, or other durable/external state.
-- Risky durable changes require confirmation or Review Center proposal flow.
+- Ordinary low-risk, recoverable work inside the user's selected Project,
+  resource, provider, and tool scopes may execute without per-action approval.
+- Scope expansion, sensitive disclosure, destructive or irreversible effects,
+  consequential external actions, and LifeModel changes require the applicable
+  just-in-time confirmation or Review flow.
+- Provider use configured by the user and ordinary public Web research do not
+  require per-message or per-search confirmation.
 - Creating or approving a proposal is not the same as proving materialization.
 - Missing or stale evidence stays unknown, blocked, or failed.
 - Use `LifeStateProjection` and backend ViewModels instead of rebuilding product

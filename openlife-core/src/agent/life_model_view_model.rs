@@ -8,8 +8,7 @@ use crate::agent::review_item::{ReviewItem, ReviewItemType};
 use crate::agent::types::{AgentProposal, ProposalStatus, ProposalType};
 use crate::agent::LifeModelLearningCandidate;
 use crate::life_model::v2::{
-    LegacyLifeModelMigrationPreviewV2, LifeModelDocumentV2, LifeModelHumanProjectionV2,
-    LifeModelVersionHistoryEntryV2,
+    LifeModelDocumentV2, LifeModelHumanProjectionV2, LifeModelVersionHistoryEntryV2,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
@@ -186,7 +185,6 @@ pub struct LifeModelViewModel {
     pub truth_mode: LifeModelTruthMode,
     pub canonical_summary: Option<LifeModelCanonicalSummary>,
     pub version_history: Vec<LifeModelVersionHistoryEntryV2>,
-    pub legacy_migration_preview: Option<LegacyLifeModelMigrationPreviewV2>,
     pub trust_quality_state: LifeModelTrustQualityState,
     pub pending_update_counts: LifeModelPendingUpdateCounts,
     pub provenance_refs: Vec<EvidenceRef>,
@@ -240,10 +238,9 @@ pub struct LifeModelCanonicalV2Input {
 pub struct LifeModelViewModelBuildInput {
     pub canonical_v2: Option<LifeModelCanonicalV2Input>,
     pub version_history: Vec<LifeModelVersionHistoryEntryV2>,
-    /// A fresh profile with neither legacy YAML nor a persisted v2 head has a
-    /// canonical empty owner without creating storage as a read side effect.
+    /// A fresh profile without a persisted canonical head is presented as
+    /// empty without creating storage as a read side effect.
     pub fresh_profile_canonical_empty: bool,
-    pub legacy_migration_preview: Option<LegacyLifeModelMigrationPreviewV2>,
     pub projection: Option<LifeModelProjectionInput>,
     pub proposals: Vec<AgentProposal>,
     pub review_items: Vec<ReviewItem>,
@@ -333,11 +330,6 @@ pub fn build_life_model_view_model_envelope(
         } else {
             Vec::new()
         },
-        legacy_migration_preview: if canonical_owner {
-            None
-        } else {
-            input.legacy_migration_preview.clone()
-        },
         trust_quality_state: build_trust_quality_state(status, &input, &source_refs),
         pending_update_counts,
         provenance_refs: source_refs.clone(),
@@ -398,9 +390,6 @@ fn loaded_status(
             .is_some_and(|canonical| canonical.item_count == 0)
     {
         return ViewModelStatus::Empty;
-    }
-    if input.legacy_migration_preview.is_some() {
-        return ViewModelStatus::Ready;
     }
     if !meaningful_canonical {
         return ViewModelStatus::Empty;
@@ -490,7 +479,7 @@ fn build_contract_limitations(authoritative_canonical: bool) -> Vec<String> {
     if !authoritative_canonical {
         limitations.insert(
             0,
-            "No valid structured LifeModel v2 version is available; legacy YAML remains a compatibility owner until governed migration.".into(),
+            "No valid canonical LifeModel version is available; personalization remains inactive until the user confirms one.".into(),
         );
     }
     limitations
@@ -707,7 +696,7 @@ fn build_warnings(
     {
         warnings.push(warning(
             "lifemodel.canonical_summary_unavailable",
-            "No valid structured LifeModel v2 version is available; canonical truth is not inferred from compatibility data.",
+            "No valid canonical LifeModel version is available; no substitute truth was inferred.",
             ViewModelWarningSeverity::Info,
             source_refs.to_vec(),
         ));
@@ -719,7 +708,7 @@ fn build_warnings(
         warnings.push(warning(
             "lifemodel.empty",
             if authoritative_empty {
-                "The canonical LifeModel v2 owner is intentionally empty; legacy compatibility data is not substituted."
+                "The canonical LifeModel owner is intentionally empty."
             } else {
                 "No confirmed LifeModel content was found; no fake canonical summary was generated."
             },
@@ -910,13 +899,6 @@ fn warning(
 
 fn is_life_model_proposal(proposal: &AgentProposal) -> bool {
     proposal.proposal_type == ProposalType::LifeModelUpdate
-        || matches!(
-            proposal.proposal_type,
-            ProposalType::GoalUpdate
-                | ProposalType::StateUpdate
-                | ProposalType::PreferenceUpdate
-                | ProposalType::CapabilityUpdate
-        )
         || affected_dimension_ids(proposal)
             .iter()
             .any(|id| id != "unknown")
@@ -1134,43 +1116,10 @@ mod tests {
         let data = envelope.data.expect("fresh profile data");
         assert_eq!(data.truth_mode, LifeModelTruthMode::Canonical);
         assert!(data.canonical_summary.is_none());
-        assert!(data.legacy_migration_preview.is_none());
         assert!(envelope
             .warnings
             .iter()
             .all(|warning| warning.code != "lifemodel.canonical_summary_unavailable"));
-    }
-
-    #[test]
-    fn legacy_migration_preview_is_visible_only_before_meaningful_canonical_v2() {
-        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
-            "identity:\n  name: Test User\nstate:\n  current_focus: Current work\n",
-        )
-        .expect("preview");
-        let compatibility = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            legacy_migration_preview: Some(preview.clone()),
-            now: Some("2026-08-08T10:00:00Z".into()),
-            ..Default::default()
-        });
-        assert_eq!(
-            compatibility
-                .data
-                .expect("compatibility data")
-                .legacy_migration_preview,
-            Some(preview.clone())
-        );
-
-        let canonical = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
-            canonical_v2: Some(canonical_input(1, &["One confirmed item"])),
-            legacy_migration_preview: Some(preview),
-            now: Some("2026-08-08T10:00:00Z".into()),
-            ..Default::default()
-        });
-        assert!(canonical
-            .data
-            .expect("canonical data")
-            .legacy_migration_preview
-            .is_none());
     }
 
     #[test]

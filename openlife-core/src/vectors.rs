@@ -11,8 +11,7 @@ use std::sync::{Arc, Mutex};
 
 const MAX_VECTOR_SEARCH_CANDIDATES: usize = 2_000;
 pub const VECTOR_REBUILD_BATCH_LIMIT: usize = 64;
-const CANONICAL_VECTOR_OWNER_KINDS: [&str; 3] =
-    ["memory_lifecycle", "memory_record", "knowledge_note"];
+const CANONICAL_VECTOR_OWNER_KINDS: [&str; 2] = ["memory_lifecycle", "knowledge_note"];
 
 /// Stable, validated identity for a canonical asset materialized in the
 /// derived vector store. Provenance strings and session ids are deliberately
@@ -324,7 +323,6 @@ impl VectorStore {
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_vectors_canonical_owner_source
              ON vectors(source)
              WHERE source GLOB 'memory_lifecycle:*'
-                OR source GLOB 'memory_record:*'
                 OR source GLOB 'knowledge_note:*'",
             [],
         )?;
@@ -342,14 +340,6 @@ impl VectorStore {
                     embedding_profile_id, embedding_dimension
                 )
             ) WITHOUT ROWID;
-            CREATE TABLE IF NOT EXISTS vector_tombstone_projections (
-                tombstone_id TEXT PRIMARY KEY,
-                aggregate_kind TEXT NOT NULL,
-                aggregate_id TEXT NOT NULL,
-                applied_at TEXT NOT NULL
-            );
-            CREATE INDEX IF NOT EXISTS idx_vector_tombstone_aggregate
-            ON vector_tombstone_projections(aggregate_kind, aggregate_id);
             CREATE TABLE IF NOT EXISTS vector_materialization_projections (
                 event_id TEXT PRIMARY KEY,
                 aggregate_kind TEXT NOT NULL,
@@ -570,8 +560,8 @@ impl VectorStore {
             END;",
         )?;
         // Older releases copied every ordinary chat turn into the vector store. Conversation
-        // text is now owned by MemoryStore.messages and searched there by reference, so these
-        // derived content copies must not survive migration.
+        // text is now owned by ConversationStore, so these derived content copies must not
+        // survive migration or become a second conversation authority.
         tx.execute(
             "DELETE FROM vectors WHERE source IN ('user_message', 'assistant_reply')",
             [],
@@ -634,10 +624,6 @@ impl VectorStore {
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        if !source.starts_with("memory_lifecycle:") && vector_session_tombstoned(&conn, session_id)?
-        {
-            anyhow::bail!("vector_session_canonical_source_tombstoned");
-        }
         conn.execute(
             "INSERT INTO vectors (session_id, content, embedding_json, embedding_blob, embedding_profile_id, embedding_dimension, source, created_at, tier, access_count, last_accessed_at, importance_score, archived, archived_at, summary) VALUES (?1, ?2, '[]', ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![session_id, content, blob, profile.id, profile.dimension as i64, source, chrono::Utc::now().to_rfc3339(), 2, 0, Option::<String>::None, 0.5_f32, 0, Option::<String>::None, Option::<String>::None],
@@ -903,11 +889,6 @@ impl VectorStore {
             validate_embedding_profile(item.embedding, item.profile)?;
             if is_reserved_canonical_vector_source(item.source) {
                 anyhow::bail!("generic vector batch cannot claim a canonical owner");
-            }
-            if !item.source.starts_with("memory_lifecycle:")
-                && vector_session_tombstoned(&tx, item.session_id)?
-            {
-                anyhow::bail!("vector_session_canonical_source_tombstoned");
             }
             let blob = encode_embedding_blob(item.embedding);
             tx.execute(
@@ -1662,9 +1643,7 @@ impl VectorStore {
                AND (vectors.last_accessed_at IS NULL OR vectors.last_accessed_at < ?1)
                AND vectors.access_count <= 2
                AND vectors.importance_score < 0.3
-               AND projections.aggregate_kind IN (
-                   'memory_lifecycle', 'memory_record', 'knowledge_note'
-               )
+               AND projections.aggregate_kind IN ('memory_lifecycle', 'knowledge_note')
              ORDER BY vectors.importance_score ASC,
                       COALESCE(vectors.last_accessed_at, '') ASC,
                       projections.aggregate_kind,
@@ -1689,87 +1668,6 @@ impl VectorStore {
             CanonicalVectorOwnerRef::new(&candidate.owner_kind, &candidate.owner_id)?;
         }
         Ok(candidates)
-    }
-
-    /// Apply a canonical conversation tombstone to derived vector content.
-    /// Vectors with a mechanically matching materialization marker have an
-    /// independent canonical owner and therefore survive conversation deletion.
-    /// A source prefix alone is never ownership evidence. Every vector owned
-    /// only by the deleted conversation is removed so it cannot remain searchable.
-    pub fn project_conversation_tombstone(
-        &self,
-        tombstone_id: &str,
-        session_id: &str,
-    ) -> Result<usize> {
-        if tombstone_id.trim().is_empty() || session_id.trim().is_empty() {
-            anyhow::bail!("invalid vector conversation tombstone projection");
-        }
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        let already_applied = tx
-            .query_row(
-                "SELECT 1 FROM vector_tombstone_projections WHERE tombstone_id = ?1",
-                [tombstone_id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        let deleted = tx.execute(
-            "DELETE FROM vectors
-             WHERE session_id = ?1
-               AND NOT EXISTS (
-                   SELECT 1 FROM vector_materialization_projections projections
-                   WHERE projections.vector_id = vectors.id
-                     AND projections.mutation_kind = 'materialized'
-                     AND projections.aggregate_kind IN (
-                         'memory_lifecycle', 'memory_record', 'knowledge_note'
-                     )
-                     AND vectors.source =
-                         projections.aggregate_kind || ':' || projections.aggregate_id
-               )",
-            [session_id],
-        )?;
-        if !already_applied {
-            tx.execute(
-                "INSERT INTO vector_tombstone_projections (
-                    tombstone_id, aggregate_kind, aggregate_id, applied_at
-                 ) VALUES (?1, 'conversation', ?2, ?3)",
-                params![tombstone_id, session_id, chrono::Utc::now().to_rfc3339()],
-            )?;
-        }
-        tx.commit()?;
-        Ok(deleted)
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    #[doc(hidden)]
-    pub fn install_tombstone_projection_failure_for_test(&self) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        conn.execute_batch(
-            "CREATE TRIGGER fail_vector_tombstone_projection_for_test
-             BEFORE DELETE ON vectors
-             BEGIN
-                 SELECT RAISE(ABORT, 'injected vector tombstone projection failure');
-             END;",
-        )?;
-        Ok(())
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    #[doc(hidden)]
-    pub fn remove_tombstone_projection_failure_for_test(&self) -> Result<()> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        conn.execute_batch("DROP TRIGGER IF EXISTS fail_vector_tombstone_projection_for_test;")?;
-        Ok(())
     }
 
     /// Update importance score for a chunk (e.g. after user feedback).
@@ -1951,18 +1849,6 @@ fn validate_exported_chunk_profile(chunk: &ExportedVectorChunk) -> Result<()> {
     Ok(())
 }
 
-fn vector_session_tombstoned(conn: &Connection, session_id: &str) -> Result<bool> {
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM vector_tombstone_projections
-             WHERE aggregate_kind = 'conversation' AND aggregate_id = ?1 LIMIT 1",
-            [session_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-}
-
 fn validate_projection_ref(label: &str, value: &str) -> Result<()> {
     if value.trim().is_empty()
         || value.trim() != value
@@ -1995,7 +1881,6 @@ fn rebind_and_validate_materialization_markers(conn: &Connection) -> Result<()> 
         .query_row(
             "SELECT source FROM vectors
              WHERE source GLOB 'memory_lifecycle:*'
-                OR source GLOB 'memory_record:*'
                 OR source GLOB 'knowledge_note:*'
              GROUP BY source HAVING COUNT(*) > 1 LIMIT 1",
             [],
@@ -2009,7 +1894,6 @@ fn rebind_and_validate_materialization_markers(conn: &Connection) -> Result<()> 
     let mut sources = conn.prepare(
         "SELECT source FROM vectors
          WHERE source GLOB 'memory_lifecycle:*'
-            OR source GLOB 'memory_record:*'
             OR source GLOB 'knowledge_note:*'",
     )?;
     for source in sources.query_map([], |row| row.get::<_, String>(0))? {
@@ -2279,9 +2163,11 @@ fn decode_embedding(blob: Option<&[u8]>, legacy_json: &str) -> Vec<f32> {
             // to stale compatibility JSON would hide the damaged canonical value.
             return Vec::new();
         }
-        return blob
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        let (chunks, remainder) = blob.as_chunks::<4>();
+        debug_assert!(remainder.is_empty());
+        return chunks
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect();
     }
     serde_json::from_str(legacy_json).unwrap_or_default()
@@ -3630,86 +3516,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn conversation_tombstone_deletes_searchable_session_projection_idempotently() {
-        let store = VectorStore::new_in_memory().unwrap();
-        let profile = test_profile(4);
-        store
-            .insert(
-                "deleted-session",
-                "PRIVATE_VECTOR_SENTINEL",
-                &[0.1, 0.2, 0.3, 0.4],
-                &profile,
-                "manual_index",
-            )
-            .unwrap();
-        store
-            .project_memory_embedding(
-                "outbox:accepted-memory",
-                &test_owner("memory_lifecycle", "memory-1"),
-                "deleted-session",
-                "accepted memory remains",
-                &[0.4, 0.3, 0.2, 0.1],
-                &profile,
-            )
-            .unwrap();
-        store
-            .project_memory_embedding(
-                "outbox:manual-memory-record",
-                &test_owner("memory_record", "42"),
-                "deleted-session",
-                "manual canonical memory remains",
-                &[0.2, 0.3, 0.4, 0.1],
-                &profile,
-            )
-            .unwrap();
-        store
-            .project_memory_embedding(
-                "outbox:knowledge-note",
-                &test_owner("knowledge_note", "7"),
-                "deleted-session",
-                "canonical KnowledgeNote remains",
-                &[0.3, 0.2, 0.1, 0.4],
-                &profile,
-            )
-            .unwrap();
-
-        assert_eq!(
-            store
-                .project_conversation_tombstone("tombstone-1", "deleted-session")
-                .unwrap(),
-            1
-        );
-        assert_eq!(
-            store
-                .project_conversation_tombstone("tombstone-1", "deleted-session")
-                .unwrap(),
-            0
-        );
-        let chunks = store.export_all_chunks().unwrap();
-        assert!(!chunks
-            .iter()
-            .any(|chunk| chunk.content == "PRIVATE_VECTOR_SENTINEL"));
-        assert!(chunks
-            .iter()
-            .any(|chunk| chunk.source == "memory_lifecycle:memory-1"));
-        assert!(chunks
-            .iter()
-            .any(|chunk| chunk.source == "memory_record:42"));
-        assert!(chunks
-            .iter()
-            .any(|chunk| chunk.source == "knowledge_note:7"));
-        assert!(store
-            .insert(
-                "deleted-session",
-                "late stale projection",
-                &[0.1, 0.2, 0.3, 0.4],
-                &profile,
-                "manual_index",
-            )
-            .is_err());
-    }
-
     fn staged_rebuild_item(
         memory_id: i64,
         content: &str,
@@ -4080,11 +3886,7 @@ mod tests {
     fn generic_vector_writes_cannot_spoof_canonical_owner_prefixes() {
         let store = VectorStore::new_in_memory().unwrap();
         let profile = test_profile(4);
-        for source in [
-            "knowledge_note:spoof",
-            "memory_lifecycle:spoof",
-            "memory_record:spoof",
-        ] {
+        for source in ["knowledge_note:spoof", "memory_lifecycle:spoof"] {
             assert!(store
                 .insert(
                     "session-test",
@@ -4133,10 +3935,10 @@ mod tests {
             .unwrap();
         store
             .project_memory_embedding(
-                "outbox:memory-record-before-rebuild",
-                &test_owner("memory_record", "7"),
+                "outbox:lifecycle-before-rebuild",
+                &test_owner("memory_lifecycle", "7"),
                 "memory-session",
-                "memory record before rebuild",
+                "lifecycle memory before rebuild",
                 &[0.0, 1.0, 0.0, 0.0],
                 &profile,
             )
@@ -4148,14 +3950,12 @@ mod tests {
             metadata_digest: "sha256:marker-rebind-snapshot".into(),
         };
         let job = store.start_or_resume_rebuild(&snapshot).unwrap();
-        let mut memory_record = staged_rebuild_item(7, "rebuilt memory record", &profile);
-        memory_record.chunk.as_mut().unwrap().source = "memory_record:7".into();
-        memory_record.canonical_owner = Some(test_owner("memory_record", "7"));
+        let lifecycle_memory = staged_rebuild_item(7, "rebuilt lifecycle memory", &profile);
         let mut knowledge_note = staged_rebuild_item(42, "rebuilt knowledge note", &profile);
         knowledge_note.chunk.as_mut().unwrap().source = "knowledge_note:42".into();
         knowledge_note.canonical_owner = Some(test_owner("knowledge_note", "42"));
         store
-            .stage_rebuild_batch(&job.job_id, &[memory_record, knowledge_note])
+            .stage_rebuild_batch(&job.job_id, &[lifecycle_memory, knowledge_note])
             .unwrap();
         store.finalize_rebuild(&job.job_id, &snapshot).unwrap();
 
@@ -4177,7 +3977,7 @@ mod tests {
         assert_eq!(rebound_source, "knowledge_note:42");
         let other_id: i64 = conn
             .query_row(
-                "SELECT id FROM vectors WHERE source = 'memory_record:7'",
+                "SELECT id FROM vectors WHERE source = 'memory_lifecycle:7'",
                 [],
                 |row| row.get(0),
             )

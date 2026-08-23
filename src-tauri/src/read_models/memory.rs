@@ -1,15 +1,11 @@
-use crate::memory_gateway;
 use crate::state::AppState;
 use openlife_core::agent::{
-    build_memory_view_model, EvidenceRef, EvidenceSensitivity, EvidenceSource, MemoryTierSummary,
-    MemoryViewModel, MemoryViewModelBuildInput, ReviewItem, ViewModelEnvelope, ViewModelStatus,
-    ViewModelWarning, ViewModelWarningSeverity,
+    build_memory_view_model, EvidenceRef, EvidenceSensitivity, EvidenceSource, MemoryViewModel,
+    MemoryViewModelBuildInput, ViewModelEnvelope, ViewModelStatus, ViewModelWarning,
+    ViewModelWarningSeverity,
 };
-use openlife_core::vectors::TierStats;
 use std::{collections::BTreeMap, sync::Arc};
 use tauri::State;
-
-use super::review_center::get_review_center_view_model_with_state;
 
 #[tauri::command]
 pub async fn get_memory_view_model(
@@ -24,32 +20,21 @@ pub(crate) async fn get_memory_view_model_with_state(
     let mut warnings = Vec::new();
     let (lifecycle_available, lifecycle_records, retrieval_dispositions) =
         load_lifecycle_records(state, &mut warnings).await;
-    let tier_summary = load_tier_summary(state, &mut warnings).await;
-    let review_items = load_review_items(state, &mut warnings).await;
 
     let model = build_memory_view_model(MemoryViewModelBuildInput {
         lifecycle_records,
-        review_items,
-        tier_summary,
         source_refs: vec![
             source_ref("memory_lifecycle_store", "Memory lifecycle store"),
-            source_ref("review_center_view_model", "ReviewCenterViewModel"),
-            source_ref("vector_store_tier_stats", "Vector access-tier telemetry"),
-            source_ref(
-                "memory_store_retrieval_state",
-                "Canonical Memory retrieval state",
-            ),
         ],
         contract_limitations: vec![
-            "Accepted proposal decisions remain decision state until lifecycle materialization evidence proves applied.".into(),
-            "Archived count comes from proven canonical Memory retrieval state; vector archive flags are projection telemetry only.".into(),
+            "Memory content and recall state come from one canonical lifecycle owner; the vector index is rebuildable and does not grant fact authority.".into(),
         ],
         retrieval_dispositions,
     });
 
     let status = if !lifecycle_available {
         ViewModelStatus::Error
-    } else if model.summary.total_lifecycle_records == 0 && model.review_item_refs.is_empty() {
+    } else if model.summary.total_memory_count == 0 {
         ViewModelStatus::Empty
     } else {
         ViewModelStatus::Ready
@@ -107,51 +92,6 @@ async fn load_lifecycle_records(
             ));
             (false, Vec::new(), BTreeMap::new())
         }
-    }
-}
-
-async fn load_tier_summary(
-    state: &Arc<AppState>,
-    warnings: &mut Vec<ViewModelWarning>,
-) -> Option<MemoryTierSummary> {
-    match memory_gateway::get_memory_tier_stats_with_state(state).await {
-        Ok(stats) => Some(tier_summary(stats)),
-        Err(err) => {
-            warnings.push(warning(
-                "memory_tier_stats_unavailable",
-                format!("MemoryViewModel could not load vector tier telemetry: {err}"),
-            ));
-            None
-        }
-    }
-}
-
-async fn load_review_items(
-    state: &Arc<AppState>,
-    warnings: &mut Vec<ViewModelWarning>,
-) -> Vec<ReviewItem> {
-    match get_review_center_view_model_with_state(state).await {
-        Ok(envelope) => {
-            warnings.extend(envelope.warnings);
-            envelope.data.map(|model| model.items).unwrap_or_default()
-        }
-        Err(err) => {
-            warnings.push(warning(
-                "review_center_view_model_unavailable",
-                format!("MemoryViewModel could not load ReviewCenterViewModel refs: {err}"),
-            ));
-            Vec::new()
-        }
-    }
-}
-
-fn tier_summary(stats: TierStats) -> MemoryTierSummary {
-    MemoryTierSummary {
-        total: stats.total.max(0) as usize,
-        tier1: stats.tier1.max(0) as usize,
-        tier2: stats.tier2.max(0) as usize,
-        tier3: stats.tier3.max(0) as usize,
-        archived: stats.archived.max(0) as usize,
     }
 }
 
@@ -260,7 +200,6 @@ mod tests {
         assert_eq!(erased_item.recall_state, "erased");
         assert!(erased_item.privacy_erased);
         assert!(erased_item.content.is_none());
-        assert!(erased_item.evidence_ids.is_empty());
         assert!(!erased_item.can_privacy_erase);
     }
 }

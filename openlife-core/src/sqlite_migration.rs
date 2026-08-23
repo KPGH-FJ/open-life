@@ -389,11 +389,6 @@ impl SqliteSlotOwnerLeaseUnavailable {
             failure_layer,
         }
     }
-
-    #[cfg(test)]
-    pub(crate) fn failure_layer(&self) -> SqliteSlotOwnerLeaseFailureLayer {
-        self.failure_layer
-    }
 }
 
 impl std::fmt::Display for SqliteSlotOwnerLeaseUnavailable {
@@ -501,7 +496,7 @@ impl SqliteSlotOwnerLease {
             // Explicit CLOEXEC is part of the lease contract. Scheduler tests
             // and the product may launch child processes while a store is
             // open; an inherited lock descriptor must never extend the
-            // writable-owner lifetime past the owning TaskStore.
+            // writable-owner lifetime past the owning SQLite store.
             lock_options.custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
         }
         let lock_file = lock_options.open(&lease_path).with_context(|| {

@@ -21,7 +21,6 @@ pub struct LifeStateProjection {
     pub credential_bootstrap: crate::state::CredentialBootstrapSnapshot,
     pub tool_permissions: LifeToolPermissionProjection,
     pub safe_paths: Vec<String>,
-    pub surfaces: Vec<LifeSurfaceProjection>,
     pub source_refs: Vec<String>,
 }
 
@@ -84,20 +83,6 @@ pub struct LifeToolPermissionProjection {
     pub allow_until_revoked_count: usize,
 }
 
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LifeSurfaceProjection {
-    pub surface: String,
-    pub pending_review_count: usize,
-    pub edited_review_count: usize,
-    pub total_review_required_count: usize,
-    pub readiness_status: String,
-    pub task_status: String,
-    pub safe_mode_active: bool,
-    pub waiting_permission_count: usize,
-    pub active_tool_permission_count: usize,
-}
-
 #[tauri::command]
 pub async fn get_life_state_projection(
     state: State<'_, Arc<AppState>>,
@@ -122,7 +107,6 @@ pub(crate) async fn get_life_state_projection_with_state(
         usage_readiness_issues: diagnostics.usage_readiness_issues.clone(),
     };
     let safe_mode = build_safe_mode_projection(
-        diagnostics.startup_warnings.clone(),
         diagnostics.vector_corrupt_embedding_count,
         Some(diagnostics.database_status.as_str()),
     );
@@ -132,14 +116,6 @@ pub(crate) async fn get_life_state_projection_with_state(
         let cfg = state.config.lock().await;
         cfg.system.safe_paths.clone()
     };
-    let surfaces = build_surface_projection(
-        &pending,
-        &readiness,
-        &task_state,
-        &safe_mode,
-        &tool_permissions,
-    );
-
     Ok(LifeStateProjection {
         version: "life_state_projection_v1".into(),
         generated_at: Utc::now().to_rfc3339(),
@@ -151,7 +127,6 @@ pub(crate) async fn get_life_state_projection_with_state(
         credential_bootstrap: state.credential_bootstrap_snapshot.clone(),
         tool_permissions,
         safe_paths,
-        surfaces,
         source_refs: vec![
             "diagnostics".into(),
             "proposal_store:pending_and_edited".into(),
@@ -278,16 +253,11 @@ async fn build_task_state_projection(state: &Arc<AppState>) -> LifeTaskStateProj
 }
 
 fn build_safe_mode_projection(
-    startup_warnings: Vec<String>,
     vector_corrupt_embedding_count: usize,
     database_status: Option<&str>,
 ) -> LifeSafeModeProjection {
-    let active = !startup_warnings.is_empty()
-        || vector_corrupt_embedding_count > 0
-        || database_status == Some("degraded");
-    let reason = if let Some(warning) = startup_warnings.first() {
-        warning.clone()
-    } else if vector_corrupt_embedding_count > 0 {
+    let active = vector_corrupt_embedding_count > 0 || database_status == Some("degraded");
+    let reason = if vector_corrupt_embedding_count > 0 {
         format!(
             "检测到 {} 条损坏向量索引记录。",
             vector_corrupt_embedding_count
@@ -299,9 +269,6 @@ fn build_safe_mode_projection(
     };
 
     let mut source_refs = Vec::new();
-    if !startup_warnings.is_empty() {
-        source_refs.push("diagnostics:startup_warnings".into());
-    }
     if vector_corrupt_embedding_count > 0 {
         source_refs.push("diagnostics:vector_corrupt_embedding_count".into());
     }
@@ -356,47 +323,6 @@ async fn build_tool_permission_projection(state: &Arc<AppState>) -> LifeToolPerm
     projection
 }
 
-fn build_surface_projection(
-    pending: &LifePendingProjection,
-    readiness: &LifeReadinessProjection,
-    task_state: &LifeTaskStateProjection,
-    safe_mode: &LifeSafeModeProjection,
-    tool_permissions: &LifeToolPermissionProjection,
-) -> Vec<LifeSurfaceProjection> {
-    let readiness_status = if readiness.usage_ready {
-        "ready"
-    } else if readiness.chat_ready || readiness.life_model_ready {
-        "partial"
-    } else {
-        "blocked"
-    };
-    let task_status = task_state
-        .latest_task_status
-        .clone()
-        .unwrap_or_else(|| "idle".into());
-    [
-        "today",
-        "mailbox",
-        "chat",
-        "companion",
-        "life_model",
-        "settings",
-    ]
-    .into_iter()
-    .map(|surface| LifeSurfaceProjection {
-        surface: surface.into(),
-        pending_review_count: pending.pending_proposal_count,
-        edited_review_count: pending.edited_proposal_count,
-        total_review_required_count: pending.total_review_required_count,
-        readiness_status: readiness_status.into(),
-        task_status: task_status.clone(),
-        safe_mode_active: safe_mode.active,
-        waiting_permission_count: task_state.waiting_permission_count,
-        active_tool_permission_count: tool_permissions.active_count,
-    })
-    .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -413,12 +339,20 @@ mod tests {
 
     #[test]
     fn safe_mode_projection_uses_same_product_sources() {
-        let projection = build_safe_mode_projection(Vec::new(), 3, Some("ok"));
+        let projection = build_safe_mode_projection(3, Some("ok"));
 
         assert!(projection.active);
         assert_eq!(
             projection.source_refs,
             vec!["diagnostics:vector_corrupt_embedding_count"]
         );
+    }
+
+    #[test]
+    fn optional_capability_warning_does_not_create_global_safe_mode() {
+        let projection = build_safe_mode_projection(0, Some("ok"));
+
+        assert!(!projection.active);
+        assert!(projection.source_refs.is_empty());
     }
 }

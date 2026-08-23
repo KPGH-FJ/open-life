@@ -88,70 +88,6 @@ impl std::fmt::Display for AgentTaskStatus {
     }
 }
 
-/// Typed task input used by policy classification and scheduled work.
-#[derive(Debug, Clone)]
-pub struct AgentTask {
-    pub kind: AgentTaskKind,
-    pub session_id: String,
-    pub user_text: String,
-    pub messages: Vec<crate::llm::ChatMessage>,
-    pub layer: crate::layer::Layer,
-}
-
-/// Trace of which model was chosen and why.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RedactionLevel {
-    None,
-    Light,
-    Summary,
-    Strict,
-    LocalOnly,
-}
-
-impl std::fmt::Display for RedactionLevel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RedactionLevel::None => write!(f, "none"),
-            RedactionLevel::Light => write!(f, "light"),
-            RedactionLevel::Summary => write!(f, "summary"),
-            RedactionLevel::Strict => write!(f, "strict"),
-            RedactionLevel::LocalOnly => write!(f, "local_only"),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ModelRouteTrace {
-    pub provider: String,
-    pub model: String,
-    pub route_type: String, // "local" | "cloud" | "fallback" | "direct"
-    pub prefer_local: bool,
-    pub local_model: String,
-    pub reason: String,
-    pub privacy_level: RedactionLevel,
-    pub latency_ms: Option<u64>,
-    pub retry_count: u32,
-    #[serde(default)]
-    pub fallback_reason: Option<String>,
-    #[serde(default)]
-    pub provider_health_is_estimated: Option<bool>,
-}
-
-/// Summary of what context was included in the run.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct ContextSummary {
-    pub life_model_empty: bool,
-    pub included_life_model_sections: Vec<String>,
-    pub memory_hit_count: i64,
-    pub memory_sources: Vec<String>,
-    pub used_tools_prompt: bool,
-    pub redaction_applied: bool,
-    pub redaction_level: RedactionLevel,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolActionScope {
@@ -259,7 +195,11 @@ impl ContentReceiptAuthorityKey for CanonicalTaskReceiptKey {
             return false;
         }
         let mut tag = [0u8; 32];
-        for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+        if !remainder.is_empty() {
+            return false;
+        }
+        for (index, pair) in pairs.iter().enumerate() {
             let Ok(pair) = std::str::from_utf8(pair) else {
                 return false;
             };
@@ -1103,41 +1043,20 @@ impl std::fmt::Display for ProposalStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProposalType {
-    GoalUpdate,
-    StateUpdate,
-    PreferenceUpdate,
-    CapabilityUpdate,
     MemoryWrite,
     MemoryArchive,
     ToolPermission,
-    ScheduledTask,
     ExternalWriteAction,
-    ModelPolicyChange,
-    DataExport,
-    ScheduleCheckin,
-    /// Unknown or future proposal type that this build cannot safely apply.
-    Unsupported,
-    /// 兼容旧数据
-    #[serde(alias = "life_model_update")]
     LifeModelUpdate,
 }
 
 impl std::fmt::Display for ProposalType {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ProposalType::GoalUpdate => write!(f, "goal_update"),
-            ProposalType::StateUpdate => write!(f, "state_update"),
-            ProposalType::PreferenceUpdate => write!(f, "preference_update"),
-            ProposalType::CapabilityUpdate => write!(f, "capability_update"),
             ProposalType::MemoryWrite => write!(f, "memory_write"),
             ProposalType::MemoryArchive => write!(f, "memory_archive"),
             ProposalType::ToolPermission => write!(f, "tool_permission"),
-            ProposalType::ScheduledTask => write!(f, "scheduled_task"),
             ProposalType::ExternalWriteAction => write!(f, "external_write_action"),
-            ProposalType::ModelPolicyChange => write!(f, "model_policy_change"),
-            ProposalType::DataExport => write!(f, "data_export"),
-            ProposalType::ScheduleCheckin => write!(f, "schedule_checkin"),
-            ProposalType::Unsupported => write!(f, "unsupported"),
             ProposalType::LifeModelUpdate => write!(f, "life_model_update"),
         }
     }
@@ -1147,28 +1066,22 @@ impl std::fmt::Display for ProposalType {
 #[serde(rename_all = "snake_case")]
 pub enum ProposalSource {
     BuilderReview,
-    CalibrationRun,
-    FeedbackEvolution,
     MemoryGovernance,
     SkillRuntime,
     NetworkConsent,
     Manual,
     ChatConversation,
-    PlanningSession,
 }
 
 impl std::fmt::Display for ProposalSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             ProposalSource::BuilderReview => write!(f, "builder_review"),
-            ProposalSource::CalibrationRun => write!(f, "calibration_run"),
-            ProposalSource::FeedbackEvolution => write!(f, "feedback_evolution"),
             ProposalSource::MemoryGovernance => write!(f, "memory_governance"),
             ProposalSource::SkillRuntime => write!(f, "skill_runtime"),
             ProposalSource::NetworkConsent => write!(f, "network_consent"),
             ProposalSource::Manual => write!(f, "manual"),
             ProposalSource::ChatConversation => write!(f, "chat_conversation"),
-            ProposalSource::PlanningSession => write!(f, "planning_session"),
         }
     }
 }
@@ -1183,14 +1096,11 @@ impl rusqlite::types::FromSql for ProposalSource {
     fn column_result(value: rusqlite::types::ValueRef<'_>) -> rusqlite::types::FromSqlResult<Self> {
         value.as_str().and_then(|s| match s {
             "builder_review" => Ok(ProposalSource::BuilderReview),
-            "calibration_run" => Ok(ProposalSource::CalibrationRun),
-            "feedback_evolution" => Ok(ProposalSource::FeedbackEvolution),
             "memory_governance" => Ok(ProposalSource::MemoryGovernance),
             "skill_runtime" => Ok(ProposalSource::SkillRuntime),
             "network_consent" => Ok(ProposalSource::NetworkConsent),
             "manual" => Ok(ProposalSource::Manual),
             "chat_conversation" => Ok(ProposalSource::ChatConversation),
-            "planning_session" => Ok(ProposalSource::PlanningSession),
             _ => Err(rusqlite::types::FromSqlError::InvalidType),
         })
     }
@@ -1272,14 +1182,11 @@ impl AgentProposal {
     fn calculate_expires_at(source: ProposalSource) -> Option<DateTime<Utc>> {
         let duration = match source {
             ProposalSource::BuilderReview => chrono::Duration::days(30),
-            ProposalSource::CalibrationRun => chrono::Duration::days(14),
-            ProposalSource::FeedbackEvolution => chrono::Duration::days(7),
             ProposalSource::MemoryGovernance => chrono::Duration::days(7),
             ProposalSource::SkillRuntime => chrono::Duration::days(14),
             ProposalSource::NetworkConsent => chrono::Duration::days(3),
             ProposalSource::Manual => chrono::Duration::days(365),
             ProposalSource::ChatConversation => chrono::Duration::days(3),
-            ProposalSource::PlanningSession => chrono::Duration::days(14),
         };
         Some(Utc::now() + duration)
     }
@@ -1299,11 +1206,6 @@ impl AgentProposal {
             let duration = expires.signed_duration_since(now);
             duration.num_days()
         })
-    }
-
-    /// Backward compatibility: get run_id
-    pub fn get_run_id(&self) -> Option<&str> {
-        self.run_id.as_deref()
     }
 
     pub fn accept(&mut self) {

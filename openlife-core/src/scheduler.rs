@@ -1,23 +1,19 @@
-use crate::agent::ModelRouteTrace;
 use crate::config::NetworkPolicy;
 use crate::llm::{
     BoundedContextBlock, ChatMessage, ContextManifest, PreparedProviderOutcome,
     PreparedProviderRequest, ProviderDataRoute, ProviderInvocationReceipt,
     ProviderInvocationStatus, ProviderPayloadCategory, ProviderPayloadPurpose,
-    ProviderPolicyAuthority, ProviderPolicyAuthorization, ProviderPolicyProvenanceKind,
-    ProviderPolicyProvenanceRef, ProviderPolicyReceiptEvidence, StreamResult,
+    ProviderPolicyAuthorization, ProviderPolicyProvenanceKind, ProviderPolicyProvenanceRef,
+    ProviderPolicyReceiptEvidence, StreamResult,
 };
 use crate::network_client::NetworkPolicyDecision;
 use crate::ollama::{prepare_ollama_chat_target, resolve_ollama_model};
-use crate::tasks::{ScheduledTaskClaim, TaskStore};
 use anyhow::Result;
 use futures::Stream;
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-
-use crate::agent::model_router::ModelRouter;
 
 /// Adapter-edge lifecycle facts emitted synchronously with the underlying
 /// provider operation. A start fact means the local client began a dispatch
@@ -35,6 +31,13 @@ pub enum ProviderInvocationProgress {
     Completed(ProviderInvocationReceipt),
     Failed(ProviderInvocationReceipt),
     RemoteUnknown(ProviderInvocationReceipt),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedProviderRoute {
+    pub provider: String,
+    pub model: String,
+    pub route_type: String,
 }
 
 /// Non-serializable runtime authority for one exact prepared-provider
@@ -97,27 +100,6 @@ impl ProviderInvocationTerminalProof {
             self.runtime_seal.origin,
             ProviderInvocationTerminalOrigin::RuntimeAdapter
         ) && !self.runtime_seal.issuance_id.is_nil()
-    }
-
-    #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) fn reconciliation_source_id(&self) -> Result<String> {
-        if !self.is_runtime_adapter_terminal() {
-            anyhow::bail!("provider reconciliation source was not issued by a runtime adapter");
-        }
-        Ok(
-            crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
-                "schema": "provider_runtime_terminal_reconciliation_source_v1",
-                "issuanceId": self.runtime_seal.issuance_id,
-                "requestId": self.receipt.request_id,
-                "provider": self.receipt.provider,
-                "model": self.receipt.model,
-                "status": self.receipt.status,
-                "startedAt": self.receipt.started_at.to_rfc3339(),
-                "finishedAt": self.receipt.finished_at.to_rfc3339(),
-                "errorDigest": self.receipt.error_digest,
-            }))
-            .1,
-        )
     }
 
     #[expect(
@@ -590,1041 +572,6 @@ impl ProviderStartedAttempt {
     }
 }
 
-const MAX_SCHEDULED_PROVIDER_TRUTH_ATTEMPTS: usize = 256;
-const MAX_SCHEDULED_PROVIDER_TRUTH_ADMISSIONS: usize = MAX_SCHEDULED_PROVIDER_TRUTH_ATTEMPTS * 2;
-
-/// Closed local reasons that may conservatively tighten a real adapter start
-/// to `remote_unknown`. The caller cannot supply prose or a receipt, and this
-/// enum cannot create a terminal unless the exact scheduled request already
-/// crossed the adapter start hook.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScheduledProviderLocalAbortCause {
-    ExecutionTimeout,
-    CancellationRequested,
-    RuntimeFutureAborted,
-}
-
-impl ScheduledProviderLocalAbortCause {
-    fn reason_code(self) -> &'static str {
-        match self {
-            Self::ExecutionTimeout => "scheduled_provider_execution_timeout",
-            Self::CancellationRequested => "scheduled_provider_cancellation_requested",
-            Self::RuntimeFutureAborted => "scheduled_provider_runtime_future_aborted",
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-struct ScheduledProviderTruthClaimBinding {
-    canonical_store_identity: String,
-    database_slot_verifier: String,
-    runtime_store_instance_id: uuid::Uuid,
-    task_id: String,
-    task_revision_digest: String,
-    attempt_id: String,
-    attempt_number: u32,
-    claim_token_digest: String,
-    grant_id: String,
-    grant_binding_digest: String,
-    policy_decision_digest: String,
-    policy_version: String,
-    data_route: ProviderDataRoute,
-    payload_purpose: ProviderPayloadPurpose,
-    subject_scope_digest: String,
-    grant_expires_at: Option<String>,
-}
-
-impl std::fmt::Debug for ScheduledProviderTruthClaimBinding {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("ScheduledProviderTruthClaimBinding")
-            .field("canonical_store_identity", &self.canonical_store_identity)
-            .field("database_slot_verifier", &"[HMAC-ONLY]")
-            .field("runtime_store_instance_id", &self.runtime_store_instance_id)
-            .field("task_id", &self.task_id)
-            .field("attempt_id", &self.attempt_id)
-            .field("attempt_number", &self.attempt_number)
-            .field("claim_token", &"[DIGEST-ONLY]")
-            .field("grant_id", &self.grant_id)
-            .field("policy_decision_digest", &self.policy_decision_digest)
-            .finish()
-    }
-}
-
-impl ScheduledProviderTruthClaimBinding {
-    fn capture(claim: &ScheduledTaskClaim) -> Result<Self> {
-        claim.validate_policy_authority()?;
-        let authorization = ProviderPolicyAuthorization::from_scheduled_claim(claim)?;
-        let grant_value = serde_json::to_value(claim.provider_grant())
-            .map_err(|error| anyhow::anyhow!("scheduled provider grant digest failed: {error}"))?;
-        let task_revision_digest =
-            crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
-                "schema": "scheduled_task_claim_revision_v1",
-                "id": claim.task().id,
-                "title": claim.task().title,
-                "description": claim.task().description,
-                "dueDate": claim.task().due_date,
-                "priority": claim.task().priority,
-                "status": claim.task().status,
-                "createdAt": claim.task().created_at,
-                "completedAt": claim.task().completed_at,
-                "sourceRunId": claim.task().source_run_id,
-                "sourceProposalId": claim.task().source_proposal_id,
-                "actionType": claim.task().action_type,
-                "attemptCount": claim.task().attempt_count,
-                "claimTokenDigest": crate::agent::metadata_safe::metadata_safe_text_digest(
-                    claim.task().claim_token.as_deref().unwrap_or("none"),
-                ).1,
-                "leaseExpiresAt": claim.task().lease_expires_at,
-                "lastError": claim.task().last_error,
-                "resultDigest": claim.task().result_digest,
-                "resultRef": claim.task().result_ref,
-                "providerGrant": grant_value,
-            }))
-            .1;
-        Ok(Self {
-            canonical_store_identity: claim.canonical_store_identity().to_string(),
-            database_slot_verifier: claim.database_slot_verifier().to_string(),
-            runtime_store_instance_id: claim.runtime_store_instance_id(),
-            task_id: claim.task().id.clone(),
-            task_revision_digest,
-            attempt_id: claim.attempt_id().to_string(),
-            attempt_number: claim.attempt_number(),
-            claim_token_digest: crate::agent::metadata_safe::metadata_safe_text_digest(
-                claim.claim_token(),
-            )
-            .1,
-            grant_id: claim.provider_grant().grant_id.clone(),
-            grant_binding_digest: crate::agent::metadata_safe::metadata_safe_value_digest(
-                &grant_value,
-            )
-            .1,
-            policy_decision_digest: claim.provider_grant().policy_decision_digest.clone(),
-            policy_version: claim.provider_grant().policy_version.clone(),
-            data_route: claim.provider_grant().data_route,
-            payload_purpose: claim.provider_grant().payload_purpose,
-            subject_scope_digest: authorization.subject_scope_digest(),
-            grant_expires_at: claim.provider_grant().grant_expires_at.clone(),
-        })
-    }
-
-    fn validate_claim(&self, claim: &ScheduledTaskClaim) -> Result<()> {
-        let observed = Self::capture(claim)?;
-        if &observed != self {
-            anyhow::bail!(
-                "scheduled provider truth admission does not match task/attempt/claim/grant"
-            );
-        }
-        Ok(())
-    }
-
-    fn validate_dispatch_time(&self, observed_at: chrono::DateTime<chrono::Utc>) -> Result<()> {
-        if let Some(expires_at) = self.grant_expires_at.as_deref() {
-            let expires_at = chrono::DateTime::parse_from_rfc3339(expires_at)
-                .map_err(|error| {
-                    anyhow::anyhow!("scheduled provider grant expiry invalid: {error}")
-                })?
-                .with_timezone(&chrono::Utc);
-            if expires_at <= observed_at {
-                anyhow::bail!("scheduled provider grant expired before adapter dispatch");
-            }
-        }
-        Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct ScheduledPreparedProviderTruthBinding {
-    claim: ScheduledProviderTruthClaimBinding,
-    request_id: String,
-    provider: String,
-    model: String,
-    prepared_request_digest: String,
-    policy_evidence_digest: String,
-    policy_evidence: ProviderPolicyReceiptEvidence,
-}
-
-impl ScheduledPreparedProviderTruthBinding {
-    fn capture(
-        claim: &ScheduledProviderTruthClaimBinding,
-        request: &PreparedProviderRequest,
-    ) -> Result<Self> {
-        request.validate()?;
-        let authorization = request.policy_authorization();
-        let policy_evidence = request.policy_receipt_evidence();
-        policy_evidence.validate_minimal_truth()?;
-        if authorization.authority() != ProviderPolicyAuthority::ScheduledPolicy
-            || authorization.decision_id() != claim.policy_decision_digest
-            || authorization.policy_version() != claim.policy_version
-            || authorization.data_route() != claim.data_route
-            || policy_evidence.issuing_authority != ProviderPolicyAuthority::ScheduledPolicy
-            || policy_evidence.decision_id != claim.policy_decision_digest
-            || policy_evidence.policy_version != claim.policy_version
-            || policy_evidence.effective_data_route != claim.data_route
-            || policy_evidence.payload_purpose != Some(claim.payload_purpose)
-            || policy_evidence.subject_scope_digest != claim.subject_scope_digest
-        {
-            anyhow::bail!(
-                "prepared provider request does not match scheduled claim policy authority"
-            );
-        }
-        let prepared_envelope_digest = policy_evidence
-            .prepared_envelope_digest
-            .as_deref()
-            .ok_or_else(|| {
-                anyhow::anyhow!("scheduled provider request has no prepared-envelope digest")
-            })?;
-        let policy_evidence_digest = policy_evidence.evidence_digest()?;
-        let endpoint_digest =
-            crate::agent::metadata_safe::metadata_safe_text_digest(&request.provider_endpoint).1;
-        let prepared_request_digest =
-            crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
-                "schema": "scheduled_prepared_provider_request_v1",
-                "requestId": request.context_manifest.request_id,
-                "provider": request.provider_target,
-                "model": request.model_target,
-                "endpointDigest": endpoint_digest,
-                "providerConfigGeneration": request.provider_config_generation,
-                "providerCredentialVersion": request.provider_credential_version,
-                "dataRoute": request.data_route,
-                "preparedEnvelopeDigest": prepared_envelope_digest,
-                "contextManifestDigest": policy_evidence.context_manifest_digest,
-                "networkPolicyDecisionDigest": policy_evidence.network_policy_decision_digest,
-                "policyEvidenceDigest": policy_evidence_digest,
-            }))
-            .1;
-        Ok(Self {
-            claim: claim.clone(),
-            request_id: request.context_manifest.request_id.clone(),
-            provider: request.provider_target.clone(),
-            model: request.model_target.clone(),
-            prepared_request_digest,
-            policy_evidence_digest,
-            policy_evidence,
-        })
-    }
-
-    fn validate_start(&self, attempt: &ProviderStartedAttempt) -> Result<()> {
-        self.claim.validate_dispatch_time(attempt.started_at)?;
-        if attempt.request_id != self.request_id
-            || attempt.provider != self.provider
-            || attempt.model != self.model
-            || attempt.policy_evidence.evidence_digest()? != self.policy_evidence_digest
-            || attempt.policy_evidence != self.policy_evidence
-        {
-            anyhow::bail!("scheduled provider start differs from its prepared request binding");
-        }
-        Ok(())
-    }
-}
-
-/// The only durable transitions a scheduled provider admission may carry.
-/// This enum is metadata, not authority; only `ScheduledProviderTruthAdmission`
-/// authorizes a canonical write.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ScheduledProviderTruthTransition {
-    Started,
-    Completed,
-    Failed,
-    RemoteUnknown,
-}
-
-impl ScheduledProviderTruthTransition {
-    fn from_status(status: ProviderInvocationStatus) -> Self {
-        match status {
-            ProviderInvocationStatus::Completed => Self::Completed,
-            ProviderInvocationStatus::Failed => Self::Failed,
-            ProviderInvocationStatus::RemoteUnknown => Self::RemoteUnknown,
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Started => "started",
-            Self::Completed => "completed",
-            Self::Failed => "failed",
-            Self::RemoteUnknown => "remote_unknown",
-        }
-    }
-}
-
-#[derive(Clone, PartialEq, Eq)]
-struct ScheduledProviderTruthProgressKey {
-    transition: ScheduledProviderTruthTransition,
-    request_id: String,
-    provider: String,
-    model: String,
-    started_at: chrono::DateTime<chrono::Utc>,
-    finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    error_digest: Option<String>,
-    policy_evidence_digest: String,
-}
-
-impl ScheduledProviderTruthProgressKey {
-    fn from_progress(progress: &ProviderInvocationProgress) -> Result<Self> {
-        match progress {
-            ProviderInvocationProgress::Started {
-                request_id,
-                provider,
-                model,
-                started_at,
-                policy_evidence,
-            } => {
-                policy_evidence.validate_minimal_truth()?;
-                Ok(Self {
-                    transition: ScheduledProviderTruthTransition::Started,
-                    request_id: request_id.clone(),
-                    provider: provider.clone(),
-                    model: model.clone(),
-                    started_at: *started_at,
-                    finished_at: None,
-                    error_digest: None,
-                    policy_evidence_digest: policy_evidence.evidence_digest()?,
-                })
-            }
-            ProviderInvocationProgress::Completed(receipt) => {
-                if receipt.status != ProviderInvocationStatus::Completed {
-                    anyhow::bail!("scheduled provider completed progress has another status");
-                }
-                Self::from_receipt(receipt)
-            }
-            ProviderInvocationProgress::Failed(receipt) => {
-                if receipt.status != ProviderInvocationStatus::Failed {
-                    anyhow::bail!("scheduled provider failed progress has another status");
-                }
-                Self::from_receipt(receipt)
-            }
-            ProviderInvocationProgress::RemoteUnknown(receipt) => {
-                if receipt.status != ProviderInvocationStatus::RemoteUnknown {
-                    anyhow::bail!("scheduled provider unknown progress has another status");
-                }
-                Self::from_receipt(receipt)
-            }
-        }
-    }
-
-    fn from_receipt(receipt: &ProviderInvocationReceipt) -> Result<Self> {
-        validate_scheduled_provider_terminal_shape(receipt)?;
-        let policy_evidence = receipt.policy_evidence.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("scheduled provider terminal has no exact policy evidence")
-        })?;
-        Ok(Self {
-            transition: ScheduledProviderTruthTransition::from_status(receipt.status),
-            request_id: receipt.request_id.clone(),
-            provider: receipt.provider.clone(),
-            model: receipt.model.clone(),
-            started_at: receipt.started_at,
-            finished_at: Some(receipt.finished_at),
-            error_digest: receipt.error_digest.clone(),
-            policy_evidence_digest: policy_evidence.evidence_digest()?,
-        })
-    }
-}
-
-fn validate_scheduled_provider_terminal_shape(receipt: &ProviderInvocationReceipt) -> Result<()> {
-    if receipt.simulated {
-        anyhow::bail!("simulated provider receipt cannot become scheduled provider truth");
-    }
-    let valid = match receipt.status {
-        ProviderInvocationStatus::Completed => receipt.error_digest.is_none(),
-        ProviderInvocationStatus::Failed | ProviderInvocationStatus::RemoteUnknown => {
-            receipt.error_digest.is_some()
-        }
-    };
-    // Observation order is established by the typed lifecycle, not by wall
-    // clock monotonicity; the system clock may move backwards between hooks.
-    if !valid {
-        anyhow::bail!("scheduled provider terminal shape is invalid");
-    }
-    receipt
-        .policy_evidence
-        .as_ref()
-        .ok_or_else(|| anyhow::anyhow!("scheduled provider terminal lost policy evidence"))?
-        .validate_minimal_truth()?;
-    Ok(())
-}
-
-/// Metadata-only record revealed after a one-shot admission is consumed. It is
-/// intentionally crate-private: future TaskStore wiring may read it, but the
-/// record itself is not accepted as write authority.
-pub(crate) struct ScheduledProviderTruthRecord {
-    claim: ScheduledProviderTruthClaimBinding,
-    transition: ScheduledProviderTruthTransition,
-    request_id: String,
-    provider: String,
-    model: String,
-    started_at: chrono::DateTime<chrono::Utc>,
-    finished_at: Option<chrono::DateTime<chrono::Utc>>,
-    error_digest: Option<String>,
-    policy_evidence: ProviderPolicyReceiptEvidence,
-    policy_evidence_digest: String,
-    prepared_request_digest: String,
-}
-
-impl ScheduledProviderTruthRecord {
-    fn started(
-        prepared: &ScheduledPreparedProviderTruthBinding,
-        attempt: &ProviderStartedAttempt,
-    ) -> Self {
-        Self {
-            claim: prepared.claim.clone(),
-            transition: ScheduledProviderTruthTransition::Started,
-            request_id: attempt.request_id.clone(),
-            provider: attempt.provider.clone(),
-            model: attempt.model.clone(),
-            started_at: attempt.started_at,
-            finished_at: None,
-            error_digest: None,
-            policy_evidence: attempt.policy_evidence.clone(),
-            policy_evidence_digest: prepared.policy_evidence_digest.clone(),
-            prepared_request_digest: prepared.prepared_request_digest.clone(),
-        }
-    }
-
-    fn terminal(
-        prepared: &ScheduledPreparedProviderTruthBinding,
-        receipt: &ProviderInvocationReceipt,
-    ) -> Result<Self> {
-        validate_scheduled_provider_terminal_shape(receipt)?;
-        let policy_evidence = receipt
-            .policy_evidence
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("scheduled provider terminal lost policy evidence"))?;
-        Ok(Self {
-            claim: prepared.claim.clone(),
-            transition: ScheduledProviderTruthTransition::from_status(receipt.status),
-            request_id: receipt.request_id.clone(),
-            provider: receipt.provider.clone(),
-            model: receipt.model.clone(),
-            started_at: receipt.started_at,
-            finished_at: Some(receipt.finished_at),
-            error_digest: receipt.error_digest.clone(),
-            policy_evidence,
-            policy_evidence_digest: prepared.policy_evidence_digest.clone(),
-            prepared_request_digest: prepared.prepared_request_digest.clone(),
-        })
-    }
-
-    fn progress_key(&self) -> ScheduledProviderTruthProgressKey {
-        ScheduledProviderTruthProgressKey {
-            transition: self.transition,
-            request_id: self.request_id.clone(),
-            provider: self.provider.clone(),
-            model: self.model.clone(),
-            started_at: self.started_at,
-            finished_at: self.finished_at,
-            error_digest: self.error_digest.clone(),
-            policy_evidence_digest: self.policy_evidence_digest.clone(),
-        }
-    }
-
-    fn authority_digest(&self) -> String {
-        crate::agent::metadata_safe::metadata_safe_value_digest(&serde_json::json!({
-            "schema": "scheduled_provider_truth_admission_v2",
-            "canonicalStoreIdentity": self.claim.canonical_store_identity,
-            "databaseSlotVerifier": self.claim.database_slot_verifier,
-            "runtimeStoreInstanceId": self.claim.runtime_store_instance_id,
-            "taskId": self.claim.task_id,
-            "taskRevisionDigest": self.claim.task_revision_digest,
-            "attemptId": self.claim.attempt_id,
-            "attemptNumber": self.claim.attempt_number,
-            "claimTokenDigest": self.claim.claim_token_digest,
-            "grantId": self.claim.grant_id,
-            "grantBindingDigest": self.claim.grant_binding_digest,
-            "policyDecisionDigest": self.claim.policy_decision_digest,
-            "preparedRequestDigest": self.prepared_request_digest,
-            "policyEvidenceDigest": self.policy_evidence_digest,
-            "transition": self.transition.as_str(),
-            "requestId": self.request_id,
-            "provider": self.provider,
-            "model": self.model,
-            "startedAt": self.started_at.to_rfc3339(),
-            "finishedAt": self.finished_at.map(|value| value.to_rfc3339()),
-            "errorDigest": self.error_digest,
-        }))
-        .1
-    }
-
-    pub(crate) fn transition(&self) -> ScheduledProviderTruthTransition {
-        self.transition
-    }
-
-    pub(crate) fn request_id(&self) -> &str {
-        &self.request_id
-    }
-
-    pub(crate) fn provider(&self) -> &str {
-        &self.provider
-    }
-
-    pub(crate) fn model(&self) -> &str {
-        &self.model
-    }
-
-    pub(crate) fn started_at(&self) -> chrono::DateTime<chrono::Utc> {
-        self.started_at
-    }
-
-    pub(crate) fn finished_at(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        self.finished_at
-    }
-
-    pub(crate) fn error_digest(&self) -> Option<&str> {
-        self.error_digest.as_deref()
-    }
-
-    pub(crate) fn policy_evidence(&self) -> &ProviderPolicyReceiptEvidence {
-        &self.policy_evidence
-    }
-
-    pub(crate) fn prepared_request_digest(&self) -> &str {
-        &self.prepared_request_digest
-    }
-}
-
-struct ScheduledProviderTruthLifecycle {
-    prepared: ScheduledPreparedProviderTruthBinding,
-    attempt: ProviderStartedAttempt,
-    terminal: Option<ScheduledProviderTruthProgressKey>,
-}
-
-struct ScheduledProviderTruthPendingAdmission {
-    issuance_id: uuid::Uuid,
-    record_digest: String,
-    record: ScheduledProviderTruthRecord,
-}
-
-struct ScheduledProviderTruthOutstandingAdmission {
-    request_id: String,
-    record_digest: String,
-}
-
-struct ScheduledProviderTruthAdmissionState {
-    claim: ScheduledProviderTruthClaimBinding,
-    lifecycles: HashMap<String, ScheduledProviderTruthLifecycle>,
-    pending: Vec<ScheduledProviderTruthPendingAdmission>,
-    outstanding: HashMap<uuid::Uuid, ScheduledProviderTruthOutstandingAdmission>,
-}
-
-impl ScheduledProviderTruthAdmissionState {
-    fn new(claim: ScheduledProviderTruthClaimBinding) -> Self {
-        Self {
-            claim,
-            lifecycles: HashMap::new(),
-            pending: Vec::new(),
-            outstanding: HashMap::new(),
-        }
-    }
-
-    fn queue(&mut self, record: ScheduledProviderTruthRecord) -> Result<()> {
-        if self.pending.len().saturating_add(self.outstanding.len())
-            >= MAX_SCHEDULED_PROVIDER_TRUTH_ADMISSIONS
-        {
-            anyhow::bail!("scheduled provider truth admission limit reached");
-        }
-        let key = record.progress_key();
-        if self
-            .pending
-            .iter()
-            .any(|pending| pending.record.progress_key() == key)
-        {
-            anyhow::bail!("scheduled provider truth admission already queued");
-        }
-        self.pending.push(ScheduledProviderTruthPendingAdmission {
-            issuance_id: uuid::Uuid::new_v4(),
-            record_digest: record.authority_digest(),
-            record,
-        });
-        Ok(())
-    }
-
-    fn register_started(
-        &mut self,
-        prepared: ScheduledPreparedProviderTruthBinding,
-        attempt: ProviderStartedAttempt,
-    ) -> Result<()> {
-        if prepared.claim != self.claim {
-            anyhow::bail!("scheduled provider start belongs to another claim scope");
-        }
-        prepared.validate_start(&attempt)?;
-        if self.lifecycles.contains_key(&attempt.request_id) {
-            anyhow::bail!("scheduled provider request id already crossed the start edge");
-        }
-        if self.lifecycles.len() >= MAX_SCHEDULED_PROVIDER_TRUTH_ATTEMPTS {
-            anyhow::bail!("scheduled provider truth attempt limit reached");
-        }
-        self.queue(ScheduledProviderTruthRecord::started(&prepared, &attempt))?;
-        self.lifecycles.insert(
-            attempt.request_id.clone(),
-            ScheduledProviderTruthLifecycle {
-                prepared,
-                attempt,
-                terminal: None,
-            },
-        );
-        Ok(())
-    }
-
-    fn discard_started(&mut self, attempt: &ProviderStartedAttempt) {
-        let exact = self
-            .lifecycles
-            .get(&attempt.request_id)
-            .is_some_and(|lifecycle| lifecycle.attempt == *attempt && lifecycle.terminal.is_none());
-        if !exact {
-            return;
-        }
-        self.lifecycles.remove(&attempt.request_id);
-        self.pending
-            .retain(|pending| pending.record.request_id != attempt.request_id);
-        self.outstanding
-            .retain(|_, outstanding| outstanding.request_id != attempt.request_id);
-    }
-
-    fn register_terminal(
-        &mut self,
-        prepared: &ScheduledPreparedProviderTruthBinding,
-        receipt: &ProviderInvocationReceipt,
-    ) -> Result<()> {
-        if prepared.claim != self.claim {
-            anyhow::bail!("scheduled provider terminal belongs to another claim scope");
-        }
-        let lifecycle = self
-            .lifecycles
-            .get(&receipt.request_id)
-            .ok_or_else(|| anyhow::anyhow!("scheduled provider terminal arrived before start"))?;
-        if lifecycle.terminal.is_some() {
-            anyhow::bail!("scheduled provider first terminal already won");
-        }
-        if lifecycle.prepared.prepared_request_digest != prepared.prepared_request_digest
-            || lifecycle.attempt.request_id != receipt.request_id
-            || lifecycle.attempt.provider != receipt.provider
-            || lifecycle.attempt.model != receipt.model
-            || lifecycle.attempt.started_at != receipt.started_at
-            || receipt
-                .policy_evidence
-                .as_ref()
-                .ok_or_else(|| anyhow::anyhow!("scheduled provider terminal lost policy evidence"))?
-                .evidence_digest()?
-                != prepared.policy_evidence_digest
-        {
-            anyhow::bail!("scheduled provider terminal differs from its exact start binding");
-        }
-        let record = ScheduledProviderTruthRecord::terminal(prepared, receipt)?;
-        let key = record.progress_key();
-        self.queue(record)?;
-        let lifecycle = self
-            .lifecycles
-            .get_mut(&receipt.request_id)
-            .ok_or_else(|| anyhow::anyhow!("scheduled provider lifecycle disappeared"))?;
-        lifecycle.terminal = Some(key);
-        Ok(())
-    }
-
-    fn take_pending(
-        &mut self,
-        key: &ScheduledProviderTruthProgressKey,
-    ) -> Result<ScheduledProviderTruthPendingAdmission> {
-        let index = self
-            .pending
-            .iter()
-            .position(|pending| pending.record.progress_key() == *key)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "scheduled provider truth admission missing for caller-shaped progress"
-                )
-            })?;
-        let pending = self.pending.remove(index);
-        self.outstanding.insert(
-            pending.issuance_id,
-            ScheduledProviderTruthOutstandingAdmission {
-                request_id: pending.record.request_id.clone(),
-                record_digest: pending.record_digest.clone(),
-            },
-        );
-        Ok(pending)
-    }
-
-    fn consume(&mut self, issuance_id: uuid::Uuid, record_digest: &str) -> Result<()> {
-        let outstanding = self.outstanding.remove(&issuance_id).ok_or_else(|| {
-            anyhow::anyhow!("scheduled provider truth admission was already consumed or revoked")
-        })?;
-        if outstanding.record_digest != record_digest {
-            anyhow::bail!("scheduled provider truth admission digest mismatch");
-        }
-        Ok(())
-    }
-
-    fn revoke(&mut self, issuance_id: uuid::Uuid) {
-        self.outstanding.remove(&issuance_id);
-    }
-
-    fn active_attempts(
-        &self,
-    ) -> Vec<(
-        ScheduledPreparedProviderTruthBinding,
-        ProviderStartedAttempt,
-    )> {
-        self.lifecycles
-            .values()
-            .filter(|lifecycle| lifecycle.terminal.is_none())
-            .map(|lifecycle| (lifecycle.prepared.clone(), lifecycle.attempt.clone()))
-            .collect()
-    }
-}
-
-#[derive(Clone)]
-struct ScheduledProviderTruthScope {
-    state: Arc<Mutex<ScheduledProviderTruthAdmissionState>>,
-    store: Arc<TaskStore>,
-    claim: Arc<ScheduledTaskClaim>,
-}
-
-impl ScheduledProviderTruthScope {
-    fn capture_prepared(
-        &self,
-        request: &PreparedProviderRequest,
-    ) -> Result<ScheduledPreparedProviderTruthBinding> {
-        let claim = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("scheduled provider truth authority is poisoned"))?
-            .claim
-            .clone();
-        ScheduledPreparedProviderTruthBinding::capture(&claim, request)
-    }
-
-    fn record_started(
-        &self,
-        prepared: ScheduledPreparedProviderTruthBinding,
-        attempt: ProviderStartedAttempt,
-    ) -> Result<()> {
-        self.state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("scheduled provider truth authority is poisoned"))?
-            .register_started(prepared, attempt)
-    }
-
-    fn discard_started(&self, attempt: &ProviderStartedAttempt) {
-        if let Ok(mut state) = self.state.lock() {
-            state.discard_started(attempt);
-        }
-    }
-
-    fn record_adapter_terminal(
-        &self,
-        prepared: &ScheduledPreparedProviderTruthBinding,
-        proof: &ProviderInvocationTerminalProof,
-    ) -> Result<()> {
-        if !proof.is_runtime_adapter_terminal() {
-            anyhow::bail!("scheduled provider terminal lacks runtime adapter proof");
-        }
-        self.state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("scheduled provider truth authority is poisoned"))?
-            .register_terminal(prepared, proof.receipt())
-    }
-
-    fn persist_registered_progress(&self, progress: &ProviderInvocationProgress) -> Result<()> {
-        let key = ScheduledProviderTruthProgressKey::from_progress(progress)?;
-        let pending = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("scheduled provider truth authority is poisoned"))?
-            .take_pending(&key)?;
-        let admission = ScheduledProviderTruthAdmission {
-            issuance_id: pending.issuance_id,
-            record_digest: pending.record_digest,
-            record: Some(pending.record),
-            authority_state: Arc::clone(&self.state),
-        };
-        if !self.store.record_provider_truth(&self.claim, admission)? {
-            anyhow::bail!("scheduled provider truth durable CAS rejected the exact transition");
-        }
-        Ok(())
-    }
-}
-
-/// A runtime-only, single-use capability for one exact scheduled provider
-/// truth transition.
-///
-/// It deliberately implements neither `Clone` nor serde. Moving it twice,
-/// cloning it, or serializing it must remain a compile error:
-///
-/// ```compile_fail
-/// use openlife_core::scheduler::ScheduledProviderTruthAdmission;
-/// fn clone_is_not_authority(proof: ScheduledProviderTruthAdmission) {
-///     let copied = proof.clone();
-///     drop((proof, copied));
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use openlife_core::scheduler::ScheduledProviderTruthAdmission;
-/// fn serde_is_not_authority(proof: ScheduledProviderTruthAdmission) {
-///     let _ = serde_json::to_string(&proof).unwrap();
-/// }
-/// ```
-///
-/// ```compile_fail
-/// use openlife_core::scheduler::ScheduledProviderTruthAdmission;
-/// fn consume_once(_: ScheduledProviderTruthAdmission) {}
-/// fn cannot_reuse(proof: ScheduledProviderTruthAdmission) {
-///     consume_once(proof);
-///     consume_once(proof);
-/// }
-/// ```
-pub struct ScheduledProviderTruthAdmission {
-    issuance_id: uuid::Uuid,
-    record_digest: String,
-    record: Option<ScheduledProviderTruthRecord>,
-    authority_state: Arc<Mutex<ScheduledProviderTruthAdmissionState>>,
-}
-
-impl std::fmt::Debug for ScheduledProviderTruthAdmission {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let record = self.record.as_ref();
-        formatter
-            .debug_struct("ScheduledProviderTruthAdmission")
-            .field("issuance_id", &self.issuance_id)
-            .field("transition", &record.map(|record| record.transition))
-            .field(
-                "request_id",
-                &record.map(|record| record.request_id.as_str()),
-            )
-            .field("claim_token", &"[REDACTED]")
-            .finish()
-    }
-}
-
-impl ScheduledProviderTruthAdmission {
-    pub(crate) fn consume_for_claim(
-        mut self,
-        claim: &ScheduledTaskClaim,
-    ) -> Result<ScheduledProviderTruthRecord> {
-        let record = self.record.as_ref().ok_or_else(|| {
-            anyhow::anyhow!("scheduled provider truth admission has no unconsumed record")
-        })?;
-        record.claim.validate_claim(claim)?;
-        self.authority_state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("scheduled provider truth authority is poisoned"))?
-            .consume(self.issuance_id, &self.record_digest)?;
-        self.record.take().ok_or_else(|| {
-            anyhow::anyhow!("scheduled provider truth admission was already consumed")
-        })
-    }
-}
-
-impl Drop for ScheduledProviderTruthAdmission {
-    fn drop(&mut self) {
-        if self.record.is_some() {
-            if let Ok(mut state) = self.authority_state.lock() {
-                state.revoke(self.issuance_id);
-            }
-        }
-    }
-}
-
-/// Cloneable access to a scoped queue is safe because it can only take a
-/// non-cloneable admission that was already issued inside the exact adapter
-/// hook. Caller-shaped progress can select an existing fact, never mint one.
-#[derive(Clone)]
-pub struct ScheduledProviderTruthAdmissionHandle {
-    state: Arc<Mutex<ScheduledProviderTruthAdmissionState>>,
-    provider_receipt_collector: ProviderReceiptCollector,
-}
-
-impl ScheduledProviderTruthAdmissionHandle {
-    pub fn take_for_progress(
-        &self,
-        progress: &ProviderInvocationProgress,
-    ) -> Result<ScheduledProviderTruthAdmission> {
-        let key = ScheduledProviderTruthProgressKey::from_progress(progress)?;
-        let pending = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("scheduled provider truth authority is poisoned"))?
-            .take_pending(&key)?;
-        Ok(ScheduledProviderTruthAdmission {
-            issuance_id: pending.issuance_id,
-            record_digest: pending.record_digest,
-            record: Some(pending.record),
-            authority_state: Arc::clone(&self.state),
-        })
-    }
-
-    /// Conservatively terminalize only exact attempts that already crossed
-    /// the adapter start hook. If an adapter terminal won the race, this method
-    /// does not replace it or invent another terminal.
-    pub fn take_remote_unknown_after_local_abort(
-        &self,
-        cause: ScheduledProviderLocalAbortCause,
-    ) -> Result<Vec<ScheduledProviderTruthAdmission>> {
-        let active = self
-            .state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("scheduled provider truth authority is poisoned"))?
-            .active_attempts();
-        if active.is_empty() {
-            return Ok(Vec::new());
-        }
-        self.provider_receipt_collector
-            .mark_in_flight_remote_unknown(cause.reason_code());
-        let mut admissions = Vec::new();
-        for (prepared, attempt) in active {
-            let Some(receipt) = self
-                .provider_receipt_collector
-                .terminal_for_attempt(&attempt)
-            else {
-                continue;
-            };
-            if receipt.status != ProviderInvocationStatus::RemoteUnknown {
-                continue;
-            }
-            let key = ScheduledProviderTruthProgressKey::from_receipt(&receipt)?;
-            let pending = {
-                let mut state = self.state.lock().map_err(|_| {
-                    anyhow::anyhow!("scheduled provider truth authority is poisoned")
-                })?;
-                if state
-                    .lifecycles
-                    .get(&receipt.request_id)
-                    .is_some_and(|lifecycle| lifecycle.terminal.is_some())
-                {
-                    continue;
-                }
-                state.register_terminal(&prepared, &receipt)?;
-                state.take_pending(&key)?
-            };
-            admissions.push(ScheduledProviderTruthAdmission {
-                issuance_id: pending.issuance_id,
-                record_digest: pending.record_digest,
-                record: Some(pending.record),
-                authority_state: Arc::clone(&self.state),
-            });
-        }
-        Ok(admissions)
-    }
-}
-
-/// Test-only bridge for TaskStore persistence tests. It exercises the same
-/// admission state machine while remaining absent from production builds; real
-/// product code can receive admissions only from bound adapter hooks.
-#[cfg(any(test, feature = "test-utils"))]
-#[doc(hidden)]
-pub fn issue_scheduled_provider_truth_test_admission(
-    claim: &ScheduledTaskClaim,
-    progress: &ProviderInvocationProgress,
-) -> Result<ScheduledProviderTruthAdmission> {
-    let (request_id, provider, model, started_at, policy_evidence) = match progress {
-        ProviderInvocationProgress::Started {
-            request_id,
-            provider,
-            model,
-            started_at,
-            policy_evidence,
-        } => (
-            request_id.clone(),
-            provider.clone(),
-            model.clone(),
-            *started_at,
-            policy_evidence.clone(),
-        ),
-        ProviderInvocationProgress::Completed(receipt)
-        | ProviderInvocationProgress::Failed(receipt)
-        | ProviderInvocationProgress::RemoteUnknown(receipt) => (
-            receipt.request_id.clone(),
-            receipt.provider.clone(),
-            receipt.model.clone(),
-            receipt.started_at,
-            receipt
-                .policy_evidence
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("test provider terminal has no policy evidence"))?,
-        ),
-    };
-    let claim_binding = ScheduledProviderTruthClaimBinding::capture(claim)?;
-    let policy_evidence_digest = policy_evidence.evidence_digest()?;
-    let prepared = ScheduledPreparedProviderTruthBinding {
-        claim: claim_binding.clone(),
-        request_id,
-        provider,
-        model,
-        prepared_request_digest: crate::agent::metadata_safe::metadata_safe_value_digest(
-            &serde_json::json!({
-                "schema": "scheduled_provider_truth_test_prepared_v1",
-                "requestId": progress_request_id(progress),
-                "provider": progress_provider(progress),
-                "model": progress_model(progress),
-                "policyEvidenceDigest": policy_evidence_digest,
-            }),
-        )
-        .1,
-        policy_evidence_digest,
-        policy_evidence: policy_evidence.clone(),
-    };
-    let attempt = ProviderStartedAttempt {
-        request_id: prepared.request_id.clone(),
-        provider: prepared.provider.clone(),
-        model: prepared.model.clone(),
-        started_at,
-        policy_evidence,
-    };
-    let state = Arc::new(Mutex::new(ScheduledProviderTruthAdmissionState::new(
-        claim_binding,
-    )));
-    let pending = {
-        let mut state_guard = state
-            .lock()
-            .map_err(|_| anyhow::anyhow!("test provider truth authority is poisoned"))?;
-        state_guard.register_started(prepared.clone(), attempt)?;
-        if let ProviderInvocationProgress::Completed(receipt)
-        | ProviderInvocationProgress::Failed(receipt)
-        | ProviderInvocationProgress::RemoteUnknown(receipt) = progress
-        {
-            state_guard.register_terminal(&prepared, receipt)?;
-        }
-        let key = ScheduledProviderTruthProgressKey::from_progress(progress)?;
-        state_guard.take_pending(&key)?
-    };
-    Ok(ScheduledProviderTruthAdmission {
-        issuance_id: pending.issuance_id,
-        record_digest: pending.record_digest,
-        record: Some(pending.record),
-        authority_state: state,
-    })
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-fn progress_request_id(progress: &ProviderInvocationProgress) -> &str {
-    match progress {
-        ProviderInvocationProgress::Started { request_id, .. } => request_id,
-        ProviderInvocationProgress::Completed(receipt)
-        | ProviderInvocationProgress::Failed(receipt)
-        | ProviderInvocationProgress::RemoteUnknown(receipt) => &receipt.request_id,
-    }
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-fn progress_provider(progress: &ProviderInvocationProgress) -> &str {
-    match progress {
-        ProviderInvocationProgress::Started { provider, .. } => provider,
-        ProviderInvocationProgress::Completed(receipt)
-        | ProviderInvocationProgress::Failed(receipt)
-        | ProviderInvocationProgress::RemoteUnknown(receipt) => &receipt.provider,
-    }
-}
-
-#[cfg(any(test, feature = "test-utils"))]
-fn progress_model(progress: &ProviderInvocationProgress) -> &str {
-    match progress {
-        ProviderInvocationProgress::Started { model, .. } => model,
-        ProviderInvocationProgress::Completed(receipt)
-        | ProviderInvocationProgress::Failed(receipt)
-        | ProviderInvocationProgress::RemoteUnknown(receipt) => &receipt.model,
-    }
-}
-
 /// Sticky aggregate plus a fixed-size detail window. Counts are never derived
 /// from the retained detail window, so an early failure cannot disappear when
 /// later attempts overflow the response budget.
@@ -2072,8 +1019,6 @@ pub struct InferenceScheduler {
     /// Private verifier bound by the canonical ToolPermissionStore. The
     /// scheduler never owns or exposes the paired issuer.
     explicit_provider_probe_verifier: Option<crate::network_client::ExplicitProviderProbeVerifier>,
-    /// Canonical provider/model routing authority.
-    pub model_router: ModelRouter,
     /// Optional deterministic generation response for runtime harnesses.
     /// Production constructors leave this unset, so normal provider behavior is unchanged.
     pub scripted_generation_response: Option<String>,
@@ -2081,22 +1026,6 @@ pub struct InferenceScheduler {
     /// with a per-execution collector, but an unowned scheduler still cannot
     /// silently discard a real adapter invocation.
     pub(crate) provider_receipt_collector: ProviderReceiptCollector,
-}
-
-/// Scheduled-only provider executor. It owns an exact TaskStore/claim scope and
-/// intentionally exposes no generic `execute_prepared*` API. Its public
-/// scheduled-specific execution seam internally persists the exact
-/// provider-start CAS before the HTTP edge can be entered.
-#[derive(Clone)]
-pub struct ScheduledInferenceScheduler {
-    inner: InferenceScheduler,
-    truth_scope: ScheduledProviderTruthScope,
-}
-
-fn configured_model_router(provider: &str, model: &str, has_configured_key: bool) -> ModelRouter {
-    let mut router = ModelRouter::new();
-    router.seed_configured_cloud_provider(provider, model, has_configured_key);
-    router
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -2127,6 +1056,59 @@ impl std::error::Error for PreparedProviderGenerationMismatch {}
 
 fn prepared_provider_generation_mismatch(reason_code: &'static str) -> anyhow::Error {
     anyhow::Error::new(PreparedProviderGenerationMismatch { reason_code })
+}
+
+fn classify_pre_dispatch_failure(
+    error: &anyhow::Error,
+) -> crate::llm::PreparedProviderPreDispatchFailure {
+    use crate::llm::PreparedProviderPreDispatchFailure as Failure;
+
+    let lower = error.to_string().to_ascii_lowercase();
+    if lower.contains("exceeds the content limit") {
+        Failure::ContentLimit
+    } else if lower.contains("exceeds the context block limit") {
+        Failure::ContextBlockLimit
+    } else if lower.contains("exceeds the message count limit") {
+        Failure::MessageLimit
+    } else if lower.contains("another config generation")
+        || lower.contains("runtime identity changed")
+    {
+        Failure::RuntimeGenerationStale
+    } else if lower.contains("execution binding")
+        || lower.contains("endpoint binding")
+        || lower.contains("credential changed")
+    {
+        Failure::ExecutionBindingInvalid
+    } else if lower.contains("derived payload mismatch")
+        || lower.contains("unfiltered payload scope")
+    {
+        Failure::PayloadScopeMismatch
+    } else if lower.contains("provider policy")
+        || lower.contains("policy authorization")
+        || lower.contains("policy receipt")
+        || lower.contains("data route")
+    {
+        Failure::AuthorizationInvalid
+    } else if lower.contains("network policy decision") {
+        Failure::NetworkPolicyInvalid
+    } else if lower.contains("context") || lower.contains("manifest") {
+        Failure::ContextContractInvalid
+    } else {
+        Failure::RequestContractInvalid
+    }
+}
+
+fn classify_lifecycle_admission_failure(
+    error: &anyhow::Error,
+) -> crate::llm::PreparedProviderPreDispatchFailure {
+    match error.downcast_ref::<crate::llm::ProviderLifecycleAdmissionFailure>() {
+        Some(crate::llm::ProviderLifecycleAdmissionFailure::BudgetExhausted { .. }) => {
+            crate::llm::PreparedProviderPreDispatchFailure::LifecycleBudgetExhausted
+        }
+        Some(crate::llm::ProviderLifecycleAdmissionFailure::Invalid { .. }) | None => {
+            crate::llm::PreparedProviderPreDispatchFailure::LifecycleAdmissionInvalid
+        }
+    }
 }
 
 impl ProviderRuntimeIdentity {
@@ -2173,7 +1155,6 @@ impl Default for InferenceScheduler {
             provider_credential_version: 0,
             provider_runtime_identity,
             explicit_provider_probe_verifier: None,
-            model_router: configured_model_router("openai", "gpt-4o-mini", false),
             scripted_generation_response: None,
             provider_receipt_collector: ProviderReceiptCollector::default(),
         }
@@ -2214,13 +1195,6 @@ impl InferenceScheduler {
     ) -> Self {
         let provider = provider.trim().to_ascii_lowercase();
         let chat_model = crate::llm::resolve_provider_chat_model(&provider, &chat_model);
-        let model_router = configured_model_router(
-            &provider,
-            &chat_model,
-            !crate::llm::effective_api_key_for_endpoint(&provider, &openai_base, &openai_key)
-                .trim()
-                .is_empty(),
-        );
         let provider_config_generation = uuid::Uuid::new_v4().to_string();
         let provider_runtime_identity =
             ProviderRuntimeIdentity::capture(&provider, &openai_base, &chat_model, &openai_key, 0);
@@ -2237,20 +1211,9 @@ impl InferenceScheduler {
             provider_credential_version: 0,
             provider_runtime_identity,
             explicit_provider_probe_verifier: None,
-            model_router,
             scripted_generation_response: None,
             provider_receipt_collector: ProviderReceiptCollector::default(),
         }
-    }
-
-    pub fn with_model_router(mut self, mut router: ModelRouter) -> Self {
-        router.seed_configured_cloud_provider(
-            &self.provider,
-            &self.chat_model,
-            !self.effective_api_key().trim().is_empty(),
-        );
-        self.model_router = router;
-        self
     }
 
     pub fn with_provider_credential_version(mut self, credential_version: u64) -> Self {
@@ -2327,44 +1290,6 @@ impl InferenceScheduler {
     pub fn with_provider_receipt_collector(mut self, collector: ProviderReceiptCollector) -> Self {
         self.provider_receipt_collector = collector;
         self
-    }
-
-    /// Create one execution-local scheduled provider truth authority. The
-    /// returned handle can only take admissions issued by this scoped
-    /// scheduler's real adapter hooks. Rebinding is rejected, and the isolated
-    /// collector prevents timeout/cancel finalization from touching unrelated
-    /// provider attempts.
-    pub fn bind_scheduled_provider_truth_scope(
-        mut self,
-        store: Arc<TaskStore>,
-        claim: Arc<ScheduledTaskClaim>,
-    ) -> Result<(
-        ScheduledInferenceScheduler,
-        ScheduledProviderTruthAdmissionHandle,
-    )> {
-        if !store.owns_executing_claim(&claim)? {
-            anyhow::bail!("scheduled provider scope requires the exact durable executing claim");
-        }
-        let claim_binding = ScheduledProviderTruthClaimBinding::capture(&claim)?;
-        let state = Arc::new(Mutex::new(ScheduledProviderTruthAdmissionState::new(
-            claim_binding,
-        )));
-        self.provider_receipt_collector = ProviderReceiptCollector::default();
-        let handle = ScheduledProviderTruthAdmissionHandle {
-            state: Arc::clone(&state),
-            provider_receipt_collector: self.provider_receipt_collector.clone(),
-        };
-        Ok((
-            ScheduledInferenceScheduler {
-                inner: self,
-                truth_scope: ScheduledProviderTruthScope {
-                    state,
-                    store,
-                    claim,
-                },
-            },
-            handle,
-        ))
     }
 
     pub fn provider_receipts_snapshot(&self) -> Vec<ProviderInvocationReceipt> {
@@ -2591,6 +1516,7 @@ impl InferenceScheduler {
             network_policy,
             network_policy_decision,
             tools_required: false,
+            provider_tools: Vec::new(),
             execution_binding: Some(crate::llm::ProviderExecutionBinding::new(
                 endpoint,
                 self.effective_api_key(),
@@ -2660,7 +1586,6 @@ impl InferenceScheduler {
         context_manifest.validate_context_truth(&context_blocks)?;
         policy_authorization.validate_unfiltered_payload(&messages, &context_blocks)?;
         let data_route = policy_authorization.data_route();
-        let tools_route_marker = tools_required.then_some("typed_tool_contract");
         let mut prepared_ollama_target = None;
         let (provider_target, model_target) = if self.scripted_generation_response.is_some() {
             if data_route == ProviderDataRoute::LocalOnly {
@@ -2670,18 +1595,14 @@ impl InferenceScheduler {
                 ("ollama".to_string(), self.local_model.clone())
             } else {
                 // A scripted response is an eval fixture, not an adapter call.
-                // Preserve an available router target when one exists, but do
-                // not require live credentials merely to run the fixture.
-                self.model_router
-                    .route_chat(tools_route_marker, self.prefer_local)
-                    .map(|decision| (decision.provider, decision.model))
-                    .unwrap_or_else(|_| {
-                        if self.prefer_local && !self.local_model.trim().is_empty() {
-                            ("ollama".to_string(), self.local_model.clone())
-                        } else {
-                            (self.provider.clone(), self.chat_model.clone())
-                        }
-                    })
+                // It preserves the exact user-selected provider/model without
+                // requiring live credentials for a request that never leaves
+                // the process.
+                if self.prefer_local && !self.local_model.trim().is_empty() {
+                    ("ollama".to_string(), self.local_model.clone())
+                } else {
+                    (self.provider.clone(), self.chat_model.clone())
+                }
             }
         } else if data_route == ProviderDataRoute::LocalOnly {
             let target = prepare_ollama_chat_target(&self.local_model)
@@ -2698,24 +1619,13 @@ impl InferenceScheduler {
             prepared_ollama_target = Some(target);
             ("ollama".to_string(), model)
         } else {
-            let decision = self
-                .model_router
-                .route_chat(tools_route_marker, self.prefer_local)?;
-            if decision.provider == "ollama" {
-                let target = prepare_ollama_chat_target(&self.local_model)
-                    .await
-                    .ok_or_else(|| anyhow::anyhow!("selected local provider is unavailable"))?;
-                let model = target.model.clone();
-                prepared_ollama_target = Some(target);
-                ("ollama".to_string(), model)
-            } else {
-                if decision.provider != self.provider || decision.model != self.chat_model {
-                    anyhow::bail!(
-                        "provider route target does not match the configured cloud adapter"
-                    );
-                }
-                (decision.provider, decision.model)
+            if self.provider.trim().is_empty()
+                || self.chat_model.trim().is_empty()
+                || self.effective_api_key().trim().is_empty()
+            {
+                anyhow::bail!("selected cloud provider is not fully configured");
             }
+            (self.provider.clone(), self.chat_model.clone())
         };
 
         let provider_endpoint = if provider_target == "ollama" {
@@ -2781,6 +1691,7 @@ impl InferenceScheduler {
             network_policy,
             network_policy_decision,
             tools_required,
+            provider_tools: Vec::new(),
             execution_binding: Some(crate::llm::ProviderExecutionBinding::new(
                 provider_endpoint,
                 execution_api_key,
@@ -2850,20 +1761,20 @@ impl InferenceScheduler {
         let system_prompt = request.system_prompt();
         let request_id = request.context_manifest.request_id.clone();
         let payload_purpose = request.policy_receipt_evidence().payload_purpose;
-        let structured_json_output = matches!(
-            payload_purpose,
-            Some(
-                ProviderPayloadPurpose::MainChatArtifactDraft
-                    | ProviderPayloadPurpose::MainChatEvidenceCheck
-                    | ProviderPayloadPurpose::MainChatWorkPlan
-            )
-        );
+        // Artifact drafts use the ordinary model response transport. OpenLife
+        // still requires the exact artifact envelope in the trusted prompt and
+        // rejects the response locally unless the file-specific parser and
+        // schema checks pass. This avoids coupling successful artifact delivery
+        // to a provider-native JSON/thinking mode; those smaller native modes
+        // remain useful for work-plan and evidence-check envelopes.
+        let structured_json_output = cloud_provider_uses_native_structured_output(payload_purpose);
+        let provider_native_json_mode = structured_json_output;
 
         if self.scripted_generation_response.is_some()
             && (payload_purpose == Some(ProviderPayloadPurpose::MainChatWorkPlan)
                 || system_prompt
                     .as_deref()
-                    .is_some_and(|prompt| prompt.contains("openlife.work-plan.v2")))
+                    .is_some_and(|prompt| prompt.contains("openlife.work-plan.v3")))
         {
             // The scripted provider is a test fixture for the execution
             // response, not a second queue of planner responses. Keep its
@@ -2871,7 +1782,7 @@ impl InferenceScheduler {
             // still exercise plan admission without teaching fixtures to
             // masquerade as a real adaptive model.
             return Ok(
-                r#"{"schemaVersion":"openlife.work-plan.v2","steps":[{"id":"analyze","kind":"analyze","required":true,"dependsOn":[]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["analyze"]}],"completion":{"resultKind":"answer","requiresVerification":false}}"#
+                r#"{"schemaVersion":"openlife.work-plan.v3","steps":[{"id":"analyze","kind":"analyze","required":true,"dependsOn":[]},{"id":"deliver","kind":"deliver_result","required":true,"dependsOn":["analyze"]}],"completion":{"resultKind":"answer","requiresVerification":false,"requirements":[]}}"#
                     .to_string(),
             );
         }
@@ -2892,14 +1803,41 @@ impl InferenceScheduler {
                 system_prompt.as_deref(),
                 crate::ollama::OllamaOutputContract {
                     structured_format: match payload_purpose {
-                        Some(ProviderPayloadPurpose::MainChatEvidenceCheck) => {
-                            Some(crate::ollama::main_chat_evidence_check_json_schema())
+                        Some(ProviderPayloadPurpose::AgentMemoryExtraction) => {
+                            Some(crate::ollama::agent_memory_extraction_json_schema())
                         }
-                        Some(ProviderPayloadPurpose::MainChatArtifactDraft) => {
-                            Some(serde_json::Value::String("json".into()))
+                        Some(ProviderPayloadPurpose::MainChatWorkSemanticVerification) => {
+                            Some(crate::ollama::main_chat_work_semantic_verification_json_schema())
                         }
                         Some(ProviderPayloadPurpose::MainChatWorkPlan) => {
                             Some(crate::ollama::main_chat_work_plan_json_schema())
+                        }
+                        Some(ProviderPayloadPurpose::MainChatConversationStep) => {
+                            Some(crate::ollama::main_chat_conversation_step_json_schema())
+                        }
+                        Some(ProviderPayloadPurpose::MainChatInitialWorkDecision) => {
+                            Some(crate::ollama::main_chat_initial_work_decision_json_schema())
+                        }
+                        Some(ProviderPayloadPurpose::MainChatPersonalIntelligenceStep) => {
+                            Some(crate::ollama::main_chat_personal_intelligence_step_json_schema())
+                        }
+                        Some(ProviderPayloadPurpose::MainChatToolArguments) => {
+                            Some(crate::ollama::main_chat_tool_arguments_json_schema())
+                        }
+                        Some(ProviderPayloadPurpose::MainChatAgentToolStep) => {
+                            Some(crate::ollama::main_chat_agent_tool_step_json_schema())
+                        }
+                        Some(ProviderPayloadPurpose::MainChatAgentArtifactOrToolStep) => {
+                            Some(crate::ollama::main_chat_agent_artifact_or_tool_step_json_schema())
+                        }
+                        Some(ProviderPayloadPurpose::MainChatAgentAnswerOrToolStep) => {
+                            Some(crate::ollama::main_chat_agent_answer_or_tool_step_json_schema())
+                        }
+                        Some(ProviderPayloadPurpose::MainChatAgentArtifactStep) => {
+                            Some(crate::ollama::main_chat_agent_artifact_step_json_schema())
+                        }
+                        Some(ProviderPayloadPurpose::MainChatAgentFinalStep) => {
+                            Some(crate::ollama::main_chat_agent_final_step_json_schema())
                         }
                         _ => None,
                     },
@@ -2915,7 +1853,7 @@ impl InferenceScheduler {
             anyhow::bail!("prepared provider target does not match the configured cloud adapter");
         }
 
-        crate::llm::chat_with_openrouter_raw_with_start_observer(
+        crate::llm::chat_with_openai_compatible_raw_with_start_observer(
             crate::llm::OpenAiCompatibleAdapterRequest {
                 messages: request.messages,
                 system_prompt: system_prompt.as_deref(),
@@ -2924,6 +1862,8 @@ impl InferenceScheduler {
                 api_key: execution_binding.api_key(),
                 model: &request.model_target,
                 structured_json_output,
+                provider_native_json_mode,
+                provider_tools: &request.provider_tools,
                 network_policy: &request.network_policy,
                 network_policy_decision: &request.network_policy_decision,
                 request_id: Some(&request_id),
@@ -2994,50 +1934,26 @@ impl InferenceScheduler {
     where
         F: FnMut(ProviderInvocationProgress) -> Result<()>,
     {
-        self.execute_prepared_with_observer_and_scope(request, on_progress, None)
+        self.execute_prepared_with_observer_inner(request, on_progress)
             .await
     }
 
-    async fn execute_prepared_with_observer_and_scope<F>(
+    async fn execute_prepared_with_observer_inner<F>(
         &self,
         request: PreparedProviderRequest,
         mut on_progress: F,
-        scheduled_scope: Option<&ScheduledProviderTruthScope>,
     ) -> PreparedProviderOutcome
     where
         F: FnMut(ProviderInvocationProgress) -> Result<()>,
     {
-        let request_authority = request.policy_authorization().authority();
-        match (scheduled_scope.is_some(), request_authority) {
-            (false, ProviderPolicyAuthority::ScheduledPolicy) => {
-                return PreparedProviderOutcome {
-                    receipt: None,
-                    terminal_proof: None,
-                    result: Err(
-                        "provider_pre_dispatch_rejected:scheduled_policy_requires_scheduled_executor"
-                            .into(),
-                    ),
-                };
-            }
-            (true, ProviderPolicyAuthority::ScheduledPolicy) => {}
-            (true, _) => {
-                return PreparedProviderOutcome {
-                    receipt: None,
-                    terminal_proof: None,
-                    result: Err(
-                        "provider_pre_dispatch_rejected:scheduled_executor_requires_scheduled_policy"
-                            .into(),
-                    ),
-                };
-            }
-            (false, _) => {}
-        }
         let execution_binding = match self.validate_prepared_execution_owner(&request) {
             Ok(binding) => binding,
             Err(error) => {
+                let pre_dispatch_failure = classify_pre_dispatch_failure(&error);
                 return PreparedProviderOutcome {
                     receipt: None,
                     terminal_proof: None,
+                    pre_dispatch_failure: Some(pre_dispatch_failure),
                     result: Err(format!("provider_pre_dispatch_rejected:{error}")),
                 };
             }
@@ -3054,28 +1970,17 @@ impl InferenceScheduler {
                     return PreparedProviderOutcome {
                         receipt: None,
                         terminal_proof: None,
+                        pre_dispatch_failure: Some(
+                            crate::llm::PreparedProviderPreDispatchFailure::TerminalBindingInvalid,
+                        ),
                         result: Err(format!(
                             "provider_terminal_binding_pre_dispatch_rejected:{error}"
                         )),
                     };
                 }
             };
-        let scheduled_truth_binding = match scheduled_scope {
-            Some(scope) => match scope.capture_prepared(&request) {
-                Ok(binding) => Some(binding),
-                Err(error) => {
-                    return PreparedProviderOutcome {
-                        receipt: None,
-                        terminal_proof: None,
-                        result: Err(format!(
-                            "scheduled_provider_truth_pre_dispatch_rejected:{error}"
-                        )),
-                    };
-                }
-            },
-            None => None,
-        };
         let mut started_at = None;
+        let mut lifecycle_admission_failure = None;
         let execution_result = self
             .generate_prepared_inner(request, execution_binding, || {
                 let observed_at = chrono::Utc::now();
@@ -3088,14 +1993,6 @@ impl InferenceScheduler {
                 };
                 self.provider_receipt_collector
                     .record_started(attempt.clone())?;
-                if let (Some(scope), Some(binding)) =
-                    (scheduled_scope, scheduled_truth_binding.as_ref())
-                {
-                    if let Err(error) = scope.record_started(binding.clone(), attempt.clone()) {
-                        self.provider_receipt_collector.discard_started(&attempt);
-                        return Err(error);
-                    }
-                }
                 let progress = ProviderInvocationProgress::Started {
                     request_id: attempt.request_id.clone(),
                     provider: attempt.provider.clone(),
@@ -3103,18 +2000,10 @@ impl InferenceScheduler {
                     started_at: attempt.started_at,
                     policy_evidence: attempt.policy_evidence.clone(),
                 };
-                if let Some(scope) = scheduled_scope {
-                    if let Err(error) = scope.persist_registered_progress(&progress) {
-                        self.provider_receipt_collector.discard_started(&attempt);
-                        scope.discard_started(&attempt);
-                        return Err(error);
-                    }
-                }
                 if let Err(error) = on_progress(progress) {
                     self.provider_receipt_collector.discard_started(&attempt);
-                    if let Some(scope) = scheduled_scope {
-                        scope.discard_started(&attempt);
-                    }
+                    lifecycle_admission_failure =
+                        Some(classify_lifecycle_admission_failure(&error));
                     return Err(error);
                 }
                 started_at = Some(observed_at);
@@ -3166,34 +2055,6 @@ impl InferenceScheduler {
                     }
                 }
             }
-            if let (Some(scope), Some(binding), Some(proof)) = (
-                scheduled_scope,
-                scheduled_truth_binding.as_ref(),
-                terminal_proof.as_ref(),
-            ) {
-                if let Err(error) = scope.record_adapter_terminal(binding, proof) {
-                    result = Err(format!(
-                        "scheduled_provider_truth_terminal_admission_failed:{error}"
-                    ));
-                } else {
-                    let progress = match receipt.status {
-                        ProviderInvocationStatus::Completed => {
-                            ProviderInvocationProgress::Completed(receipt.clone())
-                        }
-                        ProviderInvocationStatus::Failed => {
-                            ProviderInvocationProgress::Failed(receipt.clone())
-                        }
-                        ProviderInvocationStatus::RemoteUnknown => {
-                            ProviderInvocationProgress::RemoteUnknown(receipt.clone())
-                        }
-                    };
-                    if let Err(error) = scope.persist_registered_progress(&progress) {
-                        result = Err(format!(
-                            "scheduled_provider_truth_terminal_persistence_failed:{error}"
-                        ));
-                    }
-                }
-            }
             if receipt.status != ProviderInvocationStatus::Completed && result.is_ok() {
                 result = Err("provider_terminal_race_remote_state_unknown".into());
             }
@@ -3216,6 +2077,7 @@ impl InferenceScheduler {
         PreparedProviderOutcome {
             receipt,
             terminal_proof,
+            pre_dispatch_failure: lifecycle_admission_failure,
             result,
         }
     }
@@ -3347,7 +2209,7 @@ impl InferenceScheduler {
         }
 
         let mut started_at = None;
-        let result = crate::llm::chat_with_openrouter_raw_stream_with_start_observer(
+        let result = crate::llm::chat_with_openai_compatible_raw_stream_with_start_observer(
             crate::llm::OpenAiCompatibleAdapterRequest {
                 messages: request.messages,
                 system_prompt: system_prompt.as_deref(),
@@ -3357,11 +2219,13 @@ impl InferenceScheduler {
                 model: &request.model_target,
                 structured_json_output: matches!(
                     policy_evidence.payload_purpose,
-                    Some(
-                        ProviderPayloadPurpose::MainChatArtifactDraft
-                            | ProviderPayloadPurpose::MainChatEvidenceCheck
-                    )
+                    Some(ProviderPayloadPurpose::MainChatWorkSemanticVerification)
                 ),
+                provider_native_json_mode: matches!(
+                    policy_evidence.payload_purpose,
+                    Some(ProviderPayloadPurpose::MainChatWorkSemanticVerification)
+                ),
+                provider_tools: &request.provider_tools,
                 network_policy: &request.network_policy,
                 network_policy_decision: &request.network_policy_decision,
                 request_id: Some(&request_id),
@@ -3404,95 +2268,40 @@ impl InferenceScheduler {
         self.bind_prepared_provider_stream(result, seed, terminal_binding)
     }
 
-    /// Preview the routing decision for a chat request without actually calling the LLM.
-    /// Returns a ModelRouteTrace describing which backend would be chosen and why.
-    pub async fn preview_chat_route(&self, tools_prompt: Option<&str>) -> ModelRouteTrace {
+    /// Resolve the exact provider/model selected in Settings without issuing a request.
+    ///
+    /// This is not an automatic router: it never substitutes another provider or model.
+    pub async fn resolve_selected_provider_route(&self) -> SelectedProviderRoute {
         if self.prefer_local {
             return match resolve_ollama_model(&self.local_model).await {
-                Some(model) => ModelRouteTrace {
+                Some(model) => SelectedProviderRoute {
                     provider: "ollama".into(),
                     model,
                     route_type: "local".into(),
-                    prefer_local: true,
-                    local_model: self.local_model.clone(),
-                    reason: "user_selected_local_model_available".into(),
-                    privacy_level: crate::agent::types::RedactionLevel::None,
-                    latency_ms: None,
-                    retry_count: 0,
-                    fallback_reason: None,
-                    provider_health_is_estimated: Some(false),
                 },
-                None => ModelRouteTrace {
+                None => SelectedProviderRoute {
                     provider: "none".into(),
                     model: String::new(),
                     route_type: "blocked".into(),
-                    prefer_local: true,
-                    local_model: self.local_model.clone(),
-                    reason: "selected_local_provider_unavailable".into(),
-                    privacy_level: crate::agent::types::RedactionLevel::Strict,
-                    latency_ms: None,
-                    retry_count: 0,
-                    fallback_reason: None,
-                    provider_health_is_estimated: Some(false),
                 },
             };
         }
-        match self.model_router.route_chat(tools_prompt, false) {
-            Ok(decision) => decision.to_trace(),
-            Err(error) => ModelRouteTrace {
+        if self.provider.trim().is_empty()
+            || self.chat_model.trim().is_empty()
+            || self.effective_api_key().trim().is_empty()
+        {
+            SelectedProviderRoute {
                 provider: "none".into(),
                 model: String::new(),
                 route_type: "blocked".into(),
-                prefer_local: self.prefer_local,
-                local_model: self.local_model.clone(),
-                reason: format!("model_router_blocked:{error}"),
-                privacy_level: crate::agent::types::RedactionLevel::Strict,
-                latency_ms: None,
-                retry_count: 0,
-                fallback_reason: None,
-                provider_health_is_estimated: Some(false),
-            },
+            }
+        } else {
+            SelectedProviderRoute {
+                provider: self.provider.clone(),
+                model: self.chat_model.clone(),
+                route_type: "cloud".into(),
+            }
         }
-    }
-}
-
-impl ScheduledInferenceScheduler {
-    /// Prepare a request under the exact scheduled policy capability. This is
-    /// side-effect free; execution remains owned by the crate-private durable
-    /// scheduled seam below.
-    pub async fn prepare_scheduled_chat_request(
-        &self,
-        messages: Vec<ChatMessage>,
-        context_blocks: Vec<BoundedContextBlock>,
-        context_manifest: ContextManifest,
-        policy_authorization: ProviderPolicyAuthorization,
-        network_policy: NetworkPolicy,
-        tools_required: bool,
-    ) -> Result<PreparedProviderRequest> {
-        self.inner
-            .prepare_chat_request_with_authorization(
-                messages,
-                context_blocks,
-                context_manifest,
-                policy_authorization,
-                network_policy,
-                tools_required,
-            )
-            .await
-    }
-
-    pub async fn execute_scheduled_provider_request(
-        &self,
-        request: PreparedProviderRequest,
-    ) -> PreparedProviderOutcome {
-        self.inner
-            .execute_prepared_with_observer_and_scope(request, |_| Ok(()), Some(&self.truth_scope))
-            .await
-    }
-
-    #[cfg(test)]
-    fn truth_scope(&self) -> &ScheduledProviderTruthScope {
-        &self.truth_scope
     }
 }
 
@@ -3504,34 +2313,82 @@ fn non_streaming_ollama_requires_deterministic_output(
         payload_purpose,
         Some(
             ProviderPayloadPurpose::MainChatDirectAnswer
-                | ProviderPayloadPurpose::MainChatEvidenceCheck
-                | ProviderPayloadPurpose::MainChatArtifactDraft
+                | ProviderPayloadPurpose::MainChatConversationStep
+                | ProviderPayloadPurpose::AgentMemoryExtraction
+                | ProviderPayloadPurpose::MainChatWorkSemanticVerification
+                | ProviderPayloadPurpose::MainChatInitialWorkDecision
+                | ProviderPayloadPurpose::MainChatPersonalIntelligenceStep
+                | ProviderPayloadPurpose::MainChatToolArguments
+                | ProviderPayloadPurpose::MainChatAgentToolStep
+                | ProviderPayloadPurpose::MainChatAgentArtifactOrToolStep
+                | ProviderPayloadPurpose::MainChatAgentAnswerOrToolStep
+                | ProviderPayloadPurpose::MainChatAgentArtifactStep
+                | ProviderPayloadPurpose::MainChatAgentFinalStep
         )
     ) || included_context_categories
         .iter()
         .any(|category| category == crate::web_search::WEB_SEARCH_CONTEXT_CATEGORY)
 }
 
+fn cloud_provider_uses_native_structured_output(
+    payload_purpose: Option<ProviderPayloadPurpose>,
+) -> bool {
+    matches!(
+        payload_purpose,
+        Some(
+            ProviderPayloadPurpose::MainChatWorkSemanticVerification
+                | ProviderPayloadPurpose::MainChatConversationStep
+                | ProviderPayloadPurpose::MainChatWorkPlan
+                | ProviderPayloadPurpose::MainChatInitialWorkDecision
+                | ProviderPayloadPurpose::MainChatPersonalIntelligenceStep
+                | ProviderPayloadPurpose::MainChatToolArguments
+                | ProviderPayloadPurpose::MainChatAgentToolStep
+                | ProviderPayloadPurpose::MainChatAgentArtifactOrToolStep
+                | ProviderPayloadPurpose::MainChatAgentAnswerOrToolStep
+                | ProviderPayloadPurpose::MainChatAgentArtifactStep
+                | ProviderPayloadPurpose::MainChatAgentFinalStep
+                | ProviderPayloadPurpose::AgentMemoryExtraction
+        )
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
+        classify_lifecycle_admission_failure, cloud_provider_uses_native_structured_output,
         non_streaming_ollama_requires_deterministic_output, InferenceScheduler,
         PreparedProviderGenerationMismatch, PreparedProviderStreamEvent,
         PreparedProviderStreamTerminal, ProviderInvocationProgress,
-        ProviderInvocationTerminalBinding, ProviderStartedAttempt, ScheduledInferenceScheduler,
-        ScheduledPreparedProviderTruthBinding, ScheduledProviderLocalAbortCause,
-        ScheduledProviderTruthAdmissionState, ScheduledProviderTruthClaimBinding,
-        MAX_SCHEDULED_PROVIDER_TRUTH_ATTEMPTS,
+        ProviderInvocationTerminalBinding, ProviderStartedAttempt,
     };
-    use crate::agent::{ModelRouter, ProviderAvailability};
     use crate::llm::{
         BoundedContextBlock, ChatMessage, ContextManifest, ProviderDataRoute,
         ProviderInvocationStatus, ProviderLocalOnlyReason, ProviderPayloadPurpose,
         ProviderPolicyAuthorization, ProviderPolicyReceiptEvidence,
     };
-    use crate::tasks::{ScheduledTask, ScheduledTaskClaim, TaskStore};
     use futures::StreamExt;
-    use std::sync::Arc;
+
+    #[test]
+    fn lifecycle_budget_rejection_is_not_reported_as_a_provider_failure() {
+        let budget_error = crate::llm::ProviderLifecycleAdmissionFailure::budget_exhausted(
+            "work_provider_budget_exhausted",
+        );
+        assert_eq!(
+            classify_lifecycle_admission_failure(&anyhow::Error::new(budget_error)),
+            crate::llm::PreparedProviderPreDispatchFailure::LifecycleBudgetExhausted
+        );
+        let invalid_error = crate::llm::ProviderLifecycleAdmissionFailure::invalid(
+            "canonical_work_provider_attempt_already_active",
+        );
+        assert_eq!(
+            classify_lifecycle_admission_failure(&anyhow::Error::new(invalid_error)),
+            crate::llm::PreparedProviderPreDispatchFailure::LifecycleAdmissionInvalid
+        );
+        assert_eq!(
+            classify_lifecycle_admission_failure(&anyhow::anyhow!("opaque_observer_failure")),
+            crate::llm::PreparedProviderPreDispatchFailure::LifecycleAdmissionInvalid
+        );
+    }
 
     #[test]
     fn non_streaming_direct_answer_uses_deterministic_local_generation() {
@@ -3539,14 +2396,39 @@ mod tests {
             Some(ProviderPayloadPurpose::MainChatDirectAnswer),
             &[],
         ));
-        assert!(non_streaming_ollama_requires_deterministic_output(
-            Some(ProviderPayloadPurpose::MainChatArtifactDraft),
-            &[],
-        ));
         assert!(!non_streaming_ollama_requires_deterministic_output(
-            Some(ProviderPayloadPurpose::ScheduledTaskStep),
+            Some(ProviderPayloadPurpose::FrozenRuntimeEvaluation),
             &[],
         ));
+    }
+
+    #[test]
+    fn cloud_structured_agent_surfaces_use_native_json_mode() {
+        assert!(cloud_provider_uses_native_structured_output(Some(
+            ProviderPayloadPurpose::MainChatWorkPlan
+        )));
+        assert!(cloud_provider_uses_native_structured_output(Some(
+            ProviderPayloadPurpose::MainChatWorkSemanticVerification
+        )));
+        assert!(cloud_provider_uses_native_structured_output(Some(
+            ProviderPayloadPurpose::MainChatConversationStep
+        )));
+        for purpose in [
+            ProviderPayloadPurpose::MainChatInitialWorkDecision,
+            ProviderPayloadPurpose::MainChatPersonalIntelligenceStep,
+            ProviderPayloadPurpose::MainChatToolArguments,
+            ProviderPayloadPurpose::MainChatAgentToolStep,
+            ProviderPayloadPurpose::MainChatAgentArtifactOrToolStep,
+            ProviderPayloadPurpose::MainChatAgentAnswerOrToolStep,
+            ProviderPayloadPurpose::MainChatAgentArtifactStep,
+            ProviderPayloadPurpose::MainChatAgentFinalStep,
+        ] {
+            assert!(cloud_provider_uses_native_structured_output(Some(purpose)));
+            assert!(non_streaming_ollama_requires_deterministic_output(
+                Some(purpose),
+                &[]
+            ));
+        }
     }
 
     fn allow_network_policy() -> crate::config::NetworkPolicy {
@@ -3583,17 +2465,7 @@ mod tests {
         decision_id: &str,
         current_user_text: &str,
     ) -> ProviderPolicyAuthorization {
-        let decision = crate::agent::PolicyStore::mvp_builtin().evaluate_context_policy(
-            crate::agent::PolicyEvaluationRequest {
-                topic: crate::agent::PolicyTopic::General,
-                requested_route: crate::agent::ModelRoutePolicy::CloudAllowed,
-            },
-        );
-        ProviderPolicyAuthorization::from_policy_store_context_decision(&decision, decision_id)
-            .and_then(|authorization| {
-                authorization.bind_policy_store_current_user_subject(current_user_text)
-            })
-            .expect("canonical PolicyStore cloud decision")
+        ProviderPolicyAuthorization::cloud_test_fixture(decision_id, current_user_text)
     }
 
     fn canonical_cloud_authorization(
@@ -3602,7 +2474,7 @@ mod tests {
     ) -> ProviderPolicyAuthorization {
         canonical_cloud_subject_authorization(decision_id, current_user_text)
             .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
+                crate::llm::ProviderPayloadPurpose::FrozenRuntimeEvaluation,
                 current_user_text,
                 &[ChatMessage {
                     role: "user".into(),
@@ -3610,7 +2482,7 @@ mod tests {
                 }],
                 &[],
             )
-            .expect("canonical PolicyStore cloud payload scope")
+            .expect("canonical cloud test payload scope")
     }
 
     fn local_only_test_authorization(
@@ -3619,7 +2491,7 @@ mod tests {
     ) -> ProviderPolicyAuthorization {
         ProviderPolicyAuthorization::local_only_fail_closed(ProviderLocalOnlyReason::TestFixture)
             .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
+                crate::llm::ProviderPayloadPurpose::FrozenRuntimeEvaluation,
                 current_user_text,
                 messages,
                 &[],
@@ -3627,573 +2499,9 @@ mod tests {
             .expect("local-only fixture payload scope")
     }
 
-    fn scheduled_local_claim(description: &str) -> (Arc<TaskStore>, Arc<ScheduledTaskClaim>) {
-        let store = Arc::new(TaskStore::new_in_memory().expect("scheduled task store"));
-        let mut task = ScheduledTask::new(
-            "scheduled provider admission",
-            description,
-            Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339()),
-            "medium",
-        );
-        task.seal_deterministic_local_provider_grant();
-        store
-            .create_task_idempotent(&task)
-            .expect("create scheduled local task");
-        let claim = store
-            .claim_next_due(chrono::Utc::now(), chrono::Duration::seconds(30))
-            .expect("claim due scheduled task")
-            .expect("scheduled task is due");
-        assert!(store
-            .begin_claim_execution(&claim)
-            .expect("begin scheduled execution"));
-        (store, Arc::new(claim))
-    }
-
-    fn scheduled_authorization(
-        claim: &ScheduledTaskClaim,
-        messages: &[ChatMessage],
-    ) -> ProviderPolicyAuthorization {
-        ProviderPolicyAuthorization::from_scheduled_claim(claim)
-            .and_then(|authorization| {
-                authorization.authorize_derived_payload(
-                    crate::llm::ProviderPayloadPurpose::ScheduledTaskStep,
-                    &claim.task().description,
-                    messages,
-                    &[],
-                )
-            })
-            .expect("scheduled exact payload authorization")
-    }
-
-    async fn prepare_scheduled_request(
-        scheduler: &InferenceScheduler,
-        claim: &ScheduledTaskClaim,
-        request_id: &str,
-    ) -> crate::llm::PreparedProviderRequest {
-        let messages = vec![ChatMessage {
-            role: "user".into(),
-            content: claim.task().description.clone(),
-        }];
-        scheduler
-            .prepare_chat_request_with_authorization(
-                messages.clone(),
-                vec![],
-                ContextManifest {
-                    request_id: request_id.into(),
-                    privacy_decision_id: claim.provider_grant().policy_decision_digest.clone(),
-                    selected_context_refs: vec![],
-                    included_context_categories: vec![],
-                    declared_payload_categories: vec![
-                        crate::llm::ProviderPayloadCategory::RuntimeCompiledMessages,
-                    ],
-                    policy_provenance_refs: Vec::new(),
-                    raw_life_model_included: false,
-                    raw_unbounded_memory_included: false,
-                },
-                scheduled_authorization(claim, &messages),
-                allow_network_policy(),
-                false,
-            )
-            .await
-            .expect("prepare exact scheduled request")
-    }
-
-    async fn prepare_bound_scheduled_request(
-        scheduler: &ScheduledInferenceScheduler,
-        claim: &ScheduledTaskClaim,
-        request_id: &str,
-    ) -> crate::llm::PreparedProviderRequest {
-        let messages = vec![ChatMessage {
-            role: "user".into(),
-            content: claim.task().description.clone(),
-        }];
-        scheduler
-            .prepare_scheduled_chat_request(
-                messages.clone(),
-                vec![],
-                ContextManifest {
-                    request_id: request_id.into(),
-                    privacy_decision_id: claim.provider_grant().policy_decision_digest.clone(),
-                    selected_context_refs: vec![],
-                    included_context_categories: vec![],
-                    declared_payload_categories: vec![
-                        crate::llm::ProviderPayloadCategory::RuntimeCompiledMessages,
-                    ],
-                    policy_provenance_refs: Vec::new(),
-                    raw_life_model_included: false,
-                    raw_unbounded_memory_included: false,
-                },
-                scheduled_authorization(claim, &messages),
-                allow_network_policy(),
-                false,
-            )
-            .await
-            .expect("prepare exact bound scheduled request")
-    }
-
-    fn terminal_receipt(
-        attempt: &ProviderStartedAttempt,
-        status: ProviderInvocationStatus,
-    ) -> crate::llm::ProviderInvocationReceipt {
-        let error = match status {
-            ProviderInvocationStatus::Completed => None,
-            ProviderInvocationStatus::Failed => Some("confirmed_provider_failure"),
-            ProviderInvocationStatus::RemoteUnknown => Some("remote_state_unobserved"),
-        };
-        attempt.terminal_receipt(status, error)
-    }
-
-    #[test]
-    fn scheduled_provider_truth_claim_binding_rejects_another_issued_claim() {
-        let (_store, claim) = scheduled_local_claim("bind this exact scheduled claim");
-        let binding = ScheduledProviderTruthClaimBinding::capture(&claim).unwrap();
-        let (_other_store, other_claim) = scheduled_local_claim("another scheduled claim");
-        assert!(binding.validate_claim(&other_claim).is_err());
-
-        binding.validate_claim(&claim).unwrap();
-    }
-
-    #[tokio::test]
-    async fn scheduled_provider_truth_caller_shaped_progress_cannot_mint_admission() {
-        let (store, claim) = scheduled_local_claim("do not trust caller-shaped progress");
-        let scheduler = InferenceScheduler::new(
-            "fixture-local".into(),
-            true,
-            "openai".into(),
-            "https://api.openai.com/v1".into(),
-            "".into(),
-            "unused-cloud".into(),
-            "unused-embedding".into(),
-            false,
-        )
-        .with_scripted_generation_response("fixture is not an adapter call");
-        let generic_scheduler = scheduler.clone();
-        let (scheduler, handle) = scheduler
-            .bind_scheduled_provider_truth_scope(Arc::clone(&store), Arc::clone(&claim))
-            .unwrap();
-        let prepared =
-            prepare_bound_scheduled_request(&scheduler, &claim, "scheduled-shaped-progress").await;
-        let shaped = ProviderInvocationProgress::Started {
-            request_id: prepared.context_manifest.request_id.clone(),
-            provider: prepared.provider_target.clone(),
-            model: prepared.model_target.clone(),
-            started_at: chrono::Utc::now(),
-            policy_evidence: prepared.policy_receipt_evidence(),
-        };
-
-        let error = handle.take_for_progress(&shaped).unwrap_err();
-        assert!(error.to_string().contains("caller-shaped progress"));
-        let shaped_terminal =
-            ProviderInvocationProgress::Completed(crate::llm::ProviderInvocationReceipt {
-                request_id: prepared.context_manifest.request_id.clone(),
-                provider: prepared.provider_target.clone(),
-                model: prepared.model_target.clone(),
-                status: ProviderInvocationStatus::Completed,
-                started_at: chrono::Utc::now(),
-                finished_at: chrono::Utc::now(),
-                error_digest: None,
-                simulated: false,
-                policy_evidence: Some(prepared.policy_receipt_evidence()),
-            });
-        assert!(handle.take_for_progress(&shaped_terminal).is_err());
-
-        let outcome = generic_scheduler.execute_prepared(prepared).await;
-        assert!(outcome
-            .result
-            .unwrap_err()
-            .contains("scheduled_policy_requires_scheduled_executor"));
-        assert!(outcome.receipt.is_none());
-        assert!(handle
-            .take_remote_unknown_after_local_abort(
-                ScheduledProviderLocalAbortCause::RuntimeFutureAborted,
-            )
-            .unwrap()
-            .is_empty());
-    }
-
-    #[tokio::test]
-    async fn scheduled_provider_truth_scope_rejects_cross_claim_and_mutated_envelope() {
-        let (first_store, first_claim) = scheduled_local_claim("first scheduled subject");
-        let (_second_store, second_claim) = scheduled_local_claim("second scheduled subject");
-        let scheduler = InferenceScheduler::new(
-            "fixture-local".into(),
-            true,
-            "openai".into(),
-            "https://api.openai.com/v1".into(),
-            "".into(),
-            "unused-cloud".into(),
-            "unused-embedding".into(),
-            false,
-        )
-        .with_scripted_generation_response("fixture");
-        let (scheduler, _handle) = scheduler
-            .bind_scheduled_provider_truth_scope(Arc::clone(&first_store), Arc::clone(&first_claim))
-            .unwrap();
-        let other = prepare_bound_scheduled_request(
-            &scheduler,
-            &second_claim,
-            "scheduled-other-claim-request",
-        )
-        .await;
-        let scope = scheduler.truth_scope();
-        assert!(scope.capture_prepared(&other).is_err());
-
-        let mut exact = prepare_bound_scheduled_request(
-            &scheduler,
-            &first_claim,
-            "scheduled-mutated-envelope-request",
-        )
-        .await;
-        exact.messages[0].content.push_str(" caller mutation");
-        assert!(scope.capture_prepared(&exact).is_err());
-    }
-
-    #[tokio::test]
-    async fn scheduled_provider_truth_terminal_state_machine_is_first_terminal_wins() {
-        let (store, claim) = scheduled_local_claim("scheduled terminal ordering");
-        let scheduler = InferenceScheduler::new(
-            "fixture-local".into(),
-            true,
-            "openai".into(),
-            "https://api.openai.com/v1".into(),
-            "".into(),
-            "unused-cloud".into(),
-            "unused-embedding".into(),
-            false,
-        )
-        .with_scripted_generation_response("fixture");
-        let (scheduler, _handle) = scheduler
-            .bind_scheduled_provider_truth_scope(Arc::clone(&store), Arc::clone(&claim))
-            .unwrap();
-        let prepared_request =
-            prepare_bound_scheduled_request(&scheduler, &claim, "scheduled-terminal-order").await;
-        let claim_binding = ScheduledProviderTruthClaimBinding::capture(&claim).unwrap();
-        let prepared =
-            ScheduledPreparedProviderTruthBinding::capture(&claim_binding, &prepared_request)
-                .unwrap();
-        let attempt = ProviderStartedAttempt {
-            request_id: prepared.request_id.clone(),
-            provider: prepared.provider.clone(),
-            model: prepared.model.clone(),
-            started_at: chrono::Utc::now(),
-            policy_evidence: prepared.policy_evidence.clone(),
-        };
-        let completed = terminal_receipt(&attempt, ProviderInvocationStatus::Completed);
-        let unknown = terminal_receipt(&attempt, ProviderInvocationStatus::RemoteUnknown);
-
-        let mut before_start = ScheduledProviderTruthAdmissionState::new(claim_binding.clone());
-        assert!(before_start
-            .register_terminal(&prepared, &completed)
-            .unwrap_err()
-            .to_string()
-            .contains("before start"));
-
-        let mut unknown_first = ScheduledProviderTruthAdmissionState::new(claim_binding.clone());
-        unknown_first
-            .register_started(prepared.clone(), attempt.clone())
-            .unwrap();
-        unknown_first
-            .register_terminal(&prepared, &unknown)
-            .unwrap();
-        assert!(unknown_first
-            .register_terminal(&prepared, &completed)
-            .unwrap_err()
-            .to_string()
-            .contains("first terminal"));
-
-        let mut completed_first = ScheduledProviderTruthAdmissionState::new(claim_binding);
-        completed_first
-            .register_started(prepared.clone(), attempt)
-            .unwrap();
-        completed_first
-            .register_terminal(&prepared, &completed)
-            .unwrap();
-        assert!(completed_first
-            .register_terminal(&prepared, &unknown)
-            .unwrap_err()
-            .to_string()
-            .contains("first terminal"));
-    }
-
-    #[tokio::test]
-    async fn scheduled_provider_truth_registry_is_bounded_and_fails_closed() {
-        let (_store, claim) = scheduled_local_claim("bounded scheduled provider truth");
-        let scheduler = InferenceScheduler::new(
-            "fixture-local".into(),
-            true,
-            "openai".into(),
-            "https://api.openai.com/v1".into(),
-            "".into(),
-            "unused-cloud".into(),
-            "unused-embedding".into(),
-            false,
-        )
-        .with_scripted_generation_response("fixture");
-        let prepared_request =
-            prepare_scheduled_request(&scheduler, &claim, "scheduled-bounded-base").await;
-        let claim_binding = ScheduledProviderTruthClaimBinding::capture(&claim).unwrap();
-        let base =
-            ScheduledPreparedProviderTruthBinding::capture(&claim_binding, &prepared_request)
-                .unwrap();
-        let mut state = ScheduledProviderTruthAdmissionState::new(claim_binding);
-
-        for index in 0..MAX_SCHEDULED_PROVIDER_TRUTH_ATTEMPTS {
-            let mut prepared = base.clone();
-            prepared.request_id = format!("scheduled-bounded-{index}");
-            prepared.prepared_request_digest =
-                crate::agent::metadata_safe::metadata_safe_text_digest(&prepared.request_id).1;
-            let attempt = ProviderStartedAttempt {
-                request_id: prepared.request_id.clone(),
-                provider: prepared.provider.clone(),
-                model: prepared.model.clone(),
-                started_at: chrono::Utc::now(),
-                policy_evidence: prepared.policy_evidence.clone(),
-            };
-            state.register_started(prepared, attempt).unwrap();
-        }
-
-        let mut overflow = base;
-        overflow.request_id = "scheduled-bounded-overflow".into();
-        overflow.prepared_request_digest =
-            crate::agent::metadata_safe::metadata_safe_text_digest(&overflow.request_id).1;
-        let overflow_attempt = ProviderStartedAttempt {
-            request_id: overflow.request_id.clone(),
-            provider: overflow.provider.clone(),
-            model: overflow.model.clone(),
-            started_at: chrono::Utc::now(),
-            policy_evidence: overflow.policy_evidence.clone(),
-        };
-        assert!(state
-            .register_started(overflow, overflow_attempt)
-            .unwrap_err()
-            .to_string()
-            .contains("attempt limit"));
-    }
-
-    #[test]
-    fn scheduled_provider_truth_terminal_shapes_fail_closed() {
-        let evidence = test_stream_seed("scheduled-terminal-shape").policy_evidence;
-        let started_at = chrono::Utc::now();
-        let base = crate::llm::ProviderInvocationReceipt {
-            request_id: "scheduled-terminal-shape".into(),
-            provider: "ollama".into(),
-            model: "local-model".into(),
-            status: ProviderInvocationStatus::Completed,
-            started_at,
-            finished_at: started_at,
-            error_digest: None,
-            simulated: false,
-            policy_evidence: Some(evidence),
-        };
-
-        let mut completed_with_error = base.clone();
-        completed_with_error.error_digest = Some(format!("sha256:{}", "1".repeat(64)));
-        assert!(
-            super::ScheduledProviderTruthProgressKey::from_receipt(&completed_with_error).is_err()
-        );
-
-        let mut failed_without_error = base.clone();
-        failed_without_error.status = ProviderInvocationStatus::Failed;
-        assert!(
-            super::ScheduledProviderTruthProgressKey::from_receipt(&failed_without_error).is_err()
-        );
-
-        let mut unknown_without_reason = base.clone();
-        unknown_without_reason.status = ProviderInvocationStatus::RemoteUnknown;
-        assert!(
-            super::ScheduledProviderTruthProgressKey::from_receipt(&unknown_without_reason)
-                .is_err()
-        );
-
-        let mut simulated = base;
-        simulated.simulated = true;
-        assert!(super::ScheduledProviderTruthProgressKey::from_receipt(&simulated).is_err());
-
-        let mismatched_variant =
-            ProviderInvocationProgress::Failed(crate::llm::ProviderInvocationReceipt {
-                simulated: false,
-                ..simulated
-            });
-        assert!(
-            super::ScheduledProviderTruthProgressKey::from_progress(&mismatched_variant).is_err()
-        );
-    }
-
-    // Provider tests mutate process-global endpoint credentials; the lock is
-    // intentionally held through the complete async observation window.
-    #[expect(
-        clippy::await_holding_lock,
-        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
-    )]
-    #[tokio::test(flavor = "current_thread")]
-    async fn scheduled_provider_truth_real_adapter_issues_start_and_completed_admissions() {
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", format!("http://{address}"));
-        std::env::remove_var("OLLAMA_HOST");
-        let server = tokio::spawn(serve_two_ollama_requests(listener));
-
-        let (store, claim) = scheduled_local_claim("real scheduled adapter capability");
-        let scheduler = InferenceScheduler::new(
-            "qwen-local:latest".into(),
-            true,
-            "openai".into(),
-            "http://127.0.0.1:9/v1".into(),
-            "cloud-key-must-not-be-used".into(),
-            "unused-cloud-model".into(),
-            "unused-embedding".into(),
-            false,
-        );
-        let (scheduler, handle) = scheduler
-            .bind_scheduled_provider_truth_scope(Arc::clone(&store), Arc::clone(&claim))
-            .unwrap();
-        let prepared =
-            prepare_bound_scheduled_request(&scheduler, &claim, "scheduled-real-completed").await;
-
-        let outcome = scheduler.execute_scheduled_provider_request(prepared).await;
-        std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
-        assert_eq!(outcome.result.as_deref(), Ok("local response"));
-        server.await.unwrap();
-
-        assert_eq!(
-            outcome.receipt.as_ref().map(|receipt| receipt.status),
-            Some(ProviderInvocationStatus::Completed)
-        );
-        let persisted = store
-            .provider_receipts_for_attempt(claim.attempt_id())
-            .unwrap();
-        assert_eq!(persisted.len(), 1);
-        assert_eq!(persisted[0].request_id, "scheduled-real-completed");
-        assert_eq!(persisted[0].status, "completed");
-        assert_eq!(
-            persisted[0].provider_grant_id,
-            claim.provider_grant().grant_id
-        );
-        assert_eq!(persisted[0].policy_evidence_state, "exact");
-        assert!(handle
-            .take_remote_unknown_after_local_abort(
-                ScheduledProviderLocalAbortCause::ExecutionTimeout,
-            )
-            .unwrap()
-            .is_empty());
-    }
-
-    #[expect(
-        clippy::await_holding_lock,
-        reason = "owner=backend-reliability; expires=2026-10-01; test serializes process-global provider configuration"
-    )]
-    #[tokio::test(flavor = "current_thread")]
-    async fn scheduled_provider_truth_local_abort_requires_real_in_flight_start() {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-        let _env_guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        std::env::set_var("OPENLIFE_OLLAMA_BASE_URL", format!("http://{address}"));
-        std::env::remove_var("OLLAMA_HOST");
-        let chat_seen = std::sync::Arc::new(tokio::sync::Notify::new());
-        let release_chat = std::sync::Arc::new(tokio::sync::Notify::new());
-        let chat_seen_by_server = std::sync::Arc::clone(&chat_seen);
-        let release_by_server = std::sync::Arc::clone(&release_chat);
-        let server = tokio::spawn(async move {
-            let (mut tags_socket, _) = listener.accept().await.unwrap();
-            let mut tags_request = [0_u8; 16 * 1024];
-            let _ = tags_socket.read(&mut tags_request).await.unwrap();
-            let tags_body = r#"{"models":[{"name":"qwen-local:latest","size":1}]}"#;
-            let tags_response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                tags_body.len(),
-                tags_body
-            );
-            tags_socket
-                .write_all(tags_response.as_bytes())
-                .await
-                .unwrap();
-
-            let (mut chat_socket, _) = listener.accept().await.unwrap();
-            let mut chat_request = [0_u8; 16 * 1024];
-            let _ = chat_socket.read(&mut chat_request).await.unwrap();
-            chat_seen_by_server.notify_one();
-            release_by_server.notified().await;
-        });
-
-        let (store, claim) = scheduled_local_claim("abort a real scheduled provider future");
-        let scheduler = InferenceScheduler::new(
-            "qwen-local:latest".into(),
-            true,
-            "openai".into(),
-            "http://127.0.0.1:9/v1".into(),
-            "cloud-key-must-not-be-used".into(),
-            "unused-cloud-model".into(),
-            "unused-embedding".into(),
-            false,
-        );
-        let (scheduler, handle) = scheduler
-            .bind_scheduled_provider_truth_scope(Arc::clone(&store), Arc::clone(&claim))
-            .unwrap();
-        let prepared =
-            prepare_bound_scheduled_request(&scheduler, &claim, "scheduled-real-aborted").await;
-        let execution =
-            tokio::spawn(
-                async move { scheduler.execute_scheduled_provider_request(prepared).await },
-            );
-        // Coverage instrumentation can make the full local-provider path
-        // several times slower; keep a bounded wait without using a
-        // production latency threshold as a test-harness deadline.
-        tokio::time::timeout(std::time::Duration::from_secs(10), chat_seen.notified())
-            .await
-            .expect("scheduled HTTP request crossed the loopback edge");
-        let started = store
-            .provider_receipts_for_attempt(claim.attempt_id())
-            .unwrap();
-        assert_eq!(started.len(), 1);
-        assert_eq!(started[0].status, "started");
-
-        let unknown = handle
-            .take_remote_unknown_after_local_abort(
-                ScheduledProviderLocalAbortCause::ExecutionTimeout,
-            )
-            .unwrap();
-        assert_eq!(unknown.len(), 1);
-        for admission in unknown {
-            store.record_provider_truth(&claim, admission).unwrap();
-        }
-        let unknown = store
-            .provider_receipts_for_attempt(claim.attempt_id())
-            .unwrap();
-        assert_eq!(unknown.len(), 1);
-        assert_eq!(unknown[0].status, "remote_unknown");
-        assert!(unknown[0].error_digest.is_some());
-        assert!(handle
-            .take_remote_unknown_after_local_abort(
-                ScheduledProviderLocalAbortCause::CancellationRequested,
-            )
-            .unwrap()
-            .is_empty());
-
-        execution.abort();
-        let _ = execution.await;
-        release_chat.notify_one();
-        server.await.unwrap();
-        std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
-    }
-
     #[test]
     fn prepared_generation_requires_the_typed_receipt_outcome() {
         let removed_api = ["generate_", "prepared("].concat();
-        let production_consumers = [(
-            "agent/main_chat_agent_v1.rs",
-            include_str!("agent/main_chat_agent_v1.rs") as &str,
-        )];
-
-        for (path, source) in production_consumers {
-            assert!(
-                !source.lines().any(|line| line.contains(&removed_api)),
-                "{path} must consume execute_prepared and its receipt-bearing outcome"
-            );
-        }
-
         let scheduler_source = include_str!("scheduler.rs");
         assert!(
             !scheduler_source
@@ -4201,41 +2509,6 @@ mod tests {
                 .any(|line| { line.contains("pub async fn") && line.contains(&removed_api) }),
             "the receipt-dropping convenience API must stay deleted"
         );
-    }
-
-    #[test]
-    fn scheduled_scheduler_public_api_has_no_generic_or_streaming_bypass() {
-        let source = include_str!("scheduler.rs").replace("\r\n", "\n");
-        let start = source
-            .find("impl ScheduledInferenceScheduler {")
-            .expect("scheduled scheduler impl");
-        let end = source[start..]
-            .find("\n#[cfg(test)]\nmod tests")
-            .map(|offset| start + offset)
-            .expect("scheduled scheduler impl boundary");
-        let scheduled_impl = &source[start..end];
-
-        for forbidden in [
-            "execute_prepared",
-            "execute_prepared_with_observer",
-            "execute_prepared_with_start_observer",
-            "generate_prepared_stream",
-            "generate_prepared_stream_with_start_observer",
-        ] {
-            assert!(
-                !scheduled_impl.lines().any(|line| {
-                    line.trim_start().starts_with("pub ") && line.contains(forbidden)
-                }),
-                "ScheduledInferenceScheduler exposed generic adapter entrypoint {forbidden}"
-            );
-        }
-        assert!(scheduled_impl
-            .lines()
-            .any(|line| line.contains("pub async fn execute_scheduled_provider_request")));
-        let qualified_deref = ["impl std::ops::", "Deref for ScheduledInferenceScheduler"].concat();
-        let imported_deref = ["impl ", "Deref for ScheduledInferenceScheduler"].concat();
-        assert!(!source.contains(&qualified_deref));
-        assert!(!source.contains(&imported_deref));
     }
 
     fn test_stream_seed(request_id: &str) -> ProviderStartedAttempt {
@@ -4594,12 +2867,9 @@ mod tests {
             "text-embedding-3-small".into(),
             true,
         );
-        let trace = scheduler
-            .preview_chat_route(Some("typed_tool_contract"))
-            .await;
+        let trace = scheduler.resolve_selected_provider_route().await;
         assert_eq!(trace.provider, "none");
         assert_eq!(trace.route_type, "blocked");
-        assert!(trace.reason.starts_with("model_router_blocked:"));
     }
 
     #[tokio::test]
@@ -4614,9 +2884,7 @@ mod tests {
             "text-embedding-3-small".into(),
             true,
         );
-        let trace = scheduler
-            .preview_chat_route(Some("typed_tool_contract"))
-            .await;
+        let trace = scheduler.resolve_selected_provider_route().await;
         assert_eq!(trace.provider, "openai");
         assert_eq!(trace.model, "gpt-4o-mini");
         assert_eq!(trace.route_type, "cloud");
@@ -4648,15 +2916,13 @@ mod tests {
             false,
         );
 
-        let trace = scheduler.preview_chat_route(None).await;
+        let trace = scheduler.resolve_selected_provider_route().await;
         std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
         server.await.unwrap();
 
         assert_eq!(trace.provider, "ollama");
         assert_eq!(trace.model, "openlife-selected-local:latest");
         assert_eq!(trace.route_type, "local");
-        assert_eq!(trace.reason, "user_selected_local_model_available");
-        assert_eq!(trace.fallback_reason, None);
     }
 
     #[expect(
@@ -4679,13 +2945,11 @@ mod tests {
             false,
         );
 
-        let trace = scheduler.preview_chat_route(None).await;
+        let trace = scheduler.resolve_selected_provider_route().await;
         std::env::remove_var("OPENLIFE_OLLAMA_BASE_URL");
 
         assert_eq!(trace.provider, "none");
         assert_eq!(trace.route_type, "blocked");
-        assert_eq!(trace.reason, "selected_local_provider_unavailable");
-        assert_eq!(trace.fallback_reason, None);
     }
 
     #[expect(
@@ -4878,7 +3142,7 @@ mod tests {
         let authorization =
             canonical_cloud_subject_authorization("typed-cloud-decision", "typed authorization")
                 .authorize_derived_payload(
-                    crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
+                    crate::llm::ProviderPayloadPurpose::FrozenRuntimeEvaluation,
                     "typed authorization",
                     &[ChatMessage {
                         role: "user".into(),
@@ -4937,7 +3201,7 @@ mod tests {
         assert_eq!(prepared.data_route, ProviderDataRoute::PolicyAllowed);
         assert_eq!(
             prepared.policy_authorization().authority(),
-            crate::llm::ProviderPolicyAuthority::PolicyStore
+            crate::llm::ProviderPolicyAuthority::MainChatPolicyRouter
         );
         let replay_error = scheduler
             .prepare_chat_request_with_authorization(
@@ -4993,14 +3257,10 @@ mod tests {
 
     #[tokio::test]
     async fn authorization_for_message_a_cannot_prepare_message_b() {
-        let decision = crate::agent::main_chat_agent_v1::AgentIngress::default().decide(
+        let authorization = ProviderPolicyAuthorization::cloud_test_fixture(
             "authorization-subject-session",
             "message A",
-            None,
-            crate::agent::AgentTaskKind::Conversation,
         );
-        let authorization = ProviderPolicyAuthorization::from_main_chat_ingress(&decision)
-            .expect("PolicyRouter-issued authorization");
         let transfer_error = authorization
             .clone()
             .authorize_derived_payload(
@@ -5084,7 +3344,7 @@ mod tests {
         let rebound_error = authorization
             .clone()
             .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
+                crate::llm::ProviderPayloadPurpose::FrozenRuntimeEvaluation,
                 current_user_text,
                 &messages,
                 std::slice::from_ref(&injected_context),
@@ -5195,25 +3455,20 @@ mod tests {
 
     #[tokio::test]
     async fn local_restriction_preserves_issuer_decision_provenance() {
-        let decision = crate::agent::main_chat_agent_v1::AgentIngress::default().decide(
+        let issued = ProviderPolicyAuthorization::cloud_test_fixture(
             "local-restriction-session",
             "keep this request scoped",
-            None,
-            crate::agent::AgentTaskKind::Conversation,
-        );
-        let issued = ProviderPolicyAuthorization::from_main_chat_ingress(&decision)
-            .and_then(|authorization| {
-                authorization.authorize_derived_payload(
-                    crate::llm::ProviderPayloadPurpose::MainChatDirectAnswer,
-                    "keep this request scoped",
-                    &[ChatMessage {
-                        role: "user".into(),
-                        content: "keep this request scoped".into(),
-                    }],
-                    &[],
-                )
-            })
-            .expect("PolicyRouter-issued authorization");
+        )
+        .authorize_derived_payload(
+            crate::llm::ProviderPayloadPurpose::MainChatDirectAnswer,
+            "keep this request scoped",
+            &[ChatMessage {
+                role: "user".into(),
+                content: "keep this request scoped".into(),
+            }],
+            &[],
+        )
+        .expect("typed provider authorization");
         let original_decision_id = issued.decision_id().to_string();
         let restricted = issued.restrict_to_local(ProviderLocalOnlyReason::CloudDisabled);
         assert_eq!(restricted.decision_id(), original_decision_id);
@@ -5273,123 +3528,6 @@ mod tests {
             evidence.effective_local_restriction,
             Some(ProviderLocalOnlyReason::CloudDisabled)
         );
-    }
-
-    #[tokio::test]
-    async fn policy_store_outbound_receipt_retains_typed_provenance_without_raw_profile_data() {
-        let user_text = "ordinary PolicyStore governed request";
-        let task = crate::agent::AgentTask {
-            kind: crate::agent::AgentTaskKind::Conversation,
-            session_id: "hs-provider-trace-session".into(),
-            user_text: user_text.into(),
-            messages: vec![ChatMessage {
-                role: "user".into(),
-                content: user_text.into(),
-            }],
-            layer: crate::layer::Layer::L2,
-        };
-        let policy_context = crate::agent::build_runtime_policy_context(
-            &crate::agent::PolicyStore::mvp_builtin(),
-            crate::agent::RuntimePolicyContextBuildInput {
-                task: &task,
-                sanitized_intent_summary: user_text.into(),
-                privacy_topic: crate::agent::PolicyTopic::General,
-                risk_level: crate::agent::RiskLevel::Low,
-                tool_requirements: Vec::new(),
-            },
-        )
-        .expect("PolicyStore context retains the route-policy capability");
-        let authorization = policy_context
-            .provider_authorization()
-            .clone()
-            .authorize_derived_payload(
-                crate::llm::ProviderPayloadPurpose::ScheduledTaskGeneration,
-                user_text,
-                &task.messages,
-                &[],
-            )
-            .expect("PolicyStore policy binds the exact outbound payload");
-        let provenance = policy_context.policy_provenance_refs().to_vec();
-        assert!(provenance.iter().any(|reference| {
-            reference.kind() == crate::llm::ProviderPolicyProvenanceKind::PolicyStoreRouteDecision
-        }));
-
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let provider_base = format!("http://{}/v1", listener.local_addr().unwrap());
-        let server = tokio::spawn(serve_one_json_response(
-            listener,
-            r#"{"choices":[{"message":{"content":"governed response"}}]}"#,
-        ));
-        let scheduler = InferenceScheduler::new(
-            "unused-local".into(),
-            false,
-            "openai".into(),
-            provider_base,
-            "test-key".into(),
-            "hs-governed-model".into(),
-            "embedding-model".into(),
-            false,
-        );
-        let prepared = scheduler
-            .prepare_chat_request_with_authorization(
-                task.messages.clone(),
-                Vec::new(),
-                ContextManifest {
-                    request_id: "hs-provider-trace-request".into(),
-                    privacy_decision_id: authorization.decision_id().to_string(),
-                    selected_context_refs: Vec::new(),
-                    included_context_categories: Vec::new(),
-                    declared_payload_categories: vec![
-                        crate::llm::ProviderPayloadCategory::CurrentUserConversation,
-                    ],
-                    policy_provenance_refs: provenance.clone(),
-                    raw_life_model_included: false,
-                    raw_unbounded_memory_included: false,
-                },
-                authorization,
-                allow_network_policy(),
-                false,
-            )
-            .await
-            .expect("PolicyStore-governed provider request should prepare");
-        assert!(!prepared.context_manifest.raw_life_model_included);
-        assert!(!prepared.context_manifest.raw_unbounded_memory_included);
-        let prepared_endpoint = prepared.provider_endpoint.clone();
-        let prepared_generation = prepared.provider_config_generation.clone();
-        let prepared_network_policy = prepared.network_policy.clone();
-        let prepared_network_policy_decision = prepared.network_policy_decision.clone();
-
-        let outcome = scheduler.execute_prepared(prepared).await;
-        server.await.unwrap();
-        let proof = outcome
-            .terminal_proof
-            .as_ref()
-            .expect("a real adapter terminal must issue a runtime-only proof");
-        assert_eq!(proof.receipt(), outcome.receipt.as_ref().unwrap());
-        proof
-            .validate_runtime_binding(
-                "openai",
-                "hs-governed-model",
-                &prepared_endpoint,
-                &prepared_generation,
-                &crate::llm::provider_credential_identity("test-key"),
-                0,
-                &prepared_network_policy,
-                &prepared_network_policy_decision,
-            )
-            .expect("proof must retain the exact endpoint and config generation");
-        assert_eq!(outcome.result.unwrap(), "governed response");
-        let receipt = outcome.receipt.expect("real provider receipt");
-        let evidence = receipt
-            .policy_evidence
-            .expect("typed provider policy evidence");
-        assert_eq!(evidence.policy_provenance_refs, provenance);
-        assert!(evidence.context_manifest_digest.starts_with("sha256:"));
-        assert!(!evidence.raw_life_model_included);
-        assert!(!evidence.raw_unbounded_memory_included);
-        let serialized = serde_json::to_string(&evidence).unwrap();
-        assert!(!serialized.contains(user_text));
-        assert!(!serialized.contains("bounded context"));
     }
 
     #[tokio::test]
@@ -5648,7 +3786,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn model_router_uses_configured_cloud_key_without_prior_availability_probe() {
+    async fn selected_cloud_route_uses_configured_provider_and_model() {
         let scheduler = InferenceScheduler::new(
             "qwen2.5".into(),
             false,
@@ -5658,19 +3796,17 @@ mod tests {
             "deepseek-chat".into(),
             "text-embedding-3-small".into(),
             false,
-        )
-        .with_model_router(ModelRouter::new());
+        );
 
-        let trace = scheduler.preview_chat_route(None).await;
+        let trace = scheduler.resolve_selected_provider_route().await;
 
         assert_eq!(trace.provider, "deepseek");
         assert_eq!(trace.model, "deepseek-chat");
         assert_eq!(trace.route_type, "cloud");
-        assert_eq!(trace.provider_health_is_estimated, None);
     }
 
     #[tokio::test]
-    async fn model_router_keeps_configured_cloud_provider_unavailable_without_key() {
+    async fn selected_cloud_route_is_blocked_without_a_key() {
         let scheduler = InferenceScheduler::new(
             "qwen2.5".into(),
             false,
@@ -5680,20 +3816,12 @@ mod tests {
             "deepseek-chat".into(),
             "text-embedding-3-small".into(),
             false,
-        )
-        .with_model_router(ModelRouter::new());
+        );
 
-        let trace = scheduler.preview_chat_route(None).await;
+        let trace = scheduler.resolve_selected_provider_route().await;
 
         assert_ne!(trace.provider, "deepseek");
         assert_ne!(trace.route_type, "cloud");
-        assert!(
-            trace.reason.contains("No available providers")
-                || trace.reason.contains("no_backend_available")
-                || trace.reason.contains("ollama_available_and_preferred"),
-            "unexpected route reason: {}",
-            trace.reason
-        );
     }
 
     #[expect(
@@ -5748,64 +3876,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn prepared_request_rejects_router_target_that_has_no_matching_adapter() {
-        let mut router = ModelRouter::new();
-        router.providers.insert(
-            "deepseek".into(),
-            ProviderAvailability {
-                provider: "deepseek".into(),
-                available: true,
-                latency_ms: Some(1),
-                models: vec!["deepseek-chat".into()],
-                last_checked: chrono::Utc::now(),
-                last_error: None,
-                health_is_estimated: false,
-            },
-        );
-        let scheduler = InferenceScheduler::new(
-            "unused-local-model".into(),
-            false,
-            "openai".into(),
-            "https://api.openai.com/v1".into(),
-            "sk-test".into(),
-            "gpt-4o-mini".into(),
-            "text-embedding-3-small".into(),
-            false,
-        )
-        .with_model_router(router);
-
-        let err = scheduler
-            .prepare_chat_request_with_authorization(
-                vec![ChatMessage {
-                    role: "user".into(),
-                    content: "provider mismatch".into(),
-                }],
-                vec![],
-                ContextManifest {
-                    request_id: "request-provider-mismatch".into(),
-                    privacy_decision_id: "policy-provider-mismatch".into(),
-                    selected_context_refs: vec![],
-                    included_context_categories: vec![],
-                    declared_payload_categories: vec![
-                        crate::llm::ProviderPayloadCategory::CurrentUserConversation,
-                    ],
-                    policy_provenance_refs: Vec::new(),
-                    raw_life_model_included: false,
-                    raw_unbounded_memory_included: false,
-                },
-                canonical_cloud_authorization("policy-provider-mismatch", "provider mismatch"),
-                allow_network_policy(),
-                false,
-            )
-            .await
-            .unwrap_err();
-
-        assert!(err
-            .to_string()
-            .contains("does not match the configured cloud adapter"));
-    }
-
-    #[tokio::test]
     async fn provider_start_observer_is_not_called_for_pre_dispatch_rejection() {
         let scheduler = InferenceScheduler::new(
             "unused-local-model".into(),
@@ -5852,6 +3922,7 @@ mod tests {
             network_policy,
             network_policy_decision,
             tools_required: false,
+            provider_tools: Vec::new(),
             execution_binding: None,
         };
         let mut start_observed = false;

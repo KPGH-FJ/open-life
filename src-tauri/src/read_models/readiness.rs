@@ -14,7 +14,6 @@ pub(crate) struct ProductReadinessSnapshot {
     pub life_model_ready: bool,
     pub model_empty: bool,
     pub database_status: String,
-    pub startup_warnings: Vec<String>,
     pub vector_corrupt_embedding_count: usize,
     pub readiness_issues: Vec<String>,
     pub usage_readiness_issues: Vec<String>,
@@ -53,8 +52,18 @@ pub(crate) async fn load_product_readiness(
         .require_trusted_read("LifeModelFileStore")
         .is_ok()
     {
-        match state.life_model_manager.lock().await.load() {
-            Ok(model) => (true, model.is_effectively_empty()),
+        match state
+            .life_model_manager
+            .lock()
+            .await
+            .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
+        {
+            Ok(model) => (
+                true,
+                model
+                    .as_ref()
+                    .is_none_or(|version| version.document.is_empty()),
+            ),
             Err(_) => (false, true),
         }
     } else {
@@ -163,17 +172,15 @@ pub(crate) async fn load_product_readiness(
         usage_readiness_issues.push("长期记忆索引尚未建立。".into());
     }
 
-    let database_status =
-        if persistence_health.canonical_writes_allowed && state.startup_warnings.is_empty() {
-            "ok"
-        } else {
-            "degraded"
-        }
-        .to_string();
+    let database_status = if persistence_health.canonical_writes_allowed {
+        "ok"
+    } else {
+        "degraded"
+    }
+    .to_string();
     let usage_ready = chat_ready
         && !model_empty
         && chat_session_count > 0
-        && state.startup_warnings.is_empty()
         && persistence_health.live_or_canonical_credit_eligible
         && vector_corrupt_embedding_count == 0
         && vector_unknown_profile_count == 0
@@ -187,7 +194,6 @@ pub(crate) async fn load_product_readiness(
         life_model_ready,
         model_empty,
         database_status,
-        startup_warnings: state.startup_warnings.clone(),
         vector_corrupt_embedding_count,
         readiness_issues,
         usage_readiness_issues,

@@ -1388,6 +1388,30 @@ async fn resolve_network_egress_route(
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    #[ignore = "external-live HTTPS and macOS system-proxy evidence"]
+    async fn external_live_allowed_https_host_can_use_the_fake_ip_system_proxy() {
+        let policy = NetworkPolicy {
+            default_decision: "allow".into(),
+            ..Default::default()
+        };
+        let response = NetworkClient::new(NetworkClientPolicy {
+            fake_ip_proxy_domain_allowlist: vec!["example.com".into()],
+            ..Default::default()
+        })
+        .get_text_with_headers_for_capability_and_start_observer(
+            "https://example.com",
+            Some(&policy),
+            "web.fetch",
+            HeaderMap::new(),
+            |_| async { Ok(()) },
+        )
+        .await
+        .expect("the policy-approved public HTTPS host should be reachable");
+        assert!(response.status.is_success());
+        assert!(response.body.contains("Example Domain"));
+    }
+
     #[derive(Default)]
     struct DurableToolStartObserver {
         starts: std::sync::Mutex<Vec<crate::tool_execution_receipt::ToolExecutionReceipt>>,
@@ -1604,7 +1628,18 @@ mod tests {
         assert_eq!(deny_decision.disposition, NetworkPolicyDisposition::Deny);
         assert_eq!(deny_decision.reason_code, "network_policy_default_deny");
 
-        let ask = NetworkPolicy::default();
+        let default_policy = NetworkPolicy::default();
+        assert_eq!(
+            resolve_network_policy_decision(&default_policy, url, capability)
+                .unwrap()
+                .disposition,
+            NetworkPolicyDisposition::Allow,
+            "ordinary public networking is a normal Agent capability"
+        );
+        let ask = NetworkPolicy {
+            default_decision: "ask".into(),
+            ..NetworkPolicy::default()
+        };
         let ask_decision = resolve_network_policy_decision(&ask, url, capability).unwrap();
         assert_eq!(ask_decision.disposition, NetworkPolicyDisposition::Ask);
         assert_eq!(ask_decision.reason_code, "network_policy_consent_required");
@@ -1644,7 +1679,10 @@ mod tests {
                 default_decision: "deny".into(),
                 ..NetworkPolicy::default()
             },
-            NetworkPolicy::default(),
+            NetworkPolicy {
+                default_decision: "ask".into(),
+                ..NetworkPolicy::default()
+            },
             NetworkPolicy {
                 default_decision: "allow".into(),
                 domain_denylist: vec!["127.0.0.1".into()],
@@ -1690,7 +1728,10 @@ mod tests {
         });
         let url = "http://127.0.0.1:9/effect";
         for policy in [
-            NetworkPolicy::default(),
+            NetworkPolicy {
+                default_decision: "ask".into(),
+                ..NetworkPolicy::default()
+            },
             NetworkPolicy {
                 default_decision: "deny".into(),
                 ..NetworkPolicy::default()

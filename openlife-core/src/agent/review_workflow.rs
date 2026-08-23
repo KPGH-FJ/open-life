@@ -22,25 +22,15 @@ pub enum DurableWriteSubject {
     LifeModel,
     ToolPermission,
     ExternalWrite,
-    FileWrite,
-    Task,
-    Calendar,
-    Email,
 }
 
 impl DurableWriteSubject {
     pub fn from_proposal_type(proposal_type: ProposalType) -> Self {
         match proposal_type {
             ProposalType::MemoryWrite | ProposalType::MemoryArchive => Self::Memory,
-            ProposalType::GoalUpdate
-            | ProposalType::StateUpdate
-            | ProposalType::PreferenceUpdate
-            | ProposalType::CapabilityUpdate
-            | ProposalType::LifeModelUpdate => Self::LifeModel,
+            ProposalType::LifeModelUpdate => Self::LifeModel,
             ProposalType::ToolPermission => Self::ToolPermission,
-            ProposalType::ScheduledTask | ProposalType::ScheduleCheckin => Self::Calendar,
-            ProposalType::DataExport | ProposalType::ExternalWriteAction => Self::ExternalWrite,
-            ProposalType::ModelPolicyChange | ProposalType::Unsupported => Self::LifeModel,
+            ProposalType::ExternalWriteAction => Self::ExternalWrite,
         }
     }
 }
@@ -362,7 +352,7 @@ impl<'a> ReviewWorkflow<'a> {
 
     /// Re-establish runtime authority after restart from canonical
     /// ProposalStore evidence. The returned proof cannot be serialized or
-    /// constructed from a TaskStore row.
+    /// constructed from a canonical Work item.
     pub fn materialized_acceptance_snapshot(
         &self,
         proposal_id: &str,

@@ -2,25 +2,22 @@ import { Component, type ErrorInfo, type ReactNode, useEffect } from "react";
 import { AlertTriangle, Copy, Home, RefreshCw } from "lucide-react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { FoundationActionButton, FoundationNotice } from "@/ui/foundation";
-import { tauriDurableTruthDataSource } from "@/ui/journeys/durableTruth";
+import { tauriPersonalIntelligenceDataSource } from "@/features/personalIntelligence/personalIntelligenceDataSource";
+import { tauriWorkbenchDataSource } from "@/app/workbenchDataSource";
+import { tauriConversationDataSource } from "@/features/conversation/conversationDataSource";
 import {
-  tauriGovernedActionDataSource,
-  tauriWorkspaceConversationDataSource,
-} from "@/ui/journeys/governedAction";
-import {
-  ProductWorkbenchJourney,
-  tauriProductBoundaryDataSource,
+  ProductWorkbench,
   type PublicProductSurfaceId,
   type ProductWorkbenchRouteState,
-} from "@/ui/journeys/productWorkbench";
-import { tauriSettingsPrivacyDataSource } from "@/ui/journeys/settingsPrivacy";
-import { journeyErrorCode } from "@/ui/journeys/journeyError";
+} from "@/app/ProductWorkbench";
+import { tauriSettingsDataSource } from "@/features/settings/settingsDataSource";
+import { productErrorCode } from "@/shared/productError";
 import {
   isRetiredProductPath,
   productPath,
   resolveProductionRoute,
   SETTINGS_ROUTE_PATH,
-} from "@/ui/productRouteContract";
+} from "@/app/routes";
 import { initPerformanceMonitoring } from "@/utils/performance";
 
 type ErrorBoundaryState = {
@@ -41,7 +38,7 @@ class ErrorBoundary extends Component<{ children: ReactNode }, ErrorBoundaryStat
   static getDerivedStateFromError(error: unknown): Partial<ErrorBoundaryState> {
     return {
       hasError: true,
-      error: error instanceof Error ? (error.stack ?? error.message) : journeyErrorCode(error),
+      error: error instanceof Error ? (error.stack ?? error.message) : productErrorCode(error),
     };
   }
 
@@ -171,12 +168,11 @@ function ProductionWorkbenchRoute() {
   }
 
   return (
-    <ProductWorkbenchJourney
-      dataSource={tauriProductBoundaryDataSource}
-      governedActionDataSource={tauriGovernedActionDataSource}
-      durableTruthDataSource={tauriDurableTruthDataSource}
-      settingsPrivacyDataSource={tauriSettingsPrivacyDataSource}
-      workspaceConversationDataSource={tauriWorkspaceConversationDataSource}
+    <ProductWorkbench
+      workbenchDataSource={tauriWorkbenchDataSource}
+      personalIntelligenceDataSource={tauriPersonalIntelligenceDataSource}
+      settingsDataSource={tauriSettingsDataSource}
+      conversationDataSource={tauriConversationDataSource}
       initialMode={route.mode}
       initialSurface={route.surface}
       onRouteChange={changeRoute}

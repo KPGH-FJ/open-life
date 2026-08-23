@@ -151,8 +151,6 @@ pub(crate) struct MainChatCancelOutcome {
 #[derive(Debug, Clone)]
 pub(crate) struct MainChatCancellationRequest {
     pub(crate) outcome: MainChatCancelOutcome,
-    #[allow(dead_code)]
-    pub(crate) execution_epoch: Option<MainChatExecutionEpoch>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,13 +227,6 @@ impl MainChatExecutionEpochSnapshot {
         } else {
             MainChatCancellationTerminalDisposition::Cancelled
         }
-    }
-
-    pub(crate) fn committed_fact_count(&self) -> usize {
-        self.commit_facts
-            .iter()
-            .filter(|fact| fact.outcome == MainChatCanonicalCommitOutcome::Committed)
-            .count()
     }
 }
 
@@ -1020,13 +1011,11 @@ impl MainChatCancellationRegistry {
                 active.token.cancel();
                 MainChatCancellationRequest {
                     outcome: provider_attempt_summary(active),
-                    execution_epoch: Some(active.execution_epoch.clone()),
                 }
             }
             Some(TurnCancellationEntry::CancelledBeforeRegistration { .. }) => {
                 MainChatCancellationRequest {
                     outcome: no_active_turn_cancel_outcome(),
-                    execution_epoch: None,
                 }
             }
             None => {
@@ -1038,7 +1027,6 @@ impl MainChatCancellationRegistry {
                 );
                 MainChatCancellationRequest {
                     outcome: no_active_turn_cancel_outcome(),
-                    execution_epoch: None,
                 }
             }
         }
@@ -1107,7 +1095,7 @@ impl RegisteredMainChatCancellation {
 mod tests {
     use super::{
         MainChatCancellationRegistry, MainChatCancellationTerminalDisposition,
-        MainChatCanonicalCommitOutcome, MainChatCanonicalCommitRejection, MainChatExecutionEpoch,
+        MainChatCanonicalCommitOutcome, MainChatCanonicalCommitRejection,
     };
     use openlife_core::tool_execution_receipt::{
         ToolEffectStatus, ToolExecutionReceiptRegistration, ToolTransportStatus,
@@ -1139,28 +1127,6 @@ mod tests {
             policy_provenance_refs: Vec::new(),
             raw_life_model_included: false,
             raw_unbounded_memory_included: false,
-        }
-    }
-
-    struct PauseAfterCanonicalAdmission {
-        epoch: MainChatExecutionEpoch,
-        acquired: Arc<Barrier>,
-        resume: Arc<Barrier>,
-    }
-
-    impl openlife_core::agent::CanonicalWriteAdmission for PauseAfterCanonicalAdmission {
-        fn acquire(
-            &self,
-            request: openlife_core::agent::CanonicalWriteAdmissionRequest,
-        ) -> Result<
-            Box<dyn openlife_core::agent::CanonicalWritePermit>,
-            openlife_core::agent::CanonicalWriteAdmissionRejection,
-        > {
-            let permit =
-                openlife_core::agent::CanonicalWriteAdmission::acquire(&self.epoch, request)?;
-            self.acquired.wait();
-            self.resume.wait();
-            Ok(permit)
         }
     }
 
@@ -1716,156 +1682,6 @@ mod tests {
                 "iteration {iteration}: commit winner cannot be relabelled pure cancelled"
             );
         }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn cancel_winner_blocks_real_tool_gateway_network_consent_proposal() {
-        let registry = MainChatCancellationRegistry::default();
-        let registration = registry.register("task-tool-gateway-proposal-cancel-wins");
-        let epoch = registration.execution_epoch();
-        registry.request_cancel("task-tool-gateway-proposal-cancel-wins");
-
-        let tool_registry = openlife_core::mcp::McpRegistry::new();
-        let permission_store =
-            openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
-        let proposal_store = openlife_core::agent::ProposalStore::new_in_memory().unwrap();
-        let audit_file = tempfile::NamedTempFile::new().unwrap();
-        let audit_store = openlife_core::mcp_audit::McpAuditStore::new(audit_file.path());
-        let privacy_engine = openlife_core::privacy::PrivacyEngine::new();
-        let network_policy = openlife_core::config::NetworkPolicy::default();
-        let context = openlife_core::agent::ActionExecutionContext::new(
-            &tool_registry,
-            &permission_store,
-            &audit_store,
-            &privacy_engine,
-            &[],
-        )
-        .with_network_policy(&network_policy)
-        .with_web_search_fixture_output("must remain behind admission")
-        .with_proposal_store(&proposal_store)
-        .with_canonical_write_admission(&epoch);
-
-        let result = openlife_core::agent::ToolGateway::from_executor_config(
-            openlife_core::agent::ActionExecutorConfig::default(),
-        )
-        .execute(
-            openlife_core::agent::AgentActionRequest {
-                action_type: "mcp_tool".into(),
-                target: "web.search".into(),
-                input: serde_json::json!({"arguments": {"query": "OpenLife"}}),
-                source_run_id: Some("run-tool-gateway-proposal-cancel-wins".into()),
-                step_index: 0,
-            },
-            &context,
-        )
-        .await
-        .expect("cancel rejection becomes a typed ToolGateway result");
-
-        assert_eq!(
-            result.status,
-            openlife_core::agent::ActionExecutionStatus::Failed
-        );
-        assert_eq!(
-            result.execution_receipt.transport_status,
-            ToolTransportStatus::NotAttempted
-        );
-        assert_eq!(proposal_store.pending_count().expect("count proposals"), 0);
-        let snapshot = epoch.snapshot();
-        assert_eq!(
-            snapshot.cancellation_terminal_disposition(),
-            MainChatCancellationTerminalDisposition::Cancelled
-        );
-        assert_eq!(
-            snapshot.commit_facts[0].outcome,
-            MainChatCanonicalCommitOutcome::RejectedAfterCancel
-        );
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn permit_winner_real_tool_gateway_proposal_commits_then_interrupts() {
-        let registry = MainChatCancellationRegistry::default();
-        let task_id = "task-tool-gateway-proposal-commit-wins";
-        let registration = registry.register(task_id);
-        let epoch = registration.execution_epoch();
-        let acquired = Arc::new(Barrier::new(2));
-        let resume = Arc::new(Barrier::new(2));
-        let admission = PauseAfterCanonicalAdmission {
-            epoch: epoch.clone(),
-            acquired: Arc::clone(&acquired),
-            resume: Arc::clone(&resume),
-        };
-        let cancel_registry = registry.clone();
-        let canceller = std::thread::spawn(move || {
-            acquired.wait();
-            let outcome = cancel_registry.request_cancel(task_id);
-            resume.wait();
-            outcome
-        });
-
-        let tool_registry = openlife_core::mcp::McpRegistry::new();
-        let permission_store =
-            openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap();
-        let proposal_store = openlife_core::agent::ProposalStore::new_in_memory().unwrap();
-        let audit_file = tempfile::NamedTempFile::new().unwrap();
-        let audit_store = openlife_core::mcp_audit::McpAuditStore::new(audit_file.path());
-        let privacy_engine = openlife_core::privacy::PrivacyEngine::new();
-        let network_policy = openlife_core::config::NetworkPolicy::default();
-        let context = openlife_core::agent::ActionExecutionContext::new(
-            &tool_registry,
-            &permission_store,
-            &audit_store,
-            &privacy_engine,
-            &[],
-        )
-        .with_network_policy(&network_policy)
-        .with_web_search_fixture_output("must remain behind network consent")
-        .with_proposal_store(&proposal_store)
-        .with_canonical_write_admission(&admission);
-
-        let result = openlife_core::agent::ToolGateway::from_executor_config(
-            openlife_core::agent::ActionExecutorConfig::default(),
-        )
-        .execute(
-            openlife_core::agent::AgentActionRequest {
-                action_type: "mcp_tool".into(),
-                target: "web.search".into(),
-                input: serde_json::json!({"arguments": {"query": "OpenLife"}}),
-                source_run_id: Some("run-tool-gateway-proposal-commit-wins".into()),
-                step_index: 0,
-            },
-            &context,
-        )
-        .await
-        .expect("admitted network consent proposal returns a typed result");
-        assert!(
-            canceller
-                .join()
-                .expect("canceller joins")
-                .outcome
-                .active_turn_found,
-            "the cancellation must observe the same active execution owner"
-        );
-
-        assert_eq!(
-            result.status,
-            openlife_core::agent::ActionExecutionStatus::NeedsConfirmation
-        );
-        let proposals = proposal_store
-            .list_pending_proposals(10)
-            .expect("read committed Proposal");
-        assert_eq!(proposals.len(), 1);
-        assert_eq!(
-            proposals[0].run_id.as_deref(),
-            Some("run-tool-gateway-proposal-commit-wins"),
-            "source run identity must be attached inside the admitted Proposal mutation"
-        );
-        let snapshot = epoch.snapshot();
-        assert_eq!(snapshot.committed_fact_count(), 1);
-        assert_eq!(
-            snapshot.cancellation_terminal_disposition(),
-            MainChatCancellationTerminalDisposition::InterruptedAfterCommittedEffect,
-            "a committed Proposal must never be relabelled as pure cancelled"
-        );
     }
 
     #[test]

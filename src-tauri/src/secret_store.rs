@@ -2,7 +2,6 @@ use anyhow::{Context, Result};
 use base64::{engine::general_purpose, Engine as _};
 use openlife_core::config::AppConfig;
 use openlife_core::mcp_audit::{AuditKeyConfig, AuditKeyMaterial, KeyMode, McpAuditStore};
-use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,7 +20,6 @@ const KEYCHAIN_SERVICE_OVERRIDE_ENV: &str = "OPENLIFE_KEYCHAIN_SERVICE_OVERRIDE"
 const TRIAL_KEYCHAIN_SERVICE_PREFIX: &str = "com.openlife.desktop.trial.";
 const PROVIDER_ACCOUNT: &str = "provider-api-key";
 const SEARCH_ACCOUNT: &str = "search-provider-api-key";
-const TASK_STORE_AUTHORITY_ACCOUNT: &str = "task-store-authority-key-v1";
 const CANONICAL_TASK_RECEIPT_ACCOUNT: &str = "canonical-task-receipt-key-v1";
 const MCP_AUDIT_ACCOUNT_PREFIX: &str = "mcp-audit-key-epoch-";
 const PROVIDER_SECRET_ENVELOPE_VERSION: &str = "openlife_provider_secret_v1";
@@ -32,8 +30,6 @@ static LOCAL_PROFILE_SECRET_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(crate) const PROVIDER_KEY_REF: &str = "keychain://com.openlife.desktop/provider-api-key";
 pub(crate) const SEARCH_KEY_REF: &str = "keychain://com.openlife.desktop/search-provider-api-key";
-pub(crate) const TASK_STORE_AUTHORITY_KEY_REF: &str =
-    "keychain://com.openlife.desktop/task-store-authority-key-v1";
 pub(crate) const CANONICAL_TASK_RECEIPT_KEY_REF: &str =
     "keychain://com.openlife.desktop/canonical-task-receipt-key-v1";
 pub(crate) const MCP_AUDIT_KEY_REF_PREFIX: &str =
@@ -420,7 +416,6 @@ fn keyring_account_for_secret_ref(secret_ref: &str) -> Result<String> {
     Ok(match secret_ref {
         PROVIDER_KEY_REF => PROVIDER_ACCOUNT.to_string(),
         SEARCH_KEY_REF => SEARCH_ACCOUNT.to_string(),
-        TASK_STORE_AUTHORITY_KEY_REF => TASK_STORE_AUTHORITY_ACCOUNT.to_string(),
         CANONICAL_TASK_RECEIPT_KEY_REF => CANONICAL_TASK_RECEIPT_ACCOUNT.to_string(),
         value if value.starts_with(MCP_AUDIT_KEY_REF_PREFIX) => {
             let epoch = value.trim_start_matches(MCP_AUDIT_KEY_REF_PREFIX);
@@ -635,10 +630,7 @@ pub(crate) fn inspect_and_hydrate_integrity_key<R: SecretReader + ?Sized>(
     secret_ref: &'static str,
     store: &R,
 ) -> IntegrityKeyHydration {
-    if !matches!(
-        secret_ref,
-        TASK_STORE_AUTHORITY_KEY_REF | CANONICAL_TASK_RECEIPT_KEY_REF
-    ) {
+    if secret_ref != CANONICAL_TASK_RECEIPT_KEY_REF {
         return IntegrityKeyHydration::Invalid;
     }
     let encoded = match store.read_secret(secret_ref) {
@@ -686,86 +678,6 @@ fn create_random_integrity_key(
     };
     store.set(secret_ref, &general_purpose::STANDARD.encode(key))?;
     Ok(key)
-}
-
-/// A canonical database verifier cannot be rotated merely because its OS
-/// secret entry is missing. When the database already exists, absence is a
-/// recovery/blocker state; generating a replacement would permanently sever
-/// the only authentication path for the existing canonical store.
-pub(crate) fn hydrate_or_create_canonical_store_integrity_key(
-    secret_ref: &'static str,
-    canonical_store_path: &std::path::Path,
-    store: &dyn SecretStore,
-) -> Result<[u8; 32]> {
-    if secret_ref != TASK_STORE_AUTHORITY_KEY_REF {
-        anyhow::bail!("unsupported canonical store integrity key purpose");
-    }
-    if let Some(encoded) = store.get(secret_ref)? {
-        let decoded = general_purpose::STANDARD
-            .decode(encoded)
-            .context("decode canonical store integrity key material")?;
-        let key: [u8; 32] = decoded.try_into().map_err(|_| {
-            anyhow::anyhow!("canonical store integrity key must contain exactly 32 bytes")
-        })?;
-        if key.iter().all(|byte| *byte == 0) {
-            anyhow::bail!("canonical store integrity key must not be all-zero");
-        }
-        return Ok(key);
-    }
-    if canonical_store_path.exists() {
-        match existing_task_store_authority_binding_state(canonical_store_path) {
-            Ok(false) => {
-                // Pre-v13 stores had no OS-key verifier. TaskStore will bind
-                // this newly created key and quarantine pre-authority active
-                // state transactionally during its schema migration.
-            }
-            Ok(true) => anyhow::bail!(
-                "canonical TaskStore exists but its OS-owned authority key is unavailable"
-            ),
-            Err(error) => anyhow::bail!(
-                "canonical TaskStore exists but its authority binding cannot be inspected: {error}"
-            ),
-        }
-    }
-    create_random_integrity_key(secret_ref, store)
-}
-
-fn existing_task_store_authority_binding_state(path: &std::path::Path) -> Result<bool> {
-    let conn = rusqlite::Connection::open_with_flags(
-        path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .context("open existing TaskStore authority metadata read-only")?;
-    let table_exists: bool = conn.query_row(
-        "SELECT COUNT(*) = 1 FROM sqlite_master
-         WHERE type = 'table' AND name = 'task_store_metadata'",
-        [],
-        |row| row.get(0),
-    )?;
-    if !table_exists {
-        return Ok(false);
-    }
-    let values = [
-        "canonical_task_store_identity_v1",
-        "canonical_task_store_slot_verifier_v1",
-    ]
-    .into_iter()
-    .map(|key| {
-        conn.query_row(
-            "SELECT value FROM task_store_metadata WHERE key = ?1",
-            [key],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()
-    })
-    .collect::<rusqlite::Result<Vec<_>>>()?;
-    match (values[0].as_ref(), values[1].as_ref()) {
-        (None, None) => Ok(false),
-        (Some(identity), Some(verifier)) if !identity.is_empty() && !verifier.is_empty() => {
-            Ok(true)
-        }
-        _ => anyhow::bail!("TaskStore authority metadata is incomplete"),
-    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
@@ -1895,31 +1807,14 @@ mod tests {
     }
 
     #[test]
-    fn integrity_keys_are_stable_and_purpose_isolated() {
+    fn canonical_task_receipt_key_is_stable() {
         let store = MemorySecretStore::default();
-        let directory = tempfile::tempdir().unwrap();
-        let task_store_path = directory.path().join("tasks.db");
         let canonical_task_key =
             hydrate_or_create_integrity_key(CANONICAL_TASK_RECEIPT_KEY_REF, &store).unwrap();
         let canonical_task_key_after_restart =
             hydrate_or_create_integrity_key(CANONICAL_TASK_RECEIPT_KEY_REF, &store).unwrap();
-        let task_store_key = hydrate_or_create_canonical_store_integrity_key(
-            TASK_STORE_AUTHORITY_KEY_REF,
-            &task_store_path,
-            &store,
-        )
-        .unwrap();
-        let task_store_key_after_restart = hydrate_or_create_canonical_store_integrity_key(
-            TASK_STORE_AUTHORITY_KEY_REF,
-            &task_store_path,
-            &store,
-        )
-        .unwrap();
         assert_eq!(canonical_task_key_after_restart, canonical_task_key);
-        assert_eq!(task_store_key_after_restart, task_store_key);
-        assert_ne!(task_store_key, canonical_task_key);
         assert!(canonical_task_key.iter().any(|byte| *byte != 0));
-        assert!(task_store_key.iter().any(|byte| *byte != 0));
     }
 
     #[test]
@@ -1996,48 +1891,6 @@ mod tests {
                 .as_deref(),
             Some("not-base64")
         );
-    }
-
-    #[test]
-    fn existing_task_store_never_rotates_a_missing_authority_key() {
-        let directory = tempfile::tempdir().unwrap();
-        let task_store_path = directory.path().join("tasks.db");
-        std::fs::write(&task_store_path, b"existing canonical store sentinel").unwrap();
-        let store = MemorySecretStore::default();
-
-        let error = hydrate_or_create_canonical_store_integrity_key(
-            TASK_STORE_AUTHORITY_KEY_REF,
-            &task_store_path,
-            &store,
-        )
-        .unwrap_err()
-        .to_string();
-
-        assert!(error.contains("exists"), "{error}");
-        assert!(store.get(TASK_STORE_AUTHORITY_KEY_REF).unwrap().is_none());
-    }
-
-    #[test]
-    fn new_task_store_slot_creates_one_stable_os_owned_authority_key() {
-        let directory = tempfile::tempdir().unwrap();
-        let task_store_path = directory.path().join("tasks.db");
-        let store = MemorySecretStore::default();
-
-        let first = hydrate_or_create_canonical_store_integrity_key(
-            TASK_STORE_AUTHORITY_KEY_REF,
-            &task_store_path,
-            &store,
-        )
-        .unwrap();
-        let second = hydrate_or_create_canonical_store_integrity_key(
-            TASK_STORE_AUTHORITY_KEY_REF,
-            &task_store_path,
-            &store,
-        )
-        .unwrap();
-
-        assert_eq!(first, second);
-        assert!(first.iter().any(|byte| *byte != 0));
     }
 
     #[test]

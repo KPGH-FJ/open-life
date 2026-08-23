@@ -1,3 +1,4 @@
+pub mod artifact;
 pub mod chat;
 pub mod life_model;
 pub mod main_chat_tools;

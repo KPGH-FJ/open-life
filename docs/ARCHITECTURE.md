@@ -4,6 +4,8 @@
 
 Stable source map for the current capable-Agent baseline. Current source,
 accepted ADRs, and the one active implementation plan remain authoritative.
+The path below describes production reachability today; it does not promote
+every reached module to target architecture.
 
 ## Current product path
 
@@ -23,11 +25,17 @@ Conversation and Task owners:
 frontend Conversation ViewModel + Chat composer
   -> main_chat_send.rs | main_chat_streaming.rs
   -> canonical_chat_runtime.rs | canonical_work_runtime.rs
-  -> main_chat_kernel.rs
-  -> openlife-core/src/agent/main_chat_agent_v1.rs
+  -> provider_runtime.rs | provider_client.rs
+  -> ToolGateway | ReviewWorkflow | personal-intelligence ports
   -> ConversationStore (Conversation -> Turn -> Item)
   -> CanonicalTaskRuntimeStore (Task -> Run -> Item -> ItemAttempt -> FinalResult)
 ```
+
+The model authors schema-validated Chat or Work steps. Runtime code enforces
+eligible capability kinds, exact arguments, Project/resource scope, privacy,
+permissions, budgets, receipts, completion evidence, and durable effects. The
+retired keyword router and Main Chat Kernel are absent from the source tree and
+cannot participate through a compatibility fallback.
 
 `mode=chat` enters `CanonicalChatRuntime`. `mode=work` requires caller-owned
 Task, Run, Turn, and Conversation UUIDs and enters `CanonicalWorkRuntime`.
@@ -92,17 +100,17 @@ workspace-file, Web Search, Web Fetch, selected Skill, and registered read-only
 MCP capability phases. Fixed capabilities cannot carry model-authored targets.
 An MCP step must select an exact policy-bounded manifest id; the runtime adds
 the current execution-contract digest after parsing and rechecks it immediately
-before ToolGateway dispatch. Executable arguments remain backend-derived from
-the authenticated Task, Project, resource, and user-goal scope.
+before ToolGateway dispatch. The selected model proposes executable arguments
+just in time from the authenticated request and prior bounded observations;
+the runtime validates their schema and binds them to Task, Project, resource,
+network, and tool scope before dispatch.
 
-One observation-driven plan revision is permitted only when every earlier tool
-attempt succeeded but its evidence cannot satisfy a bounded citation contract.
-The replacement plan stays in the same Run, cannot repeat an already completed
-execution capability, cannot widen the registered target set, and inherits the
-original budget. Every admitted revision is retained in
-`canonical_work_plan_revisions`; failed, cancelled, blocked, or effect-unknown
-attempts are terminal and can never be hidden by replanning. Release Work does
-not compile a strategy-owned execution branch.
+A citation-shape failure after successful reads does not replace or revise the
+plan. The same Run retains the completed ToolCall/Observation Items and asks
+for one observation-bound terminal `AgentStep`; only the requested answer or
+Artifact kind is accepted. Failed, cancelled, blocked, or effect-unknown tool
+attempts remain terminal and cannot be hidden by another plan. Release Work
+does not compile a strategy-owned execution branch.
 While Review is pending, the exact assistant Conversation Item identity is
 stored as a deferred result relation. Approval can therefore complete the same
 FinalResult after restart without inventing a second Task owner.

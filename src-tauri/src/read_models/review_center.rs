@@ -5,6 +5,7 @@ use openlife_core::agent::{
     ReviewCenterViewModel, ReviewItemArtifactEvidence, ReviewItemMaterializationStatus,
     ViewModelEnvelope, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
 };
+use openlife_core::task_runtime::CanonicalArtifactEffectState;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use tauri::State;
@@ -33,45 +34,24 @@ pub(crate) async fn get_review_center_view_model_with_state(
     let proposals = proposal_store
         .list_all_proposals(100, 0)
         .map_err(|err| format!("failed to load review proposals: {err}"))?;
-    let artifact_evidence = proposals
-        .iter()
-        .map(|proposal| {
-            proposal_store.artifact_effect(&proposal.id).map(|record| {
-                record.map(|record| {
-                    (
-                        proposal.id.clone(),
-                        ReviewItemArtifactEvidence {
-                            state: record.state.as_str().into(),
-                            target_reference_digest: record.target_reference_digest,
-                            content_digest: record.content_digest,
-                            observed_content_digest: record.observed_content_digest,
-                            byte_size: record.byte_size,
-                            media_type: record.media_type,
-                            error_code: record.error_code,
-                        },
-                    )
-                })
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| format!("failed to load artifact materialization evidence: {err}"))?
-        .into_iter()
-        .flatten()
-        .collect::<BTreeMap<_, _>>();
     let (dispatch_materialization_overrides, mut dispatch_warnings) =
         dispatch_materialization_overrides(&proposal_store, &proposals);
     drop(proposal_store);
+    let (canonical_artifact_evidence, mut canonical_artifact_warnings) =
+        canonical_artifact_evidence_overrides(state, &proposals).await;
+    let artifact_evidence = canonical_artifact_evidence;
     let config = state.config.lock().await;
     let safe_paths = config.system.safe_paths.clone();
     drop(config);
 
     let (safe_path_overrides, mut safe_path_warnings) =
-        proposal_safe_path_overrides(state, &proposals).await;
+        canonical_artifact_safe_path_overrides(state, &proposals).await;
 
     let (mut materialization_overrides, mut warnings) =
         memory_materialization_overrides(state, &proposals).await;
     materialization_overrides.extend(dispatch_materialization_overrides);
     warnings.append(&mut dispatch_warnings);
+    warnings.append(&mut canonical_artifact_warnings);
     warnings.append(&mut safe_path_warnings);
     // Review availability is owned by the exact Proposal/Artifact capability
     // being reviewed. Unrelated startup warnings (including retired execution
@@ -98,33 +78,80 @@ pub(crate) async fn get_review_center_view_model_with_state(
     Ok(envelope)
 }
 
-async fn proposal_safe_path_overrides(
+async fn canonical_artifact_safe_path_overrides(
     state: &Arc<AppState>,
     proposals: &[AgentProposal],
 ) -> (BTreeMap<String, Vec<String>>, Vec<ViewModelWarning>) {
     let mut overrides = BTreeMap::new();
     let mut warnings = Vec::new();
-    for proposal in proposals.iter().filter(|proposal| {
-        proposal
-            .after
-            .get("source")
-            .and_then(serde_json::Value::as_str)
-            == Some("markdown_memory_editor")
-    }) {
-        match crate::commands::proposal::artifact_safe_paths_for_proposal(state, proposal).await {
+    for proposal in proposals
+        .iter()
+        .filter(|proposal| proposal.proposal_type == ProposalType::ExternalWriteAction)
+    {
+        match crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, proposal).await
+        {
             Ok(paths) => {
                 overrides.insert(proposal.id.clone(), paths);
             }
             Err(error) => warnings.push(warning(
-                "markdown_memory_review_scope_unavailable",
+                "canonical_artifact_review_scope_unavailable",
                 format!(
-                    "Markdown Memory review scope could not be confirmed for proposal {}: {error}",
+                    "Canonical artifact review scope could not be reconstructed for proposal {}: {error}",
                     proposal.id
                 ),
             )),
         }
     }
     (overrides, warnings)
+}
+
+async fn canonical_artifact_evidence_overrides(
+    state: &Arc<AppState>,
+    proposals: &[AgentProposal],
+) -> (
+    BTreeMap<String, ReviewItemArtifactEvidence>,
+    Vec<ViewModelWarning>,
+) {
+    let Some(store) = state.canonical_task_runtime_store.as_ref() else {
+        return (BTreeMap::new(), Vec::new());
+    };
+    let store = store.lock().await;
+    let mut evidence = BTreeMap::new();
+    let mut warnings = Vec::new();
+    for proposal in proposals {
+        match store.load_artifact_effect(&proposal.id) {
+            Ok(Some(record)) => {
+                let state = match record.state {
+                    CanonicalArtifactEffectState::Prepared => "prepared",
+                    CanonicalArtifactEffectState::Staged => "staged",
+                    CanonicalArtifactEffectState::Confirmed => "confirmed",
+                    CanonicalArtifactEffectState::FailedBeforeEffect => "failed_before_effect",
+                    CanonicalArtifactEffectState::EffectUnknown => "unknown",
+                };
+                evidence.insert(
+                    proposal.id.clone(),
+                    ReviewItemArtifactEvidence {
+                        state: state.into(),
+                        target_reference_digest: record.target_reference_digest,
+                        content_digest: record.content_digest,
+                        observed_content_digest: record.observed_content_digest,
+                        byte_size: record.byte_size,
+                        media_type: record.media_type,
+                        error_code: record.error_code,
+                    },
+                );
+            }
+            Ok(None) => {}
+            Err(error) => warnings.push(warning(
+                "canonical_artifact_effect_lookup_failed",
+                format!(
+                    "Canonical artifact effect lookup failed for proposal {}: {error}",
+                    proposal.id
+                ),
+            )),
+        }
+    }
+    (evidence, warnings)
 }
 
 fn dispatch_materialization_overrides(
@@ -181,19 +208,10 @@ fn dispatch_materialization_overrides(
 
 fn is_dispatch_backed_review_item(proposal: &AgentProposal) -> bool {
     match proposal.proposal_type {
-        ProposalType::ScheduledTask | ProposalType::MemoryArchive => true,
-        ProposalType::LifeModelUpdate => matches!(
-            proposal.affected_path.as_str(),
-            openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
-                | openlife_core::life_model::v2::LIFE_MODEL_V2_LEGACY_MIGRATION_PATH
-        ),
-        ProposalType::DataExport => matches!(
-            proposal
-                .after
-                .get("tool")
-                .and_then(serde_json::Value::as_str),
-            Some("email.propose_draft" | "browser.open" | "local.run_utility")
-        ),
+        ProposalType::MemoryArchive => true,
+        ProposalType::LifeModelUpdate => {
+            proposal.affected_path == openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
+        }
         _ => false,
     }
 }
@@ -290,32 +308,12 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        action_materialization_status, dispatch_materialization_overrides,
-        is_dispatch_backed_review_item,
-    };
+    use super::{action_materialization_status, dispatch_materialization_overrides};
     use openlife_core::agent::{
         AgentProposal, ProposalSource, ProposalStatus, ProposalStore, ProposalType,
         ReviewItemMaterializationStatus, RiskLevel,
     };
     use serde_json::json;
-
-    fn local_utility_proposal() -> AgentProposal {
-        AgentProposal::new(
-            ProposalType::DataExport,
-            "local.utility",
-            json!({
-                "tool": "local.run_utility",
-                "command": "uptime",
-                "timeout_ms": 3_000,
-                "content": "Run the reviewed read-only utility `uptime`."
-            }),
-            "Run one reviewed read-only utility.",
-            1.0,
-            RiskLevel::Medium,
-            ProposalSource::ChatConversation,
-        )
-    }
 
     fn memory_stop_recall_proposal() -> AgentProposal {
         AgentProposal::new(
@@ -348,33 +346,6 @@ mod tests {
         assert_eq!(
             action_materialization_status(ProposalStatus::Pending, "unknown"),
             Some(ReviewItemMaterializationStatus::Unknown)
-        );
-    }
-
-    #[test]
-    fn review_projection_reads_confirmed_local_utility_dispatch_receipt() {
-        let store = ProposalStore::new_in_memory().expect("proposal store");
-        let mut proposal = local_utility_proposal();
-        store.create_proposal(&proposal).expect("create proposal");
-        let claim = store
-            .claim_dispatch(&proposal.id)
-            .expect("claim dispatch")
-            .expect("claim id");
-        assert!(store
-            .mark_effect_confirmed_projection_pending(&proposal.id, &claim)
-            .expect("persist confirmed effect"));
-        proposal.accept();
-        assert!(store
-            .project_confirmed_effect(&proposal, &claim)
-            .expect("project accepted proposal"));
-
-        let (overrides, warnings) =
-            dispatch_materialization_overrides(&store, std::slice::from_ref(&proposal));
-
-        assert!(warnings.is_empty());
-        assert_eq!(
-            overrides.get(&proposal.id),
-            Some(&ReviewItemMaterializationStatus::Applied)
         );
     }
 
@@ -438,20 +409,5 @@ mod tests {
             overrides.get(&proposal.id),
             Some(&ReviewItemMaterializationStatus::Applied)
         );
-    }
-
-    #[test]
-    fn generic_data_export_does_not_gain_dispatch_backed_action_credit() {
-        let proposal = AgentProposal::new(
-            ProposalType::DataExport,
-            "exports.generic",
-            json!({"content": "data", "filename": "export.txt"}),
-            "Export reviewed data.",
-            1.0,
-            RiskLevel::Medium,
-            ProposalSource::Manual,
-        );
-
-        assert!(!is_dispatch_backed_review_item(&proposal));
     }
 }

@@ -28,14 +28,11 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
     let config = AppConfig::default();
     let base =
         std::env::temp_dir().join(format!("openlife-main-chat-eval-{}", uuid::Uuid::new_v4()));
-    let memory_store = openlife_core::memory::MemoryStore::new_in_memory().unwrap();
+    let memory_store =
+        openlife_core::memory::KnowledgeNoteProjectionStore::new_in_memory().unwrap();
     let life_model_manager =
         openlife_core::life_model::LifeModelManager::new(base.join("life-model").join("current"));
-    openlife_core::persistence_outbox::FileMutationJournal::new(
-        life_model_manager.mutation_journal_path(),
-    )
-    .expect("isolated eval LifeModel file-mutation journal");
-    let state = Arc::new(AppState {
+    Arc::new(AppState {
         persistence_coordinator: Arc::new(
             crate::persistence_coordinator::PersistenceCoordinator::isolated_evaluation(),
         ),
@@ -90,40 +87,16 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
             openlife_core::agent::LifeModelLearningStore::new_in_memory().unwrap(),
         ))),
         main_chat_runtime_state: crate::state::MainChatRuntimeState::shared(),
-        patch_store: Some(Arc::new(Mutex::new(
-            openlife_core::life_model::patch_store::PatchStore::new_in_memory().unwrap(),
-        ))),
         tool_permission_store: Arc::new(Mutex::new(
             openlife_core::tool_permissions::ToolPermissionStore::new_in_memory().unwrap(),
         )),
         skill_registry: Arc::new(Mutex::new(openlife_core::skills::SkillRegistry::built_in())),
         startup_warnings: vec![],
         credential_bootstrap_snapshot: Default::default(),
-        scheduled_task_store: Arc::new(openlife_core::tasks::TaskStore::new_in_memory().unwrap()),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+        work_initial_decision_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+        work_agent_step_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+        work_semantic_verification_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         resource_runtime: None,
-        state_store: Some(Arc::new(
-            openlife_core::state_store::StateStore::new_in_memory().unwrap(),
-        )),
-    });
-
-    {
-        let manager = state
-            .life_model_manager
-            .try_lock()
-            .expect("isolated eval LifeModel manager must remain uncontended");
-        let model = manager
-            .load()
-            .expect("isolated eval daily-task migration source");
-        crate::state_projection::reconcile_and_import_legacy_yaml_daily_tasks(
-            state
-                .state_store
-                .as_ref()
-                .expect("isolated eval canonical StateStore"),
-            &model,
-            chrono::Utc::now(),
-        )
-        .expect("isolated eval daily-task product owner cutover fixture");
-    }
-    state
+    })
 }

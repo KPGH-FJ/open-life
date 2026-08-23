@@ -49,6 +49,13 @@ fi
 target_dir="$(cargo metadata --format-version=1 --no-deps | python3 -c 'import json,sys; print(json.load(sys.stdin)["target_directory"])')"
 app_path="$target_dir/release/bundle/macos/$expected_product_name.app"
 
+running_openlife_processes="$(pgrep -fl '/OpenLife( QA)?\.app/Contents/MacOS/openlife-tauri($| )' || true)"
+if [[ -n "$running_openlife_processes" ]]; then
+  print -u2 "close every running OpenLife app before building or verifying an exact native bundle"
+  print -u2 "$running_openlife_processes"
+  exit 73
+fi
+
 if [[ $verify_only -eq 0 ]]; then
   signing_config="$(OPENLIFE_CODESIGN_IDENTITY="$signing_identity" python3 -c 'import json,os; print(json.dumps({"bundle":{"macOS":{"signingIdentity":os.environ["OPENLIFE_CODESIGN_IDENTITY"]}}}))')"
   if [[ -n "$profile_config" ]]; then

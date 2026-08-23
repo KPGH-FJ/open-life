@@ -26,9 +26,10 @@ OpenLife has five cooperating owners:
 
 1. **Agent Runtime** owns turn orchestration, planning, model calls, tool
    execution, task progress, action receipts, cancellation, and recovery.
-2. **Agent Memory** owns conversation, Workspace/project context, episodic and
-   semantic retrieval, procedural working rules, Reflection, and bounded
-   Markdown working memory.
+2. **Agent Memory** owns personal and Project-scoped recall, episodic and
+   semantic retrieval, procedural working rules, and eligible Reflection
+   outputs. Markdown files remain ordinary Project files; they do not form a
+   second Memory product or canonical owner.
 3. **LifeModel** owns confirmed, durable understanding of the user: identity,
    values, long-term goals, stable preferences, personal boundaries, important
    relationships, collaboration style, and decision principles.

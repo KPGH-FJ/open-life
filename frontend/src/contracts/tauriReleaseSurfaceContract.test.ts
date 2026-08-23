@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
@@ -17,7 +17,12 @@ describe("release Tauri surface", () => {
   });
 
   it("does not expose retired lifecycle, feedback, evolution, or proactive wrappers", () => {
-    const releaseClient = read("src/tauri.ts");
+    const releaseClient = [
+      read("src/tauri.ts"),
+      ...readdirSync(join(process.cwd(), "src/ipc"))
+        .filter(path => path.endsWith(".ts") && !path.endsWith(".test.ts"))
+        .map(path => read(`src/ipc/${path}`)),
+    ].join("\n");
 
     for (const retiredCommand of [
       "create_plan_execute_session",
@@ -36,6 +41,17 @@ describe("release Tauri surface", () => {
       "get_proactive_suggestions",
       "generate_micro_evolution_changes",
       "calibration_create_proposals",
+      "select_markdown_memory_root",
+      "get_markdown_memory_view_model",
+      "draft_markdown_memory_file_proposal",
+      "deactivate_markdown_memory_file_proposal",
+      "draft_memory_stop_recall_proposal",
+      "draft_memory_correction_proposal",
+      "draft_memory_archive_proposal",
+      "restore_archived_chunks",
+      "draft_legacy_lifemodel_migration",
+      "get_state_alerts",
+      "get_state_history",
     ]) {
       expect(releaseClient, retiredCommand).not.toContain(`"${retiredCommand}"`);
     }

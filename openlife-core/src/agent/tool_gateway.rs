@@ -220,30 +220,13 @@ fn validate_gateway_request_contract(
     ctx: &ActionExecutionContext<'_>,
 ) -> std::result::Result<ToolGatewayContractEvidence, String> {
     match request.action_type.as_str() {
-        "memory_search" | "session_search" => {
-            request
-                .source_run_id
-                .as_deref()
-                .filter(|run_id| !run_id.trim().is_empty())
-                .ok_or_else(|| "internal_read_canonical_run_identity_missing".to_string())?;
-            let contract = internal_read_contract(&request.action_type, &request.target)?;
-            if ctx.bound_content_receipt_issuer.is_none() {
-                return Err("bound_content_receipt_issuer_unavailable".into());
-            }
-            Ok(contract)
-        }
-        "memory_write" | "memory_archive" | "life_model_patch" => {
-            Ok(internal_proposal_contract(&request.action_type))
-        }
         "mcp_tool" | "builtin_tool" | "plugin_tool" => {
             let tool_name = normalize_tool_name(&request.target, ctx.registry);
             let manifest = find_manifest(ctx, &tool_name)
                 .ok_or_else(|| "tool_gateway_manifest_not_found".to_string())?;
             let contract = validate_manifest_execution_contract(&manifest)?;
-
-            if manifest.name == "mcp.call_tool" {
-                return validate_mcp_target_contract(request, ctx);
-            }
+            let arguments = request.input.get("arguments").unwrap_or(&request.input);
+            validate_manifest_arguments(&manifest, arguments)?;
 
             Ok(contract)
         }
@@ -251,26 +234,160 @@ fn validate_gateway_request_contract(
     }
 }
 
-fn validate_mcp_target_contract(
-    request: &AgentActionRequest,
-    ctx: &ActionExecutionContext<'_>,
-) -> std::result::Result<ToolGatewayContractEvidence, String> {
-    let args = request
-        .input
-        .get("arguments")
-        .cloned()
-        .unwrap_or_else(|| request.input.clone());
-    let Some(tool_name) = args
-        .get("tool_name")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Err("tool_gateway_mcp_target_missing".into());
+/// Validate model-supplied arguments against the registered tool's JSON
+/// Schema before permission checks or adapter dispatch. The validator covers
+/// the standard object/array/scalar constraints used by built-in and MCP tool
+/// schemas; unsupported or ambiguous schema shapes fail closed.
+fn validate_manifest_arguments(
+    manifest: &ToolManifest,
+    arguments: &Value,
+) -> std::result::Result<(), String> {
+    if json_schema_value_matches(&manifest.parameters, arguments) {
+        Ok(())
+    } else {
+        Err("tool_gateway_arguments_schema_mismatch".into())
+    }
+}
+
+fn json_schema_value_matches(schema: &Value, value: &Value) -> bool {
+    let Some(schema) = schema.as_object() else {
+        return false;
     };
-    let target_manifest = find_manifest(ctx, tool_name)
-        .ok_or_else(|| "tool_gateway_mcp_target_manifest_not_found".to_string())?;
-    validate_manifest_execution_contract(&target_manifest)
+    if schema
+        .get("enum")
+        .and_then(Value::as_array)
+        .is_some_and(|allowed| !allowed.iter().any(|candidate| candidate == value))
+        || schema
+            .get("const")
+            .is_some_and(|expected| expected != value)
+    {
+        return false;
+    }
+    if let Some(branches) = schema.get("oneOf").and_then(Value::as_array) {
+        if branches
+            .iter()
+            .filter(|branch| json_schema_value_matches(branch, value))
+            .count()
+            != 1
+        {
+            return false;
+        }
+    }
+    if let Some(branches) = schema.get("anyOf").and_then(Value::as_array) {
+        if !branches
+            .iter()
+            .any(|branch| json_schema_value_matches(branch, value))
+        {
+            return false;
+        }
+    }
+    if let Some(branches) = schema.get("allOf").and_then(Value::as_array) {
+        if !branches
+            .iter()
+            .all(|branch| json_schema_value_matches(branch, value))
+        {
+            return false;
+        }
+    }
+
+    let inferred_object = schema.contains_key("properties") || schema.contains_key("required");
+    match schema.get("type") {
+        Some(Value::String(kind)) => json_schema_type_matches(kind, schema, value),
+        Some(Value::Array(kinds)) => kinds.iter().any(|kind| {
+            kind.as_str()
+                .is_some_and(|kind| json_schema_type_matches(kind, schema, value))
+        }),
+        None if inferred_object => json_schema_type_matches("object", schema, value),
+        None => true,
+        _ => false,
+    }
+}
+
+fn json_schema_type_matches(
+    kind: &str,
+    schema: &serde_json::Map<String, Value>,
+    value: &Value,
+) -> bool {
+    match kind {
+        "object" => {
+            let Some(object) = value.as_object() else {
+                return false;
+            };
+            let properties = schema.get("properties").and_then(Value::as_object);
+            if schema
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| {
+                    required
+                        .iter()
+                        .any(|name| name.as_str().is_none_or(|name| !object.contains_key(name)))
+                })
+            {
+                return false;
+            }
+            for (name, child) in object {
+                if let Some(property_schema) = properties.and_then(|items| items.get(name)) {
+                    if !json_schema_value_matches(property_schema, child) {
+                        return false;
+                    }
+                    continue;
+                }
+                match schema.get("additionalProperties") {
+                    Some(Value::Bool(false)) => return false,
+                    Some(additional_schema)
+                        if additional_schema.is_object()
+                            && !json_schema_value_matches(additional_schema, child) =>
+                    {
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+            true
+        }
+        "array" => {
+            let Some(items) = value.as_array() else {
+                return false;
+            };
+            if schema
+                .get("minItems")
+                .and_then(Value::as_u64)
+                .is_some_and(|min| items.len() < min as usize)
+                || schema
+                    .get("maxItems")
+                    .and_then(Value::as_u64)
+                    .is_some_and(|max| items.len() > max as usize)
+                || schema.get("uniqueItems").and_then(Value::as_bool) == Some(true)
+                    && items
+                        .iter()
+                        .enumerate()
+                        .any(|(index, item)| items[..index].contains(item))
+            {
+                return false;
+            }
+            schema.get("items").is_none_or(|item_schema| {
+                items
+                    .iter()
+                    .all(|item| json_schema_value_matches(item_schema, item))
+            })
+        }
+        "string" => value.as_str().is_some_and(|text| {
+            let len = text.chars().count();
+            schema
+                .get("minLength")
+                .and_then(Value::as_u64)
+                .is_none_or(|min| len >= min as usize)
+                && schema
+                    .get("maxLength")
+                    .and_then(Value::as_u64)
+                    .is_none_or(|max| len <= max as usize)
+        }),
+        "integer" => value.as_i64().is_some() || value.as_u64().is_some(),
+        "number" => value.as_f64().is_some(),
+        "boolean" => value.is_boolean(),
+        "null" => value.is_null(),
+        _ => false,
+    }
 }
 
 fn find_manifest(ctx: &ActionExecutionContext<'_>, tool_name: &str) -> Option<ToolManifest> {
@@ -369,56 +486,6 @@ fn evidence_contract_for_manifest(manifest: &ToolManifest) -> Vec<String> {
         evidence.push("proposal_or_blocker_record".into());
     }
     evidence
-}
-
-fn internal_read_contract(
-    executor_action_type: &str,
-    requested_target: &str,
-) -> std::result::Result<ToolGatewayContractEvidence, String> {
-    let canonical_tool_name = match executor_action_type {
-        "memory_search" => "memory.search",
-        "session_search" => "session.search",
-        _ => return Err("tool_gateway_internal_read_action_type_unknown".into()),
-    };
-    if requested_target != canonical_tool_name {
-        return Err("tool_gateway_internal_read_target_mismatch".into());
-    }
-    Ok(ToolGatewayContractEvidence {
-        tool_name: canonical_tool_name.into(),
-        manifest_id: executor_action_type.into(),
-        source: "tool_gateway_internal".into(),
-        permission_level: "low".into(),
-        risk_level: "low".into(),
-        action_type: "read".into(),
-        capabilities: vec!["read".into()],
-        evidence_contract: vec![
-            "gateway_internal_contract".into(),
-            "action_record".into(),
-            "observation_record".into(),
-        ],
-        action_effect: ToolActionEffect::ReadOnly,
-        idempotency_contract: ToolIdempotencyContract::Idempotent,
-    })
-}
-
-fn internal_proposal_contract(action_type: &str) -> ToolGatewayContractEvidence {
-    ToolGatewayContractEvidence {
-        tool_name: action_type.into(),
-        manifest_id: action_type.into(),
-        source: "tool_gateway_internal".into(),
-        permission_level: "medium".into(),
-        risk_level: "medium".into(),
-        action_type: "proposal_only_write".into(),
-        capabilities: vec!["write".into()],
-        evidence_contract: vec![
-            "gateway_internal_contract".into(),
-            "proposal_or_blocker_record".into(),
-            "action_record".into(),
-            "observation_record".into(),
-        ],
-        action_effect: ToolActionEffect::ProposalOnly,
-        idempotency_contract: ToolIdempotencyContract::NonIdempotent,
-    }
 }
 
 fn is_known_permission_level(value: &str) -> bool {
@@ -528,7 +595,6 @@ fn gateway_terminal_result(
         observation,
         status,
         Some(reason.into()),
-        None,
         execution_receipt,
     )
 }
@@ -591,5 +657,95 @@ fn attach_execution_receipt_evidence(result: &mut ActionExecutionResult) {
         result.observation.structured_result = Some(serde_json::json!({
             "toolExecutionReceipt": receipt,
         }));
+    }
+}
+
+#[cfg(test)]
+mod argument_schema_tests {
+    use super::validate_manifest_arguments;
+    use crate::tool_manifest::{ToolIdempotencyContract, ToolManifest, ToolSource};
+
+    fn manifest(parameters: serde_json::Value) -> ToolManifest {
+        ToolManifest {
+            id: "mcp:test:research".into(),
+            name: "research.read".into(),
+            description: "Read research data".into(),
+            parameters,
+            permission_level: "low".into(),
+            risk_level: "low".into(),
+            version: "1".into(),
+            source: ToolSource::Mcp {
+                server_name: "test".into(),
+            },
+            capabilities: vec!["read".into()],
+            requires_confirmation: false,
+            enabled: true,
+            declarative_only: false,
+            action_type: "read".into(),
+            idempotency_contract: ToolIdempotencyContract::Idempotent,
+            tags: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn manifest_schema_rejects_missing_unknown_and_wrong_typed_model_arguments() {
+        let manifest = manifest(serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "query": { "type": "string", "minLength": 1, "maxLength": 20 },
+                "limit": { "type": "integer", "enum": [1, 3, 5] }
+            },
+            "required": ["query"]
+        }));
+
+        assert!(validate_manifest_arguments(
+            &manifest,
+            &serde_json::json!({"query": "agent tools", "limit": 3})
+        )
+        .is_ok());
+        for invalid in [
+            serde_json::json!({}),
+            serde_json::json!({"query": "agent tools", "permission": "all"}),
+            serde_json::json!({"query": 7}),
+            serde_json::json!({"query": "agent tools", "limit": 2}),
+        ] {
+            assert_eq!(
+                validate_manifest_arguments(&manifest, &invalid),
+                Err("tool_gateway_arguments_schema_mismatch".into())
+            );
+        }
+    }
+
+    #[test]
+    fn manifest_schema_validates_nested_arrays_and_objects() {
+        let manifest = manifest(serde_json::json!({
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+                "filters": {
+                    "type": "array",
+                    "minItems": 1,
+                    "uniqueItems": true,
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": { "name": { "type": "string", "minLength": 1 } },
+                        "required": ["name"]
+                    }
+                }
+            },
+            "required": ["filters"]
+        }));
+        assert!(validate_manifest_arguments(
+            &manifest,
+            &serde_json::json!({"filters": [{"name": "official"}]})
+        )
+        .is_ok());
+        assert!(validate_manifest_arguments(
+            &manifest,
+            &serde_json::json!({"filters": [{"name": "official"}, {"name": "official"}]})
+        )
+        .is_err());
     }
 }

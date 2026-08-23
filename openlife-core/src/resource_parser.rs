@@ -21,6 +21,7 @@ pub const MAX_COMPRESSION_RATIO: u64 = 20;
 pub const MAX_ZIP_ENTRIES: usize = 2_048;
 pub const MAX_PDF_PAGES: usize = 300;
 pub const MAX_XLSX_SHEETS: usize = 20;
+pub const MAX_PPTX_SLIDES: usize = 300;
 pub const MAX_SPREADSHEET_CELLS: usize = 100_000;
 
 const TARGET_CHUNK_CHARS: usize = 4_096;
@@ -54,6 +55,7 @@ pub fn extract_resource(request: ResourceExtractionRequest) -> Result<ResourceEx
         ResourceFormat::Docx => extract_docx(&request.bytes)?,
         ResourceFormat::Csv => extract_csv(&request.bytes)?,
         ResourceFormat::Xlsx => extract_xlsx(&request.bytes)?,
+        ResourceFormat::Pptx => extract_pptx(&request.bytes)?,
     };
     validate_chunks(&chunks)?;
     Ok(ResourceExtraction {
@@ -131,6 +133,10 @@ fn classify_format(filename: &str, declared_mime: &str, bytes: &[u8]) -> Result<
             ResourceFormat::Xlsx,
             &["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"][..],
         ),
+        "pptx" => (
+            ResourceFormat::Pptx,
+            &["application/vnd.openxmlformats-officedocument.presentationml.presentation"][..],
+        ),
         _ => anyhow::bail!("resource_format_unsupported"),
     };
     if !expected.1.contains(&declared.as_str()) {
@@ -140,7 +146,7 @@ fn classify_format(filename: &str, declared_mime: &str, bytes: &[u8]) -> Result<
         ResourceFormat::Pdf if magic.as_deref() != Some("application/pdf") => {
             anyhow::bail!("resource_magic_mime_mismatch")
         }
-        ResourceFormat::Docx | ResourceFormat::Xlsx
+        ResourceFormat::Docx | ResourceFormat::Xlsx | ResourceFormat::Pptx
             if !bytes.starts_with(b"PK\x03\x04") && !bytes.starts_with(b"PK\x05\x06") =>
         {
             anyhow::bail!("resource_magic_mime_mismatch")
@@ -334,6 +340,57 @@ fn extract_xlsx(bytes: &[u8]) -> Result<(String, u64, Vec<ResourceChunkDraft>)> 
     ))
 }
 
+fn extract_pptx(bytes: &[u8]) -> Result<(String, u64, Vec<ResourceChunkDraft>)> {
+    let mut archive = open_bounded_zip(bytes)?;
+    validate_ooxml_safety(&mut archive)?;
+    let content_types = read_bounded_zip_entry(&mut archive, "[Content_Types].xml")?;
+    require_xml_safe(&content_types)?;
+    let content_types_text =
+        String::from_utf8(content_types).context("resource_pptx_content_types_invalid")?;
+    if !content_types_text.contains("presentationml.presentation.main+xml") {
+        anyhow::bail!("resource_pptx_content_type_mismatch");
+    }
+
+    let mut slides = archive
+        .file_names()
+        .filter_map(|name| {
+            let rest = name.strip_prefix("ppt/slides/slide")?;
+            let ordinal = rest.strip_suffix(".xml")?.parse::<u32>().ok()?;
+            Some((ordinal, name.to_string()))
+        })
+        .collect::<Vec<_>>();
+    slides.sort_by_key(|(ordinal, _)| *ordinal);
+    slides.dedup_by_key(|(ordinal, _)| *ordinal);
+    if slides.is_empty() {
+        anyhow::bail!("resource_pptx_has_no_slides");
+    }
+    if slides.len() > MAX_PPTX_SLIDES {
+        anyhow::bail!("resource_pptx_slide_limit_exceeded");
+    }
+
+    let expanded_bytes = zip_expanded_bytes(&mut archive)?;
+    let mut chunks = Vec::new();
+    for (slide, name) in slides {
+        let slide_xml = read_bounded_zip_entry(&mut archive, &name)?;
+        require_xml_safe(&slide_xml)?;
+        let text = extract_pptx_slide_text(&slide_xml)?;
+        if text.trim().is_empty() {
+            continue;
+        }
+        chunks.extend(chunk_lines(&text, |_, _| ResourceProvenance::Pptx {
+            slide,
+        })?);
+    }
+    if chunks.is_empty() {
+        anyhow::bail!("resource_pptx_has_no_extractable_text");
+    }
+    Ok((
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation".to_string(),
+        expanded_bytes,
+        chunks,
+    ))
+}
+
 fn format_xlsx_cell(cell: &Data) -> String {
     match cell {
         Data::Empty => String::new(),
@@ -475,6 +532,33 @@ fn extract_docx_paragraphs(bytes: &[u8]) -> Result<Vec<String>> {
         }
     }
     Ok(paragraphs)
+}
+
+fn extract_pptx_slide_text(bytes: &[u8]) -> Result<String> {
+    let mut reader = XmlReader::from_reader(bytes);
+    reader.config_mut().trim_text(false);
+    let mut lines = Vec::new();
+    let mut in_text = false;
+    loop {
+        match reader.read_event().context("resource_pptx_xml_invalid")? {
+            Event::Start(event) if event.local_name().as_ref() == b"t" => {
+                in_text = true;
+            }
+            Event::Text(text) if in_text => {
+                let value = text.decode().context("resource_pptx_text_invalid")?;
+                let normalized = normalize_extracted_text(&value);
+                if !normalized.is_empty() {
+                    lines.push(normalized);
+                }
+            }
+            Event::End(event) if event.local_name().as_ref() == b"t" => {
+                in_text = false;
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    Ok(lines.join("\n"))
 }
 
 fn chunk_lines(
@@ -683,6 +767,39 @@ mod tests {
         writer.finish().unwrap().into_inner()
     }
 
+    fn pptx_with_two_slides() -> Vec<u8> {
+        let output = Cursor::new(Vec::new());
+        let mut writer = zip::ZipWriter::new(output);
+        let options = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+        writer.start_file("[Content_Types].xml", options).unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/ppt/slides/slide1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+  <Override PartName="/ppt/slides/slide2.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slide+xml"/>
+</Types>"#,
+            )
+            .unwrap();
+        for (ordinal, text) in [(1, "Roadshow overview"), (2, "PPTX_SLIDE_SENTINEL")] {
+            writer
+                .start_file(format!("ppt/slides/slide{ordinal}.xml"), options)
+                .unwrap();
+            writer
+                .write_all(
+                    format!(
+                        r#"<?xml version="1.0" encoding="UTF-8"?>
+<p:sld xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main"><p:cSld><p:spTree><p:sp><p:txBody><a:p><a:r><a:t>{text}</a:t></a:r></a:p></p:txBody></p:sp></p:spTree></p:cSld></p:sld>"#
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        }
+        writer.finish().unwrap().into_inner()
+    }
+
     fn encrypted_pdf() -> Vec<u8> {
         let mut document = lopdf::Document::load_mem(&fixture("comparison.pdf")).unwrap();
         document.trailer.set(
@@ -771,6 +888,28 @@ mod tests {
             .chunks
             .iter()
             .any(|chunk| chunk.content.contains("=WEBSERVICE(\"http://127.0.0.1\")")));
+    }
+
+    #[test]
+    fn pptx_preserves_slide_provenance() {
+        let pptx = extract_resource(ResourceExtractionRequest {
+            filename: "roadshow.pptx".to_string(),
+            declared_mime:
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                    .to_string(),
+            bytes: pptx_with_two_slides(),
+        })
+        .unwrap();
+        assert_eq!(pptx.format, ResourceFormat::Pptx);
+        assert_eq!(pptx.chunks.len(), 2);
+        assert!(pptx
+            .chunks
+            .iter()
+            .any(|chunk| matches!(chunk.provenance, ResourceProvenance::Pptx { slide: 1 })));
+        assert!(pptx.chunks.iter().any(|chunk| {
+            matches!(chunk.provenance, ResourceProvenance::Pptx { slide: 2 })
+                && chunk.content == "PPTX_SLIDE_SENTINEL"
+        }));
     }
 
     #[test]

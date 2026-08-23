@@ -2,7 +2,7 @@ import { describe, it, expect, vi, beforeEach } from "vitest";
 import { invoke } from "@tauri-apps/api/core";
 import {
   acceptProposal,
-  restoreArchivedMemory,
+  archiveMemory,
   startStreamMessage,
   redactInvokeArgs,
   saveConfig,
@@ -30,8 +30,6 @@ describe("canonical Tauri command arguments", () => {
   it("redacts stream message content and identifiers from dev invoke logs", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reply: "ok",
-      reasoning_trace: {},
-      tool_calls: [],
       run_id: "run-1",
     });
 
@@ -68,11 +66,11 @@ describe("canonical Tauri command arguments", () => {
   });
 
   it("sends canonical camelCase command arguments", async () => {
-    await restoreArchivedMemory({ ownerKind: "knowledge_note", ownerId: "note-1" });
+    await archiveMemory("memory:note-1");
     expect(invoke).toHaveBeenCalledWith(
-      "restore_archived_chunks",
+      "archive_memory",
       expect.objectContaining({
-        owner: { ownerKind: "knowledge_note", ownerId: "note-1" },
+        memoryId: "memory:note-1",
       })
     );
   });
@@ -117,8 +115,6 @@ describe("canonical Tauri command arguments", () => {
   it("passes the selected skill through canonical chat command wrappers", async () => {
     vi.mocked(invoke).mockResolvedValue({
       reply: "ok",
-      reasoning_trace: {},
-      tool_calls: [],
     });
 
     await startStreamMessage("session-skill", [{ role: "user", content: "Summarize this" }], {

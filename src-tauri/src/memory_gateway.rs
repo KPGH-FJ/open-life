@@ -7,40 +7,39 @@ use crate::persistence_coordinator::{
 };
 use crate::AppState;
 use once_cell::sync::Lazy as LazyLock;
-use openlife_core::agent::main_chat_agent_v1::{
-    PolicyMemoryAdmissionProof, PolicyMemoryRollbackGrant,
-};
+use openlife_core::agent::ExplicitMemoryAdmissionProof;
 use openlife_core::agent::{
     AgentProposal, CanonicalMemoryFactDescriptor, ExplicitMemoryWriteInput,
-    ExplicitMemoryWriteReceipt, MainChatMemoryCandidate, MemoryLifecycleAcceptanceInput,
-    MemoryLifecycleScope, MemoryPrivacyEraseReport, MemoryRollbackReport,
+    ExplicitMemoryWriteReceipt, MemoryCandidate, MemoryLifecycleAcceptanceInput,
+    MemoryLifecycleAcceptanceReport, MemoryLifecycleCategory, MemoryPrivacyEraseReport,
+    MemoryRollbackReport,
 };
 use openlife_core::embedding::{
     execute_embedding, prepare_embedding_request_recorded, EmbeddingInvocationReceipt,
     EmbeddingOutcome, EmbeddingProfile, EmbeddingRouteConfig, EmbeddingRouteKind,
     PreparedEmbeddingRequestOutcome, UNKNOWN_EMBEDDING_PROFILE_ID,
 };
-use openlife_core::llm::ChatMessage;
 use openlife_core::memory::{
     CanonicalMemoryRetrievalState, MemoryRetrievalDisposition, MemorySearchHit,
 };
-use openlife_core::memory_gateway::{
-    MemoryGateway, MemoryGatewayDecision, MemoryGatewayRequest, MemoryGatewaySubject,
-    MemoryGatewayWriteStatus,
-};
 use openlife_core::persistence_outbox::{
-    CanonicalMutationReceipt, CanonicalProjectionHeadAdvanced, ProjectionDelivery,
-    ProjectionDeliveryState,
+    CanonicalProjectionHeadAdvanced, ProjectionDelivery, ProjectionDeliveryState,
 };
 use openlife_core::vectors::{
-    plan_embedding_privacy, CanonicalMemoryRetrievalCandidate, CanonicalVectorOwnerRef,
-    ExportedVectorChunk, MemoryChunk, TierStats, VectorRebuildBatchItem, VectorRebuildEvidence,
-    VectorRebuildJob, VectorRebuildJobStatus, VectorSearchOutcome, VECTOR_REBUILD_BATCH_LIMIT,
+    plan_embedding_privacy, CanonicalVectorOwnerRef, MemoryChunk, TierStats, VectorRebuildEvidence,
+    VectorSearchOutcome,
+};
+#[cfg(test)]
+use openlife_core::vectors::{
+    ExportedVectorChunk, VectorRebuildBatchItem, VectorRebuildJob, VectorRebuildJobStatus,
+    VECTOR_REBUILD_BATCH_LIMIT,
 };
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use std::collections::HashMap;
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
+#[cfg(test)]
+use std::collections::VecDeque;
 use std::sync::Arc;
 #[cfg(test)]
 use std::sync::Mutex as StdMutex;
@@ -143,6 +142,7 @@ async fn wait_at_canonical_commit_admission_barrier(state: &Arc<AppState>) {
 
 /// Run one synchronous VectorStore transaction under a short-lived shared
 /// canonical permit. Rebuild provider and embedding awaits stay outside this helper.
+#[cfg(test)]
 async fn commit_vector_store_mutation<T>(
     state: &Arc<AppState>,
     mutation: impl FnOnce() -> anyhow::Result<T>,
@@ -361,38 +361,6 @@ fn runtime_store_error(state: &Arc<AppState>, store: &str, error: impl ToString)
     AppError::db_with_hint(error, "persistence_runtime_degraded")
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MemoryGatewayWriteReport {
-    pub decision: MemoryGatewayDecision,
-    pub session_id: Option<String>,
-    pub memory_id: Option<String>,
-    pub embedding_id: Option<i64>,
-    pub proposal_id: Option<String>,
-    pub run_id: Option<String>,
-    pub evidence_id: Option<String>,
-    pub before: Option<serde_json::Value>,
-    pub after: Option<serde_json::Value>,
-    pub conflict_status: Option<String>,
-    pub direct_store_write: bool,
-    pub embedding_profile: Option<EmbeddingProfile>,
-    pub embedding_receipt: Option<EmbeddingInvocationReceipt>,
-    pub embedding_projection_status: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct ExplicitMemoryRollbackReceipt {
-    pub receipt_id: String,
-    pub memory_id: String,
-    pub rollback_event_id: String,
-    pub outbox_event_id: String,
-    pub projection_state: ProjectionDeliveryState,
-    pub canonical_committed: bool,
-    pub replayed: bool,
-    pub final_active: bool,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MemorySearchResult {
@@ -421,17 +389,7 @@ impl CanonicalMemoryOwnerInput {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LowAccessCanonicalMemoryCandidate {
-    pub owner: CanonicalMemoryOwnerInput,
-    pub tier: i64,
-    pub access_count: i64,
-    pub last_accessed_at: Option<String>,
-    pub importance_score: f32,
-    pub candidate_only: bool,
-}
-
+#[cfg(test)]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ArchivedCanonicalMemoryView {
@@ -456,6 +414,18 @@ pub struct MemoryRetrievalMutationResult {
     pub projection_error_digest: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryCorrectionResult {
+    pub memory_id: String,
+    pub replaced_memory_id: String,
+    pub canonical_committed: bool,
+    pub projection_state: ProjectionDeliveryState,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub projection_error_digest: Option<String>,
+    pub undo_available: bool,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum EmbeddingRouteQuality {
@@ -473,6 +443,7 @@ pub struct MemoryVectorDegradedEvidence {
     pub error_digest: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnowledgeNoteWriteResult {
@@ -628,45 +599,7 @@ fn projection_delivery_is_blocking(delivery: &ProjectionDelivery) -> bool {
 }
 
 fn projection_delivery_is_foreground_local(delivery: &ProjectionDelivery) -> bool {
-    (delivery.aggregate_kind == "memory_lifecycle"
-        && delivery.mutation_kind == "materialized"
-        && delivery.projection_target == "memory_store")
-        || (delivery.aggregate_kind == "memory_retrieval"
-            && delivery.projection_target == "vector_store")
-}
-
-impl MemoryGatewayWriteReport {
-    fn new(decision: MemoryGatewayDecision) -> Self {
-        Self {
-            decision,
-            session_id: None,
-            memory_id: None,
-            embedding_id: None,
-            proposal_id: None,
-            run_id: None,
-            evidence_id: None,
-            before: None,
-            after: None,
-            conflict_status: None,
-            direct_store_write: false,
-            embedding_profile: None,
-            embedding_receipt: None,
-            embedding_projection_status: None,
-        }
-    }
-
-    fn with_session_id(mut self, session_id: impl Into<String>) -> Self {
-        self.session_id = Some(session_id.into());
-        self
-    }
-
-    fn with_proposal(mut self, proposal: &AgentProposal) -> Self {
-        self.proposal_id = Some(proposal.id.clone());
-        self.run_id = proposal.run_id.clone();
-        self.before = proposal.before.clone();
-        self.after = Some(proposal.after.clone());
-        self
-    }
+    delivery.aggregate_kind == "memory_retrieval" && delivery.projection_target == "vector_store"
 }
 
 #[derive(Clone)]
@@ -814,130 +747,6 @@ fn require_embedding_success(
             operation, &profile, &receipt,
         ))),
     }
-}
-
-/// Idempotently commit one canonical conversation message through the single
-/// conversation Gateway. `operation_id` is caller-owned execution identity,
-/// never a content-derived heuristic; replay returns the original row and
-/// payload drift fails closed.
-pub(crate) async fn save_conversation_message_idempotent_with_state(
-    session_id: &str,
-    message: &ChatMessage,
-    operation_id: &str,
-    state: &Arc<AppState>,
-) -> Result<openlife_core::memory::CanonicalConversationMessageReceipt, String> {
-    if !matches!(message.role.as_str(), "user" | "assistant") {
-        return Err("canonical conversation message role must be user or assistant".into());
-    }
-    let decision = MemoryGateway::decide(MemoryGatewaySubject::ChatTurn);
-    debug_assert_eq!(decision.status, MemoryGatewayWriteStatus::ContextOnly);
-    let _commit_permit =
-        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore])
-            .await
-            .map_err(|error| error.to_string())?;
-    let store = state.memory_store.lock().await;
-    let receipt = store
-        .save_message_idempotent(session_id, message, operation_id)
-        .map_err(|error| runtime_store_error(state, "MemoryStore", error).to_string())?;
-    store
-        .touch_chat_session(session_id)
-        .map_err(|error| runtime_store_error(state, "MemoryStore", error).to_string())?;
-    Ok(receipt)
-}
-
-/// TurnRuntime is the only ordinary Main Chat user-message writer. This
-/// narrower entrypoint prevents downstream kernel/preprocess code from
-/// persisting user bodies a second time.
-pub(crate) async fn save_turn_user_message_idempotent_with_state(
-    session_id: &str,
-    message: &ChatMessage,
-    operation_id: &str,
-    state: &Arc<AppState>,
-) -> Result<openlife_core::memory::CanonicalConversationMessageCommit, String> {
-    if message.role != "user" {
-        return Err("canonical TurnRuntime input message must have role=user".into());
-    }
-    let decision = MemoryGateway::decide(MemoryGatewaySubject::ChatTurn);
-    debug_assert_eq!(decision.status, MemoryGatewayWriteStatus::ContextOnly);
-    let _commit_permit =
-        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore])
-            .await
-            .map_err(|error| error.to_string())?;
-    let store = state.memory_store.lock().await;
-    let commit = store
-        .save_message_idempotent_with_proof(session_id, message, operation_id)
-        .map_err(|error| runtime_store_error(state, "MemoryStore", error).to_string())?;
-    store
-        .touch_chat_session(session_id)
-        .map_err(|error| runtime_store_error(state, "MemoryStore", error).to_string())?;
-    Ok(commit)
-}
-
-pub(crate) async fn materialize_bounded_turn_context_through_operation_with_state(
-    operation_id: &str,
-    state: &Arc<AppState>,
-) -> Result<openlife_core::agent::conversation_context::ConversationContextProjection, String> {
-    state
-        .memory_store
-        .lock()
-        .await
-        .materialize_bounded_conversation_context_through_operation(
-            operation_id,
-            openlife_core::agent::conversation_context::ConversationContextConfig::default(),
-        )
-        .map_err(|error| runtime_store_error(state, "MemoryStore", error).to_string())
-}
-
-pub(crate) async fn create_chat_session_with_state(
-    session_id: &str,
-    title: &str,
-    state: &Arc<AppState>,
-) -> Result<(), AppError> {
-    let _commit_permit =
-        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore]).await?;
-    let store = state.memory_store.lock().await;
-    store
-        .create_chat_session(session_id, title)
-        .map_err(AppError::from)
-}
-
-pub(crate) async fn rename_chat_session_with_state(
-    session_id: &str,
-    title: &str,
-    state: &Arc<AppState>,
-) -> Result<(), AppError> {
-    let _commit_permit =
-        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore]).await?;
-    let store = state.memory_store.lock().await;
-    store
-        .rename_chat_session(session_id, title)
-        .map_err(AppError::from)
-}
-
-pub(crate) async fn delete_chat_session_with_state(
-    session_id: &str,
-    state: &Arc<AppState>,
-) -> Result<(), AppError> {
-    let receipt = {
-        let _commit_permit =
-            acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore]).await?;
-        let store = state.memory_store.lock().await;
-        store
-            .delete_chat_session_with_tombstone(
-                session_id,
-                Some("user_confirmed_conversation_delete"),
-            )
-            .map_err(AppError::from)?
-    };
-    notify_canonical_outbox_background_worker(state);
-    reconcile_blocking_canonical_outbox_event_with_state(
-        state,
-        CanonicalOutboxOwner::MemoryStore,
-        &receipt.event_id,
-    )
-    .await
-    .map_err(AppError::external)?;
-    ensure_memory_outbox_event_applied(state, &receipt).await
 }
 
 pub(crate) async fn reconcile_canonical_outboxes_with_state(
@@ -1489,20 +1298,7 @@ async fn apply_projection_delivery(
     commit_lane: CanonicalProjectionCommitLane,
 ) -> Result<ProjectionApplicationOutcome, ProjectionReconciliationError> {
     match delivery.aggregate_kind.as_str() {
-        "conversation" if delivery.mutation_kind == "deleted" => {
-            apply_conversation_deletion_projection(state, delivery, commit_lane)
-                .await
-                .map(|_| ProjectionApplicationOutcome::Applied)
-        }
         "knowledge_note" if delivery.mutation_kind == "created" => {
-            apply_knowledge_note_projection(state, delivery, commit_lane)
-                .await
-                .map(|_| ProjectionApplicationOutcome::Applied)
-        }
-        // Migration-only delivery contract for outbox rows emitted by the
-        // retired direct-Memory indexing command. No current product write can
-        // enqueue this aggregate/mutation pair.
-        "memory_record" if delivery.mutation_kind == "indexed" => {
             apply_knowledge_note_projection(state, delivery, commit_lane)
                 .await
                 .map(|_| ProjectionApplicationOutcome::Applied)
@@ -1574,19 +1370,12 @@ async fn apply_knowledge_note_projection(
             delivery.projection_target
         )));
     }
-    let owner_kind = match (
-        delivery.aggregate_kind.as_str(),
-        delivery.mutation_kind.as_str(),
-    ) {
-        ("knowledge_note", "created") => "knowledge_note",
-        ("memory_record", "indexed") => "memory_record",
-        _ => {
-            return Err(ProjectionReconciliationError::failed(
-                "unsupported canonical KnowledgeNote projection contract",
-            ))
-        }
-    };
-    let owner = CanonicalVectorOwnerRef::new(owner_kind, &delivery.aggregate_id)
+    if delivery.aggregate_kind != "knowledge_note" || delivery.mutation_kind != "created" {
+        return Err(ProjectionReconciliationError::failed(
+            "unsupported canonical KnowledgeNote projection contract",
+        ));
+    }
+    let owner = CanonicalVectorOwnerRef::new("knowledge_note", &delivery.aggregate_id)
         .map_err(ProjectionReconciliationError::failed)?;
     let record = state
         .memory_store
@@ -1639,9 +1428,6 @@ async fn apply_knowledge_note_projection(
         .map_err(ProjectionReconciliationError::failed)
 }
 
-/// The only compatibility materializer for Lifecycle-owned raw Memory. The
-/// outbox and projection markers are ref-only; D010 can replace the two legacy
-/// content projections without changing this delivery contract.
 async fn apply_memory_lifecycle_projection(
     state: &Arc<AppState>,
     delivery: &ProjectionDelivery,
@@ -1661,21 +1447,6 @@ async fn apply_memory_lifecycle_projection(
         })?;
     if delivery.mutation_kind == "deleted" {
         return match delivery.projection_target.as_str() {
-            "memory_store" => {
-                let _commit_permit = acquire_canonical_projection_commit_permit(
-                    state,
-                    CanonicalWriteOwner::MemoryStore,
-                    commit_lane,
-                )
-                .await?;
-                state
-                    .memory_store
-                    .lock()
-                    .await
-                    .project_lifecycle_memory_tombstone(&delivery.event_id, &delivery.aggregate_id)
-                    .map(|_| ())
-                    .map_err(ProjectionReconciliationError::failed)
-            }
             "vector_store" => {
                 let _commit_permit = acquire_canonical_projection_commit_permit(
                     state,
@@ -1708,47 +1479,11 @@ async fn apply_memory_lifecycle_projection(
         // degraded. Never let that late delivery resurrect stale content.
         return Ok(());
     }
-    let session_id = if record.scope == MemoryLifecycleScope::Global {
-        openlife_core::memory::MEMORY_LIFECYCLE_GLOBAL_SESSION_ID
-    } else {
-        record.scope_owner_ref.as_deref().unwrap_or_else(|| {
-            record
-                .source_task_id
-                .as_deref()
-                .unwrap_or(openlife_core::memory::MEMORY_LIFECYCLE_GLOBAL_SESSION_ID)
-        })
-    };
+    let vector_partition = record
+        .scope_owner_ref
+        .as_deref()
+        .unwrap_or("agent-memory-global");
     match delivery.projection_target.as_str() {
-        "memory_store" => {
-            let tags = vec![
-                "canonical_owner:memory_lifecycle".to_string(),
-                format!("memory_id:{}", record.memory_id),
-                format!("proposal_id:{}", record.proposal_id),
-                format!("memory_category:{}", record.category),
-            ];
-            let _commit_permit = acquire_canonical_projection_commit_permit(
-                state,
-                CanonicalWriteOwner::MemoryStore,
-                commit_lane,
-            )
-            .await?;
-            state
-                .memory_store
-                .lock()
-                .await
-                .project_lifecycle_memory(
-                    &delivery.event_id,
-                    &record.memory_id,
-                    session_id,
-                    &record.content,
-                    "lifecycle_memory_projection",
-                    &tags,
-                    "private",
-                    None,
-                )
-                .map(|_| ())
-                .map_err(ProjectionReconciliationError::failed)
-        }
         "vector_store" => {
             let vector_store = state.vector_store.lock().await.clone();
             let owner = CanonicalVectorOwnerRef::new("memory_lifecycle", &record.memory_id)
@@ -1777,7 +1512,7 @@ async fn apply_memory_lifecycle_projection(
                 .project_memory_embedding(
                     &delivery.event_id,
                     &owner,
-                    session_id,
+                    vector_partition,
                     &record.content,
                     &embedding,
                     &profile,
@@ -1791,70 +1526,7 @@ async fn apply_memory_lifecycle_projection(
     }
 }
 
-async fn apply_conversation_deletion_projection(
-    state: &Arc<AppState>,
-    delivery: &ProjectionDelivery,
-    commit_lane: CanonicalProjectionCommitLane,
-) -> Result<(), ProjectionReconciliationError> {
-    let tombstone_id = delivery.tombstone_id.as_deref().ok_or_else(|| {
-        ProjectionReconciliationError::failed("conversation deletion outbox missing tombstone id")
-    })?;
-    if delivery.projection_target != "vector_store" {
-        return Err(ProjectionReconciliationError::failed(format!(
-            "unsupported conversation projection target: {}",
-            delivery.projection_target
-        )));
-    }
-    let _commit_permit = acquire_canonical_projection_commit_permit(
-        state,
-        CanonicalWriteOwner::VectorStore,
-        commit_lane,
-    )
-    .await?;
-    let store = state.vector_store.lock().await.clone();
-    store
-        .project_conversation_tombstone(tombstone_id, &delivery.aggregate_id)
-        .map_err(ProjectionReconciliationError::failed)?;
-    Ok(())
-}
-
-async fn ensure_memory_outbox_event_applied(
-    state: &Arc<AppState>,
-    receipt: &CanonicalMutationReceipt,
-) -> Result<(), AppError> {
-    let summary = state
-        .memory_store
-        .lock()
-        .await
-        .projection_summary(&receipt.event_id)
-        .map_err(AppError::from)?;
-    match summary.state() {
-        ProjectionDeliveryState::Applied => Ok(()),
-        state => Err(AppError::external(
-            serde_json::json!({
-                "operation": "conversation_delete",
-                "canonicalCommitted": true,
-                "outboxEventId": receipt.event_id,
-                "tombstoneId": receipt.tombstone_id,
-                "projectionState": state,
-                "pending": summary.pending,
-                "degraded": summary.degraded,
-            })
-            .to_string(),
-        )),
-    }
-}
-
-pub(crate) async fn touch_chat_session_with_state(
-    session_id: &str,
-    state: &Arc<AppState>,
-) -> Result<(), AppError> {
-    let _commit_permit =
-        acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore]).await?;
-    let store = state.memory_store.lock().await;
-    store.touch_chat_session(session_id).map_err(AppError::from)
-}
-
+#[cfg(test)]
 pub(crate) async fn create_knowledge_note_with_state(
     operation_id: String,
     session_id: String,
@@ -1862,16 +1534,6 @@ pub(crate) async fn create_knowledge_note_with_state(
     source: String,
     state: &Arc<AppState>,
 ) -> Result<KnowledgeNoteWriteResult, AppError> {
-    let decision = MemoryGateway::decide(MemoryGatewaySubject::KnowledgeNote);
-    if decision.lane != openlife_core::memory_gateway::MemoryLane::KnowledgeNote
-        || decision.status != MemoryGatewayWriteStatus::KnowledgeNoteWritten
-        || !decision.knowledge_note_allowed
-        || decision.local_memory_allowed
-    {
-        return Err(AppError::internal(
-            "KnowledgeNote gateway contract is not independently authorized.",
-        ));
-    }
     let canonical_write = {
         let _commit_permit =
             acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::MemoryStore]).await?;
@@ -1925,15 +1587,6 @@ pub(crate) async fn create_knowledge_note_with_state(
     let embedding_id = None;
     let embedding_profile = None;
     let embedding_receipt = None;
-    let _report = MemoryGatewayWriteReport::new(decision)
-        .with_session_id(session_id)
-        .with_optional_embedding_id(embedding_id)
-        .with_optional_embedding_projection(
-            embedding_profile.clone(),
-            embedding_receipt.clone(),
-            projection_state.as_str(),
-        )
-        .with_gateway_write();
     Ok(KnowledgeNoteWriteResult {
         operation_id: canonical_write.operation_id,
         replayed: canonical_write.replayed,
@@ -1948,6 +1601,7 @@ pub(crate) async fn create_knowledge_note_with_state(
     })
 }
 
+#[cfg(test)]
 pub(crate) async fn search_memory_with_state(
     query: String,
     top_k: usize,
@@ -1969,27 +1623,134 @@ pub(crate) async fn search_lifecycle_memory_with_state(
     search_memory_with_scope_filter(query, top_k, state, Some(allowed_memory_ids)).await
 }
 
+fn lifecycle_lexical_relevance(query: &str, content: &str) -> Option<f32> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return None;
+    }
+    let content = content.to_lowercase();
+    if content.contains(&query) {
+        return Some(0.95);
+    }
+    let mut terms = query
+        .split(|ch: char| !ch.is_alphanumeric() && !(('\u{4e00}'..='\u{9fff}').contains(&ch)))
+        .filter(|term| term.chars().count() >= 2)
+        .map(str::to_string)
+        .take(24)
+        .collect::<Vec<_>>();
+    let cjk = query
+        .chars()
+        .filter(|ch| matches!(ch, '\u{3400}'..='\u{4dbf}' | '\u{4e00}'..='\u{9fff}' | '\u{f900}'..='\u{faff}'))
+        .collect::<Vec<_>>();
+    terms.extend(
+        cjk.windows(2)
+            .map(|window| window.iter().collect::<String>()),
+    );
+    terms.sort();
+    terms.dedup();
+    if terms.is_empty() {
+        return None;
+    }
+    let matched = terms
+        .iter()
+        .filter(|term| content.contains(term.as_str()))
+        .count();
+    if matched == 0 {
+        None
+    } else {
+        Some(0.35 + 0.5 * (matched as f32 / terms.len() as f32))
+    }
+}
+
+async fn search_canonical_lifecycle_text(
+    query: &str,
+    top_k: usize,
+    allowed_memory_ids: &HashSet<String>,
+    state: &Arc<AppState>,
+) -> Result<Vec<MemorySearchHit>, AppError> {
+    let store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(|| {
+            AppError::db_with_hint(
+                "MemoryLifecycleStore unavailable",
+                "memory_retrieval_degraded",
+            )
+        })?
+        .lock()
+        .await;
+    let mut hits = allowed_memory_ids
+        .iter()
+        .filter_map(|memory_id| store.get_record(memory_id).ok().flatten())
+        .filter_map(|record| {
+            let relevance_score = lifecycle_lexical_relevance(query, &record.content)?;
+            Some(MemorySearchHit {
+                chunk: MemoryChunk {
+                    id: 0,
+                    session_id: record
+                        .scope_owner_ref
+                        .clone()
+                        .unwrap_or_else(|| "global".into()),
+                    content: record.content,
+                    source: format!("memory_lifecycle:{}", record.memory_id),
+                    created_at: record
+                        .accepted_at
+                        .map(|accepted_at| accepted_at.to_rfc3339())
+                        .unwrap_or_default(),
+                    tier: 0,
+                    access_count: 0,
+                    last_accessed_at: String::new(),
+                    importance_score: record.confidence,
+                    archived: false,
+                    archived_at: None,
+                    summary: None,
+                },
+                relevance_score,
+                source_tier: "canonical_lifecycle_lexical".into(),
+            })
+        })
+        .collect::<Vec<_>>();
+    hits.sort_by(|left, right| {
+        right
+            .relevance_score
+            .partial_cmp(&left.relevance_score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| right.chunk.created_at.cmp(&left.chunk.created_at))
+    });
+    hits.truncate(top_k);
+    Ok(hits)
+}
+
 async fn search_memory_with_scope_filter(
     query: String,
     top_k: usize,
     state: &Arc<AppState>,
     allowed_lifecycle_memory_ids: Option<&HashSet<String>>,
 ) -> Result<MemorySearchResult, AppError> {
-    require_persistence_read(state, "MemoryStore")?;
     require_persistence_read(state, "VectorStore")?;
     require_persistence_read(state, "MemoryLifecycleStore")?;
     let desensitized_query = {
         let privacy_engine = state.privacy_engine.lock().await;
         privacy_engine.desensitize(&query).0
     };
-    let text_telemetry_ticket = prepare_memory_search_access_telemetry(state);
-    let mut text_hits = {
+    let (mut text_hits, text_telemetry_ticket) = if let Some(allowed) = allowed_lifecycle_memory_ids
+    {
+        (
+            search_canonical_lifecycle_text(&desensitized_query, top_k, allowed, state).await?,
+            None,
+        )
+    } else {
+        require_persistence_read(state, "MemoryStore")?;
+        let ticket = prepare_memory_search_access_telemetry(state);
         let store = state.memory_store.lock().await;
-        store
-            .search_text_memories(None, &desensitized_query, top_k)
-            .map_err(|error| {
-                AppError::db_with_hint(error.to_string(), "memory_retrieval_degraded")
-            })?
+        (
+            store
+                .search_text_memories(None, &desensitized_query, top_k)
+                .map_err(|error| {
+                    AppError::db_with_hint(error.to_string(), "memory_retrieval_degraded")
+                })?,
+            Some(ticket),
+        )
     };
     if let Some(allowed) = allowed_lifecycle_memory_ids {
         text_hits.retain(|hit| lifecycle_source_is_allowed(&hit.chunk.source, allowed));
@@ -2060,9 +1821,12 @@ async fn search_memory_with_scope_filter(
             }
         }
     };
-    let text_telemetry_evidence =
-        record_text_search_access_telemetry_with_state(&text_hits, state, text_telemetry_ticket)
-            .await;
+    let text_telemetry_evidence = match text_telemetry_ticket {
+        Some(ticket) => {
+            record_text_search_access_telemetry_with_state(&text_hits, state, ticket).await
+        }
+        None => None,
+    };
     if let Some(evidence) = text_telemetry_evidence.as_ref() {
         log::warn!(
             "Memory text search telemetry skipped after a successful read: reason={} error_digest={}",
@@ -2097,6 +1861,7 @@ fn lifecycle_source_is_allowed(source: &str, allowed_memory_ids: &HashSet<String
         .is_some_and(|memory_id| allowed_memory_ids.contains(memory_id))
 }
 
+#[cfg(any(test, feature = "dev-extensions"))]
 pub(crate) async fn run_memory_tier_maintenance_with_state(
     state: &Arc<AppState>,
 ) -> Result<(usize, usize), AppError> {
@@ -2104,32 +1869,6 @@ pub(crate) async fn run_memory_tier_maintenance_with_state(
         acquire_memory_vector_commit_permit(state, &[CanonicalWriteOwner::VectorStore]).await?;
     let store = state.vector_store.lock().await;
     store.run_tier_maintenance().map_err(AppError::from)
-}
-
-pub(crate) async fn archive_low_access_memories_with_state(
-    state: &Arc<AppState>,
-) -> Result<Vec<LowAccessCanonicalMemoryCandidate>, AppError> {
-    require_persistence_read(state, "MemoryStore")?;
-    require_persistence_read(state, "VectorStore")?;
-    let candidates = state
-        .vector_store
-        .lock()
-        .await
-        .low_access_canonical_memory_candidates(200)
-        .map_err(AppError::from)?;
-    let memory_store = state.memory_store.lock().await.clone();
-    let mut verified = Vec::new();
-    for candidate in candidates {
-        let owner = CanonicalVectorOwnerRef::new(&candidate.owner_kind, &candidate.owner_id)
-            .map_err(AppError::from)?;
-        if !canonical_memory_owner_is_current(state, &memory_store, &owner).await?
-            || !canonical_memory_retrieval_is_active(state, &memory_store, &owner).await?
-        {
-            continue;
-        }
-        verified.push(low_access_candidate_view(candidate));
-    }
-    Ok(verified)
 }
 
 pub(crate) async fn restore_archived_chunks_with_state(
@@ -2145,6 +1884,7 @@ pub(crate) async fn restore_archived_chunks_with_state(
     .await
 }
 
+#[cfg(test)]
 pub(crate) async fn list_archived_chunks_with_state(
     limit: usize,
     state: &Arc<AppState>,
@@ -2152,11 +1892,15 @@ pub(crate) async fn list_archived_chunks_with_state(
     list_archived_chunks_with_state_inner(limit, state, None).await
 }
 
+#[cfg(test)]
 const ARCHIVED_MEMORY_PAGE_SIZE: usize = 64;
 
-type ArchivedMemoryPageHook<'a> =
-    dyn Fn(&openlife_core::memory::MemoryStore) -> Result<(), AppError> + Sync + 'a;
+#[cfg(test)]
+type ArchivedMemoryPageHook<'a> = dyn Fn(&openlife_core::memory::KnowledgeNoteProjectionStore) -> Result<(), AppError>
+    + Sync
+    + 'a;
 
+#[cfg(test)]
 async fn list_archived_chunks_with_state_inner(
     limit: usize,
     state: &Arc<AppState>,
@@ -2303,9 +2047,10 @@ async fn current_archived_memory_count_with_state(
         .ok_or_else(|| AppError::internal("canonical archived Memory count exceeds usize"))
 }
 
+#[cfg(any(test, feature = "dev-extensions"))]
 async fn canonical_memory_retrieval_head_matches(
     state: &Arc<AppState>,
-    memory_store: &openlife_core::memory::MemoryStore,
+    memory_store: &openlife_core::memory::KnowledgeNoteProjectionStore,
     owner: &CanonicalVectorOwnerRef,
     expected: &CanonicalMemoryRetrievalState,
 ) -> Result<bool, AppError> {
@@ -2335,9 +2080,10 @@ async fn canonical_memory_retrieval_head_matches(
     Ok(current.as_ref() == Some(expected))
 }
 
+#[cfg(any(test, feature = "dev-extensions"))]
 async fn canonical_memory_owner_is_current(
     state: &Arc<AppState>,
-    memory_store: &openlife_core::memory::MemoryStore,
+    memory_store: &openlife_core::memory::KnowledgeNoteProjectionStore,
     owner: &CanonicalVectorOwnerRef,
 ) -> Result<bool, AppError> {
     if owner.kind() == "memory_lifecycle" {
@@ -2358,47 +2104,7 @@ async fn canonical_memory_owner_is_current(
         .map_err(AppError::from)
 }
 
-async fn canonical_memory_retrieval_is_active(
-    state: &Arc<AppState>,
-    memory_store: &openlife_core::memory::MemoryStore,
-    owner: &CanonicalVectorOwnerRef,
-) -> Result<bool, AppError> {
-    if owner.kind() == "memory_lifecycle" {
-        return state
-            .memory_lifecycle_store
-            .as_ref()
-            .ok_or_else(|| {
-                AppError::db_with_hint(
-                    "MemoryLifecycleStore unavailable while reading retrieval state",
-                    "canonical_state_unknown",
-                )
-            })?
-            .lock()
-            .await
-            .is_memory_retrievable(owner.id())
-            .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"));
-    }
-    memory_store
-        .is_memory_retrieval_active(owner)
-        .map_err(AppError::from)
-}
-
-fn low_access_candidate_view(
-    candidate: CanonicalMemoryRetrievalCandidate,
-) -> LowAccessCanonicalMemoryCandidate {
-    LowAccessCanonicalMemoryCandidate {
-        owner: CanonicalMemoryOwnerInput {
-            owner_kind: candidate.owner_kind,
-            owner_id: candidate.owner_id,
-        },
-        tier: candidate.tier,
-        access_count: candidate.access_count,
-        last_accessed_at: candidate.last_accessed_at,
-        importance_score: candidate.importance_score,
-        candidate_only: true,
-    }
-}
-
+#[cfg(test)]
 fn archived_memory_view(state: CanonicalMemoryRetrievalState) -> ArchivedCanonicalMemoryView {
     ArchivedCanonicalMemoryView {
         owner: CanonicalMemoryOwnerInput {
@@ -2551,6 +2257,7 @@ pub(crate) async fn count_memory_chunks_with_state(state: &Arc<AppState>) -> Res
     store.count_all_chunks().map_err(AppError::from)
 }
 
+#[cfg(test)]
 pub(crate) async fn rebuild_memory_index_with_state(
     state: &Arc<AppState>,
 ) -> Result<serde_json::Value, AppError> {
@@ -2742,6 +2449,7 @@ pub(crate) async fn rebuild_memory_index_with_state(
     }
 }
 
+#[cfg(test)]
 async fn cancellable_rebuild_embedding(
     job_id: &str,
     content: &str,
@@ -2761,6 +2469,7 @@ async fn cancellable_rebuild_embedding(
     }
 }
 
+#[cfg(test)]
 fn vector_rebuild_job_report(job: &VectorRebuildJob) -> serde_json::Value {
     serde_json::json!({
         "jobId": job.job_id,
@@ -2782,6 +2491,7 @@ fn vector_rebuild_job_report(job: &VectorRebuildJob) -> serde_json::Value {
     })
 }
 
+#[cfg(test)]
 pub(crate) async fn get_memory_index_rebuild_progress_with_state(
     state: &Arc<AppState>,
 ) -> Result<Option<VectorRebuildJob>, AppError> {
@@ -2790,6 +2500,7 @@ pub(crate) async fn get_memory_index_rebuild_progress_with_state(
     store.latest_rebuild_job().map_err(AppError::from)
 }
 
+#[cfg(test)]
 pub(crate) async fn cancel_memory_index_rebuild_with_state(
     job_id: Option<String>,
     state: &Arc<AppState>,
@@ -2817,26 +2528,6 @@ pub(crate) async fn materialize_memory_proposal_with_state(
     _original_source: String,
 ) -> Result<openlife_core::life_model::patch::PatchApplyResult, String> {
     require_persistence_write_string(state)?;
-    let decision = memory_gateway_decision_for_proposal(
-        proposal,
-        "accepted_proposal_materialization",
-        proposal_memory_evidence_refs(proposal),
-    );
-    if decision.lane == openlife_core::memory_gateway::MemoryLane::CanonicalLifeModelTruth {
-        return Ok(patch_result(
-            proposal,
-            false,
-            "memory_write_blocked",
-            Some("canonical_lifemodel_truth_requires_lifemodel_write_gateway".to_string()),
-        ));
-    }
-    let (workspace_root, project_root) = {
-        let config = state.config.lock().await;
-        (
-            config.system.workspace_memory_root.clone(),
-            config.system.project_memory_root.clone(),
-        )
-    };
     let mut lifecycle_report = {
         let lifecycle_store = state
             .memory_lifecycle_store
@@ -2860,8 +2551,8 @@ pub(crate) async fn materialize_memory_proposal_with_state(
         if let Err(error) = openlife_core::agent::bind_memory_fact_scope_owner(
             &mut lifecycle_input.fact,
             Some(&session_id),
-            workspace_root.as_deref(),
-            project_root.as_deref(),
+            None,
+            None,
         ) {
             return Ok(patch_result(
                 proposal,
@@ -2983,12 +2674,6 @@ pub(crate) async fn materialize_memory_proposal_with_state(
         )
     };
 
-    let _report = MemoryGatewayWriteReport::new(decision)
-        .with_proposal(proposal)
-        .with_session_id(session_id)
-        .with_memory_id(lifecycle_report.record.memory_id)
-        .with_gateway_write();
-
     Ok(patch_result(
         proposal,
         true,
@@ -3030,13 +2715,13 @@ pub(crate) async fn materialize_memory_proposal_with_state(
 )]
 pub(crate) async fn commit_explicit_user_memory_for_turn_with_state(
     state: &Arc<AppState>,
-    source_task_id: String,
-    source_run_id: String,
+    source_task_id: Option<String>,
+    source_run_id: Option<String>,
     source_message_id: String,
     fact: CanonicalMemoryFactDescriptor,
-    admission_proof: PolicyMemoryAdmissionProof,
+    admission_proof: ExplicitMemoryAdmissionProof,
     source_user_message: &str,
-    candidate: &MainChatMemoryCandidate,
+    candidate: &MemoryCandidate,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
 ) -> Result<ExplicitMemoryWriteReceipt, String> {
     require_persistence_write_string(state)?;
@@ -3062,13 +2747,13 @@ pub(crate) async fn commit_explicit_user_memory_for_turn_with_state(
 )]
 async fn commit_explicit_user_memory_inner(
     state: &Arc<AppState>,
-    source_task_id: String,
-    source_run_id: String,
+    source_task_id: Option<String>,
+    source_run_id: Option<String>,
     source_message_id: String,
     source_message_digest: String,
     authorized_candidate_id: String,
     fact: CanonicalMemoryFactDescriptor,
-    admission_proof: PolicyMemoryAdmissionProof,
+    admission_proof: ExplicitMemoryAdmissionProof,
     execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
 ) -> Result<ExplicitMemoryWriteReceipt, String> {
     let lifecycle_store = state
@@ -3077,8 +2762,11 @@ async fn commit_explicit_user_memory_inner(
         .ok_or_else(memory_lifecycle_store_missing)?;
     let store = lifecycle_store.lock().await;
     let result = {
+        let source_owner = source_task_id
+            .as_deref()
+            .unwrap_or(source_message_id.as_str());
         let commit_permit = execution_epoch
-            .begin_canonical_commit("memory", format!("explicit:{source_task_id}"))
+            .begin_canonical_commit("memory", format!("explicit:{source_owner}"))
             .map_err(|rejection| format!("explicit memory commit rejected: {rejection:?}"))?;
         let result = store.commit_explicit_user_memory(
             ExplicitMemoryWriteInput {
@@ -3165,18 +2853,180 @@ async fn commit_explicit_user_memory_inner(
     }
 }
 
-pub(crate) fn memory_gateway_decision_for_proposal(
-    proposal: &AgentProposal,
-    user_intent_kind: &str,
-    evidence_refs: Vec<String>,
-) -> MemoryGatewayDecision {
-    let request = MemoryGatewayRequest::from_proposal(
-        proposal,
-        &proposal.after,
-        user_intent_kind.to_string(),
-        evidence_refs,
-    );
-    MemoryGateway::decide_request(&request)
+async fn reconcile_memory_acceptance_report(
+    state: &Arc<AppState>,
+    report: &mut MemoryLifecycleAcceptanceReport,
+) -> Result<Option<String>, String> {
+    let canonical_mutation = report
+        .canonical_mutation
+        .as_ref()
+        .ok_or_else(|| "active Memory admission is missing canonical mutation".to_string())?;
+    notify_canonical_outbox_background_worker(state);
+    let mut preceding_states = Vec::new();
+    let mut error_digests = Vec::new();
+    for receipt in &report.preceding_canonical_mutations {
+        if let Err(error) = reconcile_foreground_canonical_outbox_event_with_state(
+            state,
+            CanonicalOutboxOwner::MemoryLifecycleStore,
+            &receipt.event_id,
+        )
+        .await
+        {
+            error_digests.push(openlife_core::persistence_outbox::metadata_digest(&error));
+        }
+        preceding_states.push(
+            state
+                .memory_lifecycle_store
+                .as_ref()
+                .ok_or_else(memory_lifecycle_store_missing)?
+                .lock()
+                .await
+                .projection_summary(&receipt.event_id)
+                .map_err(|error| error.to_string())?
+                .state(),
+        );
+    }
+    if let Err(error) = reconcile_foreground_canonical_outbox_event_with_state(
+        state,
+        CanonicalOutboxOwner::MemoryLifecycleStore,
+        &canonical_mutation.event_id,
+    )
+    .await
+    {
+        error_digests.push(openlife_core::persistence_outbox::metadata_digest(&error));
+    }
+    let projection_state = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?
+        .lock()
+        .await
+        .projection_summary(&canonical_mutation.event_id)
+        .map_err(|error| error.to_string())?
+        .state();
+    report.projection_state = if preceding_states.contains(&ProjectionDeliveryState::Degraded) {
+        ProjectionDeliveryState::Degraded
+    } else if preceding_states
+        .iter()
+        .any(|state| *state != ProjectionDeliveryState::Applied)
+    {
+        ProjectionDeliveryState::Pending
+    } else {
+        projection_state
+    };
+    Ok(
+        (report.projection_state != ProjectionDeliveryState::Applied).then(|| {
+            openlife_core::persistence_outbox::metadata_digest(&format!(
+                "memory_projection:{}:{:?}:{:?}",
+                canonical_mutation.event_id, report.projection_state, error_digests
+            ))
+        }),
+    )
+}
+
+pub(crate) async fn correct_memory_asset_with_state(
+    memory_id: String,
+    content: String,
+    state: &Arc<AppState>,
+) -> Result<MemoryCorrectionResult, String> {
+    require_persistence_write_string(state)?;
+    ensure_exact_memory_id(&memory_id)?;
+    let content = content.trim();
+    if content.is_empty() || content.chars().count() > 32_768 {
+        return Err("Memory correction must contain 1..=32,768 characters".into());
+    }
+    let lifecycle_store = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(memory_lifecycle_store_missing)?;
+    let mut report = {
+        let store = lifecycle_store.lock().await;
+        let record = store
+            .get_record(&memory_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "Memory correction target not found".to_string())?;
+        if !store
+            .is_memory_retrievable(&memory_id)
+            .map_err(|error| error.to_string())?
+            || record.content.is_empty()
+        {
+            return Err("Restore this Memory before correcting it".into());
+        }
+        if record.category == MemoryLifecycleCategory::Correction {
+            return Err("A historical correction record cannot be corrected again".into());
+        }
+        if record.content == content {
+            return Err("Memory correction must change the content".into());
+        }
+        let mut fact = CanonicalMemoryFactDescriptor::new(
+            content.to_string(),
+            record.scope,
+            record.category,
+            record.risk_level,
+            record.sensitivity,
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(owner) = record.scope_owner_ref.as_deref() {
+            fact = fact
+                .with_scope_owner_ref(owner)
+                .map_err(|error| error.to_string())?;
+        }
+        store
+            .accept_memory_proposal(MemoryLifecycleAcceptanceInput {
+                proposal_id: format!("direct:memory-correction:{}", uuid::Uuid::new_v4()),
+                source_task_id: record.source_task_id,
+                source_run_id: record.source_run_id,
+                fact,
+                created_by: "user_direct_control".into(),
+                accepted_by: "user".into(),
+                evidence_ids: record.evidence_ids,
+                confidence: "1.000".into(),
+                conflict_ids: Vec::new(),
+                supersedes_memory_id: Some(memory_id.clone()),
+            })
+            .map_err(|error| error.to_string())?
+    };
+    let projection_error_digest = reconcile_memory_acceptance_report(state, &mut report).await?;
+    Ok(MemoryCorrectionResult {
+        memory_id: report.record.memory_id,
+        replaced_memory_id: memory_id,
+        canonical_committed: report.canonical_committed,
+        projection_state: report.projection_state,
+        projection_error_digest,
+        undo_available: true,
+    })
+}
+
+pub(crate) async fn archive_memory_asset_with_state(
+    memory_id: String,
+    state: &Arc<AppState>,
+) -> Result<MemoryRetrievalMutationResult, AppError> {
+    ensure_exact_memory_id(&memory_id).map_err(AppError::permission)?;
+    set_memory_retrieval_disposition_with_state(
+        &CanonicalMemoryOwnerInput {
+            owner_kind: "memory_lifecycle".into(),
+            owner_id: memory_id,
+        },
+        MemoryRetrievalDisposition::Archived,
+        "user_direct_archive",
+        state,
+    )
+    .await
+}
+
+pub(crate) async fn restore_memory_asset_with_state(
+    memory_id: String,
+    state: &Arc<AppState>,
+) -> Result<MemoryRetrievalMutationResult, AppError> {
+    ensure_exact_memory_id(&memory_id).map_err(AppError::permission)?;
+    restore_archived_chunks_with_state(
+        &CanonicalMemoryOwnerInput {
+            owner_kind: "memory_lifecycle".into(),
+            owner_id: memory_id,
+        },
+        state,
+    )
+    .await
 }
 
 pub(crate) async fn archive_memory_for_proposal_with_state(
@@ -3343,153 +3193,8 @@ async fn finish_memory_rollback_projection(
     Ok(())
 }
 
-async fn recover_explicit_memory_rollback_receipt(
-    commit_receipt: &ExplicitMemoryWriteReceipt,
-    state: &Arc<AppState>,
-) -> Result<ExplicitMemoryRollbackReceipt, String> {
-    let lifecycle_store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(memory_lifecycle_store_missing)?;
-    let store = lifecycle_store.lock().await;
-    let record = store
-        .get_record(&commit_receipt.memory_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "explicit_memory_rollback_record_missing".to_string())?;
-    if record.status != openlife_core::agent::MemoryLifecycleStatus::RolledBack
-        || record.runtime_context_excluded_at.is_none()
-        || !record.proposal_id.starts_with("explicit_memory:")
-        || !record
-            .evidence_ids
-            .iter()
-            .any(|evidence| evidence == &commit_receipt.source_message_id)
-    {
-        return Err("explicit_memory_rollback_recovery_identity_mismatch".into());
-    }
-    let rollback_event_id = record
-        .rolled_back_by_event_id
-        .as_deref()
-        .ok_or_else(|| "explicit_memory_rollback_event_missing".to_string())?;
-    let rollback_event = store
-        .lifecycle_events(&record.memory_id)
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .find_map(|event| {
-            (event.event_id == rollback_event_id)
-                .then_some(event.rollback_event)
-                .flatten()
-        })
-        .ok_or_else(|| "explicit_memory_rollback_event_body_missing".to_string())?;
-    if rollback_event.memory_id != record.memory_id
-        || rollback_event.proposal_id != record.proposal_id
-        || rollback_event.next_status != openlife_core::agent::MemoryLifecycleStatus::RolledBack
-    {
-        return Err("explicit_memory_rollback_event_identity_mismatch".into());
-    }
-    let outbox_event_id = store
-        .latest_projection_event_id(&record.memory_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "explicit_memory_rollback_outbox_event_missing".to_string())?;
-    let projection_state = store
-        .projection_summary(&outbox_event_id)
-        .map_err(|error| error.to_string())?
-        .state();
-    Ok(ExplicitMemoryRollbackReceipt {
-        receipt_id: rollback_event.rollback_event_id.clone(),
-        memory_id: record.memory_id,
-        rollback_event_id: rollback_event.rollback_event_id,
-        outbox_event_id,
-        projection_state,
-        canonical_committed: true,
-        replayed: true,
-        final_active: false,
-    })
-}
-
-pub(crate) async fn rollback_explicit_user_memory_for_turn_with_state(
-    state: &Arc<AppState>,
-    commit_receipt: &ExplicitMemoryWriteReceipt,
-    rollback_grant: PolicyMemoryRollbackGrant,
-    execution_epoch: &crate::main_chat_cancellation::MainChatExecutionEpoch,
-) -> Result<ExplicitMemoryRollbackReceipt, String> {
-    let terminal_recovery = rollback_grant
-        .consume_for_explicit_receipt(commit_receipt)
-        .map_err(|error| error.to_string())?;
-    if terminal_recovery {
-        return recover_explicit_memory_rollback_receipt(commit_receipt, state).await;
-    }
-
-    require_persistence_write_string(state)?;
-    ensure_exact_memory_id(&commit_receipt.memory_id)?;
-    let lifecycle_store = state
-        .memory_lifecycle_store
-        .as_ref()
-        .ok_or_else(memory_lifecycle_store_missing)?;
-    let rollback_result = {
-        // Acquire the async store guard before entering the cancellation-fenced
-        // synchronous SQLite mutation. The deliberately !Send commit permit is
-        // always settled inside this block and is never held across an await.
-        let store = lifecycle_store.lock().await;
-        let commit_permit = execution_epoch
-            .begin_canonical_commit(
-                "memory",
-                format!("explicit_rollback:{}", commit_receipt.memory_id),
-            )
-            .map_err(|rejection| format!("explicit memory rollback rejected: {rejection:?}"))?;
-        let result = store
-            .rollback_memory_asset(
-                &commit_receipt.memory_id,
-                "user",
-                "user_requested_same_turn_explicit_memory_rollback",
-            )
-            .map_err(|error| error.to_string());
-        match &result {
-            Ok(report) if report.canonical_committed => commit_permit.finish_committed(),
-            Ok(_) => commit_permit.finish_not_modified(),
-            Err(_) => commit_permit.finish_failed(),
-        }
-        result
-    };
-
-    let mut report = match rollback_result {
-        Ok(report) => report,
-        Err(error) => {
-            return recover_explicit_memory_rollback_receipt(commit_receipt, state)
-                .await
-                .map_err(|recovery_error| format!("{error};{recovery_error}"));
-        }
-    };
-    finish_memory_rollback_projection(state, &mut report).await?;
-    Ok(ExplicitMemoryRollbackReceipt {
-        receipt_id: report.rollback_event.rollback_event_id.clone(),
-        memory_id: report.record.memory_id,
-        rollback_event_id: report.rollback_event.rollback_event_id,
-        outbox_event_id: report.canonical_mutation.event_id,
-        projection_state: report.projection_state,
-        canonical_committed: report.canonical_committed,
-        replayed: false,
-        final_active: false,
-    })
-}
-
 fn memory_lifecycle_store_missing() -> String {
     "MemoryLifecycleStore unavailable; memory lifecycle governance is required.".into()
-}
-
-fn proposal_memory_evidence_refs(proposal: &AgentProposal) -> Vec<String> {
-    let mut refs = Vec::new();
-    if let Some(run_id) = proposal.run_id.as_ref() {
-        refs.push(format!("work_run:{run_id}"));
-    }
-    if let Some(evidence_id) = proposal
-        .after
-        .get("evidence_id")
-        .or_else(|| proposal.after.get("evidenceId"))
-        .and_then(serde_json::Value::as_str)
-    {
-        refs.push(format!("evidence:{evidence_id}"));
-    }
-    refs
 }
 
 fn ensure_exact_memory_id(memory_id: &str) -> Result<(), String> {
@@ -3524,96 +3229,24 @@ fn patch_result(
     }
 }
 
-fn serialized_label<T: Serialize>(value: &T) -> String {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|value| value.as_str().map(str::to_string))
-        .unwrap_or_else(|| "unknown".into())
-}
-
-trait MemoryGatewayWriteReportExt {
-    fn with_embedding_id(self, embedding_id: i64) -> Self;
-    fn with_optional_embedding_id(self, embedding_id: Option<i64>) -> Self;
-    fn with_memory_id(self, memory_id: impl Into<String>) -> Self;
-    fn with_embedding_projection(
-        self,
-        profile: EmbeddingProfile,
-        receipt: EmbeddingInvocationReceipt,
-        status: &str,
-    ) -> Self;
-    fn with_optional_embedding_projection(
-        self,
-        profile: Option<EmbeddingProfile>,
-        receipt: Option<EmbeddingInvocationReceipt>,
-        status: &str,
-    ) -> Self;
-    fn with_gateway_write(self) -> Self;
-}
-
-impl MemoryGatewayWriteReportExt for MemoryGatewayWriteReport {
-    fn with_embedding_id(mut self, embedding_id: i64) -> Self {
-        self.embedding_id = Some(embedding_id);
-        self
-    }
-
-    fn with_optional_embedding_id(mut self, embedding_id: Option<i64>) -> Self {
-        self.embedding_id = embedding_id;
-        self
-    }
-
-    fn with_memory_id(mut self, memory_id: impl Into<String>) -> Self {
-        self.memory_id = Some(memory_id.into());
-        self
-    }
-
-    fn with_embedding_projection(
-        self,
-        profile: EmbeddingProfile,
-        receipt: EmbeddingInvocationReceipt,
-        status: &str,
-    ) -> Self {
-        self.with_optional_embedding_projection(Some(profile), Some(receipt), status)
-    }
-
-    fn with_optional_embedding_projection(
-        mut self,
-        profile: Option<EmbeddingProfile>,
-        receipt: Option<EmbeddingInvocationReceipt>,
-        status: &str,
-    ) -> Self {
-        self.embedding_profile = profile;
-        self.embedding_receipt = receipt;
-        self.embedding_projection_status = Some(status.to_string());
-        self
-    }
-
-    fn with_gateway_write(mut self) -> Self {
-        // This field reports whether a durable store mutation actually occurred. Governance
-        // through MemoryGateway does not make the write disappear; callers must distinguish the
-        // canonical Conversation write from a long-term Memory decision via `decision`.
-        self.direct_store_write = true;
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn reviewed_project_memory_proposal(id: &str, content: &str) -> AgentProposal {
+    fn reviewed_personal_memory_proposal(id: &str, content: &str) -> AgentProposal {
         let mut proposal = AgentProposal::new(
             openlife_core::agent::ProposalType::MemoryWrite,
-            "memory.project",
+            "memory.personal",
             serde_json::json!({
                 "content": content,
-                "scope": "project",
+                "scope": "global",
                 "category": "preference",
                 "candidateKind": "preference",
                 "riskLevel": "low",
                 "sensitivity": "internal"
             }),
-            "Reviewed project Memory",
+            "Reviewed personal Memory",
             1.0,
             openlife_core::agent::RiskLevel::Low,
             openlife_core::agent::ProposalSource::Manual,
@@ -3625,23 +3258,14 @@ mod tests {
     #[tokio::test]
     async fn reviewed_correction_waits_for_old_tombstone_and_new_projection() {
         let state = crate::test_utils::test_app_state();
-        let project_root = tempfile::tempdir().expect("project root");
-        state.config.lock().await.system.project_memory_root = Some(
-            project_root
-                .path()
-                .canonicalize()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned(),
-        );
-        let original = reviewed_project_memory_proposal(
+        let original = reviewed_personal_memory_proposal(
             "proposal:correction-original",
-            "Original project communication preference.",
+            "Original communication preference.",
         );
         let original_result = materialize_memory_proposal_with_state(
             &state,
             &original,
-            "Original project communication preference.".into(),
+            "Original communication preference.".into(),
             "session:test".into(),
             "manual".into(),
         )
@@ -3657,20 +3281,20 @@ mod tests {
             .list_retrievable_records(None, 10)
             .unwrap()
             .into_iter()
-            .find(|record| record.content == "Original project communication preference.")
+            .find(|record| record.content == "Original communication preference.")
             .unwrap();
-        assert!(original_record.scope_owner_ref.is_some());
+        assert!(original_record.scope_owner_ref.is_none());
         let original_memory_id = original_record.memory_id;
 
-        let mut correction = reviewed_project_memory_proposal(
+        let mut correction = reviewed_personal_memory_proposal(
             "proposal:correction-replacement",
-            "Corrected project communication preference.",
+            "Corrected communication preference.",
         );
         correction.after["supersedesMemoryId"] = serde_json::json!(original_memory_id);
         let correction_result = materialize_memory_proposal_with_state(
             &state,
             &correction,
-            "Corrected project communication preference.".into(),
+            "Corrected communication preference.".into(),
             "session:test".into(),
             "manual".into(),
         )
@@ -3688,10 +3312,17 @@ mod tests {
             .into_iter()
             .map(|record| record.content)
             .collect::<Vec<_>>();
-        assert_eq!(
-            projected_content,
-            vec!["Corrected project communication preference.".to_string()]
-        );
+        assert!(projected_content.is_empty());
+        let canonical = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_retrievable_records(None, 10)
+            .unwrap();
+        assert_eq!(canonical.len(), 1);
+        assert_eq!(canonical[0].content, "Corrected communication preference.");
     }
 
     fn install_canonical_commit_admission_barrier(
@@ -3728,71 +3359,8 @@ mod tests {
         (admitted_rx, release_tx)
     }
 
-    fn install_release_like_persistence_coordinator(
-        state: &mut Arc<AppState>,
-    ) -> Arc<crate::persistence_coordinator::PersistenceCoordinator> {
-        let coordinator = Arc::new(
-            crate::persistence_coordinator::PersistenceCoordinator::for_release_bootstrap(),
-        );
-        for store in crate::persistence_coordinator::EXPECTED_BOOTSTRAP_STORES {
-            coordinator.register_read_write(*store);
-        }
-        coordinator.seal();
-        assert_eq!(
-            coordinator.snapshot().mode,
-            crate::persistence_coordinator::PersistenceRuntimeMode::ReadWrite
-        );
-        Arc::get_mut(state)
-            .expect("test state must have one outer owner")
-            .persistence_coordinator = Arc::clone(&coordinator);
-        coordinator
-    }
     #[tokio::test]
-    async fn memory_and_vector_gateways_reject_admitted_writes_after_generation_invalidation() {
-        let memory_state = crate::test_utils::test_app_state();
-        let before_messages = memory_state
-            .memory_store
-            .lock()
-            .await
-            .message_count()
-            .unwrap();
-        let (memory_admitted, release_memory) =
-            install_canonical_commit_admission_barrier(&memory_state);
-        let late_memory_state = Arc::clone(&memory_state);
-        let memory_write = tokio::spawn(async move {
-            save_turn_user_message_idempotent_with_state(
-                "late-barrier-session",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "MUST_NOT_COMMIT_AFTER_RECOVERY_FENCE".into(),
-                },
-                &uuid::Uuid::new_v4().hyphenated().to_string(),
-                &late_memory_state,
-            )
-            .await
-        });
-        memory_admitted
-            .await
-            .expect("Memory write must pause after synchronous admission");
-        memory_state
-            .persistence_coordinator
-            .degrade_globally("test_memory_admission_invalidated");
-        release_memory.send(()).unwrap();
-        let memory_error = memory_write
-            .await
-            .unwrap()
-            .expect_err("stale Memory admission must not reach its owner lock");
-        assert!(memory_error.contains("persistence_admission_invalidated"));
-        assert_eq!(
-            memory_state
-                .memory_store
-                .lock()
-                .await
-                .message_count()
-                .unwrap(),
-            before_messages
-        );
-
+    async fn vector_gateway_rejects_admitted_writes_after_generation_invalidation() {
         let vector_state = crate::test_utils::test_app_state();
         let before_vectors = vector_state
             .vector_store
@@ -3901,18 +3469,16 @@ mod tests {
     #[tokio::test]
     async fn late_memory_access_telemetry_is_skipped_without_losing_search_results() {
         let state = crate::test_utils::test_app_state();
+        create_knowledge_note_with_state(
+            uuid::Uuid::new_v4().to_string(),
+            "memory-telemetry-session".into(),
+            "MEMORY_RESULT_MUST_SURVIVE_SKIPPED_TELEMETRY".into(),
+            "test".into(),
+            &state,
+        )
+        .await
+        .unwrap();
         let store = state.memory_store.lock().await.clone();
-        store
-            .save_memory_record(
-                "memory-telemetry-session",
-                "MEMORY_RESULT_MUST_SURVIVE_SKIPPED_TELEMETRY",
-                "note",
-                "manual",
-                &[],
-                "private",
-                None,
-            )
-            .unwrap();
         let telemetry_ticket = prepare_memory_search_access_telemetry(&state);
         let hits = store
             .search_text_memories(None, "MEMORY_RESULT_MUST_SURVIVE_SKIPPED_TELEMETRY", 5)
@@ -3963,6 +3529,7 @@ mod tests {
             before_source
         );
     }
+    #[tokio::test]
     async fn late_memory_retrieval_materializer_rejects_invalidated_commit_admission() {
         let state = crate::test_utils::test_app_state();
         let (_input, owner) =
@@ -4388,7 +3955,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let restore_newest = |store: &openlife_core::memory::MemoryStore| {
+        let restore_newest = |store: &openlife_core::memory::KnowledgeNoteProjectionStore| {
             store
                 .set_memory_retrieval_disposition(
                     &owner_a,
@@ -4455,16 +4022,17 @@ mod tests {
             .owner()
             .unwrap();
         let newest_for_hook = newest.clone();
-        let restore_after_first_page = move |store: &openlife_core::memory::MemoryStore| {
-            store
-                .set_memory_retrieval_disposition(
-                    &newest_for_hook,
-                    MemoryRetrievalDisposition::Active,
-                    "test_restore_after_archive_page",
-                )
-                .map(|_| ())
-                .map_err(AppError::from)
-        };
+        let restore_after_first_page =
+            move |store: &openlife_core::memory::KnowledgeNoteProjectionStore| {
+                store
+                    .set_memory_retrieval_disposition(
+                        &newest_for_hook,
+                        MemoryRetrievalDisposition::Active,
+                        "test_restore_after_archive_page",
+                    )
+                    .map(|_| ())
+                    .map_err(AppError::from)
+            };
 
         let listed =
             list_archived_chunks_with_state_inner(500, &state, Some(&restore_after_first_page))
@@ -4561,6 +4129,7 @@ mod tests {
         .owner()
         .is_err());
     }
+    #[tokio::test]
     async fn existing_vector_marker_cannot_hide_lost_canonical_knowledge_note_proof() {
         let state = crate::test_utils::test_app_state();
         state.config.lock().await.llm.embedding_enabled = false;
@@ -4621,12 +4190,64 @@ mod tests {
     fn test_explicit_fact(content: &str) -> CanonicalMemoryFactDescriptor {
         CanonicalMemoryFactDescriptor::new(
             content,
-            MemoryLifecycleScope::Global,
+            openlife_core::agent::MemoryLifecycleScope::Global,
             openlife_core::agent::MemoryLifecycleCategory::Fact,
             openlife_core::agent::MemoryLifecycleRiskLevel::Low,
             openlife_core::agent::MemoryLifecycleSensitivity::Internal,
         )
         .unwrap()
+    }
+
+    fn test_explicit_candidate_and_fact(
+        source_message_id: &str,
+        source_user_message: &str,
+    ) -> (MemoryCandidate, CanonicalMemoryFactDescriptor) {
+        let claim = source_user_message.trim().trim_end_matches('.').to_string();
+        let candidate = MemoryCandidate {
+            candidate_id: format!(
+                "test-memory-candidate:{}",
+                openlife_core::agent::metadata_safe_text_digest(&format!(
+                    "{source_message_id}\0{claim}"
+                ))
+                .1
+            ),
+            source_span_id: source_message_id.to_string(),
+            kind: openlife_core::agent::MemoryCandidateKind::SemanticUserFact,
+            destination: openlife_core::agent::MemoryDestination::MemoryProposal,
+            evidence_text: claim.clone(),
+            source_preview: claim.clone(),
+            normalized_claim: claim.clone(),
+            sensitivity: "internal".into(),
+            stability: "user_directed".into(),
+            explicitness: "explicit".into(),
+            future_actionability: "user_directed".into(),
+            confidence: 1.0,
+            reason_codes: vec!["typed_test_fixture".into()],
+        };
+        let fact = test_explicit_fact(&claim);
+        (candidate, fact)
+    }
+
+    fn test_explicit_admission_proof(
+        source_message_id: &str,
+        source_user_message: &str,
+        candidate: &MemoryCandidate,
+        fact: &CanonicalMemoryFactDescriptor,
+    ) -> ExplicitMemoryAdmissionProof {
+        ExplicitMemoryAdmissionProof::test_fixture_for_explicit_input(
+            &openlife_core::agent::ExplicitMemoryWriteInput {
+                source_task_id: None,
+                source_run_id: None,
+                source_message_id: source_message_id.to_string(),
+                source_message_digest:
+                    openlife_core::agent::metadata_safe::metadata_safe_text_digest(
+                        source_user_message,
+                    )
+                    .1,
+                authorized_candidate_id: candidate.candidate_id.clone(),
+                fact: fact.clone(),
+            },
+        )
     }
 
     async fn commit_test_explicit_memory(
@@ -4637,11 +4258,14 @@ mod tests {
         fact: CanonicalMemoryFactDescriptor,
     ) -> Result<ExplicitMemoryWriteReceipt, String> {
         let source_user_message = format!("Please remember: {}", fact.canonical_body);
-        let (_policy, candidate, fact, proof) =
-            crate::main_chat_kernel::test_policy_memory_admission_context(
-                source_message_id,
-                &source_user_message,
-            );
+        let (candidate, fact) =
+            test_explicit_candidate_and_fact(source_message_id, &source_user_message);
+        let proof = test_explicit_admission_proof(
+            source_message_id,
+            &source_user_message,
+            &candidate,
+            &fact,
+        );
         let registry = {
             state
                 .main_chat_runtime_state
@@ -4653,8 +4277,8 @@ mod tests {
         let registration = registry.register(task_id);
         commit_explicit_user_memory_for_turn_with_state(
             state,
-            task_id.to_string(),
-            source_run_id.to_string(),
+            Some(task_id.to_string()),
+            Some(source_run_id.to_string()),
             source_message_id.to_string(),
             fact,
             proof,
@@ -4688,32 +4312,6 @@ mod tests {
         config.llm.openai_key = "sk-test".into();
         config.llm.embedding_model = "text-embedding-3-small".into();
         config.llm.embedding_enabled = true;
-    }
-
-    fn deletion_test_profile() -> EmbeddingProfile {
-        EmbeddingProfile::new(
-            EmbeddingRouteKind::DeterministicHash,
-            "openlife",
-            openlife_core::embedding::DETERMINISTIC_HASH_MODEL_V1,
-            "builtin:openlife",
-            openlife_core::embedding::DETERMINISTIC_HASH_ARTIFACT_V1,
-            4,
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn gateway_report_does_not_hide_a_canonical_conversation_write() {
-        let report =
-            MemoryGatewayWriteReport::new(MemoryGateway::decide(MemoryGatewaySubject::ChatTurn))
-                .with_session_id("session-1")
-                .with_gateway_write();
-
-        assert_eq!(
-            report.decision.status,
-            MemoryGatewayWriteStatus::ContextOnly
-        );
-        assert!(report.direct_store_write);
     }
 
     #[test]
@@ -4756,16 +4354,19 @@ mod tests {
         };
         let registration = registry.register(task_id);
         let source_user_message = "Remember this proof-bound fact.".to_string();
-        let (_policy, candidate, fact, proof) =
-            crate::main_chat_kernel::test_policy_memory_admission_context(
-                "message-policy-authorized",
-                &source_user_message,
-            );
+        let (candidate, fact) =
+            test_explicit_candidate_and_fact("message-policy-authorized", &source_user_message);
+        let proof = test_explicit_admission_proof(
+            "message-policy-authorized",
+            &source_user_message,
+            &candidate,
+            &fact,
+        );
 
         let error = commit_explicit_user_memory_for_turn_with_state(
             &state,
-            task_id.into(),
-            "run-proof-message-mismatch".into(),
+            Some(task_id.into()),
+            Some("run-proof-message-mismatch".into()),
             "message-spoofed".into(),
             fact,
             proof,
@@ -4803,16 +4404,19 @@ mod tests {
         let registration = registry.register(task_id);
         registry.request_cancel(task_id);
         let source_user_message = "Remember this only if the canonical commit wins.".to_string();
-        let (_policy, candidate, fact, proof) =
-            crate::main_chat_kernel::test_policy_memory_admission_context(
-                "message-memory-cancel",
-                &source_user_message,
-            );
+        let (candidate, fact) =
+            test_explicit_candidate_and_fact("message-memory-cancel", &source_user_message);
+        let proof = test_explicit_admission_proof(
+            "message-memory-cancel",
+            &source_user_message,
+            &candidate,
+            &fact,
+        );
 
         let error = commit_explicit_user_memory_for_turn_with_state(
             &state,
-            task_id.into(),
-            "run-memory-cancel".into(),
+            Some(task_id.into()),
+            Some("run-memory-cancel".into()),
             "message-memory-cancel".into(),
             fact,
             proof,
@@ -4857,15 +4461,18 @@ mod tests {
         let registration = registry.register(task_id);
         let source_user_message =
             "Remember that canonical commit won before cancellation.".to_string();
-        let (_policy, candidate, fact, proof) =
-            crate::main_chat_kernel::test_policy_memory_admission_context(
-                "message-memory-commit",
-                &source_user_message,
-            );
+        let (candidate, fact) =
+            test_explicit_candidate_and_fact("message-memory-commit", &source_user_message);
+        let proof = test_explicit_admission_proof(
+            "message-memory-commit",
+            &source_user_message,
+            &candidate,
+            &fact,
+        );
         let receipt = commit_explicit_user_memory_for_turn_with_state(
             &state,
-            task_id.into(),
-            "run-memory-commit".into(),
+            Some(task_id.into()),
+            Some("run-memory-commit".into()),
             "message-memory-commit".into(),
             fact,
             proof,
@@ -4945,7 +4552,7 @@ mod tests {
             .await
             .projection_summary(own_event_id)
             .unwrap();
-        assert_eq!(own.applied, 1);
+        assert_eq!(own.applied, 0);
         assert_eq!(own.pending, 1);
         let unrelated_summary = state
             .memory_store
@@ -4955,21 +4562,20 @@ mod tests {
             .unwrap();
         assert_eq!(unrelated_summary.pending, 1);
 
-        let startup_delete = {
-            let memory = state.memory_store.lock().await;
-            memory
-                .create_chat_session("startup-blocking-session", "Delete during startup")
-                .unwrap();
-            memory
-                .delete_chat_session_with_tombstone(
-                    "startup-blocking-session",
-                    Some("startup_reconciliation_test"),
-                )
-                .unwrap()
-        };
+        let startup_delete = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .rollback_memory_asset(&receipt.memory_id, "test", "startup_reconciliation_test")
+            .unwrap()
+            .canonical_mutation;
         assert_eq!(
             state
-                .memory_store
+                .memory_lifecycle_store
+                .as_ref()
+                .unwrap()
                 .lock()
                 .await
                 .projection_summary(&startup_delete.event_id)
@@ -5010,7 +4616,9 @@ mod tests {
         assert!(!startup.blocking_backlog_may_remain);
         assert_eq!(
             state
-                .memory_store
+                .memory_lifecycle_store
+                .as_ref()
+                .unwrap()
                 .lock()
                 .await
                 .projection_summary(&startup_delete.event_id)
@@ -5073,7 +4681,7 @@ mod tests {
             .await
             .projection_summary(event_id)
             .unwrap();
-        assert_eq!(pending.applied, 1);
+        assert_eq!(pending.applied, 0);
         assert_eq!(pending.pending, 1);
         assert_eq!(pending.degraded, 0);
         assert_eq!(
@@ -5183,185 +4791,5 @@ mod tests {
                 .state(),
             ProjectionDeliveryState::Applied
         );
-    }
-
-    #[tokio::test]
-    async fn committed_conversation_tombstone_replays_after_crash_without_searchable_vector() {
-        const SENTINEL: &str = "PRIVATE_DELETION_REPLAY_SENTINEL";
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        {
-            let memory = state.memory_store.lock().await;
-            memory
-                .create_chat_session("delete-replay-session", "Delete me")
-                .unwrap();
-            memory
-                .save_message(
-                    "delete-replay-session",
-                    &ChatMessage {
-                        role: "user".into(),
-                        content: SENTINEL.into(),
-                    },
-                )
-                .unwrap();
-        }
-        {
-            let vector = state.vector_store.lock().await;
-            vector
-                .insert(
-                    "delete-replay-session",
-                    SENTINEL,
-                    &[0.1, 0.2, 0.3, 0.4],
-                    &deletion_test_profile(),
-                    "manual_index",
-                )
-                .unwrap();
-        }
-
-        let receipt = state
-            .memory_store
-            .lock()
-            .await
-            .delete_chat_session_with_tombstone("delete-replay-session", Some("user delete"))
-            .unwrap();
-        assert!(state
-            .memory_store
-            .lock()
-            .await
-            .load_recent_messages("delete-replay-session", 10)
-            .unwrap()
-            .is_empty());
-        assert!(state
-            .vector_store
-            .lock()
-            .await
-            .export_all_chunks()
-            .unwrap()
-            .iter()
-            .any(|chunk| chunk.content == SENTINEL));
-        assert_eq!(
-            state
-                .memory_store
-                .lock()
-                .await
-                .projection_summary(&receipt.event_id)
-                .unwrap()
-                .pending,
-            1
-        );
-
-        let report = reconcile_canonical_outboxes_with_state(&state, 200)
-            .await
-            .unwrap();
-        assert_eq!(report.applied, 1);
-        assert_eq!(report.degraded, 0);
-        assert!(!state
-            .vector_store
-            .lock()
-            .await
-            .export_all_chunks()
-            .unwrap()
-            .iter()
-            .any(|chunk| chunk.content == SENTINEL));
-        assert_eq!(
-            state
-                .memory_store
-                .lock()
-                .await
-                .projection_summary(&receipt.event_id)
-                .unwrap()
-                .state(),
-            ProjectionDeliveryState::Applied
-        );
-
-        let duplicate = reconcile_canonical_outboxes_with_state(&state, 200)
-            .await
-            .unwrap();
-        assert_eq!(duplicate.examined, 0);
-    }
-
-    #[tokio::test]
-    async fn degraded_deletion_projection_remains_durable_and_recovers_without_redelete() {
-        const SENTINEL: &str = "PRIVATE_DELETION_RECOVERY_SENTINEL";
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        {
-            let memory = state.memory_store.lock().await;
-            memory
-                .create_chat_session("delete-recovery-session", "Delete me")
-                .unwrap();
-            memory
-                .save_message(
-                    "delete-recovery-session",
-                    &ChatMessage {
-                        role: "user".into(),
-                        content: SENTINEL.into(),
-                    },
-                )
-                .unwrap();
-        }
-        {
-            let vector = state.vector_store.lock().await;
-            vector
-                .insert(
-                    "delete-recovery-session",
-                    SENTINEL,
-                    &[0.1, 0.2, 0.3, 0.4],
-                    &deletion_test_profile(),
-                    "manual_index",
-                )
-                .unwrap();
-            vector
-                .install_tombstone_projection_failure_for_test()
-                .unwrap();
-        }
-        let receipt = state
-            .memory_store
-            .lock()
-            .await
-            .delete_chat_session_with_tombstone("delete-recovery-session", None)
-            .unwrap();
-
-        let degraded = reconcile_canonical_outboxes_with_state(&state, 200)
-            .await
-            .unwrap();
-        assert_eq!(degraded.degraded, 1);
-        let summary = state
-            .memory_store
-            .lock()
-            .await
-            .projection_summary(&receipt.event_id)
-            .unwrap();
-        assert_eq!(summary.state(), ProjectionDeliveryState::Degraded);
-        assert_eq!(summary.applied, 0);
-        assert_eq!(summary.degraded, 1);
-
-        state
-            .vector_store
-            .lock()
-            .await
-            .remove_tombstone_projection_failure_for_test()
-            .unwrap();
-        let recovered = reconcile_canonical_outboxes_with_state(&state, 200)
-            .await
-            .unwrap();
-        assert_eq!(recovered.applied, 1);
-        assert_eq!(recovered.degraded, 0);
-        assert_eq!(
-            state
-                .memory_store
-                .lock()
-                .await
-                .projection_summary(&receipt.event_id)
-                .unwrap()
-                .state(),
-            ProjectionDeliveryState::Applied
-        );
-        assert!(!state
-            .vector_store
-            .lock()
-            .await
-            .export_all_chunks()
-            .unwrap()
-            .iter()
-            .any(|chunk| chunk.content == SENTINEL));
     }
 }

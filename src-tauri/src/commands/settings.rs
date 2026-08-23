@@ -26,12 +26,10 @@ use crate::provider_network_consent::{
     authorize_explicit_provider_probe, ExplicitProviderProbeAuthorization,
 };
 use crate::secret_store::{
-    create_mcp_audit_key_material, hydrate_bound_provider_secret,
-    hydrate_or_create_canonical_store_integrity_key, hydrate_or_create_integrity_key,
+    create_mcp_audit_key_material, hydrate_bound_provider_secret, hydrate_or_create_integrity_key,
     inspect_existing_mcp_audit_keys, inspect_integrity_key_access, stage_config_secrets,
     IntegrityKeyInspection, McpAuditKeyHydrationInspection, ProfileSecretStore, SecretStore,
     CANONICAL_TASK_RECEIPT_KEY_REF, MCP_AUDIT_KEY_REF_PREFIX, PROVIDER_KEY_REF, SEARCH_KEY_REF,
-    TASK_STORE_AUTHORITY_KEY_REF,
 };
 use crate::state::{CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{
@@ -217,12 +215,6 @@ fn inspect_required_credential_snapshot(
             CANONICAL_TASK_RECEIPT_KEY_REF,
             &["task_runtime.db"],
         ),
-        inspect_fixed_credential_status(
-            data_dir,
-            store,
-            TASK_STORE_AUTHORITY_KEY_REF,
-            &["tasks.db"],
-        ),
         inspect_mcp_audit_credential_status(data_dir, store),
     ])
 }
@@ -248,6 +240,15 @@ fn inspect_search_provider_credential_status(
     config: &AppConfig,
     store: &dyn SecretStore,
 ) -> CredentialBootstrapStatus {
+    if config.search_reuses_selected_provider_credential() {
+        return inspect_provider_credential_status(config, store);
+    }
+    if matches!(
+        config.effective_search_provider(),
+        Some("duckduckgo" | "searxng")
+    ) {
+        return CredentialBootstrapStatus::Available;
+    }
     if config.system.search_provider_key_ref.as_deref() != Some(SEARCH_KEY_REF) {
         return CredentialBootstrapStatus::MissingExistingData;
     }
@@ -476,10 +477,7 @@ fn initialize_required_credentials_after_confirmation(
 
     let mut report = recovery_report_from_snapshot(&current_snapshot);
     let mut created = Vec::<CreatedCredential>::new();
-    for (purpose, secret_ref) in [
-        ("canonical_task_receipts", CANONICAL_TASK_RECEIPT_KEY_REF),
-        ("task_store", TASK_STORE_AUTHORITY_KEY_REF),
-    ] {
+    for (purpose, secret_ref) in [("canonical_task_receipts", CANONICAL_TASK_RECEIPT_KEY_REF)] {
         if !eligible.iter().any(|eligible| eligible == purpose) {
             continue;
         }
@@ -495,15 +493,7 @@ fn initialize_required_credentials_after_confirmation(
             }
             return Ok(report);
         }
-        let result = if purpose == "task_store" {
-            hydrate_or_create_canonical_store_integrity_key(
-                secret_ref,
-                &data_dir.join("tasks.db"),
-                store,
-            )
-        } else {
-            hydrate_or_create_integrity_key(secret_ref, store)
-        };
+        let result = hydrate_or_create_integrity_key(secret_ref, store);
         let key = match result {
             Ok(key) => key,
             Err(error) => {
@@ -701,7 +691,7 @@ fn resolve_submitted_provider_api_key(submitted: &AppConfig, current: &AppConfig
 fn search_provider_identity(config: &AppConfig) -> Option<String> {
     let provider = config.system.search_provider.trim().to_ascii_lowercase();
     match provider.as_str() {
-        "duckduckgo" | "brave" | "deepseek" => Some(provider),
+        "auto" | "duckduckgo" | "brave" | "deepseek" | "openrouter" => Some(provider),
         "searxng" => {
             let parsed = reqwest::Url::parse(config.system.searxng_url.trim()).ok()?;
             if !matches!(parsed.scheme(), "http" | "https")
@@ -921,14 +911,6 @@ pub struct ArtifactOutputDirectorySelection {
     pub selected_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct MarkdownMemoryRootSelection {
-    pub cancelled: bool,
-    pub scope: crate::markdown_memory::MarkdownMemoryScope,
-    pub selected_path: Option<String>,
-}
-
 fn validate_artifact_output_directory(path: &Path) -> Result<PathBuf, AppError> {
     let metadata = path.symlink_metadata().map_err(|error| {
         AppError::permission(format!(
@@ -1021,83 +1003,6 @@ pub async fn select_artifact_output_directory<R: Runtime>(
     let canonical = persist_artifact_output_directory(state, &selected).await?;
     Ok(ArtifactOutputDirectorySelection {
         cancelled: false,
-        selected_path: Some(canonical.to_string_lossy().into_owned()),
-    })
-}
-
-async fn persist_markdown_memory_root(
-    state: &Arc<AppState>,
-    scope: crate::markdown_memory::MarkdownMemoryScope,
-    selected_path: &Path,
-) -> Result<PathBuf, AppError> {
-    require_config_write_admission(state)?;
-    let canonical = validate_artifact_output_directory(selected_path)?;
-    let _config_write_guard = CONFIG_WRITE_COORDINATOR.lock().await;
-    let config_path = app_data_dir().join("config.yaml");
-    let mut persisted = if config_path.exists() {
-        AppConfig::load(&config_path).map_err(|error| {
-            AppError::db_with_hint(
-                format!("Markdown memory root config load failed: {error}"),
-                "canonical_state_unknown",
-            )
-        })?
-    } else {
-        reference_only_config_for_first_persist(state.config.lock().await.clone())
-    };
-    let canonical_string = canonical.to_string_lossy().into_owned();
-    match scope {
-        crate::markdown_memory::MarkdownMemoryScope::Workspace => {
-            persisted.system.workspace_memory_root = Some(canonical_string.clone());
-        }
-        crate::markdown_memory::MarkdownMemoryScope::Project => {
-            persisted.system.project_memory_root = Some(canonical_string.clone());
-        }
-    }
-    persisted.save(&config_path).map_err(AppError::from)?;
-
-    let mut runtime_config = state.config.lock().await;
-    runtime_config.system.workspace_memory_root = persisted.system.workspace_memory_root.clone();
-    runtime_config.system.project_memory_root = persisted.system.project_memory_root.clone();
-    Ok(canonical)
-}
-
-pub(crate) async fn select_markdown_memory_root<R: Runtime>(
-    app_handle: tauri::AppHandle<R>,
-    state: &Arc<AppState>,
-    scope: crate::markdown_memory::MarkdownMemoryScope,
-) -> Result<MarkdownMemoryRootSelection, AppError> {
-    let (sender, receiver) = tokio::sync::oneshot::channel();
-    app_handle
-        .dialog()
-        .file()
-        .set_title(match scope {
-            crate::markdown_memory::MarkdownMemoryScope::Workspace => {
-                "选择 Workspace Markdown Memory 文件夹"
-            }
-            crate::markdown_memory::MarkdownMemoryScope::Project => {
-                "选择 Project Markdown Memory 文件夹"
-            }
-        })
-        .pick_folder(move |path| {
-            let _ = sender.send(path);
-        });
-    let selected = receiver
-        .await
-        .map_err(|_| AppError::internal("Markdown memory root picker closed without a result"))?;
-    let Some(selected) = selected else {
-        return Ok(MarkdownMemoryRootSelection {
-            cancelled: true,
-            scope,
-            selected_path: None,
-        });
-    };
-    let selected = selected.into_path().map_err(|_| {
-        AppError::permission("Markdown memory root picker returned an invalid path")
-    })?;
-    let canonical = persist_markdown_memory_root(state, scope, &selected).await?;
-    Ok(MarkdownMemoryRootSelection {
-        cancelled: false,
-        scope,
         selected_path: Some(canonical.to_string_lossy().into_owned()),
     })
 }
@@ -1701,12 +1606,11 @@ mod tests {
             vec![
                 "created",
                 "created",
-                "created",
                 "missing_existing_data",
                 "missing_existing_data",
             ]
         );
-        assert_eq!(*store.writes.lock().unwrap(), 3);
+        assert_eq!(*store.writes.lock().unwrap(), 2);
         assert_eq!(*store.deletes.lock().unwrap(), 0);
         let serialized = serde_json::to_string(&report).unwrap();
         assert!(!serialized.contains("keychain://"));
@@ -1719,17 +1623,12 @@ mod tests {
     fn credential_access_recovery_restores_existing_keys_without_writes_or_secret_output() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
-        for (index, secret_ref) in [CANONICAL_TASK_RECEIPT_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF]
-            .into_iter()
-            .enumerate()
-        {
-            store
-                .set(
-                    secret_ref,
-                    &general_purpose::STANDARD.encode([index as u8 + 1; 32]),
-                )
-                .unwrap();
-        }
+        store
+            .set(
+                CANONICAL_TASK_RECEIPT_KEY_REF,
+                &general_purpose::STANDARD.encode([1_u8; 32]),
+            )
+            .unwrap();
         let mut config = AppConfig::default();
         config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
         store
@@ -1745,7 +1644,6 @@ mod tests {
         *store.writes.lock().unwrap() = 0;
 
         let expected = CredentialBootstrapSnapshot::from_statuses([
-            CredentialBootstrapStatus::Unavailable,
             CredentialBootstrapStatus::Unavailable,
             CredentialBootstrapStatus::InitializationRequired,
         ])
@@ -1764,7 +1662,6 @@ mod tests {
         assert!(!report.initialization_completed_for_restart);
         for purpose in [
             "canonical_task_receipts",
-            "task_store",
             "provider_api_key",
             "search_provider_api_key",
         ] {
@@ -1793,6 +1690,30 @@ mod tests {
         assert!(!serialized.contains("sk-recovery-test"));
         assert!(!serialized.contains("sk-search-recovery-test"));
         assert!(!serialized.contains("keychain://"));
+    }
+
+    #[test]
+    fn official_deepseek_search_reports_the_selected_provider_credential_status() {
+        let store = RecoverySecretStore::default();
+        let mut config = AppConfig::default();
+        config.prefer_local_model = false;
+        config.llm.provider = "deepseek".into();
+        config.llm.openai_base = "https://api.deepseek.com".into();
+        config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
+        config.system.search_provider = "deepseek".into();
+        store
+            .set(
+                PROVIDER_KEY_REF,
+                &crate::secret_store::encode_provider_secret(&config, "sk-shared-deepseek")
+                    .unwrap(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            inspect_search_provider_credential_status(&config, &store),
+            CredentialBootstrapStatus::Available
+        );
+        assert!(store.get(SEARCH_KEY_REF).unwrap().is_none());
     }
 
     #[test]
@@ -1855,7 +1776,6 @@ mod tests {
         let purposes = vec![
             "canonical_task_receipts".to_string(),
             "mcp_audit".to_string(),
-            "task_store".to_string(),
         ];
         let arguments = serde_json::json!({
             "eligiblePurposeIds": purposes,
@@ -1884,9 +1804,11 @@ mod tests {
     #[test]
     fn credential_initialization_existing_canonical_data_never_becomes_initialization_eligible() {
         let directory = tempfile::tempdir().unwrap();
-        for file_name in ["task_runtime.db", "tasks.db"] {
-            std::fs::write(directory.path().join(file_name), b"canonical-data-sentinel").unwrap();
-        }
+        std::fs::write(
+            directory.path().join("task_runtime.db"),
+            b"canonical-data-sentinel",
+        )
+        .unwrap();
         std::fs::write(
             directory.path().join("mcp_audit.db"),
             b"uninspectable-canonical-data",
@@ -1897,11 +1819,12 @@ mod tests {
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
 
         assert!(eligible_credential_purposes(&snapshot).is_empty());
-        assert!(snapshot.purposes[..2]
-            .iter()
-            .all(|item| item.status == CredentialBootstrapStatus::MissingExistingData));
         assert_eq!(
-            snapshot.purposes[2].status,
+            snapshot.purposes[0].status,
+            CredentialBootstrapStatus::MissingExistingData
+        );
+        assert_eq!(
+            snapshot.purposes[1].status,
             CredentialBootstrapStatus::Unknown
         );
         assert_eq!(*store.writes.lock().unwrap(), 0);
@@ -1913,16 +1836,17 @@ mod tests {
     fn credential_initialization_invalid_existing_key_material_is_never_replaced() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
-        for secret_ref in [CANONICAL_TASK_RECEIPT_KEY_REF, TASK_STORE_AUTHORITY_KEY_REF] {
-            store.set(secret_ref, "not-base64").unwrap();
-        }
+        store
+            .set(CANONICAL_TASK_RECEIPT_KEY_REF, "not-base64")
+            .unwrap();
         *store.writes.lock().unwrap() = 0;
 
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
 
-        assert!(snapshot.purposes[..2]
-            .iter()
-            .all(|item| item.status == CredentialBootstrapStatus::Invalid));
+        assert_eq!(
+            snapshot.purposes[0].status,
+            CredentialBootstrapStatus::Invalid
+        );
         assert_eq!(*store.writes.lock().unwrap(), 0);
         assert_eq!(*store.deletes.lock().unwrap(), 0);
         assert!(store
@@ -1959,7 +1883,7 @@ mod tests {
     fn credential_initialization_fixed_credential_failure_compensates_every_prior_write() {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
-        *store.fail_set_at.lock().unwrap() = Some(3);
+        *store.fail_set_at.lock().unwrap() = Some(1);
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
 
         let report =
@@ -1968,8 +1892,8 @@ mod tests {
 
         assert!(!report.initialization_completed_for_restart);
         assert_eq!(report.cleanup_status, "compensated");
-        assert_eq!(*store.writes.lock().unwrap(), 3);
-        assert_eq!(*store.deletes.lock().unwrap(), 2);
+        assert_eq!(*store.writes.lock().unwrap(), 1);
+        assert_eq!(*store.deletes.lock().unwrap(), 0);
         assert!(store.values.lock().unwrap().is_empty());
     }
 
@@ -1978,7 +1902,7 @@ mod tests {
     ) {
         let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
-        *store.fail_after_set_at.lock().unwrap() = Some(3);
+        *store.fail_after_set_at.lock().unwrap() = Some(1);
         let snapshot = inspect_required_credential_snapshot(directory.path(), &store);
 
         let report =
@@ -1986,14 +1910,14 @@ mod tests {
                 .unwrap();
 
         assert_eq!(report.cleanup_status, "unknown");
-        assert_eq!(*store.writes.lock().unwrap(), 3);
-        assert_eq!(*store.deletes.lock().unwrap(), 2);
+        assert_eq!(*store.writes.lock().unwrap(), 1);
+        assert_eq!(*store.deletes.lock().unwrap(), 0);
         assert_eq!(store.values.lock().unwrap().len(), 1);
         assert_eq!(
             report
                 .items
                 .iter()
-                .find(|item| item.purpose == "mcp_audit")
+                .find(|item| item.purpose == "canonical_task_receipts")
                 .unwrap()
                 .status,
             "cleanup_unknown"
@@ -2025,8 +1949,8 @@ mod tests {
                 .unwrap();
 
         assert_eq!(report.cleanup_status, "compensated");
-        assert_eq!(*store.writes.lock().unwrap(), 3);
-        assert_eq!(*store.deletes.lock().unwrap(), 3);
+        assert_eq!(*store.writes.lock().unwrap(), 2);
+        assert_eq!(*store.deletes.lock().unwrap(), 2);
         assert!(store.values.lock().unwrap().is_empty());
         assert!(!directory.path().join("mcp_audit_keys.json").exists());
     }
@@ -2125,8 +2049,8 @@ mod tests {
                 .status,
             "cleanup_unknown"
         );
-        assert_eq!(*store.writes.lock().unwrap(), 3);
-        assert_eq!(*store.deletes.lock().unwrap(), 2);
+        assert_eq!(*store.writes.lock().unwrap(), 2);
+        assert_eq!(*store.deletes.lock().unwrap(), 1);
         assert_eq!(store.values.lock().unwrap().len(), 1);
         assert!(directory.path().join("mcp_audit_keys.json").exists());
     }
@@ -2370,7 +2294,10 @@ mod tests {
         let base = format!("http://{}/v1", listener.local_addr().unwrap());
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let mut runtime_config = state.config.lock().await.clone();
-        runtime_config.system.network_policy = openlife_core::config::NetworkPolicy::default();
+        runtime_config.system.network_policy = openlife_core::config::NetworkPolicy {
+            default_decision: "ask".into(),
+            ..openlife_core::config::NetworkPolicy::default()
+        };
         state.replace_provider_runtime_config(runtime_config).await;
         let mut config = AppConfig::default();
         config.llm.provider = "openai".into();
@@ -2400,7 +2327,10 @@ mod tests {
     #[tokio::test]
     async fn provider_network_ask_reuses_review_workflow_and_allow_once_is_recoverable() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let policy = openlife_core::config::NetworkPolicy::default();
+        let policy = openlife_core::config::NetworkPolicy {
+            default_decision: "ask".into(),
+            ..openlife_core::config::NetworkPolicy::default()
+        };
         let capability = "provider.openai";
         let url = "https://api.openai.com/v1/chat/completions";
         let ask = resolve_network_policy_decision(&policy, url, capability).unwrap();

@@ -6,7 +6,13 @@
 
 use async_trait::async_trait;
 use chrono::Utc;
-use openlife_core::agent::main_chat_agent_v1::{ContextSourceCandidate, ContextSourceKind};
+use openlife_core::agent::MemoryLifecycleScope;
+use openlife_core::agent::{ContextSourceCandidate, ContextSourceKind};
+use openlife_core::conversation::ConversationUserMessageProof;
+use openlife_core::work_orchestration::{
+    AgentMemoryKind, AgentMemoryScope, AgentPersonalIntelligenceAction,
+    AgentPersonalIntelligenceStep,
+};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -129,11 +135,11 @@ pub(crate) struct PersonalIntelligenceContextSnapshot {
 
 pub(crate) struct PersonalIntelligenceSuggestionRequest<'a> {
     pub(crate) conversation_id: &'a str,
-    pub(crate) task_id: &'a str,
-    pub(crate) run_id: &'a str,
+    pub(crate) task_id: Option<&'a str>,
+    pub(crate) run_id: Option<&'a str>,
     pub(crate) user_text: &'a str,
-    pub(crate) policy: &'a openlife_core::agent::main_chat_agent_v1::PolicyDecision,
-    pub(crate) memory_routing: &'a openlife_core::agent::MainChatMemoryRoutingResult,
+    pub(crate) action: AgentPersonalIntelligenceStep,
+    pub(crate) user_message_proof: &'a ConversationUserMessageProof,
     pub(crate) execution_epoch: &'a crate::main_chat_cancellation::MainChatExecutionEpoch,
 }
 
@@ -144,6 +150,17 @@ pub(crate) enum PersonalIntelligenceSuggestionReceipt {
         receipt_id: String,
         newly_committed: bool,
         undo_available: bool,
+    },
+    MemoryReviewCreated {
+        proposal_id: String,
+    },
+    MemoryArchived {
+        memory_id: String,
+        undo_available: bool,
+    },
+    MemoryForgetNotFound,
+    MemoryForgetAmbiguous {
+        match_count: usize,
     },
     LifeModelCandidateCaptured {
         candidate_id: String,
@@ -196,13 +213,22 @@ impl AgentMemoryContextPort for AppStateAgentMemoryContextPort {
         request: &PersonalIntelligenceContextRequest<'_>,
         life_model_rerank_terms: &[String],
     ) -> Result<AgentMemoryContextSnapshot, String> {
-        let candidates = crate::main_chat_context_loader::retrievable_lifecycle_context_candidates(
-            &self.state,
-            request.conversation_id,
-            request.user_text,
-            life_model_rerank_terms,
-        )
-        .await?;
+        if !agent_memory_use_is_enabled(&self.state, request.conversation_id).await? {
+            return Ok(AgentMemoryContextSnapshot {
+                contract_version: AGENT_MEMORY_CONTEXT_PORT_VERSION,
+                candidates: Vec::new(),
+            });
+        }
+        let scope_filter = explicit_memory_read_scope_filter(request.user_text);
+        let candidates = crate::main_chat_context_loader::
+            retrievable_lifecycle_context_candidates_with_scope_filter(
+                &self.state,
+                request.conversation_id,
+                request.user_text,
+                life_model_rerank_terms,
+                scope_filter.as_deref(),
+            )
+            .await?;
         Ok(AgentMemoryContextSnapshot {
             contract_version: AGENT_MEMORY_CONTEXT_PORT_VERSION,
             candidates,
@@ -282,6 +308,52 @@ pub(crate) async fn apply_authorized_personal_intelligence_suggestion(
     .await
 }
 
+fn explicit_memory_read_scope_filter(_user_text: &str) -> Option<Vec<MemoryLifecycleScope>> {
+    // Recall scope is owned by the conversation mode and canonical Project
+    // binding. Natural-language keyword parsing must not silently narrow or
+    // widen the memories available to the selected model.
+    None
+}
+
+pub(crate) fn personal_intelligence_product_reply(
+    receipt: &PersonalIntelligenceSuggestionReceipt,
+) -> Option<String> {
+    match receipt {
+        PersonalIntelligenceSuggestionReceipt::MemoryCommitted {
+            memory_id,
+            receipt_id,
+            newly_committed,
+            undo_available,
+        } => Some(format!(
+            "已按你的明确要求记住。你可以随时在个人智能中编辑或撤销。memory_id={memory_id} receipt_id={receipt_id} newly_committed={newly_committed} undo_available={undo_available}"
+        )),
+        PersonalIntelligenceSuggestionReceipt::MemoryReviewCreated { proposal_id } => Some(
+            format!("这条记忆可能包含敏感信息，已放入审核；批准前不会保存。proposal_id={proposal_id}"),
+        ),
+        PersonalIntelligenceSuggestionReceipt::MemoryArchived {
+            memory_id,
+            undo_available,
+        } => Some(format!(
+            "已忘记这条 Agent Memory，后续不会再召回；你仍可在个人智能中撤销。memory_id={memory_id} undo_available={undo_available}"
+        )),
+        PersonalIntelligenceSuggestionReceipt::MemoryForgetNotFound => Some(
+            "没有找到与你描述相符的 Agent Memory；没有更改任何内容。你可以在个人智能中查看后再选择忘记。".into(),
+        ),
+        PersonalIntelligenceSuggestionReceipt::MemoryForgetAmbiguous { match_count } => Some(
+            format!(
+                "找到 {match_count} 条可能匹配的 Agent Memory；为避免忘错，我没有更改任何内容。请说得更具体，或在个人智能中选择。"
+            ),
+        ),
+        PersonalIntelligenceSuggestionReceipt::LifeModelCandidateCaptured {
+            candidate_id,
+            replayed,
+        } => Some(format!(
+            "已记录一条 LifeModel 候选供你在个人智能中查看；尚未创建提案，也没有修改 LifeModel。candidate_id={candidate_id} replayed={replayed}"
+        )),
+        PersonalIntelligenceSuggestionReceipt::NotApplicable => None,
+    }
+}
+
 #[async_trait]
 impl PersonalIntelligenceSuggestionPort for AppStatePersonalIntelligenceSuggestionPort {
     async fn apply(
@@ -296,38 +368,102 @@ async fn apply_authorized_suggestion_with_state(
     state: &Arc<AppState>,
     request: PersonalIntelligenceSuggestionRequest<'_>,
 ) -> Result<PersonalIntelligenceSuggestionReceipt, String> {
-    use openlife_core::agent::main_chat_agent_v1::{AllowedCapability, IntentSourceKind};
     use openlife_core::agent::{
-        bind_memory_fact_scope_owner, explicit_memory_scope_from_user_text,
-        CanonicalMemoryFactDescriptor, MemoryCandidateKind, MemoryDestination,
-        MemoryLifecycleRiskLevel, MemoryLifecycleSensitivity,
+        bind_memory_fact_scope_owner, CanonicalMemoryFactDescriptor, MemoryCandidate,
+        MemoryCandidateKind, MemoryDestination, MemoryLifecycleRiskLevel,
+        MemoryLifecycleSensitivity,
     };
 
     debug_assert!(!PERSONAL_INTELLIGENCE_SUGGESTION_PORT_VERSION.is_empty());
-    let candidate = request.memory_routing.candidates.iter().find(|candidate| {
-        request
-            .policy
-            .allows_memory_candidate(&candidate.candidate_id)
+    let source_digest = openlife_core::agent::metadata_safe_text_digest(request.user_text).1;
+    if !request.user_message_proof.is_live()
+        || request.user_message_proof.content_digest() != source_digest
+        || request.user_message_proof.content_length_bytes() != request.user_text.len()
+        || request.user_message_proof.conversation_id() != request.conversation_id
+    {
+        return Err("personal_intelligence_canonical_user_item_mismatch".into());
+    }
+    if request.action.action == AgentPersonalIntelligenceAction::Forget {
+        let query = request
+            .action
+            .query
+            .as_deref()
+            .ok_or_else(|| "personal_intelligence_forget_query_missing".to_string())?;
+        if !request.user_text.contains(query) {
+            return Err("personal_intelligence_source_span_mismatch".into());
+        }
+        return forget_memory_with_state(state, request.conversation_id, query).await;
+    }
+    let source_span = request
+        .action
+        .source_span
+        .as_deref()
+        .ok_or_else(|| "personal_intelligence_source_span_missing".to_string())?;
+    if !request.user_text.contains(source_span) {
+        return Err("personal_intelligence_source_span_mismatch".into());
+    }
+    let candidate_kind = match request.action.action {
+        AgentPersonalIntelligenceAction::Remember => match request.action.memory_kind {
+            Some(AgentMemoryKind::Fact) => MemoryCandidateKind::SemanticUserFact,
+            Some(AgentMemoryKind::Preference) => MemoryCandidateKind::Preference,
+            Some(AgentMemoryKind::Procedure) => MemoryCandidateKind::ProceduralRule,
+            Some(AgentMemoryKind::LifeEvent) => MemoryCandidateKind::EpisodicLifeEvent,
+            None => return Err("personal_intelligence_memory_kind_missing".into()),
+        },
+        AgentPersonalIntelligenceAction::SuggestLifeModel => MemoryCandidateKind::Preference,
+        AgentPersonalIntelligenceAction::Forget => unreachable!(),
+    };
+    let destination = match request.action.action {
+        AgentPersonalIntelligenceAction::Remember => MemoryDestination::MemoryProposal,
+        AgentPersonalIntelligenceAction::SuggestLifeModel => MemoryDestination::LifeModelProposal,
+        AgentPersonalIntelligenceAction::Forget => unreachable!(),
+    };
+    let sensitivity =
+        if openlife_core::privacy::assess_sensitive_content(source_span).requires_memory_review() {
+            "sensitive"
+        } else {
+            "internal"
+        };
+    let candidate_seed = serde_json::json!({
+        "sourceMessageRef": request.user_message_proof.item_ref(),
+        "sourceSpan": source_span,
+        "kind": candidate_kind,
+        "destination": destination,
     });
-    let Some(candidate) = candidate else {
-        return Ok(PersonalIntelligenceSuggestionReceipt::NotApplicable);
+    let candidate = MemoryCandidate {
+        candidate_id: format!(
+            "memory-candidate:{}",
+            openlife_core::agent::metadata_safe_value_digest(&candidate_seed).1
+        ),
+        source_span_id: request.user_message_proof.item_ref(),
+        kind: candidate_kind,
+        destination,
+        evidence_text: source_span.to_string(),
+        source_preview: source_span.chars().take(120).collect(),
+        normalized_claim: source_span.trim().to_string(),
+        sensitivity: sensitivity.into(),
+        stability: "user_directed".into(),
+        explicitness: "explicit".into(),
+        future_actionability: "user_directed".into(),
+        confidence: 1.0,
+        reason_codes: vec!["model_selected_typed_personal_intelligence_action".into()],
     };
 
-    if request
-        .policy
-        .allows(AllowedCapability::ReversibleMemoryCommit)
-        && candidate.kind == MemoryCandidateKind::SemanticUserFact
-        && candidate.destination == MemoryDestination::MemoryProposal
-    {
+    if request.action.action == AgentPersonalIntelligenceAction::Remember {
+        if !state.config.lock().await.system.agent_memory_enabled {
+            return Err("agent_memory_disabled_globally".into());
+        }
+        let scope = match request.action.scope {
+            Some(AgentMemoryScope::Personal) => MemoryLifecycleScope::Global,
+            Some(AgentMemoryScope::Project) => MemoryLifecycleScope::Project,
+            None => return Err("personal_intelligence_memory_scope_missing".into()),
+        };
         let mut fact = CanonicalMemoryFactDescriptor::from_candidate(
             candidate.normalized_claim.clone(),
             candidate.kind,
-            explicit_memory_scope_from_user_text(request.user_text),
-            MemoryLifecycleRiskLevel::from_intent_risk(request.policy.risk),
-            MemoryLifecycleSensitivity::from_policy_and_candidate(
-                request.policy.sensitivity,
-                &candidate.sensitivity,
-            ),
+            scope,
+            MemoryLifecycleRiskLevel::Low,
+            MemoryLifecycleSensitivity::from_candidate_label(&candidate.sensitivity),
         )
         .map_err(|error| format!("personal_intelligence_memory_descriptor_rejected:{error}"))?;
         let (workspace_owner, project_owner) =
@@ -339,24 +475,27 @@ async fn apply_authorized_suggestion_with_state(
             project_owner.as_deref(),
         )
         .map_err(|error| format!("personal_intelligence_memory_scope_rejected:{error}"))?;
-        let admission = request
-            .policy
-            .authorize_explicit_memory_admission(
-                IntentSourceKind::CurrentAuthenticatedUserMessage,
+        if fact.sensitivity == MemoryLifecycleSensitivity::Sensitive {
+            return stage_explicit_memory_review(state, &request, &candidate, &fact).await;
+        }
+        let admission =
+            openlife_core::agent::ExplicitMemoryAdmissionProof::issue_from_agent_action(
+                request.user_message_proof,
                 request.user_text,
-                candidate,
+                &candidate,
                 &fact,
+                scope,
             )
             .map_err(|error| error.to_string())?;
         let receipt = crate::memory_gateway::commit_explicit_user_memory_for_turn_with_state(
             state,
-            request.task_id.to_string(),
-            request.run_id.to_string(),
-            request.policy.authorized_user_message_id.clone(),
+            request.task_id.map(str::to_string),
+            request.run_id.map(str::to_string),
+            request.user_message_proof.item_ref(),
             fact,
             admission,
             request.user_text,
-            candidate,
+            &candidate,
             request.execution_epoch,
         )
         .await?;
@@ -368,13 +507,22 @@ async fn apply_authorized_suggestion_with_state(
         });
     }
 
-    if request.policy.allows(AllowedCapability::LifeModelProposal)
-        && candidate.destination == MemoryDestination::LifeModelProposal
-    {
-        let receipt = crate::life_model_learning::capture_explicit_main_chat_candidate(
+    if request.action.action == AgentPersonalIntelligenceAction::SuggestLifeModel {
+        let section = request
+            .action
+            .life_model_section
+            .ok_or_else(|| "personal_intelligence_lifemodel_section_missing".to_string())?;
+        let statement = request
+            .action
+            .life_model_statement
+            .as_deref()
+            .ok_or_else(|| "personal_intelligence_lifemodel_statement_missing".to_string())?;
+        let receipt = crate::life_model_learning::capture_typed_explicit_conversation_candidate(
             state,
-            candidate,
-            request.policy,
+            section,
+            statement,
+            source_span,
+            request.user_message_proof,
             request.user_text,
         )
         .await?;
@@ -387,6 +535,185 @@ async fn apply_authorized_suggestion_with_state(
     }
 
     Ok(PersonalIntelligenceSuggestionReceipt::NotApplicable)
+}
+
+async fn stage_explicit_memory_review(
+    state: &Arc<AppState>,
+    request: &PersonalIntelligenceSuggestionRequest<'_>,
+    candidate: &openlife_core::agent::MemoryCandidate,
+    fact: &openlife_core::agent::CanonicalMemoryFactDescriptor,
+) -> Result<PersonalIntelligenceSuggestionReceipt, String> {
+    use openlife_core::agent::{
+        AgentProposal, DurableWriteRequest, DurableWriteSource, DurableWriteSubject,
+        ProposalSource, ProposalType, ReviewWorkflow, RiskLevel,
+    };
+
+    state
+        .persistence_coordinator
+        .require_effects_for_stores(&["ProposalStore"])
+        .map_err(|error| error.to_string())?;
+    let mut proposal = AgentProposal::new(
+        ProposalType::MemoryWrite,
+        if fact.scope == openlife_core::agent::MemoryLifecycleScope::Project {
+            "memory.project"
+        } else {
+            "memory.personal"
+        },
+        serde_json::json!({
+            "content": fact.canonical_body,
+            "scope": fact.scope,
+            "scopeOwnerRef": fact.scope_owner_ref,
+            "category": fact.category,
+            "riskLevel": "medium",
+            "sensitivity": fact.sensitivity,
+            "candidateKind": candidate.kind,
+            "source": "typed_personal_intelligence_action",
+            "sourceMessageRef": request.user_message_proof.item_ref(),
+        }),
+        "The user explicitly asked OpenLife to remember this sensitive information. Review is required before it becomes Agent Memory.",
+        1.0,
+        RiskLevel::Medium,
+        ProposalSource::ChatConversation,
+    );
+    proposal.source_detail = Some(request.conversation_id.to_string());
+    proposal.run_id = request.run_id.map(str::to_string);
+    let durable_request = DurableWriteRequest::from_agent_proposal(
+        DurableWriteSource::MainChat,
+        DurableWriteSubject::Memory,
+        proposal,
+        "这条敏感记忆需要你确认后才会保存。",
+    )
+    .with_evidence_refs(vec![request.user_message_proof.item_ref()])
+    .with_idempotency_key(format!(
+        "typed-personal-intelligence:{}:{}",
+        request.user_message_proof.item_ref(),
+        candidate.candidate_id
+    ));
+    let proposal_store = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(|| "proposal_store_unavailable".to_string())?
+        .lock()
+        .await;
+    let outcome = ReviewWorkflow::new(&proposal_store)
+        .submit_with_admission(durable_request, request.execution_epoch)
+        .map_err(|error| error.to_string())?;
+    Ok(PersonalIntelligenceSuggestionReceipt::MemoryReviewCreated {
+        proposal_id: outcome.proposal_id().to_string(),
+    })
+}
+
+async fn forget_memory_with_state(
+    state: &Arc<AppState>,
+    conversation_id: &str,
+    query: &str,
+) -> Result<PersonalIntelligenceSuggestionReceipt, String> {
+    use openlife_core::agent::MemoryLifecycleScope;
+
+    let (workspace_owner, project_owner) = canonical_scope_owners(state, conversation_id).await?;
+    let conversation_scope_owner = openlife_core::agent::memory_scope_owner_ref(
+        MemoryLifecycleScope::Conversation,
+        conversation_id,
+    )
+    .map_err(|error| error.to_string())?;
+    let project_scope_owner = project_owner
+        .as_deref()
+        .map(|owner| {
+            openlife_core::agent::memory_scope_owner_ref(MemoryLifecycleScope::Project, owner)
+        })
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let workspace_scope_owner = workspace_owner
+        .as_deref()
+        .map(|owner| {
+            openlife_core::agent::memory_scope_owner_ref(MemoryLifecycleScope::Workspace, owner)
+        })
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let records = state
+        .memory_lifecycle_store
+        .as_ref()
+        .ok_or_else(|| "memory_lifecycle_store_unavailable".to_string())?
+        .lock()
+        .await
+        .list_active_records(None, 200)
+        .map_err(|error| error.to_string())?;
+    let exact_memory_id = query
+        .split_whitespace()
+        .find(|token| token.starts_with("memory:"))
+        .map(|token| token.trim_matches(|ch: char| ch.is_ascii_punctuation()));
+    let normalized_query = normalize_memory_match_text(query);
+    let mut matches = records
+        .into_iter()
+        .filter(|record| match record.scope {
+            MemoryLifecycleScope::Global => true,
+            MemoryLifecycleScope::Conversation => {
+                record.scope_owner_ref.as_deref() == Some(conversation_scope_owner.as_str())
+            }
+            MemoryLifecycleScope::Project => {
+                record.scope_owner_ref.as_deref() == project_scope_owner.as_deref()
+            }
+            MemoryLifecycleScope::Workspace => {
+                record.scope_owner_ref.as_deref() == workspace_scope_owner.as_deref()
+            }
+        })
+        .filter(|record| {
+            if let Some(memory_id) = exact_memory_id {
+                return record.memory_id == memory_id;
+            }
+            let normalized_content = normalize_memory_match_text(&record.content);
+            !normalized_query.is_empty()
+                && (normalized_content == normalized_query
+                    || normalized_content.contains(&normalized_query)
+                    || normalized_query.contains(&normalized_content))
+        })
+        .collect::<Vec<_>>();
+    if matches.is_empty() {
+        return Ok(PersonalIntelligenceSuggestionReceipt::MemoryForgetNotFound);
+    }
+    if matches.len() > 1 {
+        return Ok(
+            PersonalIntelligenceSuggestionReceipt::MemoryForgetAmbiguous {
+                match_count: matches.len(),
+            },
+        );
+    }
+    let memory_id = matches.remove(0).memory_id;
+    crate::memory_gateway::archive_memory_asset_with_state(memory_id.clone(), state)
+        .await
+        .map_err(|error| error.to_string())?;
+    Ok(PersonalIntelligenceSuggestionReceipt::MemoryArchived {
+        memory_id,
+        undo_available: true,
+    })
+}
+
+fn normalize_memory_match_text(value: &str) -> String {
+    value
+        .chars()
+        .flat_map(char::to_lowercase)
+        .filter(|ch| ch.is_alphanumeric())
+        .collect()
+}
+
+async fn agent_memory_use_is_enabled(
+    state: &Arc<AppState>,
+    conversation_id: &str,
+) -> Result<bool, String> {
+    if !state.config.lock().await.system.agent_memory_enabled {
+        return Ok(false);
+    }
+    let store = state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| "conversation_store_unavailable".to_string())?
+        .lock()
+        .await;
+    let conversation = store
+        .get_conversation(conversation_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "conversation_not_found".to_string())?;
+    Ok(conversation.memory_mode.uses_memory())
 }
 
 async fn canonical_scope_owners(
@@ -600,10 +927,12 @@ fn bounded(value: &str, max_chars: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openlife_core::agent::{ProposalStatus, ProposalType};
     use openlife_core::life_model::v2::{
         LifeModelDocumentV2, LifeModelItemV2, LifeModelSectionV2, LifeModelStatementV2,
         LifeModelTypedDiffV2, LifeModelTypedOperationV2, LIFE_MODEL_V2_TYPED_DIFF_SCHEMA,
     };
+    use openlife_core::work_orchestration::AgentLifeModelStatementSection;
 
     #[test]
     fn empty_optional_ports_keep_security_authority_false() {
@@ -627,6 +956,299 @@ mod tests {
         );
         assert!(!snapshot.metadata.influence_receipt.permission_granted);
         assert!(!snapshot.metadata.influence_receipt.durable_write_authorized);
+    }
+
+    #[tokio::test]
+    async fn unavailable_optional_ports_degrade_to_bounded_context_without_task_ownership() {
+        let baseline = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        baseline
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Optional context degradation")
+            .unwrap();
+
+        let broken_life_model_root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(broken_life_model_root.path().join("life_model_v2.db")).unwrap();
+        let mut degraded_state = (*baseline).clone();
+        degraded_state.memory_lifecycle_store = None;
+        degraded_state.life_model_manager = Arc::new(tokio::sync::Mutex::new(
+            openlife_core::life_model::LifeModelManager::new(broken_life_model_root.path()),
+        ));
+        let state = Arc::new(degraded_state);
+
+        let before_tasks = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_task_snapshots(10)
+            .unwrap();
+        let snapshot = load_personal_intelligence_context(
+            &state,
+            PersonalIntelligenceContextRequest {
+                conversation_id: &conversation_id,
+                user_text: "请继续回答这个普通问题",
+            },
+        )
+        .await;
+
+        assert!(!snapshot.life_model.metadata.available);
+        assert!(snapshot
+            .life_model
+            .metadata
+            .warning_codes
+            .iter()
+            .any(|code| code == "lifemodel_v2_unavailable"));
+        assert!(snapshot.life_model.candidates.is_empty());
+        assert_eq!(snapshot.memory.candidates.len(), 1);
+        assert_eq!(
+            snapshot.memory.candidates[0].source_id,
+            "memory.lifecycle.unavailable"
+        );
+        assert!(snapshot.memory.candidates[0]
+            .content
+            .contains("must not be inferred"));
+        assert!(
+            !snapshot
+                .life_model
+                .metadata
+                .influence_receipt
+                .permission_granted
+        );
+        assert!(
+            !snapshot
+                .life_model
+                .metadata
+                .influence_receipt
+                .durable_write_authorized
+        );
+        let after_tasks = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_task_snapshots(10)
+            .unwrap();
+        assert_eq!(before_tasks, after_tasks);
+    }
+
+    async fn begin_personal_action(
+        state: &Arc<AppState>,
+        user_text: &str,
+    ) -> (
+        String,
+        String,
+        openlife_core::conversation::ConversationUserMessageProof,
+        crate::main_chat_cancellation::MainChatExecutionEpoch,
+    ) {
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Personal action")
+            .unwrap();
+        let begun = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_chat_turn_with_proof(openlife_core::conversation::BeginChatTurn {
+                conversation_id: &conversation_id,
+                turn_id: &turn_id,
+                user_message: user_text,
+                provider: &openlife_core::conversation::ProviderBinding {
+                    profile_id: "local-test".into(),
+                    provider_id: "ollama".into(),
+                    model_id: "test".into(),
+                    endpoint_class: "local".into(),
+                    config_generation: "1".into(),
+                },
+            })
+            .unwrap();
+        let epoch = state
+            .main_chat_runtime_state
+            .lock()
+            .await
+            .cancellation_registry
+            .try_register(&turn_id)
+            .unwrap()
+            .execution_epoch();
+        (conversation_id, turn_id, begun.user_message_proof, epoch)
+    }
+
+    #[tokio::test]
+    async fn typed_low_risk_memory_commits_directly_and_remains_reversible() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let user_text = "将下述信息纳入长期参考：时间统一使用 RFC 3339。";
+        let source_span = "时间统一使用 RFC 3339";
+        let (conversation_id, turn_id, proof, epoch) =
+            begin_personal_action(&state, user_text).await;
+        let receipt = apply_authorized_personal_intelligence_suggestion(
+            &state,
+            PersonalIntelligenceSuggestionRequest {
+                conversation_id: &conversation_id,
+                task_id: None,
+                run_id: Some(&turn_id),
+                user_text,
+                action: AgentPersonalIntelligenceStep {
+                    action: AgentPersonalIntelligenceAction::Remember,
+                    source_span: Some(source_span.into()),
+                    query: None,
+                    memory_kind: Some(AgentMemoryKind::Procedure),
+                    scope: Some(AgentMemoryScope::Personal),
+                    life_model_section: None,
+                    life_model_statement: None,
+                },
+                user_message_proof: &proof,
+                execution_epoch: &epoch,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            receipt,
+            PersonalIntelligenceSuggestionReceipt::MemoryCommitted {
+                newly_committed: true,
+                undo_available: true,
+                ..
+            }
+        ));
+        let active = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_active_records(None, 10)
+            .unwrap();
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].content, source_span);
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_all_proposals(10, 0)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn typed_sensitive_memory_stages_review_without_changing_memory_truth() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let user_text = "将下述信息记作个人资料：身份证号 110101199001011234。";
+        let source_span = "身份证号 110101199001011234";
+        let (conversation_id, turn_id, proof, epoch) =
+            begin_personal_action(&state, user_text).await;
+        let receipt = apply_authorized_personal_intelligence_suggestion(
+            &state,
+            PersonalIntelligenceSuggestionRequest {
+                conversation_id: &conversation_id,
+                task_id: None,
+                run_id: Some(&turn_id),
+                user_text,
+                action: AgentPersonalIntelligenceStep {
+                    action: AgentPersonalIntelligenceAction::Remember,
+                    source_span: Some(source_span.into()),
+                    query: None,
+                    memory_kind: Some(AgentMemoryKind::Fact),
+                    scope: Some(AgentMemoryScope::Personal),
+                    life_model_section: None,
+                    life_model_statement: None,
+                },
+                user_message_proof: &proof,
+                execution_epoch: &epoch,
+            },
+        )
+        .await
+        .unwrap();
+        let proposal_id = match receipt {
+            PersonalIntelligenceSuggestionReceipt::MemoryReviewCreated { proposal_id } => {
+                proposal_id
+            }
+            other => panic!("expected Review, got {other:?}"),
+        };
+        assert!(state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_active_records(None, 10)
+            .unwrap()
+            .is_empty());
+        let proposal = state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_proposal(&proposal_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(proposal.proposal_type, ProposalType::MemoryWrite);
+        assert_eq!(proposal.status, ProposalStatus::Pending);
+        assert_eq!(proposal.after["content"], source_span);
+    }
+
+    #[tokio::test]
+    async fn global_and_conversation_memory_controls_gate_recall_without_touching_lifemodel() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Memory controls")
+            .unwrap();
+        assert!(agent_memory_use_is_enabled(&state, &conversation_id)
+            .await
+            .unwrap());
+
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .set_memory_mode(
+                &conversation_id,
+                openlife_core::conversation::ConversationMemoryMode::Off,
+            )
+            .unwrap();
+        assert!(!agent_memory_use_is_enabled(&state, &conversation_id)
+            .await
+            .unwrap());
+
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .set_memory_mode(
+                &conversation_id,
+                openlife_core::conversation::ConversationMemoryMode::UseOnly,
+            )
+            .unwrap();
+        state.config.lock().await.system.agent_memory_enabled = false;
+        assert!(!agent_memory_use_is_enabled(&state, &conversation_id)
+            .await
+            .unwrap());
     }
 
     #[tokio::test]
@@ -752,9 +1374,6 @@ mod tests {
                 provider: &provider,
             })
             .unwrap();
-        let ingress = openlife_core::agent::main_chat_agent_v1::AgentIngress::default()
-            .decide_with_conversation_user_item(&begun.user_message_proof, user_text, &[])
-            .unwrap();
         let proposals_before = state
             .proposal_store
             .as_ref()
@@ -776,11 +1395,21 @@ mod tests {
             &state,
             PersonalIntelligenceSuggestionRequest {
                 conversation_id: &conversation_id,
-                task_id: &uuid::Uuid::new_v4().to_string(),
-                run_id: &uuid::Uuid::new_v4().to_string(),
+                task_id: Some(&uuid::Uuid::new_v4().to_string()),
+                run_id: Some(&uuid::Uuid::new_v4().to_string()),
                 user_text,
-                policy: &ingress.policy_decision,
-                memory_routing: &ingress.intent_frame.memory_routing,
+                action: AgentPersonalIntelligenceStep {
+                    action: AgentPersonalIntelligenceAction::SuggestLifeModel,
+                    source_span: Some("communication style is concise and direct".to_string()),
+                    query: None,
+                    memory_kind: None,
+                    scope: None,
+                    life_model_section: Some(
+                        AgentLifeModelStatementSection::CollaborationPreferences,
+                    ),
+                    life_model_statement: Some("concise and direct".to_string()),
+                },
+                user_message_proof: &begun.user_message_proof,
                 execution_epoch: &epoch,
             },
         )
@@ -809,5 +1438,78 @@ mod tests {
             .load_v2_current(openlife_core::life_model::v2::DEFAULT_LIFE_MODEL_V2_MODEL_ID)
             .unwrap()
             .is_none());
+    }
+}
+#[cfg(test)]
+mod explicit_forget_tests {
+    use super::*;
+    use openlife_core::agent::{
+        AgentProposal, MemoryLifecycleAcceptanceInput, ProposalSource, ProposalType, RiskLevel,
+    };
+
+    #[tokio::test]
+    async fn explicit_forget_archives_one_matching_memory_and_keeps_undo() {
+        let state = crate::test_utils::test_app_state();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Forget Memory")
+            .unwrap();
+        let mut proposal = AgentProposal::new(
+            ProposalType::MemoryWrite,
+            "memory.personal",
+            serde_json::json!({
+                "content": "我喜欢先看结论",
+                "scope": "global",
+                "category": "preference",
+                "candidateKind": "preference",
+                "riskLevel": "low",
+                "sensitivity": "internal"
+            }),
+            "accepted Memory for explicit forget test",
+            1.0,
+            RiskLevel::Low,
+            ProposalSource::Manual,
+        );
+        proposal.id = "proposal:explicit-forget-test".into();
+        let input = MemoryLifecycleAcceptanceInput::from_memory_proposal(
+            &proposal,
+            "我喜欢先看结论".into(),
+        )
+        .unwrap();
+        let memory_id = state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .accept_memory_proposal(input)
+            .unwrap()
+            .record
+            .memory_id;
+
+        let receipt = forget_memory_with_state(&state, &conversation_id, "我喜欢先看结论")
+            .await
+            .unwrap();
+        assert_eq!(
+            receipt,
+            PersonalIntelligenceSuggestionReceipt::MemoryArchived {
+                memory_id: memory_id.clone(),
+                undo_available: true,
+            }
+        );
+        assert!(state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_active_records(None, 10)
+            .unwrap()
+            .is_empty());
     }
 }

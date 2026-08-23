@@ -1,18 +1,11 @@
-use crate::agent::conversation_context::{
-    compact_conversation_context, CanonicalConversationMessage, ConversationContextConfig,
-    ConversationContextProjection,
-};
-use crate::life_model::LifeModel;
-use crate::llm::ChatMessage;
 use crate::persistence_outbox::{
     self, CanonicalMutationReceipt, ProjectionDelivery, ProjectionSummary,
 };
-use crate::state_store::StateHistoryEntry;
 use crate::vectors::{
     CanonicalVectorOwnerRef, MemoryChunk, VectorRebuildSourceSnapshot, VECTOR_REBUILD_BATCH_LIMIT,
 };
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use ring::digest::{digest, Context as DigestContext, SHA256};
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -27,70 +20,20 @@ const KNOWLEDGE_NOTE_MAX_CONTENT_BYTES: usize = 256 * 1024;
 const KNOWLEDGE_NOTE_MAX_SOURCE_BYTES: usize = 128;
 const KNOWLEDGE_NOTE_MAX_TAGS: usize = 32;
 const KNOWLEDGE_NOTE_MAX_TAG_BYTES: usize = 128;
-const LEGACY_STATE_HISTORY_MIGRATION_MAX_ROWS: usize = 50_000;
-/// Reserved materialized-view partition for lifecycle-owned Memory whose
-/// canonical scope is global. Session-scoped reads include this partition but
-/// never widen to unrelated conversation partitions.
-pub const MEMORY_LIFECYCLE_GLOBAL_SESSION_ID: &str = "memory-lifecycle-global";
-
+/// Canonical store for user-authored knowledge notes plus rebuildable
+/// projections of lifecycle-owned Agent Memory.
+///
+/// Conversation messages belong to `ConversationStore`; long-term Memory
+/// bodies belong to `MemoryLifecycleStore`. The on-disk database and outbox
+/// owner retain the historical `memory_store` identity for crash recovery,
+/// but this Rust type deliberately names the narrower product responsibility.
 #[derive(Clone)]
-pub struct MemoryStore {
+pub struct KnowledgeNoteProjectionStore {
     conn: Arc<Mutex<Connection>>,
-    canonical_store_identity: Arc<str>,
 }
 
-const MEMORY_STORE_IDENTITY_PREFIX: &str = "memory_store:v1:";
-
-fn is_canonical_memory_store_identity(value: &str) -> bool {
-    value
-        .strip_prefix(MEMORY_STORE_IDENTITY_PREFIX)
-        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
-}
-
-fn load_or_create_memory_store_identity(conn: &Connection) -> Result<String> {
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS memory_store_metadata (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        ) WITHOUT ROWID",
-        [],
-    )?;
-    let existing = conn
-        .query_row(
-            "SELECT value FROM memory_store_metadata WHERE key = 'canonical_store_identity'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?;
-    if let Some(existing) = existing {
-        if !is_canonical_memory_store_identity(&existing) {
-            anyhow::bail!("memory_store_canonical_identity_invalid");
-        }
-        return Ok(existing);
-    }
-    let identity = format!("{MEMORY_STORE_IDENTITY_PREFIX}{}", uuid::Uuid::new_v4());
-    conn.execute(
-        "INSERT INTO memory_store_metadata(key, value)
-         VALUES ('canonical_store_identity', ?1)",
-        [&identity],
-    )?;
-    Ok(identity)
-}
-
-fn load_existing_memory_store_identity(conn: &Connection) -> Result<String> {
-    let identity = conn
-        .query_row(
-            "SELECT value FROM memory_store_metadata WHERE key = 'canonical_store_identity'",
-            [],
-            |row| row.get::<_, String>(0),
-        )
-        .optional()?
-        .context("memory_store_canonical_identity_missing")?;
-    if !is_canonical_memory_store_identity(&identity) {
-        anyhow::bail!("memory_store_canonical_identity_invalid");
-    }
-    Ok(identity)
-}
+#[cfg(test)]
+type MemoryStore = KnowledgeNoteProjectionStore;
 
 fn normalize_fts_query(query: &str) -> Option<String> {
     let limited = query
@@ -120,113 +63,9 @@ fn normalize_fts_query(query: &str) -> Option<String> {
     }
 }
 
-fn conversation_search_terms(query: &str) -> Vec<String> {
-    fn is_stopword(term: &str) -> bool {
-        matches!(
-            term,
-            "a" | "an"
-                | "the"
-                | "about"
-                | "did"
-                | "do"
-                | "find"
-                | "i"
-                | "me"
-                | "please"
-                | "prior"
-                | "previous"
-                | "search"
-                | "session"
-                | "sessions"
-                | "tell"
-                | "we"
-                | "what"
-                | "discuss"
-                | "discussed"
-                | "conversation"
-                | "conversations"
-                | "我们"
-                | "之前"
-                | "讨论"
-                | "讨论过"
-                | "请"
-                | "查找"
-                | "会话"
-        )
-    }
-
-    let bounded = query
-        .trim()
-        .chars()
-        .take(FTS_QUERY_MAX_CHARS)
-        .collect::<String>()
-        .to_lowercase();
-    let mut terms = Vec::new();
-    for segment in bounded.split(|character: char| !character.is_alphanumeric()) {
-        if segment.is_empty() {
-            continue;
-        }
-        let characters = segment.chars().collect::<Vec<_>>();
-        let contains_cjk = characters
-            .iter()
-            .any(|character| ('\u{4e00}'..='\u{9fff}').contains(character));
-        if contains_cjk && characters.len() > 2 {
-            for pair in characters.windows(2) {
-                let term = pair.iter().collect::<String>();
-                if !is_stopword(&term) {
-                    terms.push(term);
-                }
-            }
-        } else if !is_stopword(segment) && (segment.chars().count() >= 2 || contains_cjk) {
-            terms.push(segment.to_string());
-        }
-        if terms.len() >= FTS_QUERY_MAX_TOKENS {
-            break;
-        }
-    }
-    let mut seen = HashSet::new();
-    terms.retain(|term| seen.insert(term.clone()));
-    terms.truncate(FTS_QUERY_MAX_TOKENS);
-    terms
-}
-
-fn ensure_conversation_write_allowed(conn: &Connection, session_id: &str) -> Result<()> {
-    let session_id = session_id.trim();
-    if session_id.is_empty() || session_id.len() > 256 {
-        anyhow::bail!("invalid conversation session id");
-    }
-    if persistence_outbox::has_active_tombstone(conn, "conversation", session_id)? {
-        anyhow::bail!("conversation_canonical_tombstoned");
-    }
-    Ok(())
-}
-
 fn update_length_delimited_digest(context: &mut DigestContext, bytes: &[u8]) {
     context.update(&(bytes.len() as u64).to_le_bytes());
     context.update(bytes);
-}
-
-fn conversation_content_digest(content: &str) -> String {
-    let hash = digest(&SHA256, content.as_bytes());
-    let hex = hash
-        .as_ref()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    format!("sha256:{hex}")
-}
-
-fn ensure_message_operation_id(operation_id: &str) -> Result<()> {
-    if operation_id.trim() != operation_id
-        || operation_id.is_empty()
-        || operation_id.len() > 256
-        || !operation_id.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'/' | b'.' | b'_' | b'-')
-        })
-    {
-        anyhow::bail!("invalid canonical conversation message operation id");
-    }
-    Ok(())
 }
 
 fn ensure_knowledge_note_operation_id(operation_id: &str) -> Result<()> {
@@ -362,80 +201,6 @@ pub struct MemorySearchHit {
     pub source_tier: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanonicalConversationMessageReceipt {
-    pub message_id: i64,
-    pub session_id: String,
-    pub role: String,
-    pub operation_id: String,
-    pub canonical_ref: String,
-    pub content_digest: String,
-    pub content_length_bytes: usize,
-    pub replayed: bool,
-}
-
-/// Non-serializable evidence that a canonical conversation row was observed
-/// inside `MemoryStore`'s commit transaction.  The fields are deliberately
-/// private: callers may carry this proof to another in-process store, but they
-/// cannot manufacture one from an IPC/JSON receipt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CanonicalConversationMessageProof {
-    message_id: i64,
-    session_id: String,
-    role: String,
-    canonical_store_identity: Arc<str>,
-    canonical_ref: String,
-    content_digest: String,
-}
-
-impl CanonicalConversationMessageProof {
-    pub(crate) fn session_id(&self) -> &str {
-        &self.session_id
-    }
-
-    pub(crate) fn role(&self) -> &str {
-        &self.role
-    }
-
-    pub(crate) fn canonical_ref(&self) -> &str {
-        &self.canonical_ref
-    }
-
-    pub(crate) fn content_digest(&self) -> &str {
-        &self.content_digest
-    }
-}
-
-/// In-process commit result used when a downstream canonical store must prove
-/// ownership.  `receipt` remains safe to serialize separately; `proof` is an
-/// opaque capability and has no serde implementation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CanonicalConversationMessageCommit {
-    receipt: CanonicalConversationMessageReceipt,
-    proof: CanonicalConversationMessageProof,
-}
-
-#[derive(Debug, Clone)]
-pub struct CanonicalConversationMessageRecord {
-    pub message: ChatMessage,
-    pub receipt: CanonicalConversationMessageReceipt,
-}
-
-impl CanonicalConversationMessageCommit {
-    pub fn receipt(&self) -> &CanonicalConversationMessageReceipt {
-        &self.receipt
-    }
-
-    pub fn proof(&self) -> &CanonicalConversationMessageProof {
-        &self.proof
-    }
-
-    pub fn into_receipt(self) -> CanonicalConversationMessageReceipt {
-        self.receipt
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MemoryRetrievalDisposition {
@@ -488,7 +253,7 @@ pub struct CanonicalMemoryRetrievalMutation {
     pub canonical_mutation: Option<CanonicalMutationReceipt>,
 }
 
-impl MemoryStore {
+impl KnowledgeNoteProjectionStore {
     pub fn new(db_path: impl Into<PathBuf>) -> Result<Self> {
         let db_path: PathBuf = db_path.into();
         if let Some(parent) = db_path.parent() {
@@ -497,10 +262,8 @@ impl MemoryStore {
         let conn = Connection::open(&db_path)
             .with_context(|| format!("failed to open sqlite db at {:?}", db_path))?;
         configure_memory_store_connection(&conn, true)?;
-        let canonical_store_identity = load_or_create_memory_store_identity(&conn)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
-            canonical_store_identity: Arc::from(canonical_store_identity),
         };
         store.init_tables()?;
         Ok(store)
@@ -509,10 +272,8 @@ impl MemoryStore {
     pub fn new_in_memory() -> Result<Self> {
         let conn = Connection::open_in_memory().context("failed to open in-memory sqlite db")?;
         configure_memory_store_connection(&conn, false)?;
-        let canonical_store_identity = load_or_create_memory_store_identity(&conn)?;
         let store = Self {
             conn: Arc::new(Mutex::new(conn)),
-            canonical_store_identity: Arc::from(canonical_store_identity),
         };
         store.init_tables()?;
         Ok(store)
@@ -523,12 +284,10 @@ impl MemoryStore {
         let conn = crate::sqlite_migration::open_existing_read_only(
             &db_path,
             "memory_store",
-            &["messages", "memories", "memory_store_metadata"],
+            &["memories"],
         )?;
-        let canonical_store_identity = load_existing_memory_store_identity(&conn)?;
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
-            canonical_store_identity: Arc::from(canonical_store_identity),
         })
     }
 
@@ -537,46 +296,14 @@ impl MemoryStore {
             conn: Arc::new(Mutex::new(
                 crate::sqlite_migration::unavailable_read_only_sentinel("memory_store")?,
             )),
-            canonical_store_identity: Arc::from("memory_store:unavailable"),
         })
     }
 
-    #[cfg(test)]
-    pub(crate) fn canonical_store_identity(&self) -> &str {
-        &self.canonical_store_identity
-    }
-
     fn init_tables(&self) -> Result<()> {
-        let mut conn = self
+        let conn = self
             .conn
             .lock()
             .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                embedding_id INTEGER
-            )",
-            [],
-        )?;
-        Self::ensure_column_exists(&conn, "messages", "embedding_id", "INTEGER")?;
-        Self::ensure_column_exists(&conn, "messages", "operation_id", "TEXT")?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, created_at)",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_messages_embedding_id ON messages(embedding_id)",
-            [],
-        )?;
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_operation_id
-             ON messages(operation_id) WHERE operation_id IS NOT NULL",
-            [],
-        )?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS memories (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -645,72 +372,6 @@ impl MemoryStore {
             END",
             [],
         )?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS snapshots (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                life_model_yaml TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_snapshots_session ON snapshots(session_id, created_at)",
-            [],
-        )?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS chat_sessions (
-                session_id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
-            )",
-            [],
-        )?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_chat_sessions_updated ON chat_sessions(updated_at DESC)",
-            [],
-        )?;
-        Self::ensure_column_exists(&conn, "chat_sessions", "selected_skill_id", "TEXT")?;
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS conversation_context_summaries (
-                session_id TEXT PRIMARY KEY,
-                schema_version INTEGER NOT NULL CHECK(schema_version > 0),
-                source_start_message_id INTEGER NOT NULL,
-                source_end_message_id INTEGER NOT NULL,
-                source_message_count INTEGER NOT NULL CHECK(source_message_count > 0),
-                source_digest TEXT NOT NULL,
-                summary_digest TEXT NOT NULL,
-                summary_content TEXT NOT NULL,
-                created_at TEXT NOT NULL
-             ) WITHOUT ROWID;
-             CREATE INDEX IF NOT EXISTS idx_conversation_context_summary_source
-             ON conversation_context_summaries(session_id, source_end_message_id);",
-        )?;
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS state_history (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                dimension_name TEXT NOT NULL,
-                value REAL NOT NULL,
-                unit TEXT NOT NULL,
-                recorded_at TEXT NOT NULL,
-                note TEXT,
-                operation_id TEXT,
-                operation_digest TEXT
-            )",
-            [],
-        )?;
-        Self::ensure_column_exists(&conn, "state_history", "operation_id", "TEXT")?;
-        Self::ensure_column_exists(&conn, "state_history", "operation_digest", "TEXT")?;
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_state_history_dimension ON state_history(dimension_name, recorded_at DESC)",
-            [],
-        )?;
-        conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_state_history_operation_id
-             ON state_history(operation_id) WHERE operation_id IS NOT NULL",
-            [],
-        )?;
         persistence_outbox::init_schema(&conn)?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS knowledge_note_operations (
@@ -723,49 +384,22 @@ impl MemoryStore {
                 FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
              );",
         )?;
-        Self::migrate_legacy_memory_index_operation_journal(&mut conn)?;
         conn.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_note_operation_memory
              ON knowledge_note_operations(memory_id)",
             [],
         )?;
         conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS memory_materialization_projections (
-                event_id TEXT PRIMARY KEY,
-                aggregate_kind TEXT NOT NULL,
-                aggregate_id TEXT NOT NULL,
-                mutation_kind TEXT NOT NULL,
-                memory_row_id INTEGER,
-                applied_at TEXT NOT NULL
-             );
-             CREATE INDEX IF NOT EXISTS idx_memory_materialization_aggregate
-             ON memory_materialization_projections(aggregate_kind, aggregate_id);
-
-             DELETE FROM memories
-             WHERE EXISTS (
-                 SELECT 1 FROM memory_materialization_projections projections
-                 WHERE projections.aggregate_kind = 'memory_lifecycle'
-                   AND projections.mutation_kind = 'deleted'
-                   AND (
-                       memories.source = 'memory_lifecycle:' || projections.aggregate_id
-                       OR (
-                           EXISTS (
-                               SELECT 1 FROM json_each(
-                                   CASE WHEN json_valid(memories.tags_json)
-                                        THEN memories.tags_json ELSE '[]' END
-                               ) owner_tag
-                               WHERE owner_tag.value = 'canonical_owner:memory_lifecycle'
-                           )
-                           AND EXISTS (
-                               SELECT 1 FROM json_each(
-                                   CASE WHEN json_valid(memories.tags_json)
-                                        THEN memories.tags_json ELSE '[]' END
-                               ) memory_tag
-                               WHERE memory_tag.value = 'memory_id:' || projections.aggregate_id
-                           )
-                       )
-                   )
-             );",
+            "DELETE FROM memories
+             WHERE source LIKE 'memory_lifecycle:%'
+                OR EXISTS (
+                    SELECT 1 FROM json_each(
+                        CASE WHEN json_valid(memories.tags_json)
+                             THEN memories.tags_json ELSE '[]' END
+                    ) owner_tag
+                    WHERE owner_tag.value = 'canonical_owner:memory_lifecycle'
+                );
+             DROP TABLE IF EXISTS memory_materialization_projections;",
         )?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS memory_retrieval_states (
@@ -809,14 +443,7 @@ impl MemoryStore {
                  SELECT RAISE(ABORT, 'memory_lifecycle retrieval belongs to MemoryLifecycleStore');
              END;",
         )?;
-        // Conversation text has one canonical owner: `messages`. Older releases mirrored every
-        // turn into long-term `memories`; remove that derived duplicate while preserving the
-        // canonical conversation row and explicit/accepted memory assets.
-        conn.execute(
-            "DELETE FROM memories WHERE content_type = 'chat_message'",
-            [],
-        )?;
-        crate::sqlite_migration::record_schema_version(&conn, "memory_store", 8)?;
+        crate::sqlite_migration::record_schema_version(&conn, "memory_store", 9)?;
         Ok(())
     }
 
@@ -838,65 +465,6 @@ impl MemoryStore {
                 format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_definition}");
             conn.execute(&sql, [])?;
         }
-        Ok(())
-    }
-
-    /// Retire the pre-KnowledgeNote command journal. Older releases stored a
-    /// deterministic payload digest; the typed journal verifies replay by
-    /// loading the canonical row and retains only a nonce-bound token.
-    fn migrate_legacy_memory_index_operation_journal(conn: &mut Connection) -> Result<()> {
-        let legacy_exists = conn
-            .query_row(
-                "SELECT 1 FROM sqlite_master
-                 WHERE type = 'table' AND name = 'memory_index_operations'",
-                [],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        if !legacy_exists {
-            return Ok(());
-        }
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        tx.execute("DROP INDEX IF EXISTS idx_memory_index_operation_memory", [])?;
-        let legacy_rows = {
-            let mut statement = tx.prepare(
-                "SELECT operation_id, memory_id, outbox_event_id, created_at
-                 FROM memory_index_operations
-                 ORDER BY operation_id ASC",
-            )?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, i64>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
-        };
-        for (operation_id, memory_id, outbox_event_id, created_at) in legacy_rows {
-            let operation_digest = persistence_outbox::metadata_digest(&format!(
-                "knowledge_note_operation_migration:{operation_id}:{}",
-                uuid::Uuid::new_v4()
-            ));
-            tx.execute(
-                "INSERT INTO knowledge_note_operations (
-                    operation_id, operation_digest, memory_id, outbox_event_id, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5)",
-                params![
-                    operation_id,
-                    operation_digest,
-                    memory_id,
-                    outbox_event_id,
-                    created_at
-                ],
-            )?;
-        }
-        tx.execute("DROP TABLE memory_index_operations", [])?;
-        tx.commit()?;
         Ok(())
     }
 
@@ -954,467 +522,6 @@ impl MemoryStore {
             ],
         )?;
         Ok(conn.last_insert_rowid())
-    }
-
-    pub fn save_message(&self, session_id: &str, msg: &ChatMessage) -> Result<i64> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        ensure_conversation_write_allowed(&tx, session_id)?;
-        let created_at = Utc::now().to_rfc3339();
-        tx.execute(
-            "INSERT INTO messages (session_id, role, content, created_at) VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, msg.role, msg.content, &created_at],
-        )?;
-        let message_id = tx.last_insert_rowid();
-        tx.commit()?;
-        Ok(message_id)
-    }
-
-    /// Idempotently commits one canonical conversation body. `operation_id`
-    /// is a caller-owned execution fact, not a content-derived key: replaying
-    /// the same operation returns the original row, while reusing it for a
-    /// different session, role, or body fails closed.
-    pub fn save_message_idempotent(
-        &self,
-        session_id: &str,
-        msg: &ChatMessage,
-        operation_id: &str,
-    ) -> Result<CanonicalConversationMessageReceipt> {
-        self.save_message_idempotent_internal(session_id, msg, operation_id)
-            .map(CanonicalConversationMessageCommit::into_receipt)
-    }
-
-    /// Same canonical commit as `save_message_idempotent`, plus an opaque
-    /// in-process proof for a downstream store that must bind its reference to
-    /// the row that MemoryStore actually committed.
-    pub fn save_message_idempotent_with_proof(
-        &self,
-        session_id: &str,
-        msg: &ChatMessage,
-        operation_id: &str,
-    ) -> Result<CanonicalConversationMessageCommit> {
-        if msg.role != "user" {
-            anyhow::bail!("canonical_user_message_proof_requires_role_user");
-        }
-        self.save_message_idempotent_internal(session_id, msg, operation_id)
-    }
-
-    /// longer names the exact row.
-    pub fn load_active_conversation_message_by_ref(
-        &self,
-        canonical_ref: &str,
-    ) -> Result<Option<ChatMessage>> {
-        let Some(reference) = canonical_ref.strip_prefix("conversation://") else {
-            anyhow::bail!("invalid_canonical_conversation_message_ref");
-        };
-        let Some((session_id, message_id)) = reference.rsplit_once("/message/") else {
-            anyhow::bail!("invalid_canonical_conversation_message_ref");
-        };
-        let message_id = message_id
-            .parse::<i64>()
-            .context("invalid_canonical_conversation_message_id")?;
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        if persistence_outbox::has_active_tombstone(&conn, "conversation", session_id)? {
-            return Ok(None);
-        }
-        conn.query_row(
-            "SELECT role, content FROM messages
-             WHERE id = ?1 AND session_id = ?2",
-            params![message_id, session_id],
-            |row| {
-                Ok(ChatMessage {
-                    role: row.get(0)?,
-                    content: row.get(1)?,
-                })
-            },
-        )
-        .optional()
-        .map_err(Into::into)
-    }
-
-    /// Resolves an idempotent conversation operation back to the canonical
-    /// body owner. Execution/event stores may retain this operation and its
-    /// receipt, but recovery must rehydrate the body only from Conversation.
-    pub fn load_active_conversation_message_by_operation(
-        &self,
-        operation_id: &str,
-    ) -> Result<Option<CanonicalConversationMessageRecord>> {
-        ensure_message_operation_id(operation_id)?;
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
-        let row = conn
-            .query_row(
-                "SELECT id, session_id, role, content
-                 FROM messages WHERE operation_id = ?1",
-                [operation_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((message_id, session_id, role, content)) = row else {
-            return Ok(None);
-        };
-        if persistence_outbox::has_active_tombstone(&conn, "conversation", &session_id)? {
-            return Ok(None);
-        }
-        let content_digest = conversation_content_digest(&content);
-        Ok(Some(CanonicalConversationMessageRecord {
-            message: ChatMessage {
-                role: role.clone(),
-                content: content.clone(),
-            },
-            receipt: CanonicalConversationMessageReceipt {
-                message_id,
-                session_id: session_id.clone(),
-                role,
-                operation_id: operation_id.to_string(),
-                canonical_ref: format!("conversation://{session_id}/message/{message_id}"),
-                content_digest,
-                content_length_bytes: content.len(),
-                replayed: true,
-            },
-        }))
-    }
-
-    /// Rehydrate a bounded conversation prefix ending at the exact canonical
-    /// user-message operation. Later assistant or user messages must not leak
-    /// into a resumed turn after approval or restart.
-    pub fn load_conversation_messages_through_operation(
-        &self,
-        operation_id: &str,
-        limit: usize,
-    ) -> Result<Vec<ChatMessage>> {
-        ensure_message_operation_id(operation_id)?;
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
-        let target = conn
-            .query_row(
-                "SELECT id, session_id, role FROM messages WHERE operation_id = ?1",
-                [operation_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((target_id, session_id, target_role)) = target else {
-            return Ok(Vec::new());
-        };
-        if target_role != "user"
-            || persistence_outbox::has_active_tombstone(&conn, "conversation", &session_id)?
-        {
-            return Ok(Vec::new());
-        }
-        let mut statement = conn.prepare(
-            "SELECT role, content FROM (
-                SELECT id, role, content FROM messages
-                WHERE session_id = ?1 AND id <= ?2
-                ORDER BY id DESC
-                LIMIT ?3
-             ) bounded_prefix
-             ORDER BY id ASC",
-        )?;
-        let rows = statement.query_map(
-            params![session_id, target_id, i64::try_from(limit.max(1))?],
-            |row| {
-                Ok(ChatMessage {
-                    role: row.get(0)?,
-                    content: row.get(1)?,
-                })
-            },
-        )?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(Into::into)
-    }
-
-    /// Build the provider-facing conversation window from the canonical
-    /// transcript that ends at `operation_id`. The stored summary is only a
-    /// rebuildable projection: this method never trusts a previously stored
-    /// body and always derives the returned context from `messages`.
-    pub fn materialize_bounded_conversation_context_through_operation(
-        &self,
-        operation_id: &str,
-        config: ConversationContextConfig,
-    ) -> Result<ConversationContextProjection> {
-        ensure_message_operation_id(operation_id)?;
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|error| anyhow::anyhow!("mutex poison: {error}"))?;
-        let target = conn
-            .query_row(
-                "SELECT id, session_id, role FROM messages WHERE operation_id = ?1",
-                [operation_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((target_id, session_id, target_role)) = target else {
-            return Ok(ConversationContextProjection {
-                provider_messages: Vec::new(),
-                summary: None,
-                omitted_message_count: 0,
-                total_chars: 0,
-            });
-        };
-        if target_role != "user"
-            || persistence_outbox::has_active_tombstone(&conn, "conversation", &session_id)?
-        {
-            return Ok(ConversationContextProjection {
-                provider_messages: Vec::new(),
-                summary: None,
-                omitted_message_count: 0,
-                total_chars: 0,
-            });
-        }
-        let messages = {
-            let mut statement = conn.prepare(
-                "SELECT id, role, content FROM messages
-                 WHERE session_id = ?1 AND id <= ?2
-                 ORDER BY id ASC",
-            )?;
-            let rows = statement
-                .query_map(params![session_id, target_id], |row| {
-                    Ok(CanonicalConversationMessage {
-                        id: row.get(0)?,
-                        role: row.get(1)?,
-                        content: row.get(2)?,
-                    })
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
-            rows
-        };
-        let projection = compact_conversation_context(&messages, config);
-        if let Some(summary) = projection.summary.as_ref() {
-            conn.execute(
-                "INSERT INTO conversation_context_summaries (
-                    session_id, schema_version, source_start_message_id,
-                    source_end_message_id, source_message_count, source_digest,
-                    summary_digest, summary_content, created_at
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-                 ON CONFLICT(session_id) DO UPDATE SET
-                    schema_version = excluded.schema_version,
-                    source_start_message_id = excluded.source_start_message_id,
-                    source_end_message_id = excluded.source_end_message_id,
-                    source_message_count = excluded.source_message_count,
-                    source_digest = excluded.source_digest,
-                    summary_digest = excluded.summary_digest,
-                    summary_content = excluded.summary_content,
-                    created_at = excluded.created_at
-                 WHERE excluded.source_end_message_id
-                    >= conversation_context_summaries.source_end_message_id",
-                params![
-                    session_id,
-                    i64::from(summary.schema_version),
-                    summary.source_start_message_id,
-                    summary.source_end_message_id,
-                    i64::try_from(summary.source_message_count)?,
-                    summary.source_digest,
-                    summary.summary_digest,
-                    summary.content,
-                    Utc::now().to_rfc3339(),
-                ],
-            )?;
-        } else {
-            conn.execute(
-                "DELETE FROM conversation_context_summaries
-                 WHERE session_id = ?1 AND source_end_message_id <= ?2",
-                params![session_id, target_id],
-            )?;
-        }
-        Ok(projection)
-    }
-
-    fn save_message_idempotent_internal(
-        &self,
-        session_id: &str,
-        msg: &ChatMessage,
-        operation_id: &str,
-    ) -> Result<CanonicalConversationMessageCommit> {
-        ensure_message_operation_id(operation_id)?;
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        ensure_conversation_write_allowed(&tx, session_id)?;
-        let created_at = Utc::now().to_rfc3339();
-        let changed = tx.execute(
-            "INSERT OR IGNORE INTO messages
-                (session_id, role, content, created_at, operation_id)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![session_id, msg.role, msg.content, created_at, operation_id],
-        )?;
-        let replayed = changed == 0;
-        let message_id = if changed == 1 {
-            tx.last_insert_rowid()
-        } else {
-            let existing = tx
-                .query_row(
-                    "SELECT id, session_id, role, content FROM messages WHERE operation_id = ?1",
-                    [operation_id],
-                    |row| {
-                        Ok((
-                            row.get::<_, i64>(0)?,
-                            row.get::<_, String>(1)?,
-                            row.get::<_, String>(2)?,
-                            row.get::<_, String>(3)?,
-                        ))
-                    },
-                )
-                .optional()?;
-            let Some((message_id, existing_session, existing_role, existing_content)) = existing
-            else {
-                anyhow::bail!(
-                    "conversation message insert was ignored without a canonical operation owner"
-                );
-            };
-            if existing_session != session_id
-                || existing_role != msg.role
-                || existing_content != msg.content
-            {
-                anyhow::bail!(
-                    "conversation message operation id was reused with a different canonical payload"
-                );
-            }
-            message_id
-        };
-        tx.commit()?;
-        let content_digest = conversation_content_digest(&msg.content);
-        let canonical_ref = format!("conversation://{session_id}/message/{message_id}");
-        let receipt = CanonicalConversationMessageReceipt {
-            message_id,
-            session_id: session_id.to_string(),
-            role: msg.role.clone(),
-            operation_id: operation_id.to_string(),
-            canonical_ref: canonical_ref.clone(),
-            content_digest: content_digest.clone(),
-            content_length_bytes: msg.content.len(),
-            replayed,
-        };
-        Ok(CanonicalConversationMessageCommit {
-            proof: CanonicalConversationMessageProof {
-                message_id,
-                session_id: session_id.to_string(),
-                role: msg.role.clone(),
-                canonical_store_identity: Arc::clone(&self.canonical_store_identity),
-                canonical_ref,
-                content_digest,
-            },
-            receipt,
-        })
-    }
-
-    pub fn load_recent_messages(&self, session_id: &str, limit: usize) -> Result<Vec<ChatMessage>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let mut stmt = conn.prepare(
-            "SELECT role, content FROM messages
-             WHERE session_id = ?1
-             ORDER BY id DESC
-             LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![session_id, limit as i64], |row| {
-            Ok(ChatMessage {
-                role: row.get(0)?,
-                content: row.get(1)?,
-            })
-        })?;
-        let mut messages: Vec<ChatMessage> = rows.collect::<Result<Vec<_>, _>>()?;
-        messages.reverse();
-        Ok(messages)
-    }
-
-    pub fn save_snapshot(&self, session_id: &str, model: &LifeModel) -> Result<i64> {
-        let yaml = serde_yaml::to_string(model)?;
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        ensure_conversation_write_allowed(&tx, session_id)?;
-        tx.execute(
-            "INSERT INTO snapshots (session_id, life_model_yaml, created_at) VALUES (?1, ?2, ?3)",
-            params![session_id, yaml, Utc::now().to_rfc3339()],
-        )?;
-        let snapshot_id = tx.last_insert_rowid();
-        tx.commit()?;
-        Ok(snapshot_id)
-    }
-
-    pub fn load_latest_snapshot(&self, session_id: &str) -> Result<Option<LifeModel>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let mut stmt = conn.prepare(
-            "SELECT life_model_yaml FROM snapshots WHERE session_id = ?1 ORDER BY created_at DESC LIMIT 1",
-        )?;
-        let mut rows = stmt.query(params![session_id])?;
-        if let Some(row) = rows.next()? {
-            let yaml: String = row.get(0)?;
-            let model: LifeModel = serde_yaml::from_str(&yaml)?;
-            Ok(Some(model))
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn list_sessions(&self, limit: usize) -> Result<Vec<(String, DateTime<Utc>)>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let mut stmt = conn.prepare(
-            "SELECT session_id, MAX(created_at) as last_at FROM messages GROUP BY session_id ORDER BY last_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            let sid: String = row.get(0)?;
-            let last_at: String = row.get(1)?;
-            let dt = DateTime::parse_from_rfc3339(&last_at)
-                .map(|d| d.with_timezone(&Utc))
-                .unwrap_or_else(|_| Utc::now());
-            Ok((sid, dt))
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .context("failed to collect sessions")
-    }
-
-    pub fn message_count(&self) -> Result<usize> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let count = conn.query_row("SELECT COUNT(*) FROM messages", [], |row| {
-            row.get::<_, i64>(0)
-        })?;
-        usize::try_from(count).context("message count exceeds usize")
     }
 
     pub fn export_active_memory_records(&self) -> Result<Vec<MemoryRecord>> {
@@ -1477,51 +584,19 @@ impl MemoryStore {
                 },
             )
             .optional()?;
-        let knowledge_owner = match knowledge_contract {
+        match knowledge_contract {
             Some((kind, aggregate_id, mutation_kind))
                 if aggregate_id == memory_id.to_string()
                     && kind == "knowledge_note"
                     && mutation_kind == "created" =>
             {
-                Some(CanonicalVectorOwnerRef::new(
+                Ok(Some(CanonicalVectorOwnerRef::new(
                     "knowledge_note",
                     &aggregate_id,
-                )?)
-            }
-            Some((kind, aggregate_id, mutation_kind))
-                if aggregate_id == memory_id.to_string()
-                    && kind == "memory_record"
-                    && mutation_kind == "indexed" =>
-            {
-                Some(CanonicalVectorOwnerRef::new(
-                    "memory_record",
-                    &aggregate_id,
-                )?)
+                )?))
             }
             Some(_) => anyhow::bail!("KnowledgeNote rebuild ownership proof is inconsistent"),
-            None => None,
-        };
-
-        let mut lifecycle_statement = conn.prepare(
-            "SELECT DISTINCT aggregate_id
-             FROM memory_materialization_projections
-             WHERE memory_row_id = ?1
-               AND aggregate_kind = 'memory_lifecycle'
-               AND mutation_kind = 'materialized'
-             ORDER BY aggregate_id LIMIT 2",
-        )?;
-        let lifecycle_ids = lifecycle_statement
-            .query_map([memory_id], |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        let lifecycle_owner = match lifecycle_ids.as_slice() {
-            [] => None,
-            [memory_id] => Some(CanonicalVectorOwnerRef::new("memory_lifecycle", memory_id)?),
-            _ => anyhow::bail!("MemoryLifecycle rebuild ownership proof is ambiguous"),
-        };
-        match (knowledge_owner, lifecycle_owner) {
-            (Some(_), Some(_)) => anyhow::bail!("vector rebuild row has multiple canonical owners"),
-            (Some(owner), None) | (None, Some(owner)) => Ok(Some(owner)),
-            (None, None) => Ok(None),
+            None => Ok(None),
         }
     }
 
@@ -1529,7 +604,6 @@ impl MemoryStore {
         memory: &MemoryRecord,
         owner: Option<&CanonicalVectorOwnerRef>,
     ) -> Result<()> {
-        let has_tag = |expected: &str| memory.tags.iter().any(|tag| tag == expected);
         match owner {
             Some(owner) if owner.kind() == "knowledge_note" => {
                 if owner.id() != memory.id.to_string()
@@ -1537,24 +611,6 @@ impl MemoryStore {
                     || memory.privacy_level != "private"
                 {
                     anyhow::bail!("KnowledgeNote rebuild row does not match its canonical proof");
-                }
-            }
-            Some(owner) if owner.kind() == "memory_record" => {
-                if owner.id() != memory.id.to_string()
-                    || memory.content_type != "knowledge_note"
-                    || memory.privacy_level != "private"
-                {
-                    anyhow::bail!("legacy Memory record rebuild proof is inconsistent");
-                }
-            }
-            Some(owner) if owner.kind() == "memory_lifecycle" => {
-                if memory.source != owner.source()
-                    || memory.content_type != "lifecycle_memory_projection"
-                    || memory.privacy_level != "private"
-                    || !has_tag("canonical_owner:memory_lifecycle")
-                    || !has_tag(&format!("memory_id:{}", owner.id()))
-                {
-                    anyhow::bail!("MemoryLifecycle rebuild row does not match its canonical proof");
                 }
             }
             Some(_) => anyhow::bail!("unsupported vector rebuild owner contract"),
@@ -1567,32 +623,13 @@ impl MemoryStore {
         conn: &Connection,
         owner: &CanonicalVectorOwnerRef,
     ) -> Result<Option<MemoryRecord>> {
-        let memory_id = match owner.kind() {
-            "knowledge_note" | "memory_record" => owner
-                .id()
-                .parse::<i64>()
-                .context("KnowledgeNote owner id is not a canonical row id")?,
-            "memory_lifecycle" => {
-                let mut statement = conn.prepare(
-                    "SELECT DISTINCT memory_row_id
-                     FROM memory_materialization_projections
-                     WHERE aggregate_kind = 'memory_lifecycle'
-                       AND aggregate_id = ?1
-                       AND mutation_kind = 'materialized'
-                       AND memory_row_id IS NOT NULL
-                     ORDER BY memory_row_id LIMIT 2",
-                )?;
-                let ids = statement
-                    .query_map([owner.id()], |row| row.get::<_, i64>(0))?
-                    .collect::<std::result::Result<Vec<_>, _>>()?;
-                match ids.as_slice() {
-                    [memory_id] => *memory_id,
-                    [] => return Ok(None),
-                    _ => anyhow::bail!("canonical Memory owner proof is ambiguous"),
-                }
-            }
-            _ => anyhow::bail!("unsupported canonical Memory owner kind"),
-        };
+        if owner.kind() != "knowledge_note" {
+            anyhow::bail!("unsupported canonical Memory owner kind");
+        }
+        let memory_id = owner
+            .id()
+            .parse::<i64>()
+            .context("KnowledgeNote owner id is not a canonical row id")?;
         let record = conn
             .query_row(
                 "SELECT id, session_id, content, content_type, source, role, created_at,
@@ -1869,180 +906,6 @@ impl MemoryStore {
             .collect()
     }
 
-    pub fn create_chat_session(&self, session_id: &str, title: &str) -> Result<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        ensure_conversation_write_allowed(&tx, session_id)?;
-        let now = Utc::now().to_rfc3339();
-        tx.execute(
-            "INSERT INTO chat_sessions (session_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-            params![session_id, title, &now, &now],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn list_chat_sessions(&self, limit: usize) -> Result<Vec<ChatSession>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let mut stmt = conn.prepare(
-            "SELECT session_id, title, created_at, updated_at FROM chat_sessions ORDER BY updated_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok(ChatSession {
-                session_id: row.get(0)?,
-                title: row.get(1)?,
-                created_at: row.get(2)?,
-                updated_at: row.get(3)?,
-            })
-        })?;
-        rows.collect::<Result<Vec<_>, _>>()
-            .context("failed to list chat sessions")
-    }
-
-    /// Persist the user's explicit skill choice with its canonical conversation.
-    /// This intentionally does not update `updated_at`: changing bounded turn
-    /// context must not reorder the conversation history.
-    pub fn set_chat_session_selected_skill(
-        &self,
-        session_id: &str,
-        selected_skill_id: Option<&str>,
-    ) -> Result<()> {
-        let session_id = session_id.trim();
-        if session_id.is_empty() || session_id.len() > 256 {
-            anyhow::bail!("invalid conversation session id for skill selection");
-        }
-        if selected_skill_id.is_some_and(|skill_id| {
-            skill_id.is_empty()
-                || skill_id.len() > 256
-                || !skill_id
-                    .chars()
-                    .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
-        }) {
-            anyhow::bail!("invalid selected skill id");
-        }
-
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        ensure_conversation_write_allowed(&tx, session_id)?;
-        let changed = tx.execute(
-            "UPDATE chat_sessions SET selected_skill_id = ?1 WHERE session_id = ?2",
-            params![selected_skill_id, session_id],
-        )?;
-        if changed != 1 {
-            anyhow::bail!("conversation session not found for skill selection");
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn chat_session_selected_skill(&self, session_id: &str) -> Result<Option<String>> {
-        let session_id = session_id.trim();
-        if session_id.is_empty() || session_id.len() > 256 {
-            anyhow::bail!("invalid conversation session id for skill selection");
-        }
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        conn.query_row(
-            "SELECT selected_skill_id FROM chat_sessions WHERE session_id = ?1",
-            params![session_id],
-            |row| row.get(0),
-        )
-        .optional()
-        .map(|value| value.flatten())
-        .context("failed to load chat session selected skill")
-    }
-
-    pub fn rename_chat_session(&self, session_id: &str, title: &str) -> Result<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        ensure_conversation_write_allowed(&tx, session_id)?;
-        let now = Utc::now().to_rfc3339();
-        tx.execute(
-            "UPDATE chat_sessions SET title = ?1, updated_at = ?2 WHERE session_id = ?3",
-            params![title, &now, session_id],
-        )?;
-        tx.commit()?;
-        Ok(())
-    }
-
-    pub fn delete_chat_session(&self, session_id: &str) -> Result<()> {
-        self.delete_chat_session_with_tombstone(session_id, None)?;
-        Ok(())
-    }
-
-    /// Delete the canonical conversation content and record its tombstone plus
-    /// projection work in the same `memory.db` transaction. Other databases
-    /// are reconciled from this durable metadata-only outbox; this method does
-    /// not claim a cross-database transaction.
-    pub fn delete_chat_session_with_tombstone(
-        &self,
-        session_id: &str,
-        reason: Option<&str>,
-    ) -> Result<CanonicalMutationReceipt> {
-        let session_id = session_id.trim();
-        if session_id.is_empty() || session_id.len() > 256 {
-            anyhow::bail!("invalid conversation session id for deletion");
-        }
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        tx.execute(
-            "DELETE FROM messages WHERE session_id = ?1",
-            params![session_id],
-        )?;
-        // Long-term Memory rows have independent canonical owners. Only old
-        // conversation mirrors, if any survived migration, belong to this
-        // conversation tombstone.
-        tx.execute(
-            "DELETE FROM memories
-             WHERE session_id = ?1 AND content_type = 'chat_message'",
-            params![session_id],
-        )?;
-        tx.execute(
-            "DELETE FROM snapshots WHERE session_id = ?1",
-            params![session_id],
-        )?;
-        tx.execute(
-            "DELETE FROM conversation_context_summaries WHERE session_id = ?1",
-            params![session_id],
-        )?;
-        tx.execute(
-            "DELETE FROM chat_sessions WHERE session_id = ?1",
-            params![session_id],
-        )?;
-        let receipt = persistence_outbox::enqueue_tombstone(
-            &tx,
-            "conversation",
-            session_id,
-            reason,
-            &["vector_store"],
-        )?;
-        tx.commit()?;
-        Ok(receipt)
-    }
-
-    /// Commit the retrieval visibility of one stable canonical Memory owner.
-    ///
-    /// Vector row ids, session ids and source prefixes are not accepted as
-    /// authority. The state mutation and its ref-only projection event share
-    /// the MemoryStore transaction; VectorStore may lag, but searches can
-    /// always fail closed against this canonical state.
     pub fn set_memory_retrieval_disposition(
         &self,
         owner: &CanonicalVectorOwnerRef,
@@ -2652,283 +1515,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    pub fn touch_chat_session(&self, session_id: &str) -> Result<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        ensure_conversation_write_allowed(&tx, session_id)?;
-        let now = Utc::now().to_rfc3339();
-        let updated = tx.execute(
-            "UPDATE chat_sessions SET updated_at = ?1 WHERE session_id = ?2",
-            params![&now, session_id],
-        )?;
-        if updated == 0 {
-            tx.execute(
-                "INSERT INTO chat_sessions (session_id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-                params![session_id, "新会话", &now, &now],
-            )?;
-        }
-        tx.commit()?;
-        Ok(())
-    }
-
-    #[cfg(test)]
-    fn record_state_entry(
-        &self,
-        dimension_name: &str,
-        value: f64,
-        unit: &str,
-        note: Option<&str>,
-    ) -> Result<i64> {
-        Ok(self
-            .record_state_entry_idempotent(
-                &uuid::Uuid::new_v4().to_string(),
-                dimension_name,
-                value,
-                unit,
-                note,
-                None,
-                None,
-                None,
-            )?
-            .state_entry_id)
-    }
-
-    #[cfg(test)]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
-    )]
-    fn record_state_entry_idempotent(
-        &self,
-        operation_id: &str,
-        dimension_name: &str,
-        value: f64,
-        unit: &str,
-        note: Option<&str>,
-        min_threshold: Option<f32>,
-        max_threshold: Option<f32>,
-        alert_days: Option<u32>,
-    ) -> Result<CanonicalStateEntryWrite> {
-        ensure_knowledge_note_operation_id(operation_id)
-            .context("State entry operation id must be canonical lowercase UUIDv4")?;
-        if dimension_name.trim().is_empty()
-            || unit.trim().is_empty()
-            || !value.is_finite()
-            || min_threshold.is_some_and(|threshold| !threshold.is_finite())
-            || max_threshold.is_some_and(|threshold| !threshold.is_finite())
-        {
-            anyhow::bail!("State entry payload is invalid");
-        }
-        let operation_digest = persistence_outbox::metadata_digest(&format!(
-            "state_entry:{operation_id}:{}",
-            serde_json::to_string(&serde_json::json!({
-                "dimensionName": dimension_name,
-                "value": value,
-                "unit": unit,
-                "note": note,
-                "minThreshold": min_threshold,
-                "maxThreshold": max_threshold,
-                "alertDays": alert_days,
-            }))?
-        ));
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing = tx
-            .query_row(
-                "SELECT id, dimension_name, value, unit, note, operation_digest
-                 FROM state_history WHERE operation_id = ?1",
-                [operation_id],
-                |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, f64>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, Option<String>>(4)?,
-                        row.get::<_, Option<String>>(5)?,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((id, stored_dimension, stored_value, stored_unit, stored_note, stored_digest)) =
-            existing
-        {
-            if stored_digest.as_deref() != Some(operation_digest.as_str())
-                || stored_dimension != dimension_name
-                || stored_value != value
-                || stored_unit != unit
-                || stored_note.as_deref() != note
-            {
-                anyhow::bail!("State entry operation id was reused with a different payload");
-            }
-            tx.commit()?;
-            return Ok(CanonicalStateEntryWrite {
-                operation_id: operation_id.to_string(),
-                operation_digest,
-                state_entry_id: id,
-                replayed: true,
-            });
-        }
-        tx.execute(
-            "INSERT INTO state_history (
-                dimension_name, value, unit, recorded_at, note,
-                operation_id, operation_digest
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![
-                dimension_name,
-                value,
-                unit,
-                Utc::now().to_rfc3339(),
-                note,
-                operation_id,
-                operation_digest,
-            ],
-        )?;
-        let state_entry_id = tx.last_insert_rowid();
-        tx.commit()?;
-        Ok(CanonicalStateEntryWrite {
-            operation_id: operation_id.to_string(),
-            operation_digest,
-            state_entry_id,
-            replayed: false,
-        })
-    }
-
-    pub fn get_state_history(
-        &self,
-        dimension_name: &str,
-        limit: usize,
-    ) -> Result<Vec<StateHistoryEntry>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let mut stmt = conn.prepare(
-            "SELECT id, dimension_name, value, unit, recorded_at, note FROM state_history WHERE dimension_name = ?1 ORDER BY recorded_at DESC LIMIT ?2",
-        )?;
-        let rows = stmt.query_map(params![dimension_name, limit as i64], |row| {
-            Ok(StateHistoryEntry {
-                id: row.get(0)?,
-                dimension_name: row.get(1)?,
-                value: row.get(2)?,
-                unit: row.get(3)?,
-                recorded_at: row.get(4)?,
-                note: row.get(5)?,
-            })
-        })?;
-        let mut entries: Vec<StateHistoryEntry> = rows.collect::<Result<Vec<_>, _>>()?;
-        entries.reverse();
-        Ok(entries)
-    }
-
-    pub fn get_latest_state_entries(&self, limit: usize) -> Result<Vec<StateHistoryEntry>> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let mut stmt = conn.prepare(
-            "SELECT id, dimension_name, value, unit, recorded_at, note FROM state_history ORDER BY recorded_at DESC LIMIT ?1",
-        )?;
-        let rows = stmt.query_map(params![limit as i64], |row| {
-            Ok(StateHistoryEntry {
-                id: row.get(0)?,
-                dimension_name: row.get(1)?,
-                value: row.get(2)?,
-                unit: row.get(3)?,
-                recorded_at: row.get(4)?,
-                note: row.get(5)?,
-            })
-        })?;
-        let mut entries: Vec<StateHistoryEntry> = rows.collect::<Result<Vec<_>, _>>()?;
-        entries.reverse();
-        Ok(entries)
-    }
-
-    /// Complete, ordered source snapshot for the bounded StateStore migration
-    /// seam. Product reads must not use this API after authority cutover.
-    pub fn list_legacy_state_history_migration_source(
-        &self,
-    ) -> Result<LegacyStateHistoryMigrationSnapshot> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let mut statement = conn.prepare(
-            "SELECT id, dimension_name, value, unit, recorded_at, note,
-                    operation_id, operation_digest
-             FROM state_history
-             ORDER BY id ASC
-             LIMIT ?1",
-        )?;
-        let records = statement
-            .query_map(
-                [i64::try_from(
-                    LEGACY_STATE_HISTORY_MIGRATION_MAX_ROWS.saturating_add(1),
-                )?],
-                |row| {
-                    Ok(LegacyStateHistorySourceRecord {
-                        id: row.get(0)?,
-                        dimension_name: row.get(1)?,
-                        value: row.get(2)?,
-                        unit: row.get(3)?,
-                        recorded_at: row.get(4)?,
-                        note: row.get(5)?,
-                        operation_id: row.get(6)?,
-                        operation_digest: row.get(7)?,
-                    })
-                },
-            )?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(anyhow::Error::from)?;
-        if records.len() > LEGACY_STATE_HISTORY_MIGRATION_MAX_ROWS {
-            anyhow::bail!("legacy_state_history_migration_row_limit_exceeded");
-        }
-        Ok(LegacyStateHistoryMigrationSnapshot {
-            source_store_identity: self.canonical_store_identity.to_string(),
-            records,
-        })
-    }
-
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
-    )]
-    pub fn save_memory_record(
-        &self,
-        session_id: &str,
-        content: &str,
-        content_type: &str,
-        source: &str,
-        tags: &[String],
-        privacy_level: &str,
-        embedding_id: Option<i64>,
-    ) -> Result<i64> {
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let created_at = Utc::now().to_rfc3339();
-        Self::insert_memory_row(
-            &conn,
-            session_id,
-            content,
-            content_type,
-            source,
-            None,
-            &created_at,
-            tags,
-            privacy_level,
-            embedding_id,
-        )
-    }
-
-    /// Commit a canonical MemoryStore-owned note and its vector projection
+    /// Commit a canonical KnowledgeNote and its vector projection
     /// trigger in one local transaction. The outbox stores only the row id and
     /// an opaque digest; the vector materializer reloads the body from this
     /// canonical owner.
@@ -2993,14 +1580,7 @@ impl MemoryStore {
                 .context("KnowledgeNote operation lost its canonical outbox receipt")?;
             let current_contract = canonical_mutation.aggregate_kind == "knowledge_note"
                 && canonical_mutation.mutation_kind == "created";
-            // Countable, migration-only compatibility for operation receipts
-            // written by the retired `index_memory_chunk` route. New product
-            // writes below can never create this contract.
-            let legacy_contract = canonical_mutation.aggregate_kind == "memory_record"
-                && canonical_mutation.mutation_kind == "indexed";
-            if (!current_contract && !legacy_contract)
-                || canonical_mutation.aggregate_id != memory_id.to_string()
-            {
+            if !current_contract || canonical_mutation.aggregate_id != memory_id.to_string() {
                 anyhow::bail!("KnowledgeNote operation has inconsistent canonical refs");
             }
             tx.commit()?;
@@ -3136,11 +1716,9 @@ impl MemoryStore {
         event_id: &str,
         owner: &CanonicalVectorOwnerRef,
     ) -> Result<MemoryRecord> {
-        let expected_mutation = match owner.kind() {
-            "knowledge_note" => "created",
-            "memory_record" => "indexed",
-            _ => anyhow::bail!("unsupported KnowledgeNote projection owner"),
-        };
+        if owner.kind() != "knowledge_note" {
+            anyhow::bail!("unsupported KnowledgeNote projection owner");
+        }
         let memory_id = owner
             .id()
             .parse::<i64>()
@@ -3167,13 +1745,7 @@ impl MemoryStore {
                    AND events.aggregate_id = ?4
                    AND events.mutation_kind = ?5
                    AND memories.archived = 0",
-                params![
-                    event_id,
-                    memory_id,
-                    owner.kind(),
-                    owner.id(),
-                    expected_mutation,
-                ],
+                params![event_id, memory_id, owner.kind(), owner.id(), "created",],
                 row_to_memory_record,
             )
             .optional()?
@@ -3186,7 +1758,7 @@ impl MemoryStore {
         &self,
         owner: &CanonicalVectorOwnerRef,
     ) -> Result<bool> {
-        if !matches!(owner.kind(), "knowledge_note" | "memory_record") {
+        if owner.kind() != "knowledge_note" {
             anyhow::bail!("unsupported KnowledgeNote read owner");
         }
         let memory_id = owner
@@ -3217,162 +1789,6 @@ impl MemoryStore {
         Ok(Self::validate_vector_rebuild_owner_contract(&record, Some(owner)).is_ok())
     }
 
-    /// Replaceable compatibility materializer for Lifecycle-owned Memory. Raw
-    /// content enters this legacy projection only here; the delivery and marker
-    /// remain ref-only so D010 can later replace this with Lifecycle FTS without
-    /// changing the outbox contract.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "owner=backend-platform; expires=2026-10-01; replace positional boundary with a typed request object"
-    )]
-    pub fn project_lifecycle_memory(
-        &self,
-        event_id: &str,
-        memory_id: &str,
-        session_id: &str,
-        content: &str,
-        content_type: &str,
-        tags: &[String],
-        privacy_level: &str,
-        embedding_id: Option<i64>,
-    ) -> Result<Option<i64>> {
-        validate_projection_ref("event_id", event_id)?;
-        validate_projection_ref("memory_id", memory_id)?;
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        if let Some(row_id) = projected_memory_row_id(&tx, event_id)? {
-            tx.commit()?;
-            return Ok(row_id);
-        }
-        // A deletion marker is a durable fence. It is checked in the same
-        // projection-store transaction as the compatibility write, so a late
-        // creation delivery can never unarchive content after its tombstone
-        // has already been applied by another reconciler.
-        if memory_lifecycle_projection_deleted(&tx, memory_id)? {
-            insert_memory_projection_marker(
-                &tx,
-                event_id,
-                "memory_lifecycle",
-                memory_id,
-                "materialized",
-                None,
-            )?;
-            tx.commit()?;
-            return Ok(None);
-        }
-        let lifecycle_source = format!("memory_lifecycle:{memory_id}");
-        let existing = tx
-            .query_row(
-                "SELECT id, created_at FROM memories
-                 WHERE source = ?1 ORDER BY id ASC LIMIT 1",
-                [&lifecycle_source],
-                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        let row_id = if let Some((row_id, created_at)) = existing {
-            let tags_json = serde_json::to_string(tags)?;
-            let checksum = Self::checksum_for(content, session_id, &created_at);
-            tx.execute(
-                "UPDATE memories
-                 SET session_id = ?2, content = ?3, content_type = ?4,
-                     tags_json = ?5, privacy_level = ?6, embedding_id = ?7,
-                     checksum = ?8, archived = 0, archived_at = NULL
-                 WHERE id = ?1",
-                params![
-                    row_id,
-                    session_id,
-                    content,
-                    content_type,
-                    tags_json,
-                    privacy_level,
-                    embedding_id,
-                    checksum
-                ],
-            )?;
-            row_id
-        } else {
-            let created_at = Utc::now().to_rfc3339();
-            Self::insert_memory_row(
-                &tx,
-                session_id,
-                content,
-                content_type,
-                &lifecycle_source,
-                None,
-                &created_at,
-                tags,
-                privacy_level,
-                embedding_id,
-            )?
-        };
-        insert_memory_projection_marker(
-            &tx,
-            event_id,
-            "memory_lifecycle",
-            memory_id,
-            "materialized",
-            Some(row_id),
-        )?;
-        tx.commit()?;
-        Ok(Some(row_id))
-    }
-
-    pub fn project_lifecycle_memory_tombstone(
-        &self,
-        event_id: &str,
-        memory_id: &str,
-    ) -> Result<usize> {
-        validate_projection_ref("event_id", event_id)?;
-        validate_projection_ref("memory_id", memory_id)?;
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        let tx = conn.transaction()?;
-        let already_applied = memory_projection_applied(&tx, event_id)?;
-        let lifecycle_source = format!("memory_lifecycle:{memory_id}");
-        // This row is a compatibility projection; the reversible canonical
-        // body remains in MemoryLifecycleStore. A tombstone therefore removes
-        // the duplicate raw body instead of retaining it as an "archive".
-        let canonical_memory_tag = format!("memory_id:{memory_id}");
-        let deleted = tx.execute(
-            "DELETE FROM memories
-             WHERE source = ?1
-                OR (
-                    EXISTS (
-                        SELECT 1 FROM json_each(
-                            CASE WHEN json_valid(memories.tags_json)
-                                 THEN memories.tags_json ELSE '[]' END
-                        ) owner_tag
-                        WHERE owner_tag.value = 'canonical_owner:memory_lifecycle'
-                    )
-                    AND EXISTS (
-                        SELECT 1 FROM json_each(
-                            CASE WHEN json_valid(memories.tags_json)
-                                 THEN memories.tags_json ELSE '[]' END
-                        ) memory_tag
-                        WHERE memory_tag.value = ?2
-                    )
-                )",
-            params![lifecycle_source, canonical_memory_tag],
-        )?;
-        if !already_applied {
-            insert_memory_projection_marker(
-                &tx,
-                event_id,
-                "memory_lifecycle",
-                memory_id,
-                "deleted",
-                None,
-            )?;
-        }
-        tx.commit()?;
-        Ok(deleted)
-    }
-
     /// Pure text lookup. Access telemetry is a separate explicit mutation via
     /// [`Self::record_text_search_access_telemetry`].
     pub fn search_text_memories(
@@ -3399,49 +1815,26 @@ impl MemoryStore {
                  FROM memories_fts
                  JOIN memories m ON m.id = memories_fts.rowid
                  WHERE memories_fts MATCH ?1
-                   AND (m.session_id = ?2 OR m.session_id = ?3)
-                   AND (
-                       m.archived = 0 OR EXISTS (
-                           SELECT 1 FROM memory_materialization_projections projection
-                           WHERE projection.memory_row_id = m.id
-                             AND projection.aggregate_kind = 'memory_lifecycle'
-                             AND projection.mutation_kind = 'materialized'
-                       )
-                   )
+                   AND m.session_id = ?2
+                   AND m.archived = 0
                  ORDER BY rank ASC, m.created_at DESC
-                 LIMIT ?4",
+                 LIMIT ?3",
             ) {
                 Ok(stmt) => stmt,
                 Err(_) => {
-                    let mut fallback =
-                        self.search_text_memories_fallback(&conn, session_id, query, limit)?;
-                    fallback.extend(self.search_session_messages(
+                    return self.search_text_memories_fallback(
                         &conn,
-                        Some(session_id),
-                        None,
+                        session_id,
                         query,
                         limit,
-                    )?);
-                    let mut seen = HashSet::new();
-                    fallback.retain(|hit| {
-                        seen.insert((hit.chunk.session_id.clone(), hit.chunk.content.clone()))
-                    });
-                    fallback.truncate(limit);
-                    return Ok(fallback);
+                    );
                 }
             };
-            let rows = stmt.query_map(
-                params![
-                    normalized_query,
-                    session_id,
-                    MEMORY_LIFECYCLE_GLOBAL_SESSION_ID,
-                    limit as i64
-                ],
-                |row| {
+            let rows =
+                stmt.query_map(params![normalized_query, session_id, limit as i64], |row| {
                     let rank: f32 = row.get(7)?;
                     Ok(Self::row_to_search_hit(row, rank, "fts"))
-                },
-            )?;
+                })?;
             rows.collect::<Result<Vec<_>, _>>()?
         } else {
             let mut stmt = match conn.prepare(
@@ -3449,14 +1842,7 @@ impl MemoryStore {
                  FROM memories_fts
                  JOIN memories m ON m.id = memories_fts.rowid
                  WHERE memories_fts MATCH ?1
-                   AND (
-                       m.archived = 0 OR EXISTS (
-                           SELECT 1 FROM memory_materialization_projections projection
-                           WHERE projection.memory_row_id = m.id
-                             AND projection.aggregate_kind = 'memory_lifecycle'
-                             AND projection.mutation_kind = 'materialized'
-                       )
-                   )
+                   AND m.archived = 0
                  ORDER BY rank ASC, m.created_at DESC
                  LIMIT ?2",
             ) {
@@ -3475,20 +1861,6 @@ impl MemoryStore {
                 self.search_text_memories_fallback(&conn, session_id.unwrap_or(""), query, limit)?;
         }
         results = Self::filter_retrieval_active_search_hits(&conn, results)?;
-
-        if let Some(session_id) = session_id {
-            results.extend(self.search_session_messages(
-                &conn,
-                Some(session_id),
-                None,
-                query,
-                limit,
-            )?);
-            let mut seen = HashSet::new();
-            results.retain(|hit| {
-                seen.insert((hit.chunk.session_id.clone(), hit.chunk.content.clone()))
-            });
-        }
 
         results.truncate(limit);
         Ok(results)
@@ -3539,31 +1911,15 @@ impl MemoryStore {
         let sql = if session_id.is_empty() {
             "SELECT id, session_id, content, source, created_at, access_count, last_accessed_at
              FROM memories
-             WHERE (
-                       archived = 0 OR EXISTS (
-                           SELECT 1 FROM memory_materialization_projections projection
-                           WHERE projection.memory_row_id = memories.id
-                             AND projection.aggregate_kind = 'memory_lifecycle'
-                             AND projection.mutation_kind = 'materialized'
-                       )
-                   )
-               AND content LIKE ?1
+             WHERE archived = 0 AND content LIKE ?1
              ORDER BY created_at DESC
              LIMIT ?2"
         } else {
             "SELECT id, session_id, content, source, created_at, access_count, last_accessed_at
              FROM memories
-             WHERE (
-                       archived = 0 OR EXISTS (
-                           SELECT 1 FROM memory_materialization_projections projection
-                           WHERE projection.memory_row_id = memories.id
-                             AND projection.aggregate_kind = 'memory_lifecycle'
-                             AND projection.mutation_kind = 'materialized'
-                       )
-                   )
-               AND (session_id = ?1 OR session_id = ?2) AND content LIKE ?3
+             WHERE archived = 0 AND session_id = ?1 AND content LIKE ?2
              ORDER BY created_at DESC
-             LIMIT ?4"
+             LIMIT ?3"
         };
         let mut stmt = conn.prepare(sql)?;
         let rows = if session_id.is_empty() {
@@ -3572,15 +1928,9 @@ impl MemoryStore {
             })?
             .collect::<Result<Vec<_>, _>>()?
         } else {
-            stmt.query_map(
-                params![
-                    session_id,
-                    MEMORY_LIFECYCLE_GLOBAL_SESSION_ID,
-                    like_query,
-                    limit as i64
-                ],
-                |row| Ok(Self::row_to_search_hit_fallback(row, query, "keyword")),
-            )?
+            stmt.query_map(params![session_id, like_query, limit as i64], |row| {
+                Ok(Self::row_to_search_hit_fallback(row, query, "keyword"))
+            })?
             .collect::<Result<Vec<_>, _>>()?
         };
         Self::filter_retrieval_active_search_hits(conn, rows)
@@ -3597,13 +1947,6 @@ impl MemoryStore {
                 }
                 match Self::canonical_vector_owner_for_memory(conn, hit.chunk.id) {
                     Ok(Some(owner)) => {
-                        if owner.kind() == "memory_lifecycle" {
-                            // This row is only a derived body projection. The
-                            // caller must join it with MemoryLifecycleReader;
-                            // residual MemoryStore archive rows are forbidden
-                            // from overriding current lifecycle truth.
-                            return Some(Ok(hit));
-                        }
                         match Self::memory_retrieval_is_active_from_conn(conn, &owner) {
                             Ok(true) => Some(Ok(hit)),
                             Ok(false) => None,
@@ -3615,133 +1958,6 @@ impl MemoryStore {
                 }
             })
             .collect()
-    }
-
-    /// Search the canonical conversation owner without copying message bodies
-    /// into the long-term Memory index. `session_id` scopes an explicit
-    /// session lookup; otherwise the search spans prior conversations while
-    /// `exclude_session_id` keeps the current turn from satisfying its own
-    /// "what did we discuss" query.
-    pub fn search_conversation_messages(
-        &self,
-        session_id: Option<&str>,
-        exclude_session_id: Option<&str>,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<MemorySearchHit>> {
-        if query.trim().is_empty() || limit == 0 {
-            return Ok(Vec::new());
-        }
-        let limit = limit.min(10);
-        let conn = self
-            .conn
-            .lock()
-            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
-        self.search_session_messages(
-            &conn,
-            session_id,
-            session_id.is_none().then_some(exclude_session_id).flatten(),
-            query,
-            limit,
-        )
-    }
-
-    fn search_session_messages(
-        &self,
-        conn: &Connection,
-        session_id: Option<&str>,
-        exclude_session_id: Option<&str>,
-        query: &str,
-        limit: usize,
-    ) -> Result<Vec<MemorySearchHit>> {
-        let bounded_query = query
-            .trim()
-            .chars()
-            .take(FTS_QUERY_MAX_CHARS)
-            .collect::<String>();
-        let terms = conversation_search_terms(&bounded_query);
-        if bounded_query.is_empty() || terms.is_empty() {
-            return Ok(Vec::new());
-        }
-        let scan_limit = (limit.saturating_mul(40)).clamp(50, 400) as i64;
-        let (sql, first_parameter) = if let Some(session_id) = session_id {
-            (
-                "SELECT id, session_id, content, role, created_at
-                 FROM messages
-                 WHERE session_id = ?1
-                 ORDER BY created_at DESC, id DESC
-                 LIMIT ?2",
-                session_id,
-            )
-        } else {
-            (
-                "SELECT id, session_id, content, role, created_at
-                 FROM messages
-                 WHERE session_id != ?1
-                 ORDER BY created_at DESC, id DESC
-                 LIMIT ?2",
-                exclude_session_id.unwrap_or_default(),
-            )
-        };
-        let mut statement = conn.prepare(sql)?;
-        let rows = statement
-            .query_map(params![first_parameter, scan_limit], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?.max(1),
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                    row.get::<_, String>(4)?,
-                ))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()
-            .context("failed to scan bounded canonical conversation messages")?;
-        let exact_query = bounded_query.to_lowercase();
-        let mut hits = rows
-            .into_iter()
-            .filter_map(|(message_id, session_id, content, role, created_at)| {
-                let normalized_content = content.to_lowercase();
-                let matched_terms = terms
-                    .iter()
-                    .filter(|term| normalized_content.contains(term.as_str()))
-                    .count();
-                if matched_terms == 0 {
-                    return None;
-                }
-                let exact_match = normalized_content.contains(exact_query.as_str());
-                let relevance_score = if exact_match {
-                    1.0
-                } else {
-                    0.55 + 0.4 * (matched_terms as f32 / terms.len() as f32)
-                };
-                Some(MemorySearchHit {
-                    chunk: MemoryChunk {
-                        id: -message_id,
-                        session_id,
-                        content,
-                        source: format!("conversation:{role}"),
-                        created_at,
-                        tier: 3,
-                        access_count: 0,
-                        last_accessed_at: String::new(),
-                        importance_score: 0.0,
-                        archived: false,
-                        archived_at: None,
-                        summary: None,
-                    },
-                    relevance_score,
-                    source_tier: "conversation".into(),
-                })
-            })
-            .collect::<Vec<_>>();
-        hits.sort_by(|left, right| {
-            right
-                .relevance_score
-                .total_cmp(&left.relevance_score)
-                .then_with(|| right.chunk.created_at.cmp(&left.chunk.created_at))
-        });
-        hits.truncate(limit);
-        Ok(hits)
     }
 
     fn row_to_search_hit(row: &rusqlite::Row, rank: f32, source_tier: &str) -> MemorySearchHit {
@@ -3819,166 +2035,51 @@ fn row_to_memory_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<MemoryRecor
     })
 }
 
-fn validate_projection_ref(label: &str, value: &str) -> Result<()> {
-    if value.trim().is_empty()
-        || value.trim() != value
-        || value.len() > 256
-        || value.chars().any(char::is_control)
-    {
-        anyhow::bail!("invalid Memory projection {label}");
-    }
-    Ok(())
-}
-
-fn projected_memory_row_id(conn: &Connection, event_id: &str) -> Result<Option<Option<i64>>> {
-    conn.query_row(
-        "SELECT memory_row_id FROM memory_materialization_projections WHERE event_id = ?1",
-        [event_id],
-        |row| row.get::<_, Option<i64>>(0),
-    )
-    .optional()
-    .map_err(Into::into)
-}
-
-fn memory_lifecycle_projection_deleted(conn: &Connection, memory_id: &str) -> Result<bool> {
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM memory_materialization_projections
-             WHERE aggregate_kind = 'memory_lifecycle'
-               AND aggregate_id = ?1 AND mutation_kind = 'deleted'
-             LIMIT 1",
-            [memory_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-}
-
-fn memory_projection_applied(conn: &Connection, event_id: &str) -> Result<bool> {
-    Ok(conn
-        .query_row(
-            "SELECT 1 FROM memory_materialization_projections WHERE event_id = ?1",
-            [event_id],
-            |_| Ok(()),
-        )
-        .optional()?
-        .is_some())
-}
-
-fn insert_memory_projection_marker(
-    conn: &Connection,
-    event_id: &str,
-    aggregate_kind: &str,
-    aggregate_id: &str,
-    mutation_kind: &str,
-    memory_row_id: Option<i64>,
-) -> Result<()> {
-    conn.execute(
-        "INSERT INTO memory_materialization_projections (
-            event_id, aggregate_kind, aggregate_id, mutation_kind,
-            memory_row_id, applied_at
-         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        params![
-            event_id,
-            aggregate_kind,
-            aggregate_id,
-            mutation_kind,
-            memory_row_id,
-            Utc::now().to_rfc3339()
-        ],
-    )?;
-    Ok(())
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ChatSession {
-    pub session_id: String,
-    pub title: String,
-    pub created_at: String,
-    pub updated_at: String,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct LegacyStateHistorySourceRecord {
-    pub id: i64,
-    pub dimension_name: String,
-    pub value: f64,
-    pub unit: String,
-    pub recorded_at: String,
-    pub note: Option<String>,
-    pub operation_id: Option<String>,
-    pub operation_digest: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct LegacyStateHistoryMigrationSnapshot {
-    pub source_store_identity: String,
-    pub records: Vec<LegacyStateHistorySourceRecord>,
-}
-
-impl LegacyStateHistoryMigrationSnapshot {
-    pub fn validate_source_store_identity(&self) -> Result<()> {
-        if !is_canonical_memory_store_identity(&self.source_store_identity) {
-            anyhow::bail!("legacy_state_history_source_store_identity_invalid");
-        }
-        Ok(())
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CanonicalStateEntryWrite {
-    pub operation_id: String,
-    pub operation_digest: String,
-    pub state_entry_id: i64,
-    pub replayed: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::ChatMessage;
     use rusqlite::Connection;
 
-    #[test]
-    fn memory_store_save_and_load_message() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
-        let session_id = "s1";
-        let msg = ChatMessage {
-            role: "user".into(),
-            content: "hello".into(),
-        };
-        store.save_message(session_id, &msg).unwrap();
-        let loaded = store.load_recent_messages(session_id, 10).unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].role, "user");
-        assert_eq!(loaded[0].content, "hello");
+    fn save_test_knowledge_note(
+        store: &MemoryStore,
+        session_id: &str,
+        content: &str,
+    ) -> CanonicalKnowledgeNoteWrite {
+        store
+            .save_knowledge_note_idempotent_with_outbox(
+                &uuid::Uuid::new_v4().to_string(),
+                session_id,
+                content,
+                "knowledge_note",
+                "test",
+                &[],
+                "private",
+            )
+            .unwrap()
     }
 
-    #[test]
-    fn memory_store_read_only_degraded_open_checks_the_real_canonical_tables() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("memory-read-only.db");
-        {
-            let store = MemoryStore::new(&path).unwrap();
-            store
-                .save_message(
-                    "read-only-session",
-                    &ChatMessage {
-                        role: "user".into(),
-                        content: "canonical read-only evidence".into(),
-                    },
-                )
-                .unwrap();
-        }
-
-        let read_only = MemoryStore::open_read_only_existing(&path).unwrap();
-        let loaded = read_only
-            .load_recent_messages("read-only-session", 10)
-            .unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].content, "canonical read-only evidence");
+    fn insert_unowned_test_row(
+        store: &MemoryStore,
+        session_id: &str,
+        content: &str,
+        content_type: &str,
+        source: &str,
+        tags: &[String],
+    ) -> i64 {
+        let conn = store.conn.lock().unwrap();
+        MemoryStore::insert_memory_row(
+            &conn,
+            session_id,
+            content,
+            content_type,
+            source,
+            None,
+            &Utc::now().to_rfc3339(),
+            tags,
+            "private",
+            None,
+        )
+        .unwrap()
     }
 
     #[test]
@@ -4311,301 +2412,6 @@ mod tests {
     }
 
     #[test]
-    fn canonical_message_operation_replay_is_exact_and_payload_drift_fails_closed() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        let message = ChatMessage {
-            role: "assistant".into(),
-            content: "Canonical scheduled delivery".into(),
-        };
-        let first = store
-            .save_message_idempotent("scheduled:attempt-1", &message, "scheduled:attempt-1:final")
-            .unwrap();
-        let replay = store
-            .save_message_idempotent("scheduled:attempt-1", &message, "scheduled:attempt-1:final")
-            .unwrap();
-
-        assert_eq!(first.message_id, replay.message_id);
-        assert_eq!(first.canonical_ref, replay.canonical_ref);
-        assert!(!first.replayed);
-        assert!(replay.replayed);
-        assert_eq!(
-            first.canonical_ref,
-            format!(
-                "conversation://scheduled:attempt-1/message/{}",
-                first.message_id
-            )
-        );
-        let loaded = store
-            .load_recent_messages("scheduled:attempt-1", 10)
-            .unwrap();
-        assert_eq!(loaded.len(), 1);
-        assert_eq!(loaded[0].role, message.role);
-        assert_eq!(loaded[0].content, message.content);
-
-        let drift = ChatMessage {
-            role: "assistant".into(),
-            content: "Different delivery".into(),
-        };
-        assert!(store
-            .save_message_idempotent("scheduled:attempt-1", &drift, "scheduled:attempt-1:final")
-            .is_err());
-        assert!(store
-            .save_message_idempotent("scheduled:attempt-2", &message, "scheduled:attempt-1:final")
-            .is_err());
-    }
-
-    #[test]
-    fn canonical_store_identity_is_stable_across_reopen_and_distinct_per_store() {
-        let directory = tempfile::tempdir().unwrap();
-        let first_path = directory.path().join("first-memory.db");
-        let second_path = directory.path().join("second-memory.db");
-        let first_identity = {
-            let store = MemoryStore::new(&first_path).unwrap();
-            store.canonical_store_identity().to_string()
-        };
-        let reopened_identity = MemoryStore::new(&first_path)
-            .unwrap()
-            .canonical_store_identity()
-            .to_string();
-        let second_identity = MemoryStore::new(&second_path)
-            .unwrap()
-            .canonical_store_identity()
-            .to_string();
-
-        assert_eq!(first_identity, reopened_identity);
-        assert_ne!(first_identity, second_identity);
-        assert!(is_canonical_memory_store_identity(&first_identity));
-        assert!(is_canonical_memory_store_identity(&second_identity));
-    }
-
-    #[test]
-    fn assistant_message_commit_cannot_issue_a_canonical_user_input_proof() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        let assistant_message = ChatMessage {
-            role: "assistant".into(),
-            content: "This is output, not authenticated user input".into(),
-        };
-
-        let error = store
-            .save_message_idempotent_with_proof(
-                "proof-role-session",
-                &assistant_message,
-                "proof-role-operation",
-            )
-            .expect_err("assistant output cannot authorize a Work-run input reference");
-        assert!(error
-            .to_string()
-            .contains("canonical_user_message_proof_requires_role_user"));
-        assert!(store
-            .load_recent_messages("proof-role-session", 10)
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn concurrent_message_replay_cannot_create_a_b_a_history() {
-        let store = Arc::new(MemoryStore::new_in_memory().unwrap());
-        let session_id = "concurrent-conversation";
-        let message_a = ChatMessage {
-            role: "user".into(),
-            content: "A".into(),
-        };
-        store
-            .save_message_idempotent(session_id, &message_a, "operation-a")
-            .unwrap();
-
-        let barrier = Arc::new(std::sync::Barrier::new(3));
-        let replay_store = Arc::clone(&store);
-        let replay_barrier = Arc::clone(&barrier);
-        let replay_a = message_a.clone();
-        let replay = std::thread::spawn(move || {
-            replay_barrier.wait();
-            replay_store
-                .save_message_idempotent(session_id, &replay_a, "operation-a")
-                .unwrap()
-        });
-        let write_store = Arc::clone(&store);
-        let write_barrier = Arc::clone(&barrier);
-        let write = std::thread::spawn(move || {
-            let message_b = ChatMessage {
-                role: "assistant".into(),
-                content: "B".into(),
-            };
-            write_barrier.wait();
-            write_store
-                .save_message_idempotent(session_id, &message_b, "operation-b")
-                .unwrap()
-        });
-        barrier.wait();
-        assert!(replay.join().unwrap().replayed);
-        assert!(!write.join().unwrap().replayed);
-
-        let history = store.load_recent_messages(session_id, 10).unwrap();
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].content, "A");
-        assert_eq!(history[1].content, "B");
-    }
-
-    #[test]
-    fn continuation_context_stops_at_exact_user_operation() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        let session_id = "continuation-prefix";
-        for (role, content, operation) in [
-            ("user", "first", "continuation-first"),
-            ("assistant", "answer", "continuation-answer"),
-            ("user", "blocked turn", "continuation-blocked"),
-            ("assistant", "pending review", "continuation-pending"),
-            ("user", "later turn", "continuation-later"),
-        ] {
-            store
-                .save_message_idempotent(
-                    session_id,
-                    &ChatMessage {
-                        role: role.into(),
-                        content: content.into(),
-                    },
-                    operation,
-                )
-                .unwrap();
-        }
-
-        let prefix = store
-            .load_conversation_messages_through_operation("continuation-blocked", 64)
-            .unwrap();
-        assert_eq!(
-            prefix
-                .iter()
-                .map(|message| message.content.as_str())
-                .collect::<Vec<_>>(),
-            vec!["first", "answer", "blocked turn"]
-        );
-        assert_eq!(
-            prefix.last().map(|message| message.role.as_str()),
-            Some("user")
-        );
-    }
-
-    #[test]
-    fn bounded_context_rebuilds_projection_from_canonical_transcript_and_ignores_tampering() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        let session_id = "bounded-context";
-        for id in 1..=31 {
-            let role = if id % 2 == 0 { "assistant" } else { "user" };
-            let content = if id == 3 {
-                "必须保留离线约束，不要执行外部写入。".to_string()
-            } else if id == 9 {
-                "未完成：仍需检查 evidence at https://example.com/report".to_string()
-            } else {
-                format!("message-{id}-{}", "x".repeat(180))
-            };
-            store
-                .save_message_idempotent(
-                    session_id,
-                    &ChatMessage {
-                        role: role.into(),
-                        content,
-                    },
-                    &format!("bounded-context-operation-{id}"),
-                )
-                .unwrap();
-        }
-        let config = ConversationContextConfig {
-            max_chars: 1_600,
-            recent_chars: 700,
-            summary_chars: 700,
-            excerpt_chars: 180,
-        };
-
-        let first = store
-            .materialize_bounded_conversation_context_through_operation(
-                "bounded-context-operation-31",
-                config,
-            )
-            .unwrap();
-        assert!(first.total_chars <= config.max_chars);
-        assert!(first.omitted_message_count > 0);
-        let summary = first.summary.as_ref().expect("derived summary");
-        assert!(summary.content.contains("必须保留离线约束"));
-        assert!(summary.content.contains("未完成"));
-        assert_eq!(first.provider_messages.last().unwrap().role, "user");
-
-        store
-            .conn
-            .lock()
-            .unwrap()
-            .execute(
-                "UPDATE conversation_context_summaries
-                 SET summary_content = 'tampered projection'
-                 WHERE session_id = ?1",
-                [session_id],
-            )
-            .unwrap();
-        let rebuilt = store
-            .materialize_bounded_conversation_context_through_operation(
-                "bounded-context-operation-31",
-                config,
-            )
-            .unwrap();
-        assert_eq!(rebuilt.summary, first.summary);
-        assert!(!rebuilt.provider_messages[0]
-            .content
-            .contains("tampered projection"));
-
-        let earlier = store
-            .materialize_bounded_conversation_context_through_operation(
-                "bounded-context-operation-5",
-                config,
-            )
-            .unwrap();
-        assert!(earlier.summary.is_none());
-        let stored_source_end_after_earlier_replay: i64 = store
-            .conn
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT source_end_message_id FROM conversation_context_summaries
-                 WHERE session_id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(
-            stored_source_end_after_earlier_replay,
-            summary.source_end_message_id
-        );
-
-        store
-            .conn
-            .lock()
-            .unwrap()
-            .execute(
-                "DELETE FROM conversation_context_summaries WHERE session_id = ?1",
-                [session_id],
-            )
-            .unwrap();
-        let rebuilt_after_delete = store
-            .materialize_bounded_conversation_context_through_operation(
-                "bounded-context-operation-31",
-                config,
-            )
-            .unwrap();
-        assert_eq!(rebuilt_after_delete.summary, first.summary);
-
-        store.delete_chat_session(session_id).unwrap();
-        let stored_summary_count: i64 = store
-            .conn
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM conversation_context_summaries WHERE session_id = ?1",
-                [session_id],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(stored_summary_count, 0);
-    }
-
-    #[test]
     fn memory_store_rejects_and_migrates_lifecycle_retrieval_state() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memory-lifecycle-owner-boundary.db");
@@ -4687,321 +2493,10 @@ mod tests {
     }
 
     #[test]
-    fn residual_lifecycle_archive_state_cannot_hide_a_reader_authorized_body() {
-        const SENTINEL: &str = "LIFECYCLE_READER_IS_CANONICAL_SENTINEL";
-        let store = MemoryStore::new_in_memory().unwrap();
-        store
-            .project_lifecycle_memory(
-                "event-lifecycle-reader-canonical",
-                "memory:reader-canonical",
-                "lifecycle-reader-session",
-                SENTINEL,
-                "lifecycle_memory_projection",
-                &[
-                    "canonical_owner:memory_lifecycle".into(),
-                    "memory_id:memory:reader-canonical".into(),
-                ],
-                "private",
-                None,
-            )
-            .unwrap();
-        {
-            let mut conn = store.conn.lock().unwrap();
-            conn.execute_batch(
-                "DROP TRIGGER reject_memory_lifecycle_retrieval_insert;
-                 DROP TRIGGER reject_memory_lifecycle_retrieval_update;",
-            )
-            .unwrap();
-            let tx = conn.transaction().unwrap();
-            tx.execute(
-                "UPDATE memories SET archived = 1, archived_at = '2026-07-12T00:00:00Z'
-                 WHERE source = 'memory_lifecycle:memory:reader-canonical'",
-                [],
-            )
-            .unwrap();
-            let stale_reason_digest =
-                crate::persistence_outbox::metadata_digest("stale_lifecycle_archive");
-            let receipt = crate::persistence_outbox::enqueue_mutation(
-                &tx,
-                "memory_retrieval",
-                "stale-memory-store-lifecycle-owner",
-                "archived",
-                &stale_reason_digest,
-                &["vector_store"],
-            )
-            .unwrap();
-            tx.execute(
-                "INSERT INTO memory_retrieval_states
-                    (owner_kind, owner_id, disposition, revision, last_event_id,
-                     reason_digest, changed_at)
-                 VALUES ('memory_lifecycle', 'memory:reader-canonical', 'archived', 1,
-                         ?1, ?2, '2026-07-12T00:00:00Z')",
-                params![receipt.event_id, stale_reason_digest],
-            )
-            .unwrap();
-            tx.commit().unwrap();
-        }
-
-        let hits = store.search_text_memories(None, SENTINEL, 10).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(
-            hits[0].chunk.source,
-            "memory_lifecycle:memory:reader-canonical"
-        );
-    }
-
-    #[test]
-    fn memory_store_save_and_load_snapshot() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
-        let session_id = "s1";
-        let model = LifeModel::default_model();
-        store.save_snapshot(session_id, &model).unwrap();
-        let loaded = store.load_latest_snapshot(session_id).unwrap();
-        assert!(loaded.is_some());
-        assert_eq!(loaded.unwrap().metadata.version, model.metadata.version);
-    }
-
-    #[test]
-    fn memory_store_chat_session_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
-        store.create_chat_session("sess1", "Test Session").unwrap();
-        let sessions = store.list_chat_sessions(10).unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].session_id, "sess1");
-        assert_eq!(sessions[0].title, "Test Session");
-
-        store.rename_chat_session("sess1", "Renamed").unwrap();
-        let sessions = store.list_chat_sessions(10).unwrap();
-        assert_eq!(sessions[0].title, "Renamed");
-
-        store.touch_chat_session("sess1").unwrap();
-        store.delete_chat_session("sess1").unwrap();
-        let sessions = store.list_chat_sessions(10).unwrap();
-        assert!(sessions.is_empty());
-    }
-
-    #[test]
-    fn chat_session_skill_selection_survives_store_restart_and_can_be_cleared() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("memory.db");
-        {
-            let store = MemoryStore::new(&path).unwrap();
-            store
-                .create_chat_session("skill-session", "Skill Session")
-                .unwrap();
-            store
-                .set_chat_session_selected_skill("skill-session", Some("evidence_review"))
-                .unwrap();
-            assert_eq!(
-                store
-                    .chat_session_selected_skill("skill-session")
-                    .unwrap()
-                    .as_deref(),
-                Some("evidence_review")
-            );
-        }
-
-        let reopened = MemoryStore::new(&path).unwrap();
-        assert_eq!(
-            reopened
-                .chat_session_selected_skill("skill-session")
-                .unwrap()
-                .as_deref(),
-            Some("evidence_review")
-        );
-        reopened
-            .set_chat_session_selected_skill("skill-session", None)
-            .unwrap();
-        assert_eq!(
-            reopened
-                .chat_session_selected_skill("skill-session")
-                .unwrap(),
-            None
-        );
-    }
-
-    #[test]
-    fn memory_store_state_history_roundtrip() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
-        store
-            .record_state_entry("energy", 75.0, "%", Some("good"))
-            .unwrap();
-        store.record_state_entry("energy", 80.0, "%", None).unwrap();
-        let history = store.get_state_history("energy", 10).unwrap();
-        assert_eq!(history.len(), 2);
-        assert_eq!(history[0].value, 75.0);
-        assert_eq!(history[1].value, 80.0);
-
-        let latest = store.get_latest_state_entries(5).unwrap();
-        assert_eq!(latest.len(), 2);
-    }
-
-    #[test]
-    fn state_history_operation_is_payload_bound_and_replay_safe() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        let operation_id = uuid::Uuid::new_v4().to_string();
-        let first = store
-            .record_state_entry_idempotent(
-                &operation_id,
-                "focus",
-                8.0,
-                "points",
-                Some("afternoon"),
-                Some(1.0),
-                Some(10.0),
-                Some(2),
-            )
-            .unwrap();
-        let replay = store
-            .record_state_entry_idempotent(
-                &operation_id,
-                "focus",
-                8.0,
-                "points",
-                Some("afternoon"),
-                Some(1.0),
-                Some(10.0),
-                Some(2),
-            )
-            .unwrap();
-
-        assert!(!first.replayed);
-        assert!(replay.replayed);
-        assert_eq!(first.state_entry_id, replay.state_entry_id);
-        assert_eq!(first.operation_digest, replay.operation_digest);
-        assert_eq!(store.get_state_history("focus", 10).unwrap().len(), 1);
-        let migration_source = store.list_legacy_state_history_migration_source().unwrap();
-        assert_eq!(
-            migration_source.source_store_identity,
-            store.canonical_store_identity.as_ref()
-        );
-        assert_eq!(migration_source.records.len(), 1);
-        assert_eq!(migration_source.records[0].id, first.state_entry_id);
-        assert_eq!(
-            migration_source.records[0].operation_id.as_deref(),
-            Some(operation_id.as_str())
-        );
-        assert_eq!(
-            migration_source.records[0].operation_digest.as_deref(),
-            Some(first.operation_digest.as_str())
-        );
-        assert_eq!(
-            migration_source.records[0].note.as_deref(),
-            Some("afternoon")
-        );
-        assert!(store
-            .record_state_entry_idempotent(
-                &operation_id,
-                "focus",
-                9.0,
-                "points",
-                Some("afternoon"),
-                Some(1.0),
-                Some(10.0),
-                Some(2),
-            )
-            .unwrap_err()
-            .to_string()
-            .contains("different payload"));
-        for (dimension_name, unit, note) in [
-            ("energy", "points", Some("afternoon")),
-            ("focus", "percent", Some("afternoon")),
-            ("focus", "points", Some("evening")),
-        ] {
-            assert!(
-                store
-                    .record_state_entry_idempotent(
-                        &operation_id,
-                        dimension_name,
-                        8.0,
-                        unit,
-                        note,
-                        Some(1.0),
-                        Some(10.0),
-                        Some(2),
-                    )
-                    .unwrap_err()
-                    .to_string()
-                    .contains("different payload"),
-                "dimension, unit, and note must each remain bound to the operation UUID"
-            );
-        }
-        for (min_threshold, max_threshold, alert_days) in [
-            (Some(2.0), Some(10.0), Some(2)),
-            (Some(1.0), Some(9.0), Some(2)),
-            (Some(1.0), Some(10.0), Some(3)),
-        ] {
-            assert!(
-                store
-                    .record_state_entry_idempotent(
-                        &operation_id,
-                        "focus",
-                        8.0,
-                        "points",
-                        Some("afternoon"),
-                        min_threshold,
-                        max_threshold,
-                        alert_days,
-                    )
-                    .unwrap_err()
-                    .to_string()
-                    .contains("different payload"),
-                "each LifeModel projection field must remain bound to the operation UUID"
-            );
-        }
-    }
-
-    #[test]
-    fn legacy_state_history_migration_source_fails_closed_above_bounded_limit() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        {
-            let mut conn = store.conn.lock().unwrap();
-            let tx = conn.transaction().unwrap();
-            {
-                let mut statement = tx
-                    .prepare(
-                        "INSERT INTO state_history (
-                            dimension_name, value, unit, recorded_at, note,
-                            operation_id, operation_digest
-                         ) VALUES ('focus', ?1, '/10', ?2, NULL, NULL, NULL)",
-                    )
-                    .unwrap();
-                let recorded_at = Utc::now().to_rfc3339();
-                for index in 0..=LEGACY_STATE_HISTORY_MIGRATION_MAX_ROWS {
-                    statement
-                        .execute(params![index as f64, &recorded_at])
-                        .unwrap();
-                }
-            }
-            tx.commit().unwrap();
-        }
-
-        let error = store
-            .list_legacy_state_history_migration_source()
-            .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("legacy_state_history_migration_row_limit_exceeded"));
-    }
-
-    #[test]
     fn fts_query_escape_handles_special_syntax_without_error() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
-        store
-            .save_memory_record(
-                "s1",
-                "alpha quoted value with 中文 token",
-                "note",
-                "test",
-                &[],
-                "private",
-                None,
-            )
-            .unwrap();
+        save_test_knowledge_note(&store, "s1", "alpha quoted value with 中文 token");
 
         let long_query = "alpha ".repeat(100);
         for query in [
@@ -5018,17 +2513,7 @@ mod tests {
     fn fts_query_escape_preserves_normal_search() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
-        store
-            .save_memory_record(
-                "s1",
-                "deep work 深度工作 planning",
-                "note",
-                "test",
-                &[],
-                "private",
-                None,
-            )
-            .unwrap();
+        save_test_knowledge_note(&store, "s1", "deep work 深度工作 planning");
 
         let english = store.search_text_memories(Some("s1"), "deep", 5).unwrap();
         assert_eq!(english.len(), 1);
@@ -5040,48 +2525,9 @@ mod tests {
     }
 
     #[test]
-    fn session_text_search_includes_global_lifecycle_memory_but_not_other_sessions() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        for (session_id, content) in [
-            ("current-session", "SHARED_RETRIEVAL_SENTINEL current"),
-            (
-                MEMORY_LIFECYCLE_GLOBAL_SESSION_ID,
-                "SHARED_RETRIEVAL_SENTINEL global",
-            ),
-            ("other-session", "SHARED_RETRIEVAL_SENTINEL private"),
-        ] {
-            store
-                .save_memory_record(session_id, content, "note", "test", &[], "private", None)
-                .unwrap();
-        }
-
-        let hits = store
-            .search_text_memories(Some("current-session"), "SHARED_RETRIEVAL_SENTINEL", 10)
-            .unwrap();
-        let sessions = hits
-            .iter()
-            .map(|hit| hit.chunk.session_id.as_str())
-            .collect::<HashSet<_>>();
-        assert_eq!(hits.len(), 2);
-        assert!(sessions.contains("current-session"));
-        assert!(sessions.contains(MEMORY_LIFECYCLE_GLOBAL_SESSION_ID));
-        assert!(!sessions.contains("other-session"));
-    }
-
-    #[test]
     fn text_search_is_a_pure_read_of_memory_owner_state() {
         let store = MemoryStore::new_in_memory().unwrap();
-        store
-            .save_memory_record(
-                "pure-search-session",
-                "PURE_TEXT_SEARCH_RESULT",
-                "note",
-                "manual",
-                &[],
-                "private",
-                None,
-            )
-            .unwrap();
+        save_test_knowledge_note(&store, "pure-search-session", "PURE_TEXT_SEARCH_RESULT");
         let before_records = store.export_active_memory_records().unwrap();
         let before_rebuild_source = store.vector_rebuild_source_snapshot().unwrap();
 
@@ -5120,373 +2566,13 @@ mod tests {
     }
 
     #[test]
-    fn memory_store_keeps_chat_body_in_messages_only_but_session_search_still_works() {
+    fn memory_store_can_save_knowledge_notes() {
         let dir = tempfile::tempdir().unwrap();
         let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
-        let msg = ChatMessage {
-            role: "assistant".into(),
-            content: "Rust 异步任务需要注意取消和所有权".into(),
-        };
-        store.save_message("s1", &msg).unwrap();
-        let hits = store.search_text_memories(Some("s1"), "Rust", 10).unwrap();
-        assert_eq!(hits.len(), 1);
-        assert!(hits[0].chunk.content.contains("Rust"));
-        assert_eq!(hits[0].source_tier, "conversation");
-
-        let conn = store.conn.lock().unwrap();
-        let message_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM messages", [], |row| row.get(0))
-            .unwrap();
-        let mirrored_memory_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM memories WHERE content_type = 'chat_message'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(message_count, 1);
-        assert_eq!(mirrored_memory_count, 0);
-    }
-
-    #[test]
-    fn conversation_search_spans_prior_sessions_and_excludes_current_session() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
-        store
-            .save_message(
-                "prior-session",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "Agent memory needs bounded source citations".into(),
-                },
-            )
-            .unwrap();
-        store
-            .save_message(
-                "current-session",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "What did we say about Agent memory?".into(),
-                },
-            )
-            .unwrap();
-
-        let hits = store
-            .search_conversation_messages(
-                None,
-                Some("current-session"),
-                "Find what we discussed about Agent memory.",
-                10,
-            )
-            .unwrap();
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].chunk.session_id, "prior-session");
-        assert_eq!(hits[0].source_tier, "conversation");
-
-        let conn = store.conn.lock().unwrap();
-        let mirrored_memory_count: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM memories WHERE content_type = 'chat_message'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(mirrored_memory_count, 0);
-    }
-
-    #[test]
-    fn memory_store_restart_scrubs_legacy_chat_mirror_but_keeps_canonical_message() {
-        const CHAT_BODY: &str = "RELATIONSHIP-NOTE-41952-BIRCH";
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("memory.db");
-        let store = MemoryStore::new(&path).unwrap();
-        store
-            .save_message(
-                "s1",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: CHAT_BODY.into(),
-                },
-            )
-            .unwrap();
-        store
-            .save_memory_record(
-                "s1",
-                CHAT_BODY,
-                "chat_message",
-                "chat:user",
-                &[],
-                "private",
-                None,
-            )
-            .unwrap();
-        drop(store);
-
-        let restarted = MemoryStore::new(&path).unwrap();
-        let messages = restarted.load_recent_messages("s1", 10).unwrap();
-        let hits = restarted
-            .search_text_memories(Some("s1"), "RELATIONSHIP", 10)
-            .unwrap();
-
-        assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].content, CHAT_BODY);
-        assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].source_tier, "conversation");
-        let mirrored_count: i64 = restarted
-            .conn
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT COUNT(*) FROM memories WHERE content_type = 'chat_message'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(mirrored_count, 0);
-    }
-
-    #[test]
-    fn memory_store_can_save_manual_memory_records() {
-        let dir = tempfile::tempdir().unwrap();
-        let store = MemoryStore::new(dir.path().join("memory.db")).unwrap();
-        store
-            .save_memory_record(
-                "manual",
-                "用户偏好在上午处理复杂任务",
-                "note",
-                "manual_index",
-                &["preference".into(), "energy".into()],
-                "private",
-                None,
-            )
-            .unwrap();
+        save_test_knowledge_note(&store, "manual", "用户偏好在上午处理复杂任务");
         let hits = store.search_text_memories(None, "上午", 10).unwrap();
         assert_eq!(hits.len(), 1);
         assert!(matches!(hits[0].source_tier.as_str(), "fts" | "keyword"));
-    }
-
-    #[test]
-    fn memory_store_migrates_legacy_messages_table_before_creating_embedding_index() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("legacy-memory.db");
-        let conn = Connection::open(&db_path).unwrap();
-        conn.execute(
-            "CREATE TABLE messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                session_id TEXT NOT NULL,
-                role TEXT NOT NULL,
-                content TEXT NOT NULL,
-                created_at TEXT NOT NULL
-            )",
-            [],
-        )
-        .unwrap();
-        drop(conn);
-
-        let store = MemoryStore::new(&db_path).unwrap();
-        let msg = ChatMessage {
-            role: "user".into(),
-            content: "legacy schema still loads".into(),
-        };
-        store.save_message("legacy", &msg).unwrap();
-        let loaded = store.load_recent_messages("legacy", 10).unwrap();
-        assert_eq!(loaded.len(), 1);
-
-        let conn = Connection::open(&db_path).unwrap();
-        let mut stmt = conn.prepare("PRAGMA table_info(messages)").unwrap();
-        let column_names = stmt
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert!(column_names.iter().any(|name| name == "embedding_id"));
-    }
-
-    #[test]
-    fn conversation_delete_rolls_back_when_colocated_outbox_insert_fails() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        store
-            .create_chat_session("session-atomic", "Atomic")
-            .unwrap();
-        store
-            .save_message(
-                "session-atomic",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "PRIVATE_DELETE_SENTINEL".into(),
-                },
-            )
-            .unwrap();
-        store.install_outbox_insert_failure_for_test().unwrap();
-
-        let error = store
-            .delete_chat_session_with_tombstone("session-atomic", Some("forget it"))
-            .expect_err("canonical delete must roll back with its outbox");
-        assert!(error.to_string().contains("injected canonical outbox"));
-        assert_eq!(
-            store
-                .load_recent_messages("session-atomic", 10)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert!(store
-            .list_replayable_projection_deliveries(10)
-            .unwrap()
-            .is_empty());
-    }
-
-    #[test]
-    fn conversation_delete_commits_metadata_only_tombstone_and_outbox() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        store
-            .create_chat_session("session-delete", "Delete")
-            .unwrap();
-        store
-            .save_message(
-                "session-delete",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "PRIVATE_OUTBOX_SENTINEL".into(),
-                },
-            )
-            .unwrap();
-        let receipt = store
-            .delete_chat_session_with_tombstone("session-delete", Some("PRIVATE_REASON_SENTINEL"))
-            .unwrap();
-
-        assert!(store
-            .load_recent_messages("session-delete", 10)
-            .unwrap()
-            .is_empty());
-        let deliveries = store.list_replayable_projection_deliveries(10).unwrap();
-        assert_eq!(deliveries.len(), 1);
-        let serialized = serde_json::to_string(&deliveries).unwrap();
-        assert!(!serialized.contains("PRIVATE_OUTBOX_SENTINEL"));
-        assert!(!serialized.contains("PRIVATE_REASON_SENTINEL"));
-        assert_eq!(
-            store.projection_summary(&receipt.event_id).unwrap().pending,
-            1
-        );
-    }
-
-    #[test]
-    fn conversation_tombstone_fence_blocks_late_writes_and_preserves_long_term_memory() {
-        let store = Arc::new(MemoryStore::new_in_memory().unwrap());
-        store
-            .create_chat_session("session-fenced", "Fenced")
-            .unwrap();
-        store
-            .create_chat_session("unrelated-session", "Unrelated")
-            .unwrap();
-        store
-            .save_message(
-                "session-fenced",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "CONVERSATION_BODY_MUST_BE_DELETED".into(),
-                },
-            )
-            .unwrap();
-        store
-            .save_message(
-                "unrelated-session",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "UNRELATED_BODY_MUST_SURVIVE_FAILED_IMPORT".into(),
-                },
-            )
-            .unwrap();
-        store
-            .save_memory_record(
-                "session-fenced",
-                "MANUAL_LONG_TERM_MEMORY_MUST_SURVIVE",
-                "knowledge_note",
-                "manual",
-                &[],
-                "private",
-                None,
-            )
-            .unwrap();
-        store
-            .project_lifecycle_memory(
-                "outbox:lifecycle-independent",
-                "memory:independent",
-                "session-fenced",
-                "LIFECYCLE_MEMORY_MUST_SURVIVE",
-                "lifecycle_memory_projection",
-                &["memory_id:memory:independent".into()],
-                "private",
-                None,
-            )
-            .unwrap();
-
-        let deletion_committed = Arc::new(std::sync::Barrier::new(2));
-        let deleting_store = Arc::clone(&store);
-        let deleting_barrier = Arc::clone(&deletion_committed);
-        let delete = std::thread::spawn(move || {
-            let receipt = deleting_store
-                .delete_chat_session_with_tombstone("session-fenced", Some("user_confirmed_delete"))
-                .unwrap();
-            deleting_barrier.wait();
-            receipt
-        });
-
-        // The barrier releases only after the canonical delete and its outbox
-        // committed. Every late writer must observe the durable fence inside
-        // its own transaction rather than recreating the aggregate.
-        deletion_committed.wait();
-        let late_message = ChatMessage {
-            role: "assistant".into(),
-            content: "LATE_MESSAGE_MUST_NOT_RESURRECT".into(),
-        };
-        for error in [
-            store
-                .save_message("session-fenced", &late_message)
-                .unwrap_err(),
-            store
-                .create_chat_session("session-fenced", "Late create")
-                .unwrap_err(),
-            store
-                .rename_chat_session("session-fenced", "Late rename")
-                .unwrap_err(),
-            store.touch_chat_session("session-fenced").unwrap_err(),
-            store
-                .save_snapshot("session-fenced", &LifeModel::default())
-                .unwrap_err(),
-        ] {
-            assert!(error
-                .to_string()
-                .contains("conversation_canonical_tombstoned"));
-        }
-        let receipt = delete.join().unwrap();
-
-        assert!(store
-            .load_recent_messages("session-fenced", 10)
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            store.load_recent_messages("unrelated-session", 10).unwrap()[0].content,
-            "UNRELATED_BODY_MUST_SURVIVE_FAILED_IMPORT"
-        );
-        assert_eq!(
-            store
-                .search_text_memories(None, "MANUAL_LONG_TERM_MEMORY_MUST_SURVIVE", 10)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            store
-                .search_text_memories(None, "LIFECYCLE_MEMORY_MUST_SURVIVE", 10)
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            store.projection_summary(&receipt.event_id).unwrap().pending,
-            1
-        );
     }
 
     #[test]
@@ -5607,28 +2693,22 @@ mod tests {
                 "private",
             )
             .unwrap();
-        let type_only_id = store
-            .save_memory_record(
-                "owner-proof-session",
-                "type alone is not ownership",
-                "knowledge_note",
-                "manual",
-                &[],
-                "private",
-                None,
-            )
-            .unwrap();
-        let tag_only_id = store
-            .save_memory_record(
-                "owner-proof-session",
-                "tag alone is not ownership",
-                "untrusted_legacy",
-                "manual",
-                &["canonical_owner:knowledge_note".into()],
-                "private",
-                None,
-            )
-            .unwrap();
+        let type_only_id = insert_unowned_test_row(
+            &store,
+            "owner-proof-session",
+            "type alone is not ownership",
+            "knowledge_note",
+            "manual",
+            &[],
+        );
+        let tag_only_id = insert_unowned_test_row(
+            &store,
+            "owner-proof-session",
+            "tag alone is not ownership",
+            "untrusted_legacy",
+            "manual",
+            &["canonical_owner:knowledge_note".into()],
+        );
 
         let snapshot = store.vector_rebuild_source_snapshot().unwrap();
         let page = store
@@ -5672,16 +2752,11 @@ mod tests {
         assert!(store
             .load_verified_knowledge_note_projection("wrong-event", &owner)
             .is_err());
-        assert!(store
-            .load_verified_knowledge_note_projection(
-                &write.canonical_mutation.event_id,
-                &CanonicalVectorOwnerRef::new(
-                    "memory_record",
-                    &write.knowledge_note_id.to_string(),
-                )
-                .unwrap(),
-            )
-            .is_err());
+        assert!(CanonicalVectorOwnerRef::new(
+            "memory_record",
+            &write.knowledge_note_id.to_string(),
+        )
+        .is_err());
 
         store
             .conn
@@ -5695,134 +2770,6 @@ mod tests {
         assert!(store
             .load_verified_knowledge_note_projection(&write.canonical_mutation.event_id, &owner,)
             .is_err());
-    }
-
-    #[test]
-    fn knowledge_note_v2_journal_migration_scrubs_enumerable_body_digest() {
-        let dir = tempfile::tempdir().unwrap();
-        let db_path = dir.path().join("memory-index-v2.db");
-        let operation_id = uuid::Uuid::new_v4().to_string();
-        let leaked_digest = "sha256:enumerable-low-entropy-body-digest";
-        let first = {
-            let store = MemoryStore::new(&db_path).unwrap();
-            store
-                .save_knowledge_note_idempotent_with_outbox(
-                    &operation_id,
-                    "manual-session",
-                    "LOW_ENTROPY_PRIVATE_BODY",
-                    "knowledge_note",
-                    "manual",
-                    &["manual".to_string()],
-                    "private",
-                )
-                .unwrap()
-        };
-        {
-            let conn = Connection::open(&db_path).unwrap();
-            conn.execute_batch(
-                "DROP INDEX idx_knowledge_note_operation_memory;
-                 ALTER TABLE knowledge_note_operations
-                 RENAME TO knowledge_note_operations_v4_source;
-                 CREATE TABLE memory_index_operations (
-                    operation_id TEXT PRIMARY KEY,
-                    payload_digest TEXT NOT NULL,
-                    memory_id INTEGER NOT NULL,
-                    outbox_event_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    FOREIGN KEY(memory_id) REFERENCES memories(id),
-                    FOREIGN KEY(outbox_event_id) REFERENCES canonical_outbox_events(event_id)
-                 );",
-            )
-            .unwrap();
-            conn.execute(
-                "INSERT INTO memory_index_operations (
-                    operation_id, payload_digest, memory_id, outbox_event_id, created_at
-                 ) SELECT operation_id, ?1, memory_id, outbox_event_id, created_at
-                   FROM knowledge_note_operations_v4_source",
-                [leaked_digest],
-            )
-            .unwrap();
-            conn.execute("DROP TABLE knowledge_note_operations_v4_source", [])
-                .unwrap();
-            conn.execute(
-                "UPDATE canonical_outbox_events
-                 SET aggregate_kind = 'memory_record', mutation_kind = 'indexed'
-                 WHERE event_id = ?1",
-                [&first.canonical_mutation.event_id],
-            )
-            .unwrap();
-        }
-
-        let reopened = MemoryStore::new(&db_path).unwrap();
-        let replay = reopened
-            .save_knowledge_note_idempotent_with_outbox(
-                &operation_id,
-                "manual-session",
-                "LOW_ENTROPY_PRIVATE_BODY",
-                "knowledge_note",
-                "manual",
-                &["manual".to_string()],
-                "private",
-            )
-            .unwrap();
-        assert!(replay.replayed);
-        assert_eq!(replay.knowledge_note_id, first.knowledge_note_id);
-        assert_eq!(
-            replay.canonical_mutation.event_id,
-            first.canonical_mutation.event_id
-        );
-        let snapshot = reopened.vector_rebuild_source_snapshot().unwrap();
-        let rebuild_record = reopened
-            .load_vector_rebuild_source_page(0, snapshot.through_memory_id, 10)
-            .unwrap()
-            .into_iter()
-            .find(|record| record.memory.id == replay.knowledge_note_id)
-            .unwrap();
-        let legacy_owner = rebuild_record.canonical_owner.unwrap();
-        assert_eq!(legacy_owner.kind(), "memory_record");
-        assert_eq!(legacy_owner.id(), replay.knowledge_note_id.to_string());
-        assert_eq!(
-            reopened
-                .load_verified_knowledge_note_projection(
-                    &replay.canonical_mutation.event_id,
-                    &legacy_owner,
-                )
-                .unwrap()
-                .id,
-            replay.knowledge_note_id
-        );
-        let conn = reopened.conn.lock().unwrap();
-        let columns = {
-            let mut statement = conn
-                .prepare("PRAGMA table_info(knowledge_note_operations)")
-                .unwrap();
-            let columns = statement
-                .query_map([], |row| row.get::<_, String>(1))
-                .unwrap()
-                .collect::<std::result::Result<Vec<_>, _>>()
-                .unwrap();
-            columns
-        };
-        assert!(columns.iter().any(|column| column == "operation_digest"));
-        assert!(!columns.iter().any(|column| column == "payload_digest"));
-        let operation_digest: String = conn
-            .query_row(
-                "SELECT operation_digest FROM knowledge_note_operations",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_ne!(operation_digest, leaked_digest);
-        assert!(!operation_digest.contains("LOW_ENTROPY_PRIVATE_BODY"));
-        let legacy_table_exists: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master
-                 WHERE type = 'table' AND name = 'memory_index_operations'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(legacy_table_exists, 0);
     }
 
     #[test]
@@ -6081,187 +3028,10 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_compatibility_projection_is_event_idempotent_and_marker_is_ref_only() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        let tags = vec!["memory_id:memory:test".to_string()];
-        let first = store
-            .project_lifecycle_memory(
-                "outbox:test",
-                "memory:test",
-                "session-test",
-                "PROJECTION_BODY_SENTINEL",
-                "lifecycle_memory_projection",
-                &tags,
-                "private",
-                None,
-            )
-            .unwrap();
-        let second = store
-            .project_lifecycle_memory(
-                "outbox:test",
-                "memory:test",
-                "session-test",
-                "PROJECTION_BODY_SENTINEL",
-                "lifecycle_memory_projection",
-                &tags,
-                "private",
-                None,
-            )
-            .unwrap();
-
-        assert_eq!(first, second);
-        let conn = store.conn.lock().unwrap();
-        let projected_rows: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM memories WHERE source = 'memory_lifecycle:memory:test'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        let marker: String = conn
-            .query_row(
-                "SELECT event_id || aggregate_kind || aggregate_id || mutation_kind
-                 FROM memory_materialization_projections WHERE event_id = 'outbox:test'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(projected_rows, 1);
-        assert!(first.is_some());
-        assert!(!marker.contains("PROJECTION_BODY_SENTINEL"));
-    }
-
-    #[test]
-    fn lifecycle_deletion_marker_blocks_late_create_and_reasserts_delete() {
-        let store = MemoryStore::new_in_memory().unwrap();
-        let tags = vec![
-            "canonical_owner:memory_lifecycle".to_string(),
-            "memory_id:memory:deleted".to_string(),
-        ];
-        let created = store
-            .project_lifecycle_memory(
-                "outbox:create-before-delete",
-                "memory:deleted",
-                "session-test",
-                "ORIGINAL_BODY",
-                "lifecycle_memory_projection",
-                &tags,
-                "private",
-                None,
-            )
-            .unwrap();
-        assert!(created.is_some());
-        store
-            .save_memory_record(
-                "session-test",
-                "LEGACY_ALT_SOURCE_BODY_MUST_BE_SCRUBBED",
-                "lifecycle_memory_projection",
-                "legacy_projection_v0",
-                &tags,
-                "private",
-                None,
-            )
-            .unwrap();
-        assert_eq!(
-            store
-                .project_lifecycle_memory_tombstone("outbox:delete-after-create", "memory:deleted")
-                .unwrap(),
-            2
-        );
-
-        let late = store
-            .project_lifecycle_memory(
-                "outbox:late-create",
-                "memory:deleted",
-                "session-test",
-                "LATE_BODY_MUST_NOT_RESURRECT",
-                "lifecycle_memory_projection",
-                &tags,
-                "private",
-                None,
-            )
-            .unwrap();
-        assert_eq!(late, None);
-
-        assert!(store
-            .search_text_memories(None, "ORIGINAL_BODY", 10)
-            .unwrap()
-            .is_empty());
-
-        // Re-applying an already-marked tombstone is deliberately
-        // state-enforcing, not merely marker-idempotent. Simulate a stale row
-        // written by an older binary and prove the same canonical delete event
-        // scrubs the raw duplicate without a second delete request.
-        store
-            .save_memory_record(
-                "session-test",
-                "LEGACY_STALE_BODY_MUST_BE_SCRUBBED",
-                "lifecycle_memory_projection",
-                "legacy_projection_after_marker",
-                &tags,
-                "private",
-                None,
-            )
-            .unwrap();
-        assert_eq!(
-            store
-                .project_lifecycle_memory_tombstone("outbox:delete-after-create", "memory:deleted")
-                .unwrap(),
-            1
-        );
-
-        let conn = store.conn.lock().unwrap();
-        let (derived_rows, raw_sentinels, late_marker): (i64, i64, i64) = conn
-            .query_row(
-                "SELECT
-                    COUNT(*),
-                    COALESCE(SUM(CASE WHEN content IN (
-                        'ORIGINAL_BODY',
-                        'LATE_BODY_MUST_NOT_RESURRECT',
-                        'LEGACY_ALT_SOURCE_BODY_MUST_BE_SCRUBBED',
-                        'LEGACY_STALE_BODY_MUST_BE_SCRUBBED'
-                    ) THEN 1 ELSE 0 END), 0),
-                    (SELECT COUNT(*) FROM memory_materialization_projections
-                     WHERE event_id = 'outbox:late-create')
-                 FROM memories
-                 WHERE source = 'memory_lifecycle:memory:deleted'
-                    OR content IN (
-                        'LEGACY_ALT_SOURCE_BODY_MUST_BE_SCRUBBED',
-                        'LEGACY_STALE_BODY_MUST_BE_SCRUBBED'
-                    )",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        assert_eq!(derived_rows, 0);
-        assert_eq!(raw_sentinels, 0);
-        assert_eq!(late_marker, 1);
-    }
-
-    #[test]
     fn vector_rebuild_source_uses_stable_bounded_memory_id_pages() {
         let store = MemoryStore::new_in_memory().unwrap();
-        store
-            .save_message(
-                "conversation-only",
-                &ChatMessage {
-                    role: "user".into(),
-                    content: "CONVERSATION_BODY_MUST_NOT_ENTER_REBUILD_PAGE".into(),
-                },
-            )
-            .unwrap();
         for index in 0..130 {
-            store
-                .save_memory_record(
-                    "memory-session",
-                    &format!("memory-{index}"),
-                    "preference",
-                    &format!("memory_lifecycle:{index}"),
-                    &[],
-                    "private",
-                    None,
-                )
-                .unwrap();
+            save_test_knowledge_note(&store, "memory-session", &format!("memory-{index}"));
         }
 
         let snapshot = store.vector_rebuild_source_snapshot().unwrap();
