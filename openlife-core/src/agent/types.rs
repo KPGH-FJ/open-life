@@ -195,7 +195,11 @@ impl ContentReceiptAuthorityKey for CanonicalTaskReceiptKey {
             return false;
         }
         let mut tag = [0u8; 32];
-        for (index, pair) in hex.as_bytes().chunks_exact(2).enumerate() {
+        let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+        if !remainder.is_empty() {
+            return false;
+        }
+        for (index, pair) in pairs.iter().enumerate() {
             let Ok(pair) = std::str::from_utf8(pair) else {
                 return false;
             };

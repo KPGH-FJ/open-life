@@ -2163,9 +2163,11 @@ fn decode_embedding(blob: Option<&[u8]>, legacy_json: &str) -> Vec<f32> {
             // to stale compatibility JSON would hide the damaged canonical value.
             return Vec::new();
         }
-        return blob
-            .chunks_exact(4)
-            .map(|chunk| f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]))
+        let (chunks, remainder) = blob.as_chunks::<4>();
+        debug_assert!(remainder.is_empty());
+        return chunks
+            .iter()
+            .map(|chunk| f32::from_le_bytes(*chunk))
             .collect();
     }
     serde_json::from_str(legacy_json).unwrap_or_default()
