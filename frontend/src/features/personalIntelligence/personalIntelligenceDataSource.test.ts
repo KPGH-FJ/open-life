@@ -6,6 +6,7 @@ const tauriMocks = vi.hoisted(() => ({
   getReviewCenterViewModel: vi.fn(),
   getProviderPrivacyBoundarySummary: vi.fn(),
   draftLifeModelV2Change: vi.fn(),
+  draftLegacyLifeModelMigration: vi.fn(),
   draftLifeModelV2Rollback: vi.fn(),
   draftLifeModelV2Export: vi.fn(),
   confirmLifeModelLearningCandidate: vi.fn(),
@@ -27,6 +28,7 @@ vi.mock("@/ipc/personalIntelligence", () => ({
   correctMemory: tauriMocks.correctMemory,
   deleteLifeModelLearningCandidate: tauriMocks.deleteLifeModelLearningCandidate,
   draftLifeModelV2Change: tauriMocks.draftLifeModelV2Change,
+  draftLegacyLifeModelMigration: tauriMocks.draftLegacyLifeModelMigration,
   draftLifeModelV2Export: tauriMocks.draftLifeModelV2Export,
   draftLifeModelV2Rollback: tauriMocks.draftLifeModelV2Rollback,
   getLifeModelViewModel: tauriMocks.getLifeModelViewModel,
@@ -359,6 +361,52 @@ describe("Personal Intelligence Tauri data source", () => {
     await expect(
       tauriPersonalIntelligenceDataSource.draftLifeModelExport(exportRequest)
     ).rejects.toThrow("lifemodel_v2_proposal_receipt_unverified");
+  });
+
+  it("accepts a legacy migration draft only when its source and decision receipt are exact", async () => {
+    const request = {
+      sourceDigest: "sha256:legacy",
+      selections: [
+        {
+          candidateId: "legacy-candidate:one",
+          decision: "include" as const,
+          editedValue: { kind: "statement" as const, value: { statement: "Alice" } },
+        },
+        {
+          candidateId: "legacy-candidate:two",
+          decision: "exclude" as const,
+          editedValue: null,
+        },
+      ],
+      nonLifemodelItemsAcknowledged: true,
+    };
+    tauriMocks.draftLegacyLifeModelMigration.mockResolvedValueOnce({
+      proposalId: "proposal:migration",
+      status: "review_required",
+      sourceDigest: "sha256:legacy",
+      resultDocumentDigest:
+        "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+      includedCandidateCount: 1,
+      excludedCandidateCount: 1,
+      durableWriteExecuted: false,
+    });
+
+    await expect(
+      tauriPersonalIntelligenceDataSource.draftLegacyLifeModelMigration(request)
+    ).resolves.toBe("proposal:migration");
+
+    tauriMocks.draftLegacyLifeModelMigration.mockResolvedValueOnce({
+      proposalId: "proposal:migration",
+      status: "review_required",
+      sourceDigest: "sha256:legacy",
+      resultDocumentDigest: "missing-digest-scheme",
+      includedCandidateCount: 2,
+      excludedCandidateCount: 0,
+      durableWriteExecuted: false,
+    });
+    await expect(
+      tauriPersonalIntelligenceDataSource.draftLegacyLifeModelMigration(request)
+    ).rejects.toThrow("lifemodel_v2_migration_proposal_receipt_unverified");
   });
 
   it("does not report a direct Memory action as complete while its projection is pending", async () => {

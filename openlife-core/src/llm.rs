@@ -1293,6 +1293,14 @@ pub struct PreparedProviderRequest {
     pub context_manifest: ContextManifest,
     pub provider_target: String,
     pub model_target: String,
+    /// Exact reasoning budget admitted by the user-selected provider profile.
+    /// `None` preserves the provider/model default.
+    #[serde(default)]
+    pub reasoning_effort: Option<crate::conversation::ReasoningEffort>,
+    /// Exact model capability contract used to admit `reasoning_effort`.
+    /// This is metadata-only and contains neither credentials nor model output.
+    #[serde(default)]
+    pub reasoning_capability: Option<ProviderReasoningCapability>,
     /// Exact final adapter URL, including path, selected during preparation.
     pub provider_endpoint: String,
     /// In-process scheduler generation that prepared this request.
@@ -1402,6 +1410,15 @@ impl PreparedProviderRequest {
         if self.context_manifest.privacy_decision_id.trim().is_empty() {
             anyhow::bail!("prepared provider request is missing privacy_decision_id");
         }
+        if let Some(effort) = self.reasoning_effort {
+            let capability = self.reasoning_capability.as_ref().ok_or_else(|| {
+                anyhow::anyhow!("prepared provider reasoning capability is missing")
+            })?;
+            capability.validate_for_target(&self.provider_target, &self.model_target)?;
+            if !capability.supported_efforts.contains(&effort) {
+                anyhow::bail!("prepared provider reasoning effort is unsupported");
+            }
+        }
         self.context_manifest
             .validate_context_truth(&self.context_blocks)?;
         if self.provider_tools.len() > 16 {
@@ -1504,6 +1521,364 @@ impl PreparedProviderRequest {
     }
 }
 
+const GPT_5_6_REASONING_EFFORTS: &[crate::conversation::ReasoningEffort] = &[
+    crate::conversation::ReasoningEffort::None,
+    crate::conversation::ReasoningEffort::Low,
+    crate::conversation::ReasoningEffort::Medium,
+    crate::conversation::ReasoningEffort::High,
+    crate::conversation::ReasoningEffort::Xhigh,
+    crate::conversation::ReasoningEffort::Max,
+];
+
+const OPENAI_NONE_TO_XHIGH_REASONING_EFFORTS: &[crate::conversation::ReasoningEffort] = &[
+    crate::conversation::ReasoningEffort::None,
+    crate::conversation::ReasoningEffort::Low,
+    crate::conversation::ReasoningEffort::Medium,
+    crate::conversation::ReasoningEffort::High,
+    crate::conversation::ReasoningEffort::Xhigh,
+];
+
+const OPENAI_CODEX_REASONING_EFFORTS: &[crate::conversation::ReasoningEffort] = &[
+    crate::conversation::ReasoningEffort::Low,
+    crate::conversation::ReasoningEffort::Medium,
+    crate::conversation::ReasoningEffort::High,
+    crate::conversation::ReasoningEffort::Xhigh,
+];
+
+const LOW_TO_HIGH_REASONING_EFFORTS: &[crate::conversation::ReasoningEffort] = &[
+    crate::conversation::ReasoningEffort::Low,
+    crate::conversation::ReasoningEffort::Medium,
+    crate::conversation::ReasoningEffort::High,
+];
+
+const MINIMAL_TO_HIGH_REASONING_EFFORTS: &[crate::conversation::ReasoningEffort] = &[
+    crate::conversation::ReasoningEffort::Minimal,
+    crate::conversation::ReasoningEffort::Low,
+    crate::conversation::ReasoningEffort::Medium,
+    crate::conversation::ReasoningEffort::High,
+];
+
+const NONE_TO_HIGH_REASONING_EFFORTS: &[crate::conversation::ReasoningEffort] = &[
+    crate::conversation::ReasoningEffort::None,
+    crate::conversation::ReasoningEffort::Minimal,
+    crate::conversation::ReasoningEffort::Low,
+    crate::conversation::ReasoningEffort::Medium,
+    crate::conversation::ReasoningEffort::High,
+];
+
+const DEEPSEEK_REASONING_EFFORTS: &[crate::conversation::ReasoningEffort] = &[
+    crate::conversation::ReasoningEffort::None,
+    crate::conversation::ReasoningEffort::High,
+    crate::conversation::ReasoningEffort::Max,
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningWireProtocol {
+    OpenAiReasoningEffort,
+    GeminiReasoningEffort,
+    DeepSeekThinking,
+    OllamaThink,
+    OpenRouterUnified,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningCapabilitySource {
+    OfficialBuiltin,
+    ProviderDiscovery,
+    ExplicitConfiguration,
+}
+
+/// One provider/model reasoning contract admitted before provider dispatch.
+///
+/// Leading Agent clients expose only levels supported by the selected model,
+/// preserve the model default when the user makes no choice, and adapt the
+/// selected level at the provider boundary. OpenLife uses the same shape so a
+/// future provider `/models` discovery result can replace a built-in contract
+/// without changing Turn admission or the composer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderReasoningCapability {
+    pub provider_id: String,
+    pub model_id: String,
+    pub wire_protocol: ReasoningWireProtocol,
+    pub supported_efforts: Vec<crate::conversation::ReasoningEffort>,
+    pub default_effort: Option<crate::conversation::ReasoningEffort>,
+    pub mandatory: bool,
+    pub source: ReasoningCapabilitySource,
+}
+
+impl ProviderReasoningCapability {
+    pub fn validate_for_target(&self, provider: &str, model: &str) -> Result<()> {
+        if self.provider_id != provider || self.model_id != model {
+            anyhow::bail!("prepared provider reasoning capability target mismatch");
+        }
+        if self.supported_efforts.is_empty() {
+            anyhow::bail!("prepared provider reasoning capability is empty");
+        }
+        let mut observed = std::collections::HashSet::new();
+        if self
+            .supported_efforts
+            .iter()
+            .any(|effort| !observed.insert(*effort))
+        {
+            anyhow::bail!("prepared provider reasoning capability contains duplicates");
+        }
+        if self
+            .default_effort
+            .is_some_and(|effort| !self.supported_efforts.contains(&effort))
+        {
+            anyhow::bail!("prepared provider reasoning default is unsupported");
+        }
+        if self.mandatory
+            && self
+                .supported_efforts
+                .contains(&crate::conversation::ReasoningEffort::None)
+        {
+            anyhow::bail!("mandatory reasoning capability cannot expose none");
+        }
+        Ok(())
+    }
+}
+
+fn official_reasoning_capability(
+    provider: &str,
+    model: &str,
+    wire_protocol: ReasoningWireProtocol,
+    efforts: &[crate::conversation::ReasoningEffort],
+    default_effort: Option<crate::conversation::ReasoningEffort>,
+    mandatory: bool,
+) -> ProviderReasoningCapability {
+    ProviderReasoningCapability {
+        provider_id: provider.to_string(),
+        model_id: model.to_string(),
+        wire_protocol,
+        supported_efforts: efforts.to_vec(),
+        default_effort,
+        mandatory,
+        source: ReasoningCapabilitySource::OfficialBuiltin,
+    }
+}
+
+/// Verified built-in reasoning capabilities for official provider endpoints.
+/// Unknown models and custom gateways intentionally remain provider-default;
+/// they require provider discovery or an explicit capability declaration.
+pub fn built_in_reasoning_capability(
+    provider: &str,
+    model: &str,
+) -> Option<ProviderReasoningCapability> {
+    use crate::conversation::ReasoningEffort;
+    let provider = provider.trim().to_ascii_lowercase();
+    let model = model.trim();
+    let capability = match provider.as_str() {
+        "openai"
+            if matches!(
+                model,
+                "gpt-5.6" | "gpt-5.6-sol" | "gpt-5.6-terra" | "gpt-5.6-luna"
+            ) =>
+        {
+            official_reasoning_capability(
+                &provider,
+                model,
+                ReasoningWireProtocol::OpenAiReasoningEffort,
+                GPT_5_6_REASONING_EFFORTS,
+                Some(ReasoningEffort::Medium),
+                false,
+            )
+        }
+        "openai" if matches!(model, "gpt-5.5") => official_reasoning_capability(
+            &provider,
+            model,
+            ReasoningWireProtocol::OpenAiReasoningEffort,
+            OPENAI_NONE_TO_XHIGH_REASONING_EFFORTS,
+            Some(ReasoningEffort::Medium),
+            false,
+        ),
+        "openai" if matches!(model, "gpt-5.4") => official_reasoning_capability(
+            &provider,
+            model,
+            ReasoningWireProtocol::OpenAiReasoningEffort,
+            OPENAI_NONE_TO_XHIGH_REASONING_EFFORTS,
+            Some(ReasoningEffort::None),
+            false,
+        ),
+        "openai" if matches!(model, "gpt-5.3-codex" | "gpt-5.2-codex") => {
+            official_reasoning_capability(
+                &provider,
+                model,
+                ReasoningWireProtocol::OpenAiReasoningEffort,
+                OPENAI_CODEX_REASONING_EFFORTS,
+                None,
+                true,
+            )
+        }
+        "gemini" if model == "gemini-2.5-flash" => official_reasoning_capability(
+            &provider,
+            model,
+            ReasoningWireProtocol::GeminiReasoningEffort,
+            NONE_TO_HIGH_REASONING_EFFORTS,
+            None,
+            false,
+        ),
+        "gemini"
+            if matches!(
+                model,
+                "gemini-2.5-pro"
+                    | "gemini-3-flash-preview"
+                    | "gemini-3.1-pro-preview"
+                    | "gemini-3.1-flash-lite-preview"
+            ) =>
+        {
+            official_reasoning_capability(
+                &provider,
+                model,
+                ReasoningWireProtocol::GeminiReasoningEffort,
+                MINIMAL_TO_HIGH_REASONING_EFFORTS,
+                None,
+                true,
+            )
+        }
+        "deepseek" if matches!(model, "deepseek-v4-flash" | "deepseek-v4-pro") => {
+            official_reasoning_capability(
+                &provider,
+                model,
+                ReasoningWireProtocol::DeepSeekThinking,
+                DEEPSEEK_REASONING_EFFORTS,
+                Some(ReasoningEffort::High),
+                false,
+            )
+        }
+        "ollama" if model == "gpt-oss" || model.starts_with("gpt-oss:") => {
+            official_reasoning_capability(
+                &provider,
+                model,
+                ReasoningWireProtocol::OllamaThink,
+                LOW_TO_HIGH_REASONING_EFFORTS,
+                None,
+                true,
+            )
+        }
+        _ => return None,
+    };
+    capability
+        .validate_for_target(&provider, model)
+        .expect("built-in reasoning capability must be internally valid");
+    Some(capability)
+}
+
+const ALL_GATEWAY_REASONING_EFFORTS: &[crate::conversation::ReasoningEffort] = &[
+    crate::conversation::ReasoningEffort::None,
+    crate::conversation::ReasoningEffort::Minimal,
+    crate::conversation::ReasoningEffort::Low,
+    crate::conversation::ReasoningEffort::Medium,
+    crate::conversation::ReasoningEffort::High,
+    crate::conversation::ReasoningEffort::Xhigh,
+    crate::conversation::ReasoningEffort::Max,
+];
+
+/// Parse the capability object returned for one exact model by OpenRouter's
+/// `GET /api/v1/models` contract. Dynamic router entries omit `reasoning` and
+/// therefore correctly produce no selector.
+pub fn parse_openrouter_reasoning_capability(
+    body: &serde_json::Value,
+    model: &str,
+) -> Result<Option<ProviderReasoningCapability>> {
+    let entries = body
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("openrouter model discovery payload is invalid"))?;
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(model))
+    else {
+        return Ok(None);
+    };
+    let Some(reasoning) = entry
+        .get("reasoning")
+        .and_then(serde_json::Value::as_object)
+    else {
+        return Ok(None);
+    };
+    let mut supported_efforts = match reasoning.get("supported_efforts") {
+        Some(serde_json::Value::Null) => ALL_GATEWAY_REASONING_EFFORTS.to_vec(),
+        Some(serde_json::Value::Array(values)) => values
+            .iter()
+            .filter_map(serde_json::Value::as_str)
+            .filter_map(|value| crate::conversation::ReasoningEffort::from_wire(value).ok())
+            .collect::<Vec<_>>(),
+        Some(_) => anyhow::bail!("openrouter reasoning efforts are invalid"),
+        None => return Ok(None),
+    };
+    if supported_efforts.is_empty() {
+        return Ok(None);
+    }
+    let default_effort = reasoning
+        .get("default_effort")
+        .and_then(serde_json::Value::as_str)
+        .map(crate::conversation::ReasoningEffort::from_wire)
+        .transpose()?;
+    let mandatory = reasoning
+        .get("mandatory")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    if mandatory {
+        supported_efforts.retain(|effort| *effort != crate::conversation::ReasoningEffort::None);
+    }
+    let capability = ProviderReasoningCapability {
+        provider_id: "openrouter".into(),
+        model_id: model.to_string(),
+        wire_protocol: ReasoningWireProtocol::OpenRouterUnified,
+        supported_efforts,
+        default_effort,
+        mandatory,
+        source: ReasoningCapabilitySource::ProviderDiscovery,
+    };
+    capability.validate_for_target("openrouter", model)?;
+    Ok(Some(capability))
+}
+
+/// Discover reasoning controls for the configured OpenRouter model. This is a
+/// bounded idempotent metadata read on the exact official provider origin. A
+/// denied/ask network policy or malformed response fails closed and leaves the
+/// manually configured model available with provider-default reasoning.
+pub async fn discover_openrouter_reasoning_capability(
+    openai_base: &str,
+    api_key: &str,
+    model: &str,
+    network_policy: &NetworkPolicy,
+) -> Result<Option<ProviderReasoningCapability>> {
+    if !provider_endpoint_is_official("openrouter", openai_base) {
+        anyhow::bail!("openrouter capability discovery requires the official endpoint");
+    }
+    let url = provider_models_url("openrouter", openai_base);
+    let decision = crate::network_client::resolve_network_policy_decision(
+        network_policy,
+        &url,
+        "provider.openrouter.capability_discovery",
+    )?;
+    if decision.disposition != crate::network_client::NetworkPolicyDisposition::Allow {
+        anyhow::bail!("openrouter capability discovery is not allowed by network policy");
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, "application/json".parse()?);
+    if !api_key.trim().is_empty() {
+        headers.insert(AUTHORIZATION, format!("Bearer {api_key}").parse()?);
+    }
+    let response = provider_network_client("openrouter", &url)?
+        .get_text_with_headers_for_decision(&url, network_policy, &decision, headers)
+        .await?;
+    if !response.status.is_success() {
+        anyhow::bail!(
+            "openrouter capability discovery returned HTTP {}",
+            response.status
+        );
+    }
+    let body = serde_json::from_str::<serde_json::Value>(&response.body)
+        .context("openrouter capability discovery response is invalid JSON")?;
+    parse_openrouter_reasoning_capability(&body, model)
+}
+
 fn render_provider_system_prompt(context_blocks: &[BoundedContextBlock]) -> Option<String> {
     let mut trusted_instructions = Vec::new();
     let mut untrusted_data = Vec::new();
@@ -1542,6 +1917,7 @@ pub fn provider_label(provider: &str) -> String {
         "deepseek" => "DeepSeek".to_string(),
         "openrouter" => "OpenRouter".to_string(),
         "openai" => "OpenAI".to_string(),
+        "gemini" => "Google Gemini".to_string(),
         "siliconflow" => "SiliconFlow".to_string(),
         "moonshot" => "Moonshot/Kimi".to_string(),
         "dashscope" => "通义千问 DashScope".to_string(),
@@ -1584,7 +1960,14 @@ pub fn provider_endpoint_is_official(provider: &str, openai_base: &str) -> bool 
     let provider = provider.trim().to_ascii_lowercase();
     if !matches!(
         provider.as_str(),
-        "deepseek" | "openrouter" | "openai" | "siliconflow" | "moonshot" | "dashscope" | "zhipu"
+        "deepseek"
+            | "openrouter"
+            | "openai"
+            | "gemini"
+            | "siliconflow"
+            | "moonshot"
+            | "dashscope"
+            | "zhipu"
     ) {
         return false;
     }
@@ -1615,6 +1998,7 @@ pub fn effective_api_key_for_endpoint(
         "deepseek" => std::env::var("DEEPSEEK_API_KEY").unwrap_or_default(),
         "openrouter" => std::env::var("OPENROUTER_API_KEY").unwrap_or_default(),
         "openai" => std::env::var("OPENAI_API_KEY").unwrap_or_default(),
+        "gemini" => std::env::var("GEMINI_API_KEY").unwrap_or_default(),
         "siliconflow" => std::env::var("SILICONFLOW_API_KEY").unwrap_or_default(),
         "moonshot" => std::env::var("MOONSHOT_API_KEY").unwrap_or_default(),
         "dashscope" => std::env::var("DASHSCOPE_API_KEY").unwrap_or_default(),
@@ -1627,6 +2011,7 @@ pub fn default_base_for_provider(provider: &str) -> &'static str {
     match provider {
         "deepseek" => "https://api.deepseek.com",
         "openrouter" => "https://openrouter.ai/api/v1",
+        "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai",
         "siliconflow" => "https://api.siliconflow.cn/v1",
         "moonshot" => "https://api.moonshot.cn/v1",
         "dashscope" => "https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -1785,13 +2170,16 @@ fn provider_network_client(
 }
 
 fn provider_endpoint_allows_system_fake_ip_proxy(provider: &str, endpoint: &reqwest::Url) -> bool {
-    endpoint.scheme() == "https"
-        && reqwest::Url::parse(&chat_completions_url(
-            provider,
-            default_base_for_provider(provider),
-        ))
-        .ok()
-        .is_some_and(|expected| expected == *endpoint)
+    if endpoint.scheme() != "https" {
+        return false;
+    }
+    [
+        chat_completions_url(provider, default_base_for_provider(provider)),
+        provider_models_url(provider, default_base_for_provider(provider)),
+    ]
+    .into_iter()
+    .filter_map(|url| reqwest::Url::parse(&url).ok())
+    .any(|expected| expected == *endpoint)
 }
 
 fn provider_http_error(label: &str, status: reqwest::StatusCode, body: &str) -> anyhow::Error {
@@ -1829,6 +2217,7 @@ pub(crate) struct OpenAiCompatibleAdapterRequest<'a> {
     pub(crate) endpoint: &'a str,
     pub(crate) api_key: &'a str,
     pub(crate) model: &'a str,
+    pub(crate) reasoning_effort: Option<crate::conversation::ReasoningEffort>,
     /// Derived from the policy-bound provider payload purpose. The adapter may
     /// use a provider-native JSON mode, but callers cannot infer this from
     /// prompt text or relax downstream schema validation.
@@ -1892,6 +2281,65 @@ fn openai_compatible_transport_profile(provider: &str) -> OpenAiCompatibleTransp
     }
 }
 
+fn apply_reasoning_transport(
+    body: &mut serde_json::Value,
+    provider: &str,
+    model: &str,
+    effort: crate::conversation::ReasoningEffort,
+    max_completion_tokens: u64,
+) -> Result<()> {
+    let capability = if provider == "openrouter" {
+        ProviderReasoningCapability {
+            provider_id: provider.into(),
+            model_id: model.into(),
+            wire_protocol: ReasoningWireProtocol::OpenRouterUnified,
+            supported_efforts: ALL_GATEWAY_REASONING_EFFORTS.to_vec(),
+            default_effort: None,
+            mandatory: false,
+            source: ReasoningCapabilitySource::ProviderDiscovery,
+        }
+    } else {
+        built_in_reasoning_capability(provider, model)
+            .ok_or_else(|| anyhow::anyhow!("provider reasoning capability is unavailable"))?
+    };
+    capability.validate_for_target(provider, model)?;
+    if !capability.supported_efforts.contains(&effort) {
+        anyhow::bail!("provider reasoning effort is unsupported");
+    }
+    let object = body
+        .as_object_mut()
+        .ok_or_else(|| anyhow::anyhow!("provider request body is not an object"))?;
+    object.remove("temperature");
+    match capability.wire_protocol {
+        ReasoningWireProtocol::OpenAiReasoningEffort
+        | ReasoningWireProtocol::GeminiReasoningEffort => {
+            object.remove("max_tokens");
+            object.insert("reasoning_effort".into(), json!(effort.as_str()));
+            object.insert("max_completion_tokens".into(), json!(max_completion_tokens));
+        }
+        ReasoningWireProtocol::DeepSeekThinking => {
+            object.insert("max_tokens".into(), json!(max_completion_tokens.min(8_192)));
+            if effort == crate::conversation::ReasoningEffort::None {
+                object.remove("reasoning_effort");
+                object.insert("thinking".into(), json!({ "type": "disabled" }));
+            } else {
+                object.insert("reasoning_effort".into(), json!(effort.as_str()));
+                object.insert("thinking".into(), json!({ "type": "enabled" }));
+            }
+        }
+        ReasoningWireProtocol::OpenRouterUnified => {
+            object.insert(
+                "reasoning".into(),
+                json!({ "effort": effort.as_str(), "exclude": true }),
+            );
+        }
+        ReasoningWireProtocol::OllamaThink => {
+            anyhow::bail!("ollama reasoning cannot use the OpenAI-compatible adapter");
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn chat_with_openai_compatible_raw_with_start_observer<F>(
     request: OpenAiCompatibleAdapterRequest<'_>,
     on_started: F,
@@ -1906,6 +2354,7 @@ where
         endpoint,
         api_key: configured_api_key,
         model,
+        reasoning_effort,
         structured_json_output,
         provider_native_json_mode,
         provider_tools,
@@ -1950,6 +2399,19 @@ where
         "temperature": temperature,
         "max_tokens": max_tokens,
     });
+    if let Some(reasoning_effort) = reasoning_effort {
+        apply_reasoning_transport(
+            &mut body,
+            provider,
+            model,
+            reasoning_effort,
+            if structured_json_output {
+                16_384
+            } else {
+                8_192
+            },
+        )?;
+    }
     if structured_json_output && provider_native_json_mode {
         body["response_format"] = json!({ "type": "json_object" });
         if transport_profile.require_supported_parameters && provider_tools.is_empty() {
@@ -1960,7 +2422,7 @@ where
             body["provider"] = json!({ "require_parameters": true });
         }
     }
-    if structured_json_output {
+    if structured_json_output && reasoning_effort.is_none() {
         match transport_profile.structured_reasoning {
             StructuredReasoningTransport::OpenRouterLow => {
                 // Some OpenRouter routes allocate most of `max_tokens` to
@@ -2215,6 +2677,7 @@ where
         endpoint,
         api_key: configured_api_key,
         model,
+        reasoning_effort,
         structured_json_output: _,
         provider_native_json_mode: _,
         provider_tools: _,
@@ -2246,13 +2709,16 @@ where
         }));
     }
 
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "messages": req_messages,
         "temperature": 0.7,
         "max_tokens": 2048,
         "stream": true,
     });
+    if let Some(reasoning_effort) = reasoning_effort {
+        apply_reasoning_transport(&mut body, provider, model, reasoning_effort, 8_192)?;
+    }
 
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_TYPE, "application/json".parse()?);
@@ -2603,6 +3069,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: key,
                 model,
+                reasoning_effort: None,
                 structured_json_output: false,
                 provider_native_json_mode: false,
                 provider_tools: &[],
@@ -2633,6 +3100,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: key,
                 model,
+                reasoning_effort: None,
                 structured_json_output: false,
                 provider_native_json_mode: false,
                 provider_tools: &[],
@@ -2717,6 +3185,257 @@ mod tests {
         );
     }
 
+    #[test]
+    fn reasoning_capabilities_are_exact_provider_model_contracts() {
+        use crate::conversation::ReasoningEffort;
+
+        let openai = super::built_in_reasoning_capability("openai", "gpt-5.6-sol").unwrap();
+        assert_eq!(
+            openai.supported_efforts,
+            &[
+                ReasoningEffort::None,
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High,
+                ReasoningEffort::Xhigh,
+                ReasoningEffort::Max,
+            ]
+        );
+        assert_eq!(openai.default_effort, Some(ReasoningEffort::Medium));
+        let deepseek = super::built_in_reasoning_capability("deepseek", "deepseek-v4-pro").unwrap();
+        assert_eq!(
+            deepseek.supported_efforts,
+            &[
+                ReasoningEffort::None,
+                ReasoningEffort::High,
+                ReasoningEffort::Max
+            ]
+        );
+        let gpt_5_4 = super::built_in_reasoning_capability("openai", "gpt-5.4").unwrap();
+        assert_eq!(gpt_5_4.default_effort, Some(ReasoningEffort::None));
+        assert!(!gpt_5_4.supported_efforts.contains(&ReasoningEffort::Max));
+        let gemini =
+            super::built_in_reasoning_capability("gemini", "gemini-3.1-pro-preview").unwrap();
+        assert!(gemini.mandatory);
+        assert!(gemini.supported_efforts.contains(&ReasoningEffort::Minimal));
+        assert!(!gemini.supported_efforts.contains(&ReasoningEffort::None));
+        let ollama = super::built_in_reasoning_capability("ollama", "gpt-oss:20b").unwrap();
+        assert_eq!(
+            ollama.supported_efforts,
+            vec![
+                ReasoningEffort::Low,
+                ReasoningEffort::Medium,
+                ReasoningEffort::High
+            ]
+        );
+        assert!(super::built_in_reasoning_capability("openrouter", "gpt-5.6-sol").is_none());
+        assert!(super::built_in_reasoning_capability("openai", "custom-gpt-5.6").is_none());
+    }
+
+    #[test]
+    fn openrouter_discovery_preserves_exact_efforts_default_and_mandatory_state() {
+        let body = serde_json::json!({
+            "data": [
+                {
+                    "id": "google/gemini-3.5-flash",
+                    "reasoning": {
+                        "supported_efforts": ["high", "medium", "low", "minimal"],
+                        "default_effort": "medium",
+                        "default_enabled": true,
+                        "mandatory": true
+                    }
+                },
+                { "id": "openrouter/auto" }
+            ]
+        });
+        let capability =
+            super::parse_openrouter_reasoning_capability(&body, "google/gemini-3.5-flash")
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            capability.supported_efforts,
+            vec![
+                crate::conversation::ReasoningEffort::High,
+                crate::conversation::ReasoningEffort::Medium,
+                crate::conversation::ReasoningEffort::Low,
+                crate::conversation::ReasoningEffort::Minimal,
+            ]
+        );
+        assert_eq!(
+            capability.default_effort,
+            Some(crate::conversation::ReasoningEffort::Medium)
+        );
+        assert!(capability.mandatory);
+        assert_eq!(
+            capability.source,
+            super::ReasoningCapabilitySource::ProviderDiscovery
+        );
+        assert!(
+            super::parse_openrouter_reasoning_capability(&body, "openrouter/auto")
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn openrouter_null_effort_list_means_all_gateway_levels() {
+        let body = serde_json::json!({
+            "data": [{
+                "id": "vendor/reasoning-model",
+                "reasoning": {
+                    "supported_efforts": null,
+                    "default_effort": "none",
+                    "mandatory": false
+                }
+            }]
+        });
+        let capability =
+            super::parse_openrouter_reasoning_capability(&body, "vendor/reasoning-model")
+                .unwrap()
+                .unwrap();
+        assert_eq!(
+            capability.supported_efforts,
+            super::ALL_GATEWAY_REASONING_EFFORTS
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_reasoning_uses_chat_completions_reasoning_contract() {
+        let (listener, base) = local_provider_base().await;
+        let server = tokio::spawn(serve_provider_response(
+            listener,
+            "200 OK",
+            br#"{"choices":[{"message":{"content":"ok"}}]}"#.to_vec(),
+            None,
+        ));
+        let (policy, decision) = allow_provider_network("openai", &base);
+        let endpoint = super::chat_completions_url("openai", &base);
+
+        let result = super::chat_with_openai_compatible_raw_with_start_observer(
+            super::OpenAiCompatibleAdapterRequest {
+                messages: vec![super::ChatMessage {
+                    role: "user".into(),
+                    content: "Answer.".into(),
+                }],
+                system_prompt: None,
+                provider: "openai",
+                endpoint: &endpoint,
+                api_key: "sk-test",
+                model: "gpt-5.6-sol",
+                reasoning_effort: Some(crate::conversation::ReasoningEffort::High),
+                structured_json_output: false,
+                provider_native_json_mode: false,
+                provider_tools: &[],
+                network_policy: &policy,
+                network_policy_decision: &decision,
+                request_id: None,
+            },
+            || Ok(()),
+        )
+        .await
+        .expect("reasoning provider response");
+        assert_eq!(result, "ok");
+
+        let request = server.await.unwrap();
+        let body = request.split("\r\n\r\n").nth(1).expect("HTTP request body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("JSON request body");
+        assert_eq!(body["reasoning_effort"], "high");
+        assert_eq!(body["max_completion_tokens"], 8192);
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("max_tokens").is_none());
+    }
+
+    #[tokio::test]
+    async fn deepseek_reasoning_uses_thinking_contract_without_openai_token_field() {
+        let (listener, base) = local_provider_base().await;
+        let server = tokio::spawn(serve_provider_response(
+            listener,
+            "200 OK",
+            br#"{"choices":[{"message":{"content":"ok"}}]}"#.to_vec(),
+            None,
+        ));
+        let (policy, decision) = allow_provider_network("deepseek", &base);
+        let endpoint = super::chat_completions_url("deepseek", &base);
+
+        super::chat_with_openai_compatible_raw_with_start_observer(
+            super::OpenAiCompatibleAdapterRequest {
+                messages: vec![super::ChatMessage {
+                    role: "user".into(),
+                    content: "Answer.".into(),
+                }],
+                system_prompt: None,
+                provider: "deepseek",
+                endpoint: &endpoint,
+                api_key: "sk-test",
+                model: "deepseek-v4-pro",
+                reasoning_effort: Some(crate::conversation::ReasoningEffort::Max),
+                structured_json_output: false,
+                provider_native_json_mode: false,
+                provider_tools: &[],
+                network_policy: &policy,
+                network_policy_decision: &decision,
+                request_id: None,
+            },
+            || Ok(()),
+        )
+        .await
+        .expect("DeepSeek reasoning response");
+
+        let request = server.await.unwrap();
+        let body = request.split("\r\n\r\n").nth(1).expect("HTTP request body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("JSON request body");
+        assert_eq!(body["reasoning_effort"], "max");
+        assert_eq!(body["thinking"]["type"], "enabled");
+        assert_eq!(body["max_tokens"], 8192);
+        assert!(body.get("max_completion_tokens").is_none());
+        assert!(body.get("temperature").is_none());
+    }
+
+    #[tokio::test]
+    async fn openrouter_reasoning_uses_unified_discovered_contract() {
+        let (listener, base) = local_provider_base().await;
+        let server = tokio::spawn(serve_provider_response(
+            listener,
+            "200 OK",
+            br#"{"choices":[{"message":{"content":"ok"}}]}"#.to_vec(),
+            None,
+        ));
+        let (policy, decision) = allow_provider_network("openrouter", &base);
+        let endpoint = super::chat_completions_url("openrouter", &base);
+
+        super::chat_with_openai_compatible_raw_with_start_observer(
+            super::OpenAiCompatibleAdapterRequest {
+                messages: vec![super::ChatMessage {
+                    role: "user".into(),
+                    content: "Answer.".into(),
+                }],
+                system_prompt: None,
+                provider: "openrouter",
+                endpoint: &endpoint,
+                api_key: "sk-test",
+                model: "google/gemini-3.5-flash",
+                reasoning_effort: Some(crate::conversation::ReasoningEffort::Minimal),
+                structured_json_output: false,
+                provider_native_json_mode: false,
+                provider_tools: &[],
+                network_policy: &policy,
+                network_policy_decision: &decision,
+                request_id: None,
+            },
+            || Ok(()),
+        )
+        .await
+        .expect("OpenRouter reasoning response");
+
+        let request = server.await.unwrap();
+        let body = request.split("\r\n\r\n").nth(1).expect("HTTP request body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("JSON request body");
+        assert_eq!(body["reasoning"]["effort"], "minimal");
+        assert_eq!(body["reasoning"]["exclude"], true);
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("temperature").is_none());
+    }
+
     #[tokio::test]
     async fn deepseek_structured_artifact_request_uses_official_json_output_mode() {
         let (listener, base) = local_provider_base().await;
@@ -2740,6 +3459,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: "sk-test",
                 model: "deepseek-v4-flash",
+                reasoning_effort: None,
                 structured_json_output: true,
                 provider_native_json_mode: true,
                 provider_tools: &[],
@@ -2785,6 +3505,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: "sk-test",
                 model: "deepseek-v4-flash",
+                reasoning_effort: None,
                 structured_json_output: true,
                 provider_native_json_mode: false,
                 provider_tools: &[],
@@ -2830,6 +3551,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: "sk-test",
                 model: "gpt-test",
+                reasoning_effort: None,
                 structured_json_output: true,
                 provider_native_json_mode: true,
                 provider_tools: &[],
@@ -2877,6 +3599,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: "sk-test",
                 model: "provider-neutral-tool-model",
+                reasoning_effort: None,
                 structured_json_output: true,
                 provider_native_json_mode: true,
                 provider_tools: &tools,
@@ -2981,6 +3704,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: "sk-test",
                 model: "deepseek-v4-flash",
+                reasoning_effort: None,
                 structured_json_output: true,
                 provider_native_json_mode: true,
                 provider_tools: &tools,
@@ -3073,6 +3797,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: "sk-test",
                 model: "stealth/ox-alpha",
+                reasoning_effort: None,
                 structured_json_output: true,
                 provider_native_json_mode: true,
                 provider_tools: &tools,
@@ -3123,6 +3848,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: "sk-test",
                 model: "gpt-test",
+                reasoning_effort: None,
                 structured_json_output: true,
                 provider_native_json_mode: true,
                 provider_tools: &tools,
@@ -3160,6 +3886,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: "sk-test",
                 model: "gpt-test",
+                reasoning_effort: None,
                 structured_json_output: true,
                 provider_native_json_mode: true,
                 provider_tools: &[],
@@ -3388,6 +4115,7 @@ mod tests {
                 endpoint: &endpoint,
                 api_key: "sk-test",
                 model: "gpt-test",
+                reasoning_effort: None,
                 structured_json_output: false,
                 provider_native_json_mode: false,
                 provider_tools: &[],

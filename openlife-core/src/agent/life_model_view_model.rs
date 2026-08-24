@@ -7,6 +7,7 @@ use crate::agent::product_read_model::{
 use crate::agent::review_item::{ReviewItem, ReviewItemType};
 use crate::agent::types::{AgentProposal, ProposalStatus, ProposalType};
 use crate::agent::LifeModelLearningCandidate;
+use crate::life_model::legacy_migration::LegacyLifeModelInventoryV2;
 use crate::life_model::v2::{
     LifeModelDocumentV2, LifeModelHumanProjectionV2, LifeModelVersionHistoryEntryV2,
 };
@@ -19,6 +20,7 @@ const LIFE_MODEL_TARGET_REF: &str = "lifemodel";
 #[serde(rename_all = "snake_case")]
 pub enum LifeModelTruthMode {
     Canonical,
+    MigrationRequired,
     Candidate,
     PendingReview,
     ManualOverride,
@@ -184,6 +186,7 @@ pub struct LifeModelLearningSummary {
 pub struct LifeModelViewModel {
     pub truth_mode: LifeModelTruthMode,
     pub canonical_summary: Option<LifeModelCanonicalSummary>,
+    pub legacy_migration_inventory: Option<LegacyLifeModelInventoryV2>,
     pub version_history: Vec<LifeModelVersionHistoryEntryV2>,
     pub trust_quality_state: LifeModelTrustQualityState,
     pub pending_update_counts: LifeModelPendingUpdateCounts,
@@ -237,6 +240,7 @@ pub struct LifeModelCanonicalV2Input {
 #[derive(Debug, Clone, Default)]
 pub struct LifeModelViewModelBuildInput {
     pub canonical_v2: Option<LifeModelCanonicalV2Input>,
+    pub legacy_migration_inventory: Option<LegacyLifeModelInventoryV2>,
     pub version_history: Vec<LifeModelVersionHistoryEntryV2>,
     /// A fresh profile without a persisted canonical head is presented as
     /// empty without creating storage as a read side effect.
@@ -298,8 +302,10 @@ pub fn build_life_model_view_model_envelope(
         .canonical_v2
         .as_ref()
         .is_some_and(canonical_v2_input_is_authoritative);
+    let legacy_migration_required =
+        !valid_canonical_version && input.legacy_migration_inventory.is_some();
     let canonical_owner = valid_canonical_version || input.fresh_profile_canonical_empty;
-    let status = loaded_status(&input, valid_canonical_version);
+    let status = loaded_status(&input, valid_canonical_version, legacy_migration_required);
     let materialized_changes = build_materialized_changes(
         &life_model_proposals,
         &life_model_review_items,
@@ -323,8 +329,13 @@ pub fn build_life_model_view_model_envelope(
     let risky_action_blocker = risky_action_blocker(&input, status);
 
     let data = LifeModelViewModel {
-        truth_mode: derive_truth_mode(status, canonical_owner),
+        truth_mode: derive_truth_mode(status, canonical_owner, legacy_migration_required),
         canonical_summary: build_canonical_summary(&input, valid_canonical_version),
+        legacy_migration_inventory: if valid_canonical_version {
+            None
+        } else {
+            input.legacy_migration_inventory.clone()
+        },
         version_history: if canonical_owner {
             input.version_history.clone()
         } else {
@@ -346,7 +357,10 @@ pub fn build_life_model_view_model_envelope(
             candidates: input.learning_candidates.clone(),
         },
         source_refs: source_refs.clone(),
-        contract_limitations: build_contract_limitations(canonical_owner),
+        contract_limitations: build_contract_limitations(
+            canonical_owner,
+            legacy_migration_required,
+        ),
     };
 
     let mut envelope = ViewModelEnvelope::backend_read_model(status, Some(data));
@@ -379,6 +393,7 @@ pub fn build_life_model_view_model_envelope(
 fn loaded_status(
     input: &LifeModelViewModelBuildInput,
     meaningful_canonical: bool,
+    legacy_migration_required: bool,
 ) -> ViewModelStatus {
     if input.stale {
         return ViewModelStatus::Stale;
@@ -391,18 +406,28 @@ fn loaded_status(
     {
         return ViewModelStatus::Empty;
     }
+    if legacy_migration_required {
+        return ViewModelStatus::Ready;
+    }
     if !meaningful_canonical {
         return ViewModelStatus::Empty;
     }
     ViewModelStatus::Ready
 }
 
-fn derive_truth_mode(status: ViewModelStatus, meaningful_canonical: bool) -> LifeModelTruthMode {
+fn derive_truth_mode(
+    status: ViewModelStatus,
+    meaningful_canonical: bool,
+    legacy_migration_required: bool,
+) -> LifeModelTruthMode {
     if matches!(status, ViewModelStatus::Error) {
         return LifeModelTruthMode::Unavailable;
     }
     if meaningful_canonical {
         return LifeModelTruthMode::Canonical;
+    }
+    if legacy_migration_required {
+        return LifeModelTruthMode::MigrationRequired;
     }
     LifeModelTruthMode::Unknown
 }
@@ -470,13 +495,21 @@ fn canonical_v2_input_is_authoritative(canonical: &LifeModelCanonicalV2Input) ->
             .is_ok()
 }
 
-fn build_contract_limitations(authoritative_canonical: bool) -> Vec<String> {
+fn build_contract_limitations(
+    authoritative_canonical: bool,
+    legacy_migration_required: bool,
+) -> Vec<String> {
     let mut limitations = vec![
         "Accepted proposal decisions remain approved-not-applied unless the canonical materializer proves an exact committed version.".into(),
         "Memory remains a separate owner and is not copied into the canonical LifeModel document.".into(),
         "Manual overrides are governed and separate from proposal-first review materialization.".into(),
     ];
-    if !authoritative_canonical {
+    if legacy_migration_required {
+        limitations.insert(
+            0,
+            "Legacy LifeModel data is preserved but is not active personalization. It must be explicitly reviewed and migrated before canonical v2 use.".into(),
+        );
+    } else if !authoritative_canonical {
         limitations.insert(
             0,
             "No valid canonical LifeModel version is available; personalization remains inactive until the user confirms one.".into(),
@@ -492,6 +525,8 @@ fn build_trust_quality_state(
 ) -> LifeModelTrustQualityState {
     let readiness = if status == ViewModelStatus::Stale {
         LifeModelReadiness::Stale
+    } else if input.legacy_migration_inventory.is_some() {
+        LifeModelReadiness::Limited
     } else if status == ViewModelStatus::Empty {
         LifeModelReadiness::NotBuilt
     } else if input.projection.as_ref().is_some_and(|projection| {
@@ -688,6 +723,17 @@ fn build_warnings(
             source_refs.to_vec(),
         ),
     ];
+    if let Some(inventory) = input.legacy_migration_inventory.as_ref() {
+        warnings.push(warning(
+            "lifemodel.legacy_migration_required",
+            format!(
+                "Legacy LifeModel data is preserved and requires explicit migration review ({} current bytes, {} history files). It is not active canonical personalization.",
+                inventory.current_source_bytes, inventory.history_yaml_file_count
+            ),
+            ViewModelWarningSeverity::Warning,
+            source_refs.to_vec(),
+        ));
+    }
     if !input.fresh_profile_canonical_empty
         && input
             .canonical_v2
@@ -1120,6 +1166,41 @@ mod tests {
             .warnings
             .iter()
             .all(|warning| warning.code != "lifemodel.canonical_summary_unavailable"));
+    }
+
+    #[test]
+    fn legacy_inventory_is_not_presented_as_a_fresh_empty_profile() {
+        let root = tempfile::tempdir().unwrap();
+        let current = root.path().join("life-model/current");
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(
+            current.join("life_model.yaml"),
+            "identity:\n  name: Alice\n",
+        )
+        .unwrap();
+        let inventory = crate::life_model::legacy_migration::inspect_legacy_lifemodel(&current)
+            .unwrap()
+            .unwrap();
+        let envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
+            legacy_migration_inventory: Some(inventory),
+            fresh_profile_canonical_empty: false,
+            now: Some("2026-08-23T10:00:00Z".into()),
+            ..Default::default()
+        });
+
+        assert_eq!(envelope.status, ViewModelStatus::Ready);
+        let data = envelope.data.expect("legacy migration data");
+        assert_eq!(data.truth_mode, LifeModelTruthMode::MigrationRequired);
+        assert!(data.canonical_summary.is_none());
+        assert!(data.legacy_migration_inventory.is_some());
+        assert_eq!(
+            data.trust_quality_state.readiness,
+            LifeModelReadiness::Limited
+        );
+        assert!(envelope
+            .warnings
+            .iter()
+            .any(|warning| warning.code == "lifemodel.legacy_migration_required"));
     }
 
     #[test]

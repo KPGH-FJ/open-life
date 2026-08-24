@@ -1482,6 +1482,45 @@ pub fn filesystem_access_error(path: &str, safe_paths: &[String]) -> String {
     }
 }
 
+#[cfg(all(test, unix))]
+mod filesystem_scope_tests {
+    use super::is_path_in_safe_paths_async;
+
+    #[tokio::test]
+    async fn symlink_escape_is_not_inside_an_authorized_read_root() {
+        use std::os::unix::fs::symlink;
+
+        let authorized = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let outside_file = outside.path().join("secret.txt");
+        std::fs::write(&outside_file, "outside").unwrap();
+        let link = authorized.path().join("escaped.txt");
+        symlink(&outside_file, &link).unwrap();
+        let roots = vec![authorized
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()];
+
+        assert!(!is_path_in_safe_paths_async(&link.to_string_lossy(), &roots).await);
+    }
+
+    #[tokio::test]
+    async fn unrelated_existing_file_is_not_inside_an_authorized_read_root() {
+        let authorized = tempfile::tempdir().unwrap();
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let roots = vec![authorized
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()];
+
+        assert!(!is_path_in_safe_paths_async(&outside.path().to_string_lossy(), &roots).await);
+    }
+}
+
 /// Check if an IP address is private/internal.
 /// Blocks loopback, private ranges, and link-local addresses.
 pub fn is_private_ip(ip: &std::net::IpAddr) -> bool {

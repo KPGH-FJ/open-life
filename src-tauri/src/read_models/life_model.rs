@@ -26,11 +26,19 @@ pub(crate) async fn get_life_model_view_model_with_state(
     let now = chrono::Utc::now().to_rfc3339();
     let mut warnings = Vec::new();
 
-    let (canonical_v2_result, history_result) = {
+    let (canonical_v2_result, cutover_result, history_result, legacy_inventory_result) = {
         let manager = state.life_model_manager.lock().await;
         let canonical = manager.load_v2_current(DEFAULT_LIFE_MODEL_V2_MODEL_ID);
+        let cutover = match canonical.as_ref() {
+            Ok(Some(_)) => manager.load_v2_cutover(DEFAULT_LIFE_MODEL_V2_MODEL_ID),
+            Ok(None) | Err(_) => Ok(None),
+        };
         let history = manager.load_v2_history(DEFAULT_LIFE_MODEL_V2_MODEL_ID, 12);
-        (canonical, history)
+        let legacy_inventory = match canonical.as_ref() {
+            Ok(None) => manager.inspect_legacy_inventory(),
+            Ok(Some(_)) | Err(_) => Ok(None),
+        };
+        (canonical, cutover, history, legacy_inventory)
     };
     let (canonical_v2, canonical_v2_error) =
         match canonical_v2_result.and_then(|version| version.map(canonical_v2_input).transpose()) {
@@ -47,8 +55,24 @@ pub(crate) async fn get_life_model_view_model_with_state(
             Some(format!("lifemodel_v2_history_load_failed: {err}")),
         ),
     };
-    let fresh_profile_canonical_empty = canonical_v2.is_none() && canonical_v2_error.is_none();
-    let load_error = canonical_v2_error.or(history_error);
+    let cutover_error = cutover_result
+        .err()
+        .map(|err| format!("lifemodel_v2_cutover_load_failed: {err}"));
+    let (legacy_migration_inventory, legacy_inventory_error) = match legacy_inventory_result {
+        Ok(inventory) => (inventory, None),
+        Err(err) => (
+            None,
+            Some(format!("lifemodel_legacy_inventory_failed: {err}")),
+        ),
+    };
+    let fresh_profile_canonical_empty = canonical_v2.is_none()
+        && canonical_v2_error.is_none()
+        && legacy_migration_inventory.is_none()
+        && legacy_inventory_error.is_none();
+    let load_error = canonical_v2_error
+        .or(cutover_error)
+        .or(history_error)
+        .or(legacy_inventory_error);
 
     let projection = match get_life_state_projection_with_state(state).await {
         Ok(projection) => Some(projection.into()),
@@ -123,6 +147,7 @@ pub(crate) async fn get_life_model_view_model_with_state(
 
     let mut envelope = build_life_model_view_model_envelope(LifeModelViewModelBuildInput {
         canonical_v2,
+        legacy_migration_inventory,
         version_history,
         fresh_profile_canonical_empty,
         projection,

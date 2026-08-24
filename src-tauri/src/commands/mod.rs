@@ -5,3 +5,4 @@ pub mod main_chat_tools;
 pub mod memory;
 pub mod proposal;
 pub mod settings;
+pub mod tool_permissions;

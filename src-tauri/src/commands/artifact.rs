@@ -6,7 +6,7 @@ use std::{path::PathBuf, sync::Arc};
 use tauri::{Runtime, State};
 use tauri_plugin_dialog::DialogExt;
 
-async fn verified_artifact_path(
+pub(crate) async fn verified_artifact_path(
     state: &Arc<AppState>,
     artifact_id: &str,
     version: u64,
@@ -134,7 +134,7 @@ mod tests {
     use super::*;
     use openlife_core::task_runtime::{
         BeginDirectArtifactMaterializationInput, BeginGeneralTaskRunInput,
-        GeneralArtifactDraftInput,
+        BindArtifactVersionSourceInput, GeneralArtifactDraftInput,
     };
 
     #[tokio::test]
@@ -164,6 +164,7 @@ mod tests {
                     project_id: None,
                     project_revision: None,
                     scope_digest: None,
+                    execution_mode: openlife_core::task_runtime::WorkExecutionMode::ScopedAgent,
                 })
                 .unwrap();
             store
@@ -179,14 +180,15 @@ mod tests {
         {
             let store = store.lock().await;
             store
-                .bind_general_artifact_version_source(
-                    &prepared.artifact_id,
-                    prepared.version,
-                    &target.to_string_lossy(),
-                    &target.to_string_lossy(),
-                    true,
-                    None,
-                )
+                .bind_general_artifact_version_source(BindArtifactVersionSourceInput {
+                    artifact_id: &prepared.artifact_id,
+                    version: prepared.version,
+                    target_reference: &target.to_string_lossy(),
+                    draft_reference: &target.to_string_lossy(),
+                    expected_target_absent: true,
+                    expected_target_digest: None,
+                    pre_change_snapshot: None,
+                })
                 .unwrap();
             let effect_id = format!("direct:{}", uuid::Uuid::new_v4());
             let attempt_id = uuid::Uuid::new_v4().to_string();

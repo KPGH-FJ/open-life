@@ -20,10 +20,40 @@ struct DurableProviderTruth {
     turn_status: String,
 }
 
-async fn durable_provider_truth(state: &Arc<AppState>) -> Option<DurableProviderTruth> {
+async fn durable_provider_truth(
+    state: &Arc<AppState>,
+    conversation_id: Option<&str>,
+    turn_id: Option<&str>,
+) -> Option<DurableProviderTruth> {
     let store = state.conversation_store.as_ref()?.lock().await;
-    let conversation = store.list_conversations(true, 1).ok()?.into_iter().next()?;
-    let turn = store.latest_turn(&conversation.id).ok()??;
+    let turn = match turn_id {
+        Some(turn_id) => {
+            let turn = store.get_turn(turn_id).ok()??.turn;
+            if conversation_id
+                .is_some_and(|conversation_id| turn.conversation_id != conversation_id)
+            {
+                return None;
+            }
+            turn
+        }
+        None => {
+            let conversation_id = match conversation_id {
+                Some(conversation_id) => {
+                    store.get_conversation(conversation_id).ok()??;
+                    conversation_id.to_string()
+                }
+                None => {
+                    store
+                        .list_conversations(true, 1)
+                        .ok()?
+                        .into_iter()
+                        .next()?
+                        .id
+                }
+            };
+            store.latest_turn(&conversation_id).ok()??
+        }
+    };
     let local = turn.provider.provider_id.eq_ignore_ascii_case("ollama")
         || turn.provider.endpoint_class.eq_ignore_ascii_case("local");
     let route_type = if local {
@@ -56,12 +86,21 @@ async fn durable_provider_truth(state: &Arc<AppState>) -> Option<DurableProvider
 #[tauri::command]
 pub async fn get_provider_privacy_boundary_summary(
     state: State<'_, Arc<AppState>>,
+    conversation_id: Option<String>,
+    turn_id: Option<String>,
 ) -> Result<ViewModelEnvelope<ProviderPrivacyBoundarySummary>, String> {
-    get_provider_privacy_boundary_summary_with_state(state.inner()).await
+    get_provider_privacy_boundary_summary_with_state(
+        state.inner(),
+        conversation_id.as_deref().filter(|value| !value.is_empty()),
+        turn_id.as_deref().filter(|value| !value.is_empty()),
+    )
+    .await
 }
 
 pub(crate) async fn get_provider_privacy_boundary_summary_with_state(
     state: &Arc<AppState>,
+    conversation_id: Option<&str>,
+    turn_id: Option<&str>,
 ) -> Result<ViewModelEnvelope<ProviderPrivacyBoundarySummary>, String> {
     let runtime = state.provider_runtime_snapshot().await;
     let runtime_coherent = runtime.coherent;
@@ -75,7 +114,7 @@ pub(crate) async fn get_provider_privacy_boundary_summary_with_state(
         validation.status = "runtime_generation_incoherent";
         validation.last_error = Some("provider_runtime_generation_incoherent".into());
     }
-    let durable_provider_truth = durable_provider_truth(state).await;
+    let durable_provider_truth = durable_provider_truth(state, conversation_id, turn_id).await;
     // ProviderPrivacy reports the same concrete route that Main Chat and the
     // shipped status probe will enforce. AppConfig remains the policy owner;
     // the scheduler snapshot remains the provider/base route owner.
@@ -216,5 +255,96 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
         message: message.into(),
         severity: ViewModelWarningSeverity::Warning,
         evidence_refs: Vec::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use openlife_core::conversation::{BeginChatTurn, ProviderBinding};
+
+    #[tokio::test]
+    async fn durable_provider_truth_is_scoped_to_the_requested_conversation() {
+        let state = crate::test_utils::test_app_state();
+        let local_conversation_id = uuid::Uuid::new_v4().to_string();
+        let cloud_conversation_id = uuid::Uuid::new_v4().to_string();
+        let local_turn_id = uuid::Uuid::new_v4().to_string();
+        let cloud_turn_id = uuid::Uuid::new_v4().to_string();
+        let store = state.conversation_store.as_ref().unwrap().lock().await;
+        store
+            .create_conversation(&local_conversation_id, "Local Conversation")
+            .unwrap();
+        store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &local_turn_id,
+                conversation_id: &local_conversation_id,
+                user_message: "local",
+                provider: &ProviderBinding {
+                    profile_id: "profile:local".into(),
+                    provider_id: "ollama".into(),
+                    model_id: "llama3:latest".into(),
+                    endpoint_class: "local".into(),
+                    config_generation: "generation:local".into(),
+                    reasoning_effort: None,
+                },
+            })
+            .unwrap();
+        store.complete_chat_turn(&local_turn_id, "done").unwrap();
+        store
+            .create_conversation(&cloud_conversation_id, "Cloud Conversation")
+            .unwrap();
+        store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &cloud_turn_id,
+                conversation_id: &cloud_conversation_id,
+                user_message: "cloud",
+                provider: &ProviderBinding {
+                    profile_id: "profile:cloud".into(),
+                    provider_id: "openai".into(),
+                    model_id: "gpt".into(),
+                    endpoint_class: "cloud".into(),
+                    config_generation: "generation:cloud".into(),
+                    reasoning_effort: None,
+                },
+            })
+            .unwrap();
+        store.complete_chat_turn(&cloud_turn_id, "done").unwrap();
+        drop(store);
+
+        let local = durable_provider_truth(&state, Some(&local_conversation_id), None)
+            .await
+            .unwrap();
+        assert_eq!(local.route_type, ProviderRouteType::Local);
+        assert_eq!(
+            local.external_transmission,
+            ExternalTransmissionStatus::NotSent
+        );
+        assert_eq!(local.turn_id, local_turn_id);
+
+        let cloud = durable_provider_truth(&state, Some(&cloud_conversation_id), None)
+            .await
+            .unwrap();
+        assert_eq!(cloud.route_type, ProviderRouteType::Cloud);
+        assert_eq!(
+            cloud.external_transmission,
+            ExternalTransmissionStatus::Sent
+        );
+        assert_eq!(cloud.turn_id, cloud_turn_id);
+
+        assert!(
+            durable_provider_truth(&state, Some(&uuid::Uuid::new_v4().to_string()), None)
+                .await
+                .is_none()
+        );
+        let exact_local_run =
+            durable_provider_truth(&state, Some(&local_conversation_id), Some(&local_turn_id))
+                .await
+                .unwrap();
+        assert_eq!(exact_local_run.turn_id, local_turn_id);
+        assert!(
+            durable_provider_truth(&state, Some(&cloud_conversation_id), Some(&local_turn_id),)
+                .await
+                .is_none()
+        );
     }
 }

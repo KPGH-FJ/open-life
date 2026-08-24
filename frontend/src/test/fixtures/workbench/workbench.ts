@@ -199,9 +199,24 @@ function activeTask(stage: FixtureStage): TaskViewModelItem {
     relatedRunIds: ["run-interview-notes-01"],
     conversationId: "conversation-research-plan",
     title: "整理三次客户访谈，归纳下周要验证的问题",
+    latestRunProvenance: {
+      runId: "run-interview-notes-01",
+      turnId: "turn-interview-notes-01",
+      turnStatus: running ? "running" : rejected ? "failed" : "blocked",
+      providerProfileId: "provider-profile:local-analysis",
+      providerId: "ollama",
+      modelId: "qwen2.5:14b",
+      endpointClass: "local",
+      executionMode: "scoped_agent",
+      projectId: "project-customer-research",
+      projectName: "客户研究",
+      projectRevision: 3,
+      projectScopeDigest: "sha256:project-customer-research-r3",
+    },
     lifecycleStatus: running ? "running" : rejected ? "blocked" : "waiting_permission",
     terminalDeliveryStatus: rejected ? "blocked" : "not_terminal",
     finalDeliveryEvidencePresent: false,
+    completionLimitations: [],
     items: [],
     workPlan: {
       revision: 1,
@@ -503,6 +518,7 @@ export function workbenchFixtureDataSource(id: WorkbenchFixtureId): WorkbenchFix
       updated_at: generatedAt,
     },
   ];
+  let archivedSessions: ChatSession[] = [];
   const histories = new Map<string, ChatMessage[]>([
     [
       "conversation-research-plan",
@@ -531,12 +547,15 @@ export function workbenchFixtureDataSource(id: WorkbenchFixtureId): WorkbenchFix
         providerItem ? (providerItem.status as ProviderTestFixtureStage) : null
       );
     },
-    async cancelTask() {},
+    async stopRun() {},
     async loadPersonalIntelligence() {
       return buildPersonalIntelligenceFixtureSnapshot(id, durableStage);
     },
     async draftLifeModelChange() {
       return "fixture-lifemodel-v2-change-proposal";
+    },
+    async draftLegacyLifeModelMigration() {
+      return "fixture-lifemodel-v2-migration-proposal";
     },
     async draftLifeModelRollback() {
       return "fixture-lifemodel-v2-rollback-proposal";
@@ -566,13 +585,20 @@ export function workbenchFixtureDataSource(id: WorkbenchFixtureId): WorkbenchFix
       return {
         status: conversations.length > 0 ? "ready" : "empty",
         conversations,
+        archivedConversations: archivedSessions.map(session => ({ ...session })),
         projects: [],
         selectedProjectId: null,
         selectedConversationId,
         globalMemoryEnabled: true,
         selectedMemoryMode: "use_and_learn",
         messages: selectedConversationId
-          ? (histories.get(selectedConversationId) ?? []).map(message => ({ ...message }))
+          ? (histories.get(selectedConversationId) ?? []).map((message, index) => ({
+              ...message,
+              turnId: `fixture-turn-${index}`,
+              attachmentsStatus:
+                message.role === "user" ? ("ready" as const) : ("not_applicable" as const),
+              attachments: [],
+            }))
           : [],
         latestTurn: null,
         providerStatus: "ready",
@@ -598,9 +624,45 @@ export function workbenchFixtureDataSource(id: WorkbenchFixtureId): WorkbenchFix
         session.session_id === sessionId ? { ...session, title } : session
       );
     },
-    async deleteSession(sessionId) {
-      if (!histories.has(sessionId)) throw new Error("fixture_conversation_session_missing");
+    async archiveSession(sessionId) {
+      const current = sessions.find(session => session.session_id === sessionId);
+      if (!current) throw new Error("fixture_conversation_session_missing");
+      const messageCount = histories.get(sessionId)?.length ?? 0;
       sessions = sessions.filter(session => session.session_id !== sessionId);
+      archivedSessions = [
+        {
+          ...current,
+          status: "archived",
+          turnCount: messageCount > 0 ? 1 : 0,
+          itemCount: messageCount,
+          taskReferenceCount: sessionId === "conversation-research-plan" ? 1 : 0,
+          activeTaskCount: 0,
+          allowedControls:
+            messageCount === 0 && sessionId !== "conversation-research-plan"
+              ? ["restore", "delete"]
+              : ["restore"],
+          blockerCodes:
+            messageCount > 0
+              ? ["conversation_delete_history_present"]
+              : sessionId === "conversation-research-plan"
+                ? ["conversation_delete_task_history_present"]
+                : [],
+        },
+        ...archivedSessions,
+      ];
+    },
+    async restoreSession(sessionId) {
+      const current = archivedSessions.find(session => session.session_id === sessionId);
+      if (!current) throw new Error("fixture_conversation_session_missing");
+      archivedSessions = archivedSessions.filter(session => session.session_id !== sessionId);
+      sessions = [{ ...current, status: "active", allowedControls: ["archive"] }, ...sessions];
+    },
+    async deleteSession(sessionId) {
+      const current = archivedSessions.find(session => session.session_id === sessionId);
+      if (!current?.allowedControls?.includes("delete")) {
+        throw new Error("fixture_conversation_delete_not_eligible");
+      }
+      archivedSessions = archivedSessions.filter(session => session.session_id !== sessionId);
       histories.delete(sessionId);
     },
     async pickResources(importOperationId, turnOperationId) {
@@ -695,6 +757,7 @@ export function workbenchFixtureDataSource(id: WorkbenchFixtureId): WorkbenchFix
       await applyTaskControl(control);
     },
     async requestArtifactUndo() {},
+    async reviseArtifact() {},
     async openArtifactResult() {},
     async exportArtifactResult() {
       return null;

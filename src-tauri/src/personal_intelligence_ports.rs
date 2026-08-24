@@ -1073,6 +1073,7 @@ mod tests {
                     model_id: "test".into(),
                     endpoint_class: "local".into(),
                     config_generation: "1".into(),
+                    reasoning_effort: None,
                 },
             })
             .unwrap();
@@ -1360,6 +1361,7 @@ mod tests {
             model_id: "test".into(),
             endpoint_class: "local".into(),
             config_generation: "1".into(),
+            reasoning_effort: None,
         };
         let begun = state
             .conversation_store

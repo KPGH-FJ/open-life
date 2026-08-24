@@ -34,6 +34,8 @@ pub enum EvidenceSource {
     Settings,
     #[serde(rename = "provider")]
     Provider,
+    #[serde(rename = "resource")]
+    Resource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

@@ -74,6 +74,28 @@ const PRODUCT_ERROR_MESSAGES: ReadonlyArray<[RegExp, string]> = [
     "目标文件在确认前发生了变化。为避免覆盖新内容，本次写入已停止。",
   ],
   [
+    /artifact_revision_(base_changed|base_not_verified_current|target_reference_mismatch)/i,
+    "当前产物版本已经变化或无法通过完整性核验，因此没有开始修订。请刷新后从最新已核验版本重新发起。",
+  ],
+  [
+    /artifact_revision_(target_or_media_changed|requires_single_artifact|produced_no_change)/i,
+    "模型返回的修订没有遵守当前产物边界，或没有产生实际变化，因此 OpenLife 没有覆盖现有文件。",
+  ],
+  [
+    /artifact_revision_(run_identity_mismatch|receipt_unverified)/i,
+    "OpenLife 无法确认这次修订绑定到了新运行，因此没有把它作为已开始的修订展示。",
+  ],
+  [/artifact_file_changed/i, "目标文件已经变化，当前版本不再通过摘要核验，因此没有打开或导出。"],
+  [
+    /artifact_file_unavailable|artifact_materialized_reference_missing/i,
+    "已记录的产物文件当前不可访问；OpenLife 没有把缺失文件当作可用结果。",
+  ],
+  [
+    /artifact_export_(failed|unverified|digest_mismatch|target_invalid|picker_failed)/i,
+    "另存操作或写后摘要核验没有完成；原产物没有被修改。",
+  ],
+  [/artifact_open_failed/i, "产物通过核验，但系统没有成功打开对应文件。"],
+  [
     /safe_paths|artifact_safe_path|artifact_output.*unavailable/i,
     "尚未选择可保存文件的位置。请先选择一个文件夹。",
   ],

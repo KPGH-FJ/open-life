@@ -12,8 +12,7 @@
 #   make test       - 运行所有测试
 #   make test-front - 运行前端测试
 #   make test-rust  - 运行 Rust 测试
-#   make clean      - 清理构建缓存（保留 product-audit 证据）
-#   make clean-audit-results - 明确清理本地 product-audit 证据
+#   make clean      - 清理可再生成的开发缓存和测试产物
 #
 # 平台支持：
 #   自动检测 macOS/Linux/Windows，调用对应的脚本
@@ -39,7 +38,7 @@ FRONTEND_INSTALL = corepack pnpm install
 # 主要命令
 # =============================================================================
 
-.PHONY: help setup dev build check test test-front test-rust clean clean-audit-results clean-rust-target clean-all format format-check lint ci build-front check-pnpm check-lockfile
+.PHONY: help setup dev build check test test-front test-rust test-e2e clean clean-rust-target clean-all format format-check lint ci build-front check-pnpm check-lockfile
 
 ## 显示帮助信息
 help:
@@ -52,13 +51,13 @@ help:
 	@echo "  make test        - 运行所有测试"
 	@echo "  make test-front  - 运行前端测试"
 	@echo "  make test-rust   - 运行 Rust 测试"
+	@echo "  make test-e2e    - 运行 Workbench 浏览器壳测试"
 	@echo "  make format      - 格式化所有代码（Rust + 前端）"
 	@echo "  make format-check - 检查格式但不改写文件"
 	@echo "  make lint        - 运行所有 Lint 检查"
 	@echo "  make ci          - 完整 CI 检查（format-check + lint + test + frontend build）"
-	@echo "  make clean       - 清理构建缓存（保留 product-audit 证据）"
-	@echo "  make clean-audit-results - 明确清理本地 product-audit 证据"
-	@echo "  make clean-rust-target - 清理 Cargo workspace target（释放空间，后续 Rust 构建会变慢）"
+	@echo "  make clean       - 清理可再生成的开发缓存和测试产物"
+	@echo "  make clean-rust-target - 清理 Cargo 开发/测试缓存（保留 release 产物）"
 	@echo ""
 
 ## 初始化开发环境
@@ -97,8 +96,12 @@ test-front: check-pnpm
 ## 运行 Rust 测试
 test-rust:
 	@echo "🧪 运行 Rust 测试..."
-	cargo test -p openlife-core
-	cargo test -p openlife-tauri
+	cargo test --all --locked
+
+## 运行 Workbench 浏览器壳测试
+test-e2e: check-pnpm
+	@echo "🧪 运行 Workbench 浏览器壳测试..."
+	cd frontend && $(FRONTEND_RUN) test:e2e
 
 # =============================================================================
 # 清理
@@ -107,22 +110,15 @@ test-rust:
 ## 清理构建缓存和产物
 clean:
 	@echo "🧹 清理构建缓存..."
-	cd frontend && rm -rf dist node_modules/.vite playwright-report
-	cd frontend && if [ -d test-results ]; then find test-results -mindepth 1 -maxdepth 1 ! -name 'product-audit-*' -exec rm -rf {} +; fi
+	cd frontend && rm -rf dist node_modules/.vite playwright-report test-results
 	rm -rf target/openlife-dev src-tauri/target
 	@echo "✅ 清理完成"
 
-## 明确清理本地 product-audit 证据（默认 clean 不会删除）
-clean-audit-results:
-	@echo "🧹 清理本地 product-audit 证据..."
-	cd frontend && rm -rf test-results/product-audit-*
-	@echo "✅ product-audit 证据已清理"
-
-## 清理 Cargo workspace target（会释放大量空间；下次 Rust 构建/测试会重新编译）
+## 清理 Cargo 开发/测试缓存（保留 release bundle；下次 Rust 构建/测试会重新编译）
 clean-rust-target:
-	@echo "🧹 清理 Cargo workspace target..."
-	cargo clean
-	@echo "✅ Cargo target 已清理"
+	@echo "🧹 清理 Cargo 开发/测试缓存（保留 release 产物）..."
+	cargo clean --profile dev --locked
+	@echo "✅ Cargo 开发/测试缓存已清理"
 
 ## 深度清理（包含 node_modules）
 clean-all: clean clean-rust-target
@@ -156,8 +152,7 @@ dev-front: check-pnpm
 ## 运行 Rust Clippy（代码检查）
 lint-rust:
 	@echo "🔍 运行 Rust 代码检查..."
-	cargo clippy -p openlife-core -- -D warnings
-	cargo clippy -p openlife-tauri -- -D warnings
+	cargo clippy --all --locked -- -D warnings
 
 ## 格式化 Rust 代码
 fmt-rust:
@@ -204,15 +199,6 @@ check-lockfile: check-pnpm
 	@test ! -f frontend/package-lock.json || (echo "❌ 错误：发现 package-lock.json，项目使用 pnpm" && exit 1)
 	@echo "✅ 锁文件检查通过"
 
-## 完整 CI 检查（锁文件 + 格式检查 + Lint + 测试 + 前端生产构建）
-ci: check-lockfile format-check lint test build-front
+## 完整 CI 检查（锁文件 + 格式检查 + Lint + 单元/浏览器壳测试 + 前端生产构建）
+ci: check-lockfile format-check lint test build-front test-e2e
 	@echo "✅ CI 检查全部通过"
-
-## 清理 tract crate 编译缓存（解决 rlib format 偶发错误）
-.PHONY: clean-tract
-clean-tract:
-	@echo "🧹 清理 tract 相关 crate 缓存..."
-	cargo clean -p tract-nnef 2>/dev/null || true
-	cargo clean -p tract-hir 2>/dev/null || true
-	cargo clean -p tauri-utils 2>/dev/null || true
-	@echo "✅ tract 缓存已清理，重新编译即可恢复"

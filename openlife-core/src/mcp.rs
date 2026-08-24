@@ -813,7 +813,7 @@ impl McpRegistry {
         // Execution Tools: P1 (file, web)
         self.register_execution_tool(
             "file.read",
-            "读取指定路径的文件内容（仅限 safe_paths）",
+            "读取指定路径的文件内容（仅限当前 Run 绑定或额外授权的读取根目录）",
             "low",
             vec!["read".into(), "filesystem".into()],
             "read",
@@ -822,6 +822,8 @@ impl McpRegistry {
                 "additionalProperties": false,
                 "properties": {
                     "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    "projectReadRootId": { "type": "string", "minLength": 1, "maxLength": 128 },
+                    "projectReadRootName": { "type": "string", "minLength": 1, "maxLength": 256 },
                     "workspaceRelativePath": { "type": "string", "minLength": 1, "maxLength": 4096 },
                     "governedInputSource": { "type": "string", "enum": ["canonical_work_agent_step_workspace_scope"] }
                 },

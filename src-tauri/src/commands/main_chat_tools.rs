@@ -15,6 +15,18 @@ pub async fn list_main_chat_skills(
 }
 
 #[tauri::command]
+pub async fn get_main_chat_skill_detail(
+    skill_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<crate::main_chat_skills_tools::MainChatSkillDetail, String> {
+    crate::main_chat_skills_tools::get_main_chat_skill_detail_with_state(
+        &state.inner().clone(),
+        &skill_id,
+    )
+    .await
+}
+
+#[tauri::command]
 pub async fn select_main_chat_skill(
     session_id: String,
     skill_id: String,

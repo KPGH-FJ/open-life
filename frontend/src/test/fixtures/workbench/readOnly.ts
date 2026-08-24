@@ -102,6 +102,7 @@ function task(
     lifecycleStatus: "running",
     terminalDeliveryStatus: "not_terminal",
     finalDeliveryEvidencePresent: false,
+    completionLimitations: [],
     items: [],
     artifacts: [],
     pendingBlockers: [],
@@ -195,6 +196,7 @@ const readyTasks: TaskViewModelItem[] = [
           kind: "evidence",
           label: "清单产物草稿",
         },
+        sourceResourceRefs: [],
         evidenceRefs: [taskEvidence("artifact:travel-checklist:v1", "清单产物版本")],
         change: {
           kind: "create",
@@ -212,6 +214,9 @@ const readyTasks: TaskViewModelItem[] = [
           verificationItemPresent: true,
         },
         undo: {
+          available: true,
+        },
+        revision: {
           available: true,
         },
       },

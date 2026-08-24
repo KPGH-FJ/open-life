@@ -1,5 +1,5 @@
-import { Check, FolderOpen, RefreshCw, Save, Unplug, Wifi } from "lucide-react";
-import type { ReviewItem } from "@/tauri";
+import { Check, FolderOpen, RefreshCw, Save, ShieldOff, Unplug, Wifi } from "lucide-react";
+import type { ReviewItem, ToolPermissionPolicy } from "@/tauri";
 import {
   FoundationActionButton,
   FoundationDialog,
@@ -84,7 +84,7 @@ export function SettingsView({
   const searchProvider = draft.system?.search_provider ?? "auto";
   const searchCredential = searchCredentialState(draft);
   const searchReusesModelCredential = searchUsesSelectedProviderCredential(draft);
-  const artifactOutputDirectory = draft.system?.safe_paths?.[0];
+  const artifactOutputDirectory = draft.system?.artifact_output_directory;
   const agentMemoryEnabled = draft.system?.agent_memory_enabled ?? true;
   const runtimeProfile = controller.snapshot?.productDiagnostics?.runtimeBuild.profile ?? null;
   const localProfileCredentialStore = runtimeProfile === "dev" || runtimeProfile === "qa";
@@ -469,6 +469,8 @@ export function SettingsView({
             </label>
           </section>
 
+          <ToolPermissionPanel controller={controller} />
+
           <section className="ol-settings-section" aria-labelledby="ol-settings-memory-title">
             <div className="ol-settings-section-heading">
               <span>一个全局开关，对话可单独调整</span>
@@ -487,12 +489,12 @@ export function SettingsView({
           <section className="ol-settings-section" aria-labelledby="ol-settings-artifact-title">
             <div className="ol-settings-section-heading">
               <span>原生选择，精确目录</span>
-              <h2 id="ol-settings-artifact-title">Artifact 输出目录</h2>
+              <h2 id="ol-settings-artifact-title">非 Project 导出目录</h2>
             </div>
             <p>
               {artifactOutputDirectory
                 ? `当前目录：${artifactOutputDirectory}`
-                : "尚未配置。生成 artifact 时会被系统明确阻止，不会回退到进程当前目录。"}
+                : "尚未配置。非 Project 导出会被系统明确阻止；Work Artifact 使用当前 Project 或应用托管目录，不会回退到进程当前目录。"}
             </p>
             {controller.artifactDirectorySelection.phase === "failed" && (
               <FoundationNotice title="目录没有保存" tone="error" live>
@@ -564,6 +566,104 @@ export function SettingsView({
         </dl>
       </FoundationDialog>
     </div>
+  );
+}
+
+const toolPermissionPolicyLabels: Record<ToolPermissionPolicy, string> = {
+  allow: "持续允许",
+  deny: "持续拒绝",
+  ask_every_time: "每次询问",
+  allow_once: "仅本次",
+  allow_until_revoked: "允许直至撤销",
+};
+
+function ToolPermissionPanel({ controller }: { controller: SettingsController }) {
+  const envelope = controller.snapshot?.toolPermissionEnvelope ?? null;
+  const model = envelope?.data ?? null;
+  const hasUnsavedDraft = controller.state.draftRevision !== controller.state.savedRevision;
+  return (
+    <section className="ol-settings-section" aria-labelledby="ol-settings-permissions-title">
+      <div className="ol-settings-section-heading">
+        <span>后端权限权威</span>
+        <h2 id="ol-settings-permissions-title">工具权限</h2>
+      </div>
+      <p>
+        这里只管理已由 Review 或策略写入的精确权限。撤销会移除对应工具、来源、风险与动作范围；
+        不会改变本轮的“标准执行 / 只读研究”上限，也不会自行授予新能力。
+      </p>
+      {!envelope || envelope.status === "error" ? (
+        <FoundationNotice title="权限状态不可用" tone="error" live>
+          <p>系统没有返回可核对的 ToolPermissionViewModel；页面不会从配置或历史提案猜测权限。</p>
+        </FoundationNotice>
+      ) : model?.items.length ? (
+        <ul className="ol-settings-permission-list">
+          {model.items.map(item => {
+            const revoking = controller.permissionRevocation.permissionId === item.id;
+            return (
+              <li key={item.id}>
+                <div className="ol-settings-permission-list__identity">
+                  <strong>{item.toolName}</strong>
+                  <span>{toolPermissionPolicyLabels[item.policy]}</span>
+                </div>
+                <dl>
+                  <div>
+                    <dt>来源</dt>
+                    <dd>{item.source}</dd>
+                  </div>
+                  <div>
+                    <dt>动作</dt>
+                    <dd>{item.actionType}</dd>
+                  </div>
+                  <div>
+                    <dt>风险</dt>
+                    <dd>{item.riskLevel}</dd>
+                  </div>
+                  <div>
+                    <dt>状态</dt>
+                    <dd>
+                      {item.lifecycleState === "active"
+                        ? "生效中"
+                        : item.lifecycleState === "consumed"
+                          ? "已使用"
+                          : "已过期"}
+                    </dd>
+                  </div>
+                </dl>
+                {item.revocable && (
+                  <FoundationActionButton
+                    label="撤销权限"
+                    variant="secondary"
+                    icon={<ShieldOff size={17} strokeWidth={1.75} aria-hidden="true" />}
+                    loading={revoking}
+                    loadingLabel="正在撤销"
+                    disabled={
+                      controller.protectionState !== "normal" ||
+                      hasUnsavedDraft ||
+                      controller.permissionRevocation.permissionId !== null
+                    }
+                    disabledReason={
+                      controller.protectionState !== "normal"
+                        ? "系统保护状态不是正常态，权限修改保持关闭。"
+                        : hasUnsavedDraft
+                          ? "请先保存当前设置草稿，避免重新读取覆盖未保存内容。"
+                          : "另一项权限撤销正在进行。"
+                    }
+                    onClick={() => controller.revokeToolPermission(item.id)}
+                  />
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p>当前没有持久化工具权限。需要边界确认时，系统会在具体动作发生时进入 Review。</p>
+      )}
+      {controller.permissionRevocation.error && (
+        <FoundationNotice title="权限没有撤销" tone="error" live>
+          <p>系统拒绝或未能完成精确撤销；列表中的既有状态不能视为已改变。</p>
+        </FoundationNotice>
+      )}
+    </section>
   );
 }
 

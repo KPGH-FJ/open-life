@@ -53,6 +53,10 @@ describe("productErrorCode", () => {
     expect(productErrorMessage("artifact_target_precondition_changed")).toContain(
       "目标文件在确认前发生了变化"
     );
+    expect(productErrorMessage("artifact_revision_base_changed")).toContain("最新已核验版本");
+    expect(productErrorMessage("artifact_revision_target_or_media_changed")).toContain(
+      "没有覆盖现有文件"
+    );
     expect(productErrorMessage("web_search_challenge_detected")).toContain("人机验证");
     expect(productErrorMessage("web_search_no_structured_results")).toContain(
       "没有返回可核验的结果"

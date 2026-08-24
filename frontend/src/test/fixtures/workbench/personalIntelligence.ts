@@ -193,6 +193,7 @@ function lifeModel(stage: DurableFixtureStage): LifeModelViewModel {
   return {
     truthMode: "unknown",
     canonicalSummary: null,
+    legacyMigrationInventory: null,
     versionHistory: [],
     trustQualityState: {
       readiness: "usable_with_limits",

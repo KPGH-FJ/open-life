@@ -12,7 +12,32 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 8;
+const MAX_PROJECT_ADDITIONAL_READ_ROOTS: usize = 8;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectStatus {
+    Active,
+    Archived,
+}
+
+impl ProjectStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Archived => "archived",
+        }
+    }
+
+    fn from_db(value: &str) -> Result<Self> {
+        match value {
+            "active" => Ok(Self::Active),
+            "archived" => Ok(Self::Archived),
+            _ => anyhow::bail!("project_status_invalid:{value}"),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -20,9 +45,27 @@ pub struct ProjectRecord {
     pub id: String,
     pub name: String,
     pub workspace_root: Option<String>,
+    pub additional_read_roots: Vec<ProjectReadRoot>,
     pub revision: u64,
+    pub status: ProjectStatus,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectReadRoot {
+    pub id: String,
+    pub name: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectLifecycleFacts {
+    pub project: ProjectRecord,
+    pub active_conversation_count: u64,
+    pub total_conversation_count: u64,
+    pub selected_for_new_conversation: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -145,6 +188,14 @@ pub struct ConversationRecord {
     pub updated_at: DateTime<Utc>,
 }
 
+pub struct CreateConversationAdmission<'a> {
+    pub id: &'a str,
+    pub title: &'a str,
+    pub project_id: Option<&'a str>,
+    pub selected_skill_id: Option<&'a str>,
+    pub memory_mode: ConversationMemoryMode,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderBinding {
@@ -153,6 +204,49 @@ pub struct ProviderBinding {
     pub model_id: String,
     pub endpoint_class: String,
     pub config_generation: String,
+    /// Exact user-selected reasoning budget for this Turn. `None` means the
+    /// provider/model default was used; it never means an unsupported client
+    /// value was silently discarded.
+    pub reasoning_effort: Option<ReasoningEffort>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReasoningEffort {
+    None,
+    Minimal,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+
+impl ReasoningEffort {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+
+    pub fn from_wire(value: &str) -> Result<Self> {
+        match value {
+            "none" => Ok(Self::None),
+            "minimal" => Ok(Self::Minimal),
+            "low" => Ok(Self::Low),
+            "medium" => Ok(Self::Medium),
+            "high" => Ok(Self::High),
+            "xhigh" => Ok(Self::Xhigh),
+            "max" => Ok(Self::Max),
+            _ => anyhow::bail!("reasoning_effort_invalid"),
+        }
+    }
 }
 
 impl ProviderBinding {
@@ -296,6 +390,7 @@ impl ConversationStore {
             "conversation_store",
             &[
                 "projects",
+                "workspace_context_state",
                 "conversations",
                 "conversation_turns",
                 "conversation_items",
@@ -331,9 +426,31 @@ impl ConversationStore {
                 name TEXT NOT NULL,
                 workspace_root TEXT,
                 revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+                status TEXT NOT NULL DEFAULT 'active'
+                    CHECK(status IN ('active','archived')),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
              );
+             CREATE TABLE IF NOT EXISTS workspace_context_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                new_conversation_project_id TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(new_conversation_project_id) REFERENCES projects(id)
+                    ON DELETE SET NULL
+             );
+             INSERT INTO workspace_context_state(singleton,new_conversation_project_id,updated_at)
+             VALUES(1,NULL,'1970-01-01T00:00:00Z') ON CONFLICT(singleton) DO NOTHING;
+             CREATE TABLE IF NOT EXISTS project_read_roots (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(project_id,path),
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_project_read_roots_project
+                ON project_read_roots(project_id,created_at,id);
              CREATE TABLE IF NOT EXISTS conversations (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
@@ -359,6 +476,9 @@ impl ConversationStore {
                 model_id TEXT NOT NULL,
                 endpoint_class TEXT NOT NULL,
                 config_generation TEXT NOT NULL,
+                reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR reasoning_effort IN (
+                    'none','minimal','low','medium','high','xhigh','max'
+                )),
                 error_code TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -391,13 +511,28 @@ impl ConversationStore {
              CREATE INDEX IF NOT EXISTS idx_conversation_items_turn
                 ON conversation_items(turn_id, sequence);
              INSERT INTO conversation_store_metadata(key,value)
-             VALUES('schema_version','3') ON CONFLICT(key) DO NOTHING;",
+             VALUES('schema_version','8') ON CONFLICT(key) DO NOTHING;",
         )?;
         if Self::schema_version(&conn)? == 1 {
             Self::migrate_v1_to_v2(&mut conn)?;
         }
         if Self::schema_version(&conn)? == 2 {
             Self::migrate_v2_to_v3(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 3 {
+            Self::migrate_v3_to_v4(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 4 {
+            Self::migrate_v4_to_v5(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 5 {
+            Self::migrate_v5_to_v6(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 6 {
+            Self::migrate_v6_to_v7(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 7 {
+            Self::migrate_v7_to_v8(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -501,6 +636,167 @@ impl ConversationStore {
         Ok(())
     }
 
+    fn migrate_v3_to_v4(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS workspace_context_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                new_conversation_project_id TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(new_conversation_project_id) REFERENCES projects(id)
+                    ON DELETE SET NULL
+             );
+             INSERT INTO workspace_context_state(singleton,new_conversation_project_id,updated_at)
+             VALUES(1,NULL,'1970-01-01T00:00:00Z') ON CONFLICT(singleton) DO NOTHING;",
+        )?;
+        let changed = tx.execute(
+            "UPDATE conversation_store_metadata SET value='4'
+             WHERE key='schema_version' AND value='3'",
+            [],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("conversation_store_v3_migration_version_conflict");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn migrate_v4_to_v5(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "projects",
+            "status",
+            "TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','archived'))",
+        )?;
+        let changed = tx.execute(
+            "UPDATE conversation_store_metadata SET value='5'
+             WHERE key='schema_version' AND value='4'",
+            [],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("conversation_store_v4_migration_version_conflict");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn migrate_v5_to_v6(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS project_read_roots (
+                id TEXT PRIMARY KEY,
+                project_id TEXT NOT NULL,
+                name TEXT NOT NULL,
+                path TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE(project_id,path),
+                FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_project_read_roots_project
+                ON project_read_roots(project_id,created_at,id);",
+        )?;
+        let changed = tx.execute(
+            "UPDATE conversation_store_metadata SET value='6'
+             WHERE key='schema_version' AND value='5'",
+            [],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("conversation_store_v5_migration_version_conflict");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn migrate_v6_to_v7(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "conversation_turns",
+            "reasoning_effort",
+            "TEXT CHECK(reasoning_effort IS NULL OR reasoning_effort IN ('none','low','medium','high','xhigh','max'))",
+        )?;
+        let changed = tx.execute(
+            "UPDATE conversation_store_metadata SET value='7'
+             WHERE key='schema_version' AND value='6'",
+            [],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("conversation_store_v6_migration_version_conflict");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn migrate_v7_to_v8(conn: &mut Connection) -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;")?;
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "DROP INDEX IF EXISTS idx_conversation_one_running_turn;
+                 DROP INDEX IF EXISTS idx_conversation_turn_history;
+                 ALTER TABLE conversation_turns RENAME TO conversation_turns_v7;
+                 CREATE TABLE conversation_turns (
+                    id TEXT PRIMARY KEY,
+                    conversation_id TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'running','completed','failed','cancelled','interrupted'
+                    )),
+                    request_digest TEXT NOT NULL,
+                    provider_profile_id TEXT NOT NULL,
+                    provider_id TEXT NOT NULL,
+                    model_id TEXT NOT NULL,
+                    endpoint_class TEXT NOT NULL,
+                    config_generation TEXT NOT NULL,
+                    reasoning_effort TEXT CHECK(reasoning_effort IS NULL OR reasoning_effort IN (
+                        'none','minimal','low','medium','high','xhigh','max'
+                    )),
+                    error_code TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+                 );
+                 INSERT INTO conversation_turns (
+                    id,conversation_id,status,request_digest,provider_profile_id,
+                    provider_id,model_id,endpoint_class,config_generation,reasoning_effort,
+                    error_code,created_at,updated_at,finished_at
+                 )
+                 SELECT
+                    id,conversation_id,status,request_digest,provider_profile_id,
+                    provider_id,model_id,endpoint_class,config_generation,reasoning_effort,
+                    error_code,created_at,updated_at,finished_at
+                 FROM conversation_turns_v7;
+                 DROP TABLE conversation_turns_v7;
+                 CREATE UNIQUE INDEX idx_conversation_one_running_turn
+                    ON conversation_turns(conversation_id) WHERE status='running';
+                 CREATE INDEX idx_conversation_turn_history
+                    ON conversation_turns(conversation_id,created_at,id);",
+            )?;
+            let changed = tx.execute(
+                "UPDATE conversation_store_metadata SET value='8'
+                 WHERE key='schema_version' AND value='7'",
+                [],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("conversation_store_v7_migration_version_conflict");
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        let restore = conn.execute_batch("PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;");
+        migration?;
+        restore?;
+        let violation = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_row([], |_| Ok(()))
+            .optional()?;
+        if violation.is_some() {
+            anyhow::bail!("conversation_store_v7_migration_foreign_key_violation");
+        }
+        Ok(())
+    }
+
     fn validate_schema(conn: &Connection) -> Result<()> {
         let version = Self::schema_version(conn)?;
         if version != SCHEMA_VERSION {
@@ -510,17 +806,49 @@ impl ConversationStore {
     }
 
     pub fn create_conversation(&self, id: &str, title: &str) -> Result<ConversationRecord> {
-        validate_uuid("conversation_id", id)?;
-        validate_label("conversation_title", title, 512)?;
+        self.create_conversation_with_admission(CreateConversationAdmission {
+            id,
+            title,
+            project_id: None,
+            selected_skill_id: None,
+            memory_mode: ConversationMemoryMode::default(),
+        })
+    }
+
+    pub fn create_conversation_with_admission(
+        &self,
+        input: CreateConversationAdmission<'_>,
+    ) -> Result<ConversationRecord> {
+        validate_uuid("conversation_id", input.id)?;
+        validate_label("conversation_title", input.title, 512)?;
+        if let Some(project_id) = input.project_id {
+            validate_uuid("project_id", project_id)?;
+        }
+        if let Some(skill_id) = input.selected_skill_id {
+            validate_label("selected_skill_id", skill_id, 256)?;
+        }
         let now = Utc::now();
         let conn = self.lock_conn()?;
-        conn.execute(
-            "INSERT INTO conversations(id,title,status,created_at,updated_at)
-             VALUES(?1,?2,'active',?3,?3)",
-            params![id, title.trim(), now.to_rfc3339()],
+        let changed = conn.execute(
+            "INSERT INTO conversations(
+                id,title,project_id,selected_skill_id,memory_mode,status,created_at,updated_at
+             )
+             SELECT ?1,?2,?3,?4,?5,'active',?6,?6
+             WHERE ?3 IS NULL OR EXISTS(
+                SELECT 1 FROM projects WHERE id=?3 AND status='active'
+             )",
+            params![
+                input.id,
+                input.title.trim(),
+                input.project_id,
+                input.selected_skill_id,
+                input.memory_mode.as_str(),
+                now.to_rfc3339()
+            ],
         )?;
+        require_one(changed, "conversation_admission_project_unavailable")?;
         drop(conn);
-        self.get_conversation(id)?
+        self.get_conversation(input.id)?
             .context("conversation_create_missing")
     }
 
@@ -544,39 +872,171 @@ impl ConversationStore {
         self.get_project(id)?.context("project_create_missing")
     }
 
-    pub fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
+    pub fn create_project_as_new_conversation_scope(
+        &self,
+        id: &str,
+        name: &str,
+        workspace_root: &str,
+    ) -> Result<ProjectRecord> {
+        validate_uuid("project_id", id)?;
+        validate_label("project_name", name, 512)?;
+        validate_label("project_workspace_root", workspace_root, 4096)?;
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO projects(id,name,workspace_root,revision,created_at,updated_at)
+             VALUES(?1,?2,?3,1,?4,?4)",
+            params![id, name.trim(), workspace_root, now],
+        )?;
+        let changed = tx.execute(
+            "UPDATE workspace_context_state
+             SET new_conversation_project_id=?1,updated_at=?2 WHERE singleton=1",
+            params![id, now],
+        )?;
+        require_one(changed, "workspace_context_state_missing")?;
+        tx.commit()?;
+        drop(conn);
+        self.get_project(id)?.context("project_create_missing")
+    }
+
+    pub fn new_conversation_project_id(&self) -> Result<Option<String>> {
         self.lock_conn()?
             .query_row(
-                "SELECT id,name,workspace_root,revision,created_at,updated_at
+                "SELECT new_conversation_project_id FROM workspace_context_state
+                 WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("workspace_context_state_missing")
+    }
+
+    pub fn set_new_conversation_project(&self, project_id: Option<&str>) -> Result<()> {
+        if let Some(project_id) = project_id {
+            validate_uuid("project_id", project_id)?;
+        }
+        let changed = self.lock_conn()?.execute(
+            "UPDATE workspace_context_state
+             SET new_conversation_project_id=?1,updated_at=?2
+             WHERE singleton=1 AND (
+                ?1 IS NULL OR EXISTS(
+                    SELECT 1 FROM projects WHERE id=?1 AND status='active'
+                )
+             )",
+            params![project_id, Utc::now().to_rfc3339()],
+        )?;
+        require_one(changed, "workspace_project_selection_unavailable")
+    }
+
+    pub fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
+        let conn = self.lock_conn()?;
+        let mut project = conn
+            .query_row(
+                "SELECT id,name,workspace_root,revision,status,created_at,updated_at
                  FROM projects WHERE id=?1",
                 [id],
                 project_from_row,
             )
-            .optional()
-            .map_err(Into::into)
+            .optional()?;
+        if let Some(project) = project.as_mut() {
+            project.additional_read_roots = project_read_roots(&conn, &project.id)?;
+        }
+        Ok(project)
     }
 
     pub fn project_scope_digest(project: &ProjectRecord) -> String {
+        let read_roots = project
+            .additional_read_roots
+            .iter()
+            .map(|root| format!("{}\0{}\0{}", root.id, root.name, root.path))
+            .collect::<Vec<_>>()
+            .join("\0");
         content_digest(&format!(
-            "{}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}",
             project.id,
             project.name,
             project.workspace_root.as_deref().unwrap_or(""),
-            project.revision
+            read_roots,
+            project.revision,
+            project.status.as_str()
         ))
     }
 
     pub fn list_projects(&self, limit: usize) -> Result<Vec<ProjectRecord>> {
         let conn = self.lock_conn()?;
         let mut statement = conn.prepare(
-            "SELECT id,name,workspace_root,revision,created_at,updated_at
-             FROM projects ORDER BY updated_at DESC,id DESC LIMIT ?1",
+            "SELECT id,name,workspace_root,revision,status,created_at,updated_at
+             FROM projects WHERE status='active'
+             ORDER BY updated_at DESC,id DESC LIMIT ?1",
         )?;
-        let projects = statement
+        let mut projects = statement
             .query_map([limit.clamp(1, 500) as i64], project_from_row)?
             .collect::<std::result::Result<Vec<_>, _>>()
             .map_err(anyhow::Error::from)?;
+        drop(statement);
+        for project in &mut projects {
+            project.additional_read_roots = project_read_roots(&conn, &project.id)?;
+        }
         Ok(projects)
+    }
+
+    pub fn list_archived_projects(&self, limit: usize) -> Result<Vec<ProjectRecord>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id,name,workspace_root,revision,status,created_at,updated_at
+             FROM projects WHERE status='archived'
+             ORDER BY updated_at DESC,id DESC LIMIT ?1",
+        )?;
+        let mut projects = statement
+            .query_map([limit.clamp(1, 500) as i64], project_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(anyhow::Error::from)?;
+        drop(statement);
+        for project in &mut projects {
+            project.additional_read_roots = project_read_roots(&conn, &project.id)?;
+        }
+        Ok(projects)
+    }
+
+    pub fn project_lifecycle_facts(&self, project_id: &str) -> Result<ProjectLifecycleFacts> {
+        validate_uuid("project_id", project_id)?;
+        let conn = self.lock_conn()?;
+        let mut project = conn
+            .query_row(
+                "SELECT id,name,workspace_root,revision,status,created_at,updated_at
+                 FROM projects WHERE id=?1",
+                [project_id],
+                project_from_row,
+            )
+            .optional()?
+            .context("project_not_found")?;
+        project.additional_read_roots = project_read_roots(&conn, &project.id)?;
+        let (active_conversation_count, total_conversation_count) = conn.query_row(
+            "SELECT
+                SUM(CASE WHEN status='active' THEN 1 ELSE 0 END),
+                COUNT(*)
+             FROM conversations WHERE project_id=?1",
+            [project_id],
+            |row| {
+                Ok((
+                    row.get::<_, Option<i64>>(0)?.unwrap_or(0),
+                    row.get::<_, i64>(1)?,
+                ))
+            },
+        )?;
+        let selected_for_new_conversation = conn.query_row(
+            "SELECT CASE WHEN new_conversation_project_id=?1 THEN 1 ELSE 0 END
+             FROM workspace_context_state WHERE singleton=1",
+            [project_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        Ok(ProjectLifecycleFacts {
+            project,
+            active_conversation_count: u64::try_from(active_conversation_count)?,
+            total_conversation_count: u64::try_from(total_conversation_count)?,
+            selected_for_new_conversation,
+        })
     }
 
     pub fn assign_conversation_project(
@@ -591,6 +1051,9 @@ impl ConversationStore {
         let changed = self.lock_conn()?.execute(
             "UPDATE conversations SET project_id=?2,updated_at=?3
              WHERE id=?1 AND status='active'
+               AND (?2 IS NULL OR EXISTS(
+                   SELECT 1 FROM projects WHERE id=?2 AND status='active'
+               ))
                AND NOT EXISTS (
                    SELECT 1 FROM conversation_turns turn
                    WHERE turn.conversation_id=?1 AND turn.status='running'
@@ -617,7 +1080,7 @@ impl ConversationStore {
         }
         let changed = self.lock_conn()?.execute(
             "UPDATE projects SET name=?2,workspace_root=?3,revision=revision+1,updated_at=?4
-             WHERE id=?1 AND revision=?5",
+             WHERE id=?1 AND revision=?5 AND status='active'",
             params![
                 project_id,
                 name.trim(),
@@ -629,6 +1092,168 @@ impl ConversationStore {
         require_one(changed, "project_scope_revision_conflict")?;
         self.get_project(project_id)?
             .context("project_update_missing")
+    }
+
+    pub fn add_project_read_root(
+        &self,
+        project_id: &str,
+        root_id: &str,
+        name: &str,
+        path: &str,
+        expected_revision: u64,
+    ) -> Result<ProjectRecord> {
+        validate_uuid("project_id", project_id)?;
+        validate_uuid("project_read_root_id", root_id)?;
+        validate_label("project_read_root_name", name, 512)?;
+        validate_label("project_read_root_path", path, 4096)?;
+        if expected_revision == 0 {
+            anyhow::bail!("project_revision_invalid");
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let count: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM project_read_roots WHERE project_id=?1",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        if usize::try_from(count)? >= MAX_PROJECT_ADDITIONAL_READ_ROOTS {
+            anyhow::bail!("project_read_root_limit_reached");
+        }
+        let changed = tx.execute(
+            "UPDATE projects SET revision=revision+1,updated_at=?2
+             WHERE id=?1 AND revision=?3 AND status='active'",
+            params![project_id, now, i64::try_from(expected_revision)?],
+        )?;
+        require_one(changed, "project_scope_revision_conflict")?;
+        tx.execute(
+            "INSERT INTO project_read_roots(id,project_id,name,path,created_at)
+             VALUES(?1,?2,?3,?4,?5)",
+            params![root_id, project_id, name.trim(), path, now],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.get_project(project_id)?
+            .context("project_read_root_add_missing")
+    }
+
+    pub fn remove_project_read_root(
+        &self,
+        project_id: &str,
+        root_id: &str,
+        expected_revision: u64,
+    ) -> Result<ProjectRecord> {
+        validate_uuid("project_id", project_id)?;
+        validate_uuid("project_read_root_id", root_id)?;
+        if expected_revision == 0 {
+            anyhow::bail!("project_revision_invalid");
+        }
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE projects SET revision=revision+1,updated_at=?2
+             WHERE id=?1 AND revision=?3 AND status='active'
+               AND EXISTS(SELECT 1 FROM project_read_roots
+                          WHERE id=?4 AND project_id=?1)",
+            params![
+                project_id,
+                Utc::now().to_rfc3339(),
+                i64::try_from(expected_revision)?,
+                root_id
+            ],
+        )?;
+        require_one(changed, "project_read_root_remove_unavailable")?;
+        let removed = tx.execute(
+            "DELETE FROM project_read_roots WHERE id=?1 AND project_id=?2",
+            params![root_id, project_id],
+        )?;
+        require_one(removed, "project_read_root_remove_unavailable")?;
+        tx.commit()?;
+        drop(conn);
+        self.get_project(project_id)?
+            .context("project_read_root_remove_missing")
+    }
+
+    pub fn archive_project(
+        &self,
+        project_id: &str,
+        expected_revision: u64,
+    ) -> Result<ProjectRecord> {
+        validate_uuid("project_id", project_id)?;
+        if expected_revision == 0 {
+            anyhow::bail!("project_revision_invalid");
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active_conversations: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM conversations
+             WHERE project_id=?1 AND status='active'",
+            [project_id],
+            |row| row.get(0),
+        )?;
+        if active_conversations > 0 {
+            anyhow::bail!("project_archive_active_conversations_present");
+        }
+        let changed = tx.execute(
+            "UPDATE projects SET status='archived',revision=revision+1,updated_at=?2
+             WHERE id=?1 AND revision=?3 AND status='active'",
+            params![project_id, now, i64::try_from(expected_revision)?],
+        )?;
+        require_one(changed, "project_archive_revision_conflict")?;
+        tx.execute(
+            "UPDATE workspace_context_state
+             SET new_conversation_project_id=NULL,updated_at=?2
+             WHERE singleton=1 AND new_conversation_project_id=?1",
+            params![project_id, now],
+        )?;
+        tx.commit()?;
+        drop(conn);
+        self.get_project(project_id)?
+            .context("project_archive_missing")
+    }
+
+    pub fn restore_project(
+        &self,
+        project_id: &str,
+        expected_revision: u64,
+    ) -> Result<ProjectRecord> {
+        validate_uuid("project_id", project_id)?;
+        if expected_revision == 0 {
+            anyhow::bail!("project_revision_invalid");
+        }
+        let changed = self.lock_conn()?.execute(
+            "UPDATE projects SET status='active',revision=revision+1,updated_at=?2
+             WHERE id=?1 AND revision=?3 AND status='archived'",
+            params![
+                project_id,
+                Utc::now().to_rfc3339(),
+                i64::try_from(expected_revision)?
+            ],
+        )?;
+        require_one(changed, "project_restore_revision_conflict")?;
+        self.get_project(project_id)?
+            .context("project_restore_missing")
+    }
+
+    pub fn delete_archived_project(&self, project_id: &str, expected_revision: u64) -> Result<()> {
+        validate_uuid("project_id", project_id)?;
+        if expected_revision == 0 {
+            anyhow::bail!("project_revision_invalid");
+        }
+        let changed = self.lock_conn()?.execute(
+            "DELETE FROM projects
+             WHERE id=?1 AND revision=?2 AND status='archived'
+               AND NOT EXISTS(
+                   SELECT 1 FROM conversations WHERE project_id=?1
+               )
+               AND NOT EXISTS(
+                   SELECT 1 FROM workspace_context_state
+                   WHERE new_conversation_project_id=?1
+               )",
+            params![project_id, i64::try_from(expected_revision)?],
+        )?;
+        require_one(changed, "project_delete_not_eligible")
     }
 
     pub fn list_conversations(
@@ -694,19 +1319,67 @@ impl ConversationStore {
     }
 
     pub fn archive_conversation(&self, id: &str) -> Result<()> {
+        validate_uuid("conversation_id", id)?;
         let changed = self.lock_conn()?.execute(
             "UPDATE conversations SET status='archived',updated_at=?2
-             WHERE id=?1 AND status='active'",
+             WHERE id=?1 AND status='active'
+               AND NOT EXISTS(
+                   SELECT 1 FROM conversation_turns
+                   WHERE conversation_id=?1 AND status='running'
+               )",
             params![id, Utc::now().to_rfc3339()],
         )?;
-        require_one(changed, "conversation_not_found_or_archived")
+        require_one(changed, "conversation_archive_not_eligible")
+    }
+
+    pub fn restore_conversation(&self, id: &str) -> Result<()> {
+        validate_uuid("conversation_id", id)?;
+        let changed = self.lock_conn()?.execute(
+            "UPDATE conversations SET status='active',updated_at=?2
+             WHERE id=?1 AND status='archived'",
+            params![id, Utc::now().to_rfc3339()],
+        )?;
+        require_one(changed, "conversation_restore_not_eligible")
+    }
+
+    pub fn conversation_history_counts(&self, id: &str) -> Result<(u64, u64)> {
+        validate_uuid("conversation_id", id)?;
+        let conn = self.lock_conn()?;
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE id=?1)",
+            [id],
+            |row| row.get(0),
+        )?;
+        if !exists {
+            anyhow::bail!("conversation_not_found");
+        }
+        let turn_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversation_turns WHERE conversation_id=?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        let item_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conversation_items WHERE conversation_id=?1",
+            [id],
+            |row| row.get(0),
+        )?;
+        Ok((u64::try_from(turn_count)?, u64::try_from(item_count)?))
     }
 
     pub fn delete_conversation(&self, id: &str) -> Result<()> {
-        let changed = self
-            .lock_conn()?
-            .execute("DELETE FROM conversations WHERE id=?1", [id])?;
-        require_one(changed, "conversation_not_found")
+        validate_uuid("conversation_id", id)?;
+        let changed = self.lock_conn()?.execute(
+            "DELETE FROM conversations
+             WHERE id=?1 AND status='archived'
+               AND NOT EXISTS(
+                   SELECT 1 FROM conversation_turns WHERE conversation_id=?1
+               )
+               AND NOT EXISTS(
+                   SELECT 1 FROM conversation_items WHERE conversation_id=?1
+               )",
+            [id],
+        )?;
+        require_one(changed, "conversation_delete_not_eligible")
     }
 
     pub fn begin_chat_turn(&self, input: BeginChatTurn<'_>) -> Result<TurnSnapshot> {
@@ -770,8 +1443,9 @@ impl ConversationStore {
         tx.execute(
             "INSERT INTO conversation_turns(
                 id,conversation_id,status,request_digest,provider_profile_id,
-                provider_id,model_id,endpoint_class,config_generation,created_at,updated_at
-             ) VALUES(?1,?2,'running',?3,?4,?5,?6,?7,?8,?9,?9)",
+                provider_id,model_id,endpoint_class,config_generation,reasoning_effort,
+                created_at,updated_at
+             ) VALUES(?1,?2,'running',?3,?4,?5,?6,?7,?8,?9,?10,?10)",
             params![
                 input.turn_id,
                 input.conversation_id,
@@ -781,6 +1455,7 @@ impl ConversationStore {
                 input.provider.model_id,
                 input.provider.endpoint_class,
                 input.provider.config_generation,
+                input.provider.reasoning_effort.map(ReasoningEffort::as_str),
                 now,
             ],
         )?;
@@ -1049,7 +1724,7 @@ impl ConversationStore {
         let conn = self.lock_conn()?;
         conn.query_row(
             "SELECT id,conversation_id,status,request_digest,provider_profile_id,
-                    provider_id,model_id,endpoint_class,config_generation,error_code,
+                    provider_id,model_id,endpoint_class,config_generation,reasoning_effort,error_code,
                     created_at,updated_at,finished_at
              FROM conversation_turns WHERE conversation_id=?1
              ORDER BY created_at DESC,id DESC LIMIT 1",
@@ -1058,6 +1733,67 @@ impl ConversationStore {
         )
         .optional()
         .map_err(Into::into)
+    }
+
+    /// Returns a bounded newest-first Turn history across Conversations.
+    ///
+    /// Capability projections use this only for immutable provider/model
+    /// provenance. Callers must still exclude canonical Work execution-session
+    /// ids before treating a completed Turn as independent Chat evidence.
+    pub fn list_recent_turns(&self, limit: usize) -> Result<Vec<TurnRecord>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id,conversation_id,status,request_digest,provider_profile_id,
+                    provider_id,model_id,endpoint_class,config_generation,reasoning_effort,error_code,
+                    created_at,updated_at,finished_at
+             FROM conversation_turns
+             ORDER BY created_at DESC,id DESC LIMIT ?1",
+        )?;
+        let turns = statement
+            .query_map([limit.clamp(1, 500) as i64], turn_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(anyhow::Error::from)?;
+        Ok(turns)
+    }
+
+    /// Resolve the exact Conversation Turn that admitted a canonical Work task.
+    /// The Task owner persists the authenticated user-message digest while each
+    /// provider attempt persists the immutable profile/model binding. Requiring
+    /// all four fields avoids projecting the latest global/provider setting as
+    /// historical Run truth.
+    pub fn find_turn_for_work_binding(
+        &self,
+        conversation_id: &str,
+        request_digest: &str,
+        provider_profile_id: &str,
+        model_id: &str,
+        reasoning_effort: Option<ReasoningEffort>,
+    ) -> Result<Option<TurnRecord>> {
+        validate_uuid("conversation_id", conversation_id)?;
+        validate_content_digest("request_digest", request_digest)?;
+        validate_label("provider_profile_id", provider_profile_id, 256)?;
+        validate_label("model_id", model_id, 256)?;
+        self.lock_conn()?
+            .query_row(
+                "SELECT id,conversation_id,status,request_digest,provider_profile_id,
+                        provider_id,model_id,endpoint_class,config_generation,reasoning_effort,error_code,
+                        created_at,updated_at,finished_at
+                 FROM conversation_turns
+                 WHERE conversation_id=?1 AND request_digest=?2
+                   AND provider_profile_id=?3 AND model_id=?4
+                   AND reasoning_effort IS ?5
+                 ORDER BY created_at DESC,id DESC LIMIT 1",
+                params![
+                    conversation_id,
+                    request_digest,
+                    provider_profile_id,
+                    model_id,
+                    reasoning_effort.map(ReasoningEffort::as_str),
+                ],
+                turn_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn list_items(
@@ -1190,6 +1926,16 @@ fn validate_content(field: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_content_digest(field: &str, value: &str) -> Result<()> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        anyhow::bail!("{field}_invalid");
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        anyhow::bail!("{field}_invalid");
+    }
+    Ok(())
+}
+
 fn content_digest(value: &str) -> String {
     format!(
         "sha256:{}",
@@ -1241,14 +1987,35 @@ fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRecord> 
     let revision = u64::try_from(row.get::<_, i64>(3)?).map_err(|error| {
         rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Integer, error.into())
     })?;
+    let status: String = row.get(4)?;
     Ok(ProjectRecord {
         id: row.get(0)?,
         name: row.get(1)?,
         workspace_root: row.get(2)?,
+        additional_read_roots: Vec::new(),
         revision,
-        created_at: parse_time(row.get(4)?)?,
-        updated_at: parse_time(row.get(5)?)?,
+        status: ProjectStatus::from_db(&status).map_err(to_sql_error)?,
+        created_at: parse_time(row.get(5)?)?,
+        updated_at: parse_time(row.get(6)?)?,
     })
+}
+
+fn project_read_roots(conn: &Connection, project_id: &str) -> Result<Vec<ProjectReadRoot>> {
+    let mut statement = conn.prepare(
+        "SELECT id,name,path FROM project_read_roots
+         WHERE project_id=?1 ORDER BY created_at,id",
+    )?;
+    let roots = statement
+        .query_map([project_id], |row| {
+            Ok(ProjectReadRoot {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                path: row.get(2)?,
+            })
+        })?
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(anyhow::Error::from)?;
+    Ok(roots)
 }
 
 fn turn_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TurnRecord> {
@@ -1264,12 +2031,16 @@ fn turn_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TurnRecord> {
             model_id: row.get(6)?,
             endpoint_class: row.get(7)?,
             config_generation: row.get(8)?,
+            reasoning_effort: row
+                .get::<_, Option<String>>(9)?
+                .map(|value| ReasoningEffort::from_wire(&value).map_err(to_sql_error))
+                .transpose()?,
         },
-        error_code: row.get(9)?,
-        created_at: parse_time(row.get(10)?)?,
-        updated_at: parse_time(row.get(11)?)?,
+        error_code: row.get(10)?,
+        created_at: parse_time(row.get(11)?)?,
+        updated_at: parse_time(row.get(12)?)?,
         finished_at: row
-            .get::<_, Option<String>>(12)?
+            .get::<_, Option<String>>(13)?
             .map(parse_time)
             .transpose()?,
     })
@@ -1292,7 +2063,7 @@ fn item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ConversationItemRe
 fn load_turn_tx(conn: &Connection, turn_id: &str) -> Result<Option<TurnRecord>> {
     conn.query_row(
         "SELECT id,conversation_id,status,request_digest,provider_profile_id,
-                provider_id,model_id,endpoint_class,config_generation,error_code,
+                provider_id,model_id,endpoint_class,config_generation,reasoning_effort,error_code,
                 created_at,updated_at,finished_at
          FROM conversation_turns WHERE id=?1",
         [turn_id],
@@ -1332,7 +2103,45 @@ mod tests {
             model_id: "gpt-test".into(),
             endpoint_class: "cloud".into(),
             config_generation: "generation-1".into(),
+            reasoning_effort: Some(ReasoningEffort::High),
         }
+    }
+
+    #[test]
+    fn v6_store_migrates_nullable_reasoning_binding() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conversation-v6.db");
+        let store = ConversationStore::new(&path).unwrap();
+        {
+            let conn = store.lock_conn().unwrap();
+            conn.execute(
+                "ALTER TABLE conversation_turns DROP COLUMN reasoning_effort",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE conversation_store_metadata SET value='6' WHERE key='schema_version'",
+                [],
+            )
+            .unwrap();
+        }
+        drop(store);
+
+        let reopened = ConversationStore::new(&path).unwrap();
+        assert_eq!(
+            ConversationStore::schema_version(&reopened.lock_conn().unwrap()).unwrap(),
+            8
+        );
+        let conn = reopened.lock_conn().unwrap();
+        let mut statement = conn
+            .prepare("PRAGMA table_info(conversation_turns)")
+            .unwrap();
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "reasoning_effort"));
     }
 
     #[test]
@@ -1455,6 +2264,81 @@ mod tests {
     }
 
     #[test]
+    fn v3_store_migrates_durable_new_conversation_project_selection() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conversation-v3.db");
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversation_store_metadata (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO conversation_store_metadata VALUES('schema_version','3');",
+            )
+            .unwrap();
+        }
+
+        let store = ConversationStore::new(&path).unwrap();
+        let project_id = id();
+        store
+            .create_project_as_new_conversation_scope(
+                &project_id,
+                "Migrated workspace",
+                "/tmp/migrated-workspace",
+            )
+            .unwrap();
+
+        assert_eq!(
+            store.new_conversation_project_id().unwrap().as_deref(),
+            Some(project_id.as_str())
+        );
+        assert_eq!(
+            ConversationStore::schema_version(&store.lock_conn().unwrap()).unwrap(),
+            SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn v4_store_migrates_projects_to_active_lifecycle_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conversation-v4.db");
+        let project_id = id();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversation_store_metadata (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO conversation_store_metadata VALUES('schema_version','4');
+                 CREATE TABLE projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    workspace_root TEXT,
+                    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );",
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO projects VALUES(?1,'Migrated','/tmp/migrated',1,?2,?2)",
+                params![project_id, Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        }
+
+        let store = ConversationStore::new(&path).unwrap();
+        assert_eq!(
+            store.get_project(&project_id).unwrap().unwrap().status,
+            ProjectStatus::Active
+        );
+        assert_eq!(
+            ConversationStore::schema_version(&store.lock_conn().unwrap()).unwrap(),
+            SCHEMA_VERSION
+        );
+    }
+
+    #[test]
     fn chat_turn_commits_ordered_items_and_terminal_atomically() {
         let store = ConversationStore::new_in_memory().unwrap();
         let conversation_id = id();
@@ -1479,6 +2363,79 @@ mod tests {
         assert_eq!(
             completed.items[1].kind,
             ConversationItemKind::AssistantMessage
+        );
+        let recent = store.list_recent_turns(10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, turn_id);
+        assert_eq!(recent[0].status, TurnStatus::Completed);
+    }
+
+    #[test]
+    fn work_binding_lookup_requires_exact_request_profile_and_model() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let conversation_id = id();
+        let turn_id = id();
+        let provider = provider();
+        store
+            .create_conversation(&conversation_id, "Work provenance")
+            .unwrap();
+        let begun = store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &turn_id,
+                conversation_id: &conversation_id,
+                user_message: "read the selected Project",
+                provider: &provider,
+            })
+            .unwrap();
+
+        let matched = store
+            .find_turn_for_work_binding(
+                &conversation_id,
+                &begun.turn.request_digest,
+                &provider.profile_id,
+                &provider.model_id,
+                provider.reasoning_effort,
+            )
+            .unwrap()
+            .expect("exact turn binding");
+        assert_eq!(matched.id, turn_id);
+        assert!(store
+            .find_turn_for_work_binding(
+                &conversation_id,
+                &begun.turn.request_digest,
+                &provider.profile_id,
+                "different-model",
+                provider.reasoning_effort,
+            )
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn minimal_reasoning_binding_round_trips_through_turn_history() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let conversation_id = id();
+        let turn_id = id();
+        let mut provider = provider();
+        provider.reasoning_effort = Some(ReasoningEffort::Minimal);
+        store
+            .create_conversation(&conversation_id, "Gemini reasoning provenance")
+            .unwrap();
+        store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &turn_id,
+                conversation_id: &conversation_id,
+                user_message: "use the minimum supported thinking level",
+                provider: &provider,
+            })
+            .unwrap();
+        store.complete_chat_turn(&turn_id, "done").unwrap();
+
+        let restored = store.list_recent_turns(1).unwrap();
+        assert_eq!(restored[0].id, turn_id);
+        assert_eq!(
+            restored[0].provider.reasoning_effort,
+            Some(ReasoningEffort::Minimal)
         );
     }
 
@@ -1513,6 +2470,59 @@ mod tests {
                 .memory_mode,
             ConversationMemoryMode::Off
         );
+    }
+
+    #[test]
+    fn conversation_admission_atomically_binds_project_and_memory_mode() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let project_id = id();
+        let conversation_id = id();
+        store
+            .create_project(&project_id, "Private research", None)
+            .unwrap();
+
+        let created = store
+            .create_conversation_with_admission(CreateConversationAdmission {
+                id: &conversation_id,
+                title: "Bound before first turn",
+                project_id: Some(&project_id),
+                selected_skill_id: Some("evidence_review"),
+                memory_mode: ConversationMemoryMode::Off,
+            })
+            .unwrap();
+
+        assert_eq!(created.project_id.as_deref(), Some(project_id.as_str()));
+        assert_eq!(
+            created.selected_skill_id.as_deref(),
+            Some("evidence_review")
+        );
+        assert_eq!(created.memory_mode, ConversationMemoryMode::Off);
+    }
+
+    #[test]
+    fn conversation_admission_rejects_archived_project_without_partial_record() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let project_id = id();
+        let conversation_id = id();
+        store
+            .create_project(&project_id, "Archived research", None)
+            .unwrap();
+        store.archive_project(&project_id, 1).unwrap();
+
+        let error = store
+            .create_conversation_with_admission(CreateConversationAdmission {
+                id: &conversation_id,
+                title: "Must not exist",
+                project_id: Some(&project_id),
+                selected_skill_id: None,
+                memory_mode: ConversationMemoryMode::UseOnly,
+            })
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("conversation_admission_project_unavailable"));
+        assert!(store.get_conversation(&conversation_id).unwrap().is_none());
     }
 
     #[test]
@@ -1674,7 +2684,7 @@ mod tests {
     }
 
     #[test]
-    fn deleting_conversation_cascades_turns_and_items() {
+    fn deletion_requires_an_archived_conversation_without_history() {
         let store = ConversationStore::new_in_memory().unwrap();
         let conversation_id = id();
         let turn_id = id();
@@ -1690,9 +2700,58 @@ mod tests {
             })
             .unwrap();
         store.cancel_chat_turn(&turn_id).unwrap();
-        store.delete_conversation(&conversation_id).unwrap();
-        assert!(store.get_turn(&turn_id).unwrap().is_none());
-        assert!(store.list_items(&conversation_id, 100).unwrap().is_empty());
+        store.archive_conversation(&conversation_id).unwrap();
+        assert!(store.delete_conversation(&conversation_id).is_err());
+        assert!(store.get_turn(&turn_id).unwrap().is_some());
+
+        let empty_conversation_id = id();
+        store
+            .create_conversation(&empty_conversation_id, "Empty")
+            .unwrap();
+        store.archive_conversation(&empty_conversation_id).unwrap();
+        store.delete_conversation(&empty_conversation_id).unwrap();
+        assert!(store
+            .get_conversation(&empty_conversation_id)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn archived_conversation_can_be_restored_and_running_turn_blocks_archive() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let conversation_id = id();
+        let turn_id = id();
+        store
+            .create_conversation(&conversation_id, "Lifecycle")
+            .unwrap();
+        store
+            .begin_chat_turn(BeginChatTurn {
+                turn_id: &turn_id,
+                conversation_id: &conversation_id,
+                user_message: "in flight",
+                provider: &provider(),
+            })
+            .unwrap();
+        assert!(store.archive_conversation(&conversation_id).is_err());
+        store.cancel_chat_turn(&turn_id).unwrap();
+        store.archive_conversation(&conversation_id).unwrap();
+        assert_eq!(
+            store
+                .get_conversation(&conversation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ConversationStatus::Archived
+        );
+        store.restore_conversation(&conversation_id).unwrap();
+        assert_eq!(
+            store
+                .get_conversation(&conversation_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ConversationStatus::Active
+        );
     }
 
     #[test]
@@ -1747,6 +2806,126 @@ mod tests {
             ConversationStore::project_scope_digest(&project),
             ConversationStore::project_scope_digest(&updated)
         );
+    }
+
+    #[test]
+    fn project_additional_read_roots_are_revisioned_digest_bound_and_reopenable() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("conversations.db");
+        let project_id = id();
+        let root_id = id();
+        let initial_digest;
+        {
+            let store = ConversationStore::new(&database).unwrap();
+            let project = store
+                .create_project(&project_id, "Multi-root", Some("/tmp/primary"))
+                .unwrap();
+            initial_digest = ConversationStore::project_scope_digest(&project);
+            let updated = store
+                .add_project_read_root(
+                    &project_id,
+                    &root_id,
+                    "References",
+                    "/tmp/references",
+                    project.revision,
+                )
+                .unwrap();
+            assert_eq!(updated.revision, project.revision + 1);
+            assert_eq!(updated.additional_read_roots.len(), 1);
+            assert_eq!(updated.additional_read_roots[0].id, root_id);
+            assert_ne!(
+                ConversationStore::project_scope_digest(&updated),
+                initial_digest
+            );
+        }
+
+        let reopened = ConversationStore::new(&database).unwrap();
+        let persisted = reopened.get_project(&project_id).unwrap().unwrap();
+        assert_eq!(persisted.additional_read_roots.len(), 1);
+        let removed = reopened
+            .remove_project_read_root(&project_id, &root_id, persisted.revision)
+            .unwrap();
+        assert!(removed.additional_read_roots.is_empty());
+        assert_eq!(removed.revision, persisted.revision + 1);
+        assert_ne!(
+            ConversationStore::project_scope_digest(&removed),
+            initial_digest,
+            "revision remains part of the scope identity after revocation"
+        );
+    }
+
+    #[test]
+    fn project_creation_and_new_conversation_selection_commit_together() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let project_id = id();
+        let project = store
+            .create_project_as_new_conversation_scope(
+                &project_id,
+                "Selected workspace",
+                "/tmp/selected-workspace",
+            )
+            .unwrap();
+
+        assert_eq!(project.id, project_id);
+        assert_eq!(
+            store.new_conversation_project_id().unwrap().as_deref(),
+            Some(project_id.as_str())
+        );
+        store.set_new_conversation_project(None).unwrap();
+        assert!(store.new_conversation_project_id().unwrap().is_none());
+    }
+
+    #[test]
+    fn project_archive_restore_and_delete_are_revisioned_and_reference_safe() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let project_id = id();
+        let conversation_id = id();
+        let project = store
+            .create_project_as_new_conversation_scope(&project_id, "Lifecycle", "/tmp/lifecycle")
+            .unwrap();
+        store
+            .create_conversation(&conversation_id, "Linked")
+            .unwrap();
+        store
+            .assign_conversation_project(&conversation_id, Some(&project_id))
+            .unwrap();
+        assert!(store
+            .archive_project(&project_id, project.revision)
+            .unwrap_err()
+            .to_string()
+            .contains("project_archive_active_conversations_present"));
+
+        store
+            .assign_conversation_project(&conversation_id, None)
+            .unwrap();
+        let archived = store
+            .archive_project(&project_id, project.revision)
+            .unwrap();
+        assert_eq!(archived.status, ProjectStatus::Archived);
+        assert_eq!(archived.revision, project.revision + 1);
+        assert!(store.new_conversation_project_id().unwrap().is_none());
+        assert!(store.list_projects(10).unwrap().is_empty());
+        assert_eq!(
+            store.list_archived_projects(10).unwrap(),
+            vec![archived.clone()]
+        );
+        assert!(store
+            .assign_conversation_project(&conversation_id, Some(&project_id))
+            .unwrap_err()
+            .to_string()
+            .contains("conversation_project_assignment_unavailable"));
+
+        let restored = store
+            .restore_project(&project_id, archived.revision)
+            .unwrap();
+        assert_eq!(restored.status, ProjectStatus::Active);
+        let archived_again = store
+            .archive_project(&project_id, restored.revision)
+            .unwrap();
+        store
+            .delete_archived_project(&project_id, archived_again.revision)
+            .unwrap();
+        assert!(store.get_project(&project_id).unwrap().is_none());
     }
 
     #[test]

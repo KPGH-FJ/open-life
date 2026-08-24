@@ -12,12 +12,14 @@ import {
 import { editLifeModelLearningProposal } from "@/ipc/personalIntelligence";
 import { acceptProposal, postponeProposal, rejectProposal } from "@/ipc/review";
 import {
-  cancelWorkTask,
   exportArtifactResult,
   getWorkbenchViewModel,
   openArtifactResult,
   requestArtifactUndo,
+  reviseWorkArtifact,
+  resumeWorkTask,
   retryWorkTask,
+  stopWorkRun,
 } from "@/ipc/work";
 import { productErrorCode as errorText } from "@/shared/productError";
 import { buildReadModelErrorEnvelope } from "@/shared/readModelEnvelope";
@@ -46,8 +48,14 @@ export interface WorkbenchDataSource {
   dispatchReviewAction(action: ReviewAction): Promise<void>;
   editLifeModelLearningProposal(proposalId: string, statement: string): Promise<void>;
   dispatchTaskControl(control: TaskControl): Promise<void>;
-  cancelTask(taskId: string): Promise<void>;
+  stopRun(taskId: string, runId: string): Promise<void>;
   requestArtifactUndo(artifactId: string): Promise<void>;
+  reviseArtifact(
+    taskId: string,
+    artifactId: string,
+    baseVersion: number,
+    instruction: string
+  ): Promise<void>;
   openArtifactResult(artifactId: string, version: number): Promise<void>;
   exportArtifactResult(artifactId: string, version: number): Promise<string | null>;
 }
@@ -168,16 +176,17 @@ async function dispatchReviewAction(action: ReviewAction): Promise<void> {
 async function dispatchTaskControl(control: TaskControl): Promise<void> {
   switch (control.kind) {
     case "resume":
-      throw new Error("canonical_task_resume_requires_retry_or_review_checkpoint");
-    case "cancel":
-      await cancelWorkTask(control.targetTaskId);
+      if (!control.targetActionId) throw new Error("task_resume_target_run_missing");
+      await resumeWorkTask(control.targetTaskId, control.targetActionId);
+      return;
+    case "stop_run":
+      if (!control.targetActionId) throw new Error("task_stop_run_target_run_missing");
+      await stopWorkRun(control.targetTaskId, control.targetActionId);
       return;
     case "retry":
       if (!control.targetActionId) throw new Error("task_retry_target_action_missing");
       await retryWorkTask(control.targetTaskId, control.targetActionId);
       return;
-    case "refresh_context":
-      throw new Error("canonical_task_refresh_context_unavailable");
     case "open_trace":
     case "open_run":
     case "open_review_item":
@@ -186,8 +195,8 @@ async function dispatchTaskControl(control: TaskControl): Promise<void> {
   }
 }
 
-async function cancelTask(taskId: string): Promise<void> {
-  await cancelWorkTask(taskId);
+async function stopRun(taskId: string, runId: string): Promise<void> {
+  await stopWorkRun(taskId, runId);
 }
 
 export const tauriWorkbenchDataSource: WorkbenchDataSource = {
@@ -212,7 +221,7 @@ export const tauriWorkbenchDataSource: WorkbenchDataSource = {
     }
   },
   dispatchTaskControl,
-  cancelTask,
+  stopRun,
   async requestArtifactUndo(artifactId) {
     const receipt = await requestArtifactUndo(artifactId);
     if (
@@ -221,6 +230,15 @@ export const tauriWorkbenchDataSource: WorkbenchDataSource = {
       receipt.status !== "waiting_review"
     ) {
       throw new Error("artifact_undo_receipt_unverified");
+    }
+  },
+  async reviseArtifact(taskId, artifactId, baseVersion, instruction) {
+    const receipt = await reviseWorkArtifact(taskId, artifactId, baseVersion, instruction);
+    if (
+      !receipt.status ||
+      !["completed", "completed_with_pending_items"].includes(receipt.status)
+    ) {
+      throw new Error("artifact_revision_receipt_unverified");
     }
   },
   async openArtifactResult(artifactId, version) {

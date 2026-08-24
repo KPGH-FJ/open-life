@@ -1,38 +1,47 @@
 import type { ChatMessage } from "./types";
 export { redactInvokeArgs } from "./ipc/invoke";
 export {
+  addProjectReadRoot,
+  archiveChatSession,
   assignConversationProject,
+  bindProjectDirectory,
   cancelChatTurn,
   clearMainChatSkill,
   createChatSession,
-  createProject,
+  createProjectFromDirectory,
   deleteChatSession,
   detachResourceFromTurn,
   getConversationViewModel,
+  getMainChatSkillDetail,
   listMainChatSkills,
   listMainChatToolCandidates,
   pickAndImportResources,
   renameChatSession,
+  restoreChatSession,
+  removeProjectReadRoot,
   selectMainChatSkill,
   setConversationMemoryMode,
   startStreamMessage,
   submitMainChatTaskSteering,
 } from "./ipc/conversation";
 export {
-  cancelWorkTask,
   exportArtifactResult,
   getWorkbenchViewModel,
   openArtifactResult,
   openExternalHttpsSource,
   requestArtifactUndo,
+  resumeWorkTask,
   retryWorkTask,
+  stopWorkRun,
 } from "./ipc/work";
 export {
   getConfig,
   getLifeStateProjection,
   getProductDiagnosticsViewModel,
   getProviderPrivacyBoundarySummary,
+  getToolPermissionViewModel,
   recoverRequiredCredentialAccess,
+  revokeToolPermission,
   saveConfig,
   selectArtifactOutputDirectory,
   testLlmConnection,
@@ -82,6 +91,7 @@ export interface AppConfig {
       | "deepseek"
       | "openai"
       | "openrouter"
+      | "gemini"
       | "siliconflow"
       | "moonshot"
       | "dashscope"
@@ -104,7 +114,8 @@ export interface AppConfig {
     ollama_cache_ttl_seconds?: number;
     memory_search_top_k?: number;
     agent_memory_enabled?: boolean;
-    safe_paths?: string[];
+    artifact_output_directory?: string;
+    additional_read_roots?: string[];
     search_provider?: "auto" | "duckduckgo" | "brave" | "deepseek" | "searxng";
     search_provider_key?: string;
     search_provider_key_ref?: string;
@@ -148,10 +159,15 @@ export interface CredentialRecoveryReport {
 export interface MainChatMessageOptions {
   operationId: string;
   selectedSkillId?: string;
+  providerProfileId?: string;
+  reasoningEffort?: ReasoningEffort;
+  executionMode?: WorkExecutionMode;
   mode?: "chat" | "work";
   taskId?: string;
   runId?: string;
 }
+
+export type WorkExecutionMode = "scoped_agent" | "observe_only";
 
 export interface SendMessageResult {
   reply: string;
@@ -305,6 +321,19 @@ export interface MainChatSelectedSkill {
   controls: string[];
 }
 
+export interface MainChatSkillDetail {
+  skillId: string;
+  manifest: Record<string, unknown>;
+  boundedInstructionsPreview: string;
+  allowedTools: string[];
+  disallowedTools: string[];
+  policyNotes: string[];
+  requiredPermissions: string[];
+  evidenceDigest: string;
+  redactionSummary: string;
+  lastModifiedAt?: string | null;
+}
+
 export interface MainChatToolCandidate {
   candidateId: string;
   toolName: string;
@@ -371,7 +400,7 @@ export interface CanonicalWorkControlResult {
     | "effect_unknown";
 }
 
-export type MainChatSteeringStatus = "pending" | "consumed" | "blocked";
+export type MainChatSteeringStatus = "pending" | "applied" | "rejected" | "blocked";
 
 export interface MainChatSteeringRecord {
   steeringId: string;
@@ -383,13 +412,14 @@ export interface MainChatSteeringRecord {
   steeringDigest: string;
   basePlanRevision: number;
   status: MainChatSteeringStatus;
+  resolutionCode?: string;
+  appliedPlanRevision?: number;
   createdAt: string;
-  consumedAt?: string;
+  resolvedAt?: string;
 }
 
 export interface SubmitMainChatSteeringResponse {
   steering: MainChatSteeringRecord;
-  scopeExpansionBlocked: boolean;
 }
 
 export interface RuntimeBuildInfo {
@@ -542,6 +572,37 @@ export interface LifeToolPermissionProjection {
   allowUntilRevokedCount: number;
 }
 
+export type ToolPermissionPolicy =
+  | "allow"
+  | "deny"
+  | "ask_every_time"
+  | "allow_once"
+  | "allow_until_revoked";
+
+export type ToolPermissionLifecycleState = "active" | "consumed" | "expired";
+
+export interface ToolPermissionViewModelItem {
+  id: string;
+  toolName: string;
+  source: string;
+  riskLevel: string;
+  actionType: string;
+  policy: ToolPermissionPolicy;
+  lifecycleState: ToolPermissionLifecycleState;
+  createdAt: string;
+  expiresAt?: string | null;
+  consumedAt?: string | null;
+  revocable: boolean;
+}
+
+export interface ToolPermissionViewModel {
+  items: ToolPermissionViewModelItem[];
+  totalCount: number;
+  activeCount: number;
+  revocableCount: number;
+  contractLimitations: string[];
+}
+
 export type CredentialBootstrapStatus =
   | "available"
   | "initialization_required"
@@ -573,7 +634,10 @@ export interface LifeStateProjection {
   safeMode: LifeSafeModeProjection;
   credentialBootstrap?: CredentialBootstrapSnapshot;
   toolPermissions: LifeToolPermissionProjection;
-  safePaths: string[];
+  filesystemScopes: {
+    artifactOutputDirectory: string | null;
+    additionalReadRoots: string[];
+  };
   sourceRefs: string[];
 }
 
@@ -589,7 +653,8 @@ export type EvidenceSource =
   | "memory"
   | "lifemodel"
   | "settings"
-  | "provider";
+  | "provider"
+  | "resource";
 
 export type EvidenceSensitivity = "public" | "local_private" | "sensitive" | "redacted";
 
@@ -878,6 +943,7 @@ export type ReviewCenterViewModel = {
 // Canonical Rust owner: openlife-core/src/agent/life_model_view_model.rs.
 export type LifeModelTruthMode =
   | "canonical"
+  | "migration_required"
   | "candidate"
   | "pending_review"
   | "manual_override"
@@ -903,6 +969,93 @@ export type LifeModelCanonicalSummary = {
   evidenceRefs: EvidenceRef[];
   document: LifeModelDocumentV2;
   humanProjection: LifeModelHumanProjectionV2;
+};
+
+export type LegacyLifeModelMigrationDispositionV2 =
+  | "review_required"
+  | "external_owner"
+  | "manual_classification"
+  | "not_migrated"
+  | "migration_metadata";
+
+export type LegacyLifeModelMigrationOwnerV2 =
+  | "life_model_v2"
+  | "state"
+  | "tasks"
+  | "agent_memory"
+  | "agent_runtime"
+  | "migration_metadata"
+  | "legacy_compatibility_projection"
+  | "unassigned";
+
+export type LegacyLifeModelMigrationItemV2 = {
+  sourcePath: string;
+  valuePreview: string;
+  valueDigest: string;
+  valueTruncated: boolean;
+  disposition: LegacyLifeModelMigrationDispositionV2;
+  targetOwner: LegacyLifeModelMigrationOwnerV2;
+  targetSection: LifeModelSectionV2 | null;
+  reasonCode: string;
+  sensitive: boolean;
+};
+
+export type LegacyLifeModelMigrationPreviewV2 = {
+  schemaVersion: "openlife.lifemodel.legacy-migration-preview.v1";
+  sourceDigest: string;
+  items: LegacyLifeModelMigrationItemV2[];
+  reviewRequiredCount: number;
+  externalOwnerCount: number;
+  manualClassificationCount: number;
+  notMigratedCount: number;
+  migrationMetadataCount: number;
+  containsSensitiveItems: boolean;
+  candidates: LegacyLifeModelMigrationCandidateV2[];
+};
+
+export type LegacyLifeModelMigrationCandidateV2 = {
+  candidateId: string;
+  itemId: string;
+  sourcePaths: string[];
+  targetSection: LifeModelSectionV2;
+  proposedValue: LifeModelUserValueV2;
+  sensitive: boolean;
+};
+
+export type LegacyLifeModelMigrationSelectionV2 = {
+  candidateId: string;
+  decision: "include" | "exclude";
+  editedValue: LifeModelUserValueV2 | null;
+};
+
+export type DraftLegacyLifeModelMigrationRequest = {
+  sourceDigest: string;
+  selections: LegacyLifeModelMigrationSelectionV2[];
+  nonLifemodelItemsAcknowledged: boolean;
+};
+
+export type DraftLegacyLifeModelMigrationReceipt = {
+  proposalId: string;
+  status: "review_required";
+  sourceDigest: string;
+  resultDocumentDigest: string;
+  includedCandidateCount: number;
+  excludedCandidateCount: number;
+  durableWriteExecuted: false;
+};
+
+export type LegacyLifeModelInventoryV2 = {
+  schemaVersion: "openlife.lifemodel.legacy-inventory.v1";
+  currentSourcePresent: boolean;
+  currentSourceBytes: number;
+  currentSourceModifiedAt: string | null;
+  currentSourceDigest: string | null;
+  historyManifestPresent: boolean;
+  historyManifestEntryCount: number;
+  historyManifestDigest: string | null;
+  historyYamlFileCount: number;
+  historyYamlTotalBytes: number;
+  preview: LegacyLifeModelMigrationPreviewV2 | null;
 };
 
 export type LifeModelStatementV2 = {
@@ -1197,6 +1350,7 @@ export type LifeModelLearningReviewDecisionReceipt = {
 export type LifeModelViewModel = {
   truthMode: LifeModelTruthMode;
   canonicalSummary: LifeModelCanonicalSummary | null;
+  legacyMigrationInventory: LegacyLifeModelInventoryV2 | null;
   versionHistory: LifeModelVersionHistoryEntryV2[];
   trustQualityState: LifeModelTrustQualityState;
   pendingUpdateCounts: LifeModelPendingUpdateCounts;
@@ -1240,8 +1394,7 @@ export type TaskTerminalDeliveryStatus =
 export type TaskControlKind =
   | "resume"
   | "retry"
-  | "cancel"
-  | "refresh_context"
+  | "stop_run"
   | "open_trace"
   | "open_run"
   | "open_review_item"
@@ -1250,8 +1403,7 @@ export type TaskControlKind =
 export type TaskControlEffect =
   | "task_resume_request"
   | "task_retry_request"
-  | "task_cancel_request"
-  | "task_refresh_request"
+  | "task_stop_run_request"
   | "navigation_only"
   | "evidence_only";
 
@@ -1319,6 +1471,7 @@ export type TaskItemViewModel = {
 export type TaskArtifactViewModel = {
   artifactId: string;
   version: number;
+  previousVersion?: number;
   status: CanonicalArtifactStatus;
   mediaType: string;
   contentDigest: string;
@@ -1327,6 +1480,8 @@ export type TaskArtifactViewModel = {
   observedContentDigest?: string;
   proposalRef?: BackendEntityRef;
   sourceItemRef: BackendEntityRef;
+  sourceRunProvenance?: TaskViewModelItem["latestRunProvenance"];
+  sourceResourceRefs: EvidenceRef[];
   evidenceRefs: EvidenceRef[];
   change: {
     kind: "create" | "replace" | "unknown";
@@ -1348,8 +1503,13 @@ export type TaskArtifactViewModel = {
   };
   undo: {
     available: boolean;
+    operation?: "trash_created" | "restore_replaced";
     status?: string;
     proposalRef?: BackendEntityRef;
+    reasonCode?: string;
+  };
+  revision: {
+    available: boolean;
     reasonCode?: string;
   };
 };
@@ -1359,11 +1519,42 @@ export type TaskViewModelItem = {
   relatedRunIds: string[];
   conversationId?: string;
   title: string;
+  latestRunProvenance?: {
+    runId: string;
+    turnId: string;
+    turnStatus: string;
+    turnErrorCode?: string;
+    providerProfileId: string;
+    providerId: string;
+    modelId: string;
+    endpointClass: string;
+    reasoningEffort?: ReasoningEffort;
+    executionMode: WorkExecutionMode;
+    projectId?: string;
+    projectName?: string;
+    projectRevision?: number;
+    projectScopeDigest?: string;
+  };
   lifecycleStatus: TaskLifecycleStatus;
   terminalDeliveryStatus: TaskTerminalDeliveryStatus;
   finalDeliveryEvidencePresent: boolean;
   completionDisposition?: "complete" | "complete_with_disclosed_limitations";
+  completionLimitations: Array<{
+    requirementId: string;
+    description: string;
+    evidenceRefs: string[];
+  }>;
   items: TaskItemViewModel[];
+  steerings?: Array<{
+    steeringId: string;
+    runId: string;
+    status: MainChatSteeringStatus;
+    basePlanRevision: number;
+    appliedPlanRevision?: number;
+    resolutionCode?: string;
+    createdAt: string;
+    resolvedAt?: string;
+  }>;
   workPlan?: {
     revision: number;
     steps: Array<{
@@ -1523,6 +1714,13 @@ export interface ProviderInvocationReceipt {
 export interface ChatSession {
   session_id: string;
   title: string;
+  status?: "active" | "archived";
+  turnCount?: number;
+  itemCount?: number;
+  taskReferenceCount?: number | null;
+  activeTaskCount?: number | null;
+  allowedControls?: ("archive" | "restore" | "delete")[];
+  blockerCodes?: string[];
   created_at: string;
   updated_at: string;
 }
@@ -1534,6 +1732,7 @@ export interface ConversationTurnViewModel {
   providerId: string;
   modelId: string;
   endpointClass: string;
+  reasoningEffort?: ReasoningEffort;
   errorCode?: string;
 }
 
@@ -1543,26 +1742,88 @@ export interface ProviderProfileViewModel {
   modelId: string;
   endpointClass: string;
   selected: boolean;
+  availability: "ready" | "unverified" | "offline" | "stale" | "degraded" | "unconfigured";
+  unavailableReason: string | null;
+  sizeBytes: number | null;
+  protocol: "ollama_chat" | "openai_compatible_chat_completions";
+  structuredOutputContract:
+    | "json_schema_requested_locally_validated"
+    | "json_object_requested_locally_validated";
+  reasoningControl: "provider_default_only" | "effort_selector";
+  supportedReasoningEfforts: ReasoningEffort[];
+  defaultReasoningEffort: ReasoningEffort | null;
+  reasoningMandatory: boolean;
+  reasoningCapabilitySource:
+    | "official_builtin"
+    | "provider_discovery"
+    | "explicit_configuration"
+    | "unavailable";
+  chatCompatibility: "validated" | "reachable_unverified" | "unverified" | "unavailable";
+  workCompatibility: "validated" | "unverified" | "observed_contract_failure";
+  workCompatibilityReason: string | null;
 }
+
+export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface ProjectRecord {
   id: string;
   name: string;
   workspaceRoot?: string;
+  additionalReadRoots: ProjectReadRoot[];
   revision: number;
+  status: "active" | "archived";
   createdAt: string;
   updatedAt: string;
+}
+
+export interface ProjectReadRoot {
+  id: string;
+  name: string;
+  path: string;
+}
+
+export type ProjectLifecycleControl = "update" | "archive" | "restore" | "delete";
+
+export interface ProjectLifecycleViewModel extends ProjectRecord {
+  activeConversationCount: number;
+  totalConversationCount: number;
+  taskRunReferenceCount: number | null;
+  selectedForNewConversation: boolean;
+  allowedControls: ProjectLifecycleControl[];
+  blockerCodes: string[];
+}
+
+export interface ProjectDirectoryCreationResult {
+  cancelled: boolean;
+  project: ProjectRecord | null;
+}
+
+export interface ConversationAttachmentViewModel {
+  resourceId: string;
+  filename: string;
+  detectedMime: string;
+  format: "text" | "markdown" | "json" | "source" | "pdf" | "docx" | "csv" | "xlsx" | "pptx";
+  digest: string;
+  byteCount: number;
+  chunkCount: number;
+}
+
+export interface ConversationMessageViewModel extends ChatMessage {
+  turnId: string;
+  attachmentsStatus: "ready" | "unavailable" | "not_applicable";
+  attachments: ConversationAttachmentViewModel[];
 }
 
 export interface ConversationViewModel {
   status: "ready" | "empty";
   conversations: ChatSession[];
-  projects: ProjectRecord[];
+  archivedConversations?: ChatSession[];
+  projects: ProjectLifecycleViewModel[];
   selectedProjectId: string | null;
   selectedConversationId: string | null;
   globalMemoryEnabled: boolean;
   selectedMemoryMode: ConversationMemoryMode;
-  messages: ChatMessage[];
+  messages: ConversationMessageViewModel[];
   latestTurn: ConversationTurnViewModel | null;
   providerStatus: "ready" | "unavailable";
   providerProfiles: ProviderProfileViewModel[];

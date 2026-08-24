@@ -74,6 +74,7 @@ export type SettingsController = {
   };
   eligibleCredentialPurposes: string[];
   artifactDirectorySelection: { phase: "idle" | "selecting" | "failed"; error: string | null };
+  permissionRevocation: { permissionId: string | null; error: string | null };
   load: (announceResult?: boolean) => Promise<SettingsSnapshot>;
   ensureLoaded: () => Promise<SettingsEnsureLoadedResult>;
   edit: (edit: SettingsDraftEdit) => void;
@@ -84,6 +85,7 @@ export type SettingsController = {
   save: () => void;
   retryBoundaryRefresh: () => void;
   selectArtifactOutputDirectory: () => void;
+  revokeToolPermission: (permissionId: string) => void;
 };
 
 export type SettingsEnsureLoadedResult = {
@@ -93,7 +95,13 @@ export type SettingsEnsureLoadedResult = {
 };
 
 type SettingsOperationToken = {
-  kind: "test" | "save" | "boundary_refresh" | "credential_initialization" | "artifact_directory";
+  kind:
+    | "test"
+    | "save"
+    | "boundary_refresh"
+    | "credential_initialization"
+    | "artifact_directory"
+    | "permission_revocation";
   sourceGeneration: number;
   sequence: number;
 };
@@ -203,6 +211,10 @@ export function useSettingsController(
     phase: "idle" | "selecting" | "failed";
     error: string | null;
   }>({ phase: "idle", error: null });
+  const [permissionRevocation, setPermissionRevocation] = useState<{
+    permissionId: string | null;
+    error: string | null;
+  }>({ permissionId: null, error: null });
   const requestRef = useRef(0);
   const sourceGenerationRef = useRef(0);
   const operationSequenceRef = useRef(0);
@@ -232,6 +244,7 @@ export function useSettingsController(
     setTestConfirmationOpen(false);
     setCredentialInitialization({ phase: "idle", report: null, error: null });
     setArtifactDirectorySelection({ phase: "idle", error: null });
+    setPermissionRevocation({ permissionId: null, error: null });
     dispatch({ type: "reset" });
     return () => {
       sourceGenerationRef.current += 1;
@@ -744,6 +757,61 @@ export function useSettingsController(
       });
   }, [announce, dataSource, load, protectionState, state.draftRevision, state.savedRevision]);
 
+  const revokeToolPermission = useCallback(
+    (permissionId: string) => {
+      if (!dataSource?.revokeToolPermission) {
+        announce("权限管理命令不可用；现有权限没有改变。");
+        return;
+      }
+      if (
+        operationRef.current ||
+        protectionState !== "normal" ||
+        state.draftRevision !== state.savedRevision
+      ) {
+        announce("当前不能撤销权限；请先完成其他操作并保存设置草稿。");
+        return;
+      }
+      const operationToken: SettingsOperationToken = {
+        kind: "permission_revocation",
+        sourceGeneration: sourceGenerationRef.current,
+        sequence: ++operationSequenceRef.current,
+      };
+      operationRef.current = operationToken;
+      setPermissionRevocation({ permissionId, error: null });
+      announce("正在撤销精确工具权限；完成前不会改变前端推断状态。");
+      void dataSource
+        .revokeToolPermission(permissionId)
+        .then(async () => {
+          if (operationRef.current !== operationToken) return;
+          const refreshed = await load(false);
+          if (operationRef.current !== operationToken) return;
+          if (
+            refreshed.toolPermissionEnvelope.status === "error" ||
+            !refreshed.toolPermissionEnvelope.data ||
+            refreshed.toolPermissionEnvelope.data.items.some(item => item.id === permissionId)
+          ) {
+            setPermissionRevocation({
+              permissionId: null,
+              error: "tool_permission_revocation_refresh_unconfirmed",
+            });
+            announce("撤销请求已经返回，但权限读模型没有确认结果；当前状态保持未知。");
+            return;
+          }
+          setPermissionRevocation({ permissionId: null, error: null });
+          announce("工具权限已由系统撤销并重新读取。");
+        })
+        .catch(error => {
+          if (operationRef.current !== operationToken) return;
+          setPermissionRevocation({ permissionId: null, error: errorCode(error) });
+          announce("工具权限未撤销；现有系统状态保持不变。");
+        })
+        .finally(() => {
+          if (operationRef.current === operationToken) operationRef.current = null;
+        });
+    },
+    [announce, dataSource, load, protectionState, state.draftRevision, state.savedRevision]
+  );
+
   const hasUnsavedDraft = state.draftRevision !== state.savedRevision;
   const effectiveBoundaryEnvelope = useMemo(() => {
     if (!snapshot) return loadingBoundaryEnvelope();
@@ -795,6 +863,7 @@ export function useSettingsController(
     credentialInitialization,
     eligibleCredentialPurposes,
     artifactDirectorySelection,
+    permissionRevocation,
     load,
     ensureLoaded,
     edit,
@@ -805,6 +874,7 @@ export function useSettingsController(
     save,
     retryBoundaryRefresh,
     selectArtifactOutputDirectory,
+    revokeToolPermission,
   };
 }
 

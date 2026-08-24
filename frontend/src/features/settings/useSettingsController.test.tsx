@@ -62,6 +62,21 @@ function snapshot(
     config: currentConfig,
     boundaryEnvelope: envelope,
     safeMode: { active: false, reason: "", sourceRefs: [] },
+    toolPermissionEnvelope: {
+      data: {
+        items: [],
+        totalCount: 0,
+        activeCount: 0,
+        revocableCount: 0,
+        contractLimitations: [],
+      },
+      status: "empty",
+      lastUpdatedAt: "2026-07-21T00:00:00Z",
+      source: "backend-readmodel",
+      evidenceRefs: [],
+      warnings: [],
+      actions: { primary: [], review: [], debugOnly: [] },
+    },
     diagnostics: [
       { id: "sanitized_config", status: "loaded" },
       { id: "provider_privacy_boundary", status: "loaded" },
@@ -709,8 +724,11 @@ describe("settings controller", () => {
   });
 
   it("reloads backend-owned artifact output state after native folder selection", async () => {
-    const initial = { ...config(), system: { safe_paths: [] } };
-    const refreshed = { ...config(), system: { safe_paths: ["/tmp/openlife-artifacts"] } };
+    const initial = { ...config(), system: { artifact_output_directory: undefined } };
+    const refreshed = {
+      ...config(),
+      system: { artifact_output_directory: "/tmp/openlife-artifacts" },
+    };
     const loadSettings = vi
       .fn()
       .mockResolvedValueOnce(snapshot(initial, boundary()))
@@ -731,9 +749,119 @@ describe("settings controller", () => {
 
     act(() => result.current.selectArtifactOutputDirectory());
     await waitFor(() =>
-      expect(result.current.draft?.system?.safe_paths).toEqual(["/tmp/openlife-artifacts"])
+      expect(result.current.draft?.system?.artifact_output_directory).toBe(
+        "/tmp/openlife-artifacts"
+      )
     );
     expect(source.selectArtifactOutputDirectory).toHaveBeenCalledTimes(1);
     expect(loadSettings).toHaveBeenCalledTimes(2);
+  });
+
+  it("revokes an exact reusable permission and accepts only the refreshed backend model", async () => {
+    const permissionId = "00000000-0000-4000-8000-000000000001";
+    const before = snapshot(config(), boundary());
+    before.toolPermissionEnvelope = {
+      ...before.toolPermissionEnvelope,
+      status: "ready",
+      data: {
+        items: [
+          {
+            id: permissionId,
+            toolName: "web.search",
+            source: "builtin",
+            riskLevel: "medium",
+            actionType: "network",
+            policy: "allow_until_revoked",
+            lifecycleState: "active",
+            createdAt: "2026-08-24T00:00:00Z",
+            revocable: true,
+          },
+        ],
+        totalCount: 1,
+        activeCount: 1,
+        revocableCount: 1,
+        contractLimitations: [],
+      },
+    };
+    const after = snapshot(config(), boundary());
+    const source: SettingsDataSource = {
+      loadSettings: vi.fn().mockResolvedValueOnce(before).mockResolvedValueOnce(after),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+      revokeToolPermission: vi.fn().mockResolvedValue(undefined),
+    };
+    const announce = vi.fn();
+    const { result } = renderHook(() => useSettingsController(source, announce));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    act(() => result.current.revokeToolPermission(permissionId));
+
+    await waitFor(() => expect(result.current.permissionRevocation.permissionId).toBeNull());
+    expect(source.revokeToolPermission).toHaveBeenCalledWith(permissionId);
+    expect(source.loadSettings).toHaveBeenCalledTimes(2);
+    expect(result.current.snapshot?.toolPermissionEnvelope.data?.items).toEqual([]);
+    expect(announce).toHaveBeenLastCalledWith("工具权限已由系统撤销并重新读取。");
+  });
+
+  it("does not claim revocation when the refreshed permission model cannot confirm it", async () => {
+    const permissionId = "00000000-0000-4000-8000-000000000002";
+    const before = snapshot(config(), boundary());
+    before.toolPermissionEnvelope = {
+      ...before.toolPermissionEnvelope,
+      status: "ready",
+      data: {
+        items: [
+          {
+            id: permissionId,
+            toolName: "web.fetch",
+            source: "builtin",
+            riskLevel: "medium",
+            actionType: "network",
+            policy: "allow_until_revoked",
+            lifecycleState: "active",
+            createdAt: "2026-08-24T00:00:00Z",
+            revocable: true,
+          },
+        ],
+        totalCount: 1,
+        activeCount: 1,
+        revocableCount: 1,
+        contractLimitations: [],
+      },
+    };
+    const unconfirmed = snapshot(config(), boundary());
+    unconfirmed.toolPermissionEnvelope = {
+      data: null,
+      status: "error",
+      lastUpdatedAt: null,
+      source: "backend-readmodel",
+      evidenceRefs: [],
+      warnings: [],
+      actions: { primary: [], review: [], debugOnly: [] },
+    };
+    const source: SettingsDataSource = {
+      loadSettings: vi.fn().mockResolvedValueOnce(before).mockResolvedValueOnce(unconfirmed),
+      testProviderConnection: vi.fn(),
+      saveSettings: vi.fn(),
+      revokeToolPermission: vi.fn().mockResolvedValue(undefined),
+    };
+    const announce = vi.fn();
+    const { result } = renderHook(() => useSettingsController(source, announce));
+    await act(async () => {
+      await result.current.load(false);
+    });
+
+    act(() => result.current.revokeToolPermission(permissionId));
+
+    await waitFor(() =>
+      expect(result.current.permissionRevocation.error).toBe(
+        "tool_permission_revocation_refresh_unconfirmed"
+      )
+    );
+    expect(announce).toHaveBeenLastCalledWith(
+      "撤销请求已经返回，但权限读模型没有确认结果；当前状态保持未知。"
+    );
   });
 });

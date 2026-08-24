@@ -7,11 +7,10 @@ FRONTEND_DIR="$REPO_ROOT/frontend"
 
 DRY_RUN=0
 INCLUDE_WEBVIEW_CACHE=0
-INCLUDE_RELEASE_BUNDLES=0
 
 usage() {
     cat <<'EOF'
-Usage: scripts/clean-ui-artifacts.sh [--dry-run] [--include-webview-cache] [--include-release-bundles]
+Usage: scripts/clean-ui-artifacts.sh [--dry-run] [--include-webview-cache]
 
 Default clean targets:
   frontend/dist
@@ -22,6 +21,7 @@ Never cleaned by this script:
   ~/Library/Application Support/ai.openlife.desktop
   *.db files
   LifeModel, memory, proposal, or agent run data
+  release bundles
 EOF
 }
 
@@ -32,9 +32,6 @@ while [ "$#" -gt 0 ]; do
             ;;
         --include-webview-cache)
             INCLUDE_WEBVIEW_CACHE=1
-            ;;
-        --include-release-bundles)
-            INCLUDE_RELEASE_BUNDLES=1
             ;;
         -h|--help)
             usage
@@ -81,12 +78,6 @@ add_existing_glob() {
 add_path "$FRONTEND_DIR/dist"
 add_path "$TARGET_DIR/debug/bundle/macos/OpenLife.app"
 add_existing_glob "$TARGET_DIR/debug/bundle/macos/OpenLife.app.stale-*"
-
-if [ "$INCLUDE_RELEASE_BUNDLES" -eq 1 ]; then
-    while IFS= read -r path; do
-        add_path "$path"
-    done < <(find "$TARGET_DIR" -path '*/release/bundle' -type d -print 2>/dev/null | sort)
-fi
 
 if [ "$INCLUDE_WEBVIEW_CACHE" -eq 1 ]; then
     case "$(uname -s)" in

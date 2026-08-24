@@ -33,8 +33,9 @@ export type TaskControlDispatchEvent =
 export const initialTaskControlDispatchState: TaskControlDispatchState = { phase: "idle" };
 
 const effectByKind = {
+  resume: "task_resume_request",
   retry: "task_retry_request",
-  cancel: "task_cancel_request",
+  stop_run: "task_stop_run_request",
 } as const;
 
 export type ExecutableTaskControlKind = keyof typeof effectByKind;
@@ -54,11 +55,8 @@ function contractBlocker(control: TaskControl, expectedTaskId: string): string |
   if (!isExecutableTaskControl(control)) return "task_control_not_executable_on_tasks_surface";
   if (control.effect !== effectByKind[control.kind]) return "task_control_kind_effect_mismatch";
   if (control.targetTaskId !== expectedTaskId) return "task_control_target_mismatch";
-  if (control.kind === "retry" && !control.targetActionId?.trim()) {
-    return "task_retry_target_action_missing";
-  }
-  if (control.kind === "cancel" && !control.requiresConfirmation) {
-    return "task_cancel_requires_confirmation";
+  if (["resume", "retry", "stop_run"].includes(control.kind) && !control.targetActionId?.trim()) {
+    return `task_${control.kind}_target_run_missing`;
   }
   if (control.completionProofAfterDispatch) return "task_control_claims_completion_after_dispatch";
   if (control.enabled && control.disabledReason !== undefined) {
@@ -72,9 +70,18 @@ function identityMatches(control: TaskControl, task: TaskViewModelItem): boolean
 }
 
 function refreshedStateConfirmsRequest(control: TaskControl, task: TaskViewModelItem): boolean {
-  if (control.kind === "cancel") return task.lifecycleStatus === "cancelled";
-  if (control.kind === "retry") {
-    return !["failed", "remote_unknown", "unknown"].includes(task.lifecycleStatus);
+  const latestRunId = task.relatedRunIds[task.relatedRunIds.length - 1];
+  if (control.kind === "stop_run") {
+    return task.lifecycleStatus === "cancelled" && latestRunId === control.targetActionId;
+  }
+  if (control.kind === "retry" || control.kind === "resume") {
+    return (
+      latestRunId !== undefined &&
+      latestRunId !== control.targetActionId &&
+      !["failed", "blocked", "cancelled", "interrupted", "remote_unknown", "unknown"].includes(
+        task.lifecycleStatus
+      )
+    );
   }
   return false;
 }

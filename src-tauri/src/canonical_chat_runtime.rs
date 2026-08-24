@@ -17,7 +17,7 @@ use crate::runtime_events::{
 use crate::state::AppState;
 use crate::{SendMessageResult, ToolCallResult};
 use openlife_core::agent::{ContextSourceCandidate, ContextSourceKind};
-use openlife_core::conversation::{BeginChatTurn, ProviderBinding, TurnStatus};
+use openlife_core::conversation::{BeginChatTurn, ProviderBinding, ReasoningEffort, TurnStatus};
 use openlife_core::llm::{BoundedContextBlock, ChatMessage, ProviderPayloadPurpose};
 use openlife_core::work_orchestration::{AgentStep, AgentStepEnvelope, AgentStepValidationContext};
 use serde_json::Value;
@@ -28,6 +28,8 @@ pub(crate) struct CanonicalChatInput {
     pub conversation_id: String,
     pub messages: Vec<ChatMessage>,
     pub selected_skill_id: Option<String>,
+    pub provider_profile_id: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     pub stream: bool,
 }
 
@@ -99,7 +101,7 @@ pub(crate) async fn cancel_canonical_chat(
                     &run_id,
                     openlife_core::task_runtime::CanonicalTaskStatus::Cancelled,
                 )
-                .map_err(|error| format!("cancel canonical Work Task failed: {error}"))?;
+                .map_err(|error| format!("stop canonical Work Run failed: {error}"))?;
         }
     }
     Ok(CancelCanonicalChatResult {
@@ -127,6 +129,7 @@ pub(crate) struct CanonicalWorkProviderLifecycle {
     pub(crate) request_digest_seed: String,
     pub(crate) provider_profile_id: String,
     pub(crate) provider_model_id: String,
+    pub(crate) provider_reasoning_effort: Option<ReasoningEffort>,
     invocation_ordinal: u64,
     active_attempt_id: Option<String>,
 }
@@ -152,6 +155,7 @@ impl CanonicalWorkProviderLifecycle {
         request_digest_seed: String,
         provider_profile_id: String,
         provider_model_id: String,
+        provider_reasoning_effort: Option<ReasoningEffort>,
     ) -> Self {
         Self {
             store,
@@ -160,6 +164,7 @@ impl CanonicalWorkProviderLifecycle {
             request_digest_seed,
             provider_profile_id,
             provider_model_id,
+            provider_reasoning_effort,
             invocation_ordinal: 0,
             active_attempt_id: None,
         }
@@ -229,6 +234,7 @@ impl CanonicalWorkProviderLifecycle {
                 executor_kind: "provider",
                 provider_profile_id: Some(&self.provider_profile_id),
                 provider_model_id: Some(&self.provider_model_id),
+                provider_reasoning_effort: self.provider_reasoning_effort,
                 request_digest: &request_digest,
             })
             .map_err(|error| AdmissionFailure::invalid(error.to_string()))?;
@@ -445,11 +451,17 @@ pub(crate) async fn run_canonical_chat(
         .filter(|message| message.role == "user")
         .ok_or_else(|| "canonical_chat_current_user_missing".to_string())?;
 
-    let selected_provider = crate::provider_registry::selected_provider_profile(state).await?;
+    let selected_provider = crate::provider_registry::resolve_provider_profile(
+        input.provider_profile_id.as_deref(),
+        input.reasoning_effort,
+        state,
+    )
+    .await?;
     let provider_runtime = state.provider_runtime_snapshot().await;
     if !provider_runtime.coherent {
         return Err("provider_runtime_generation_incoherent".into());
     }
+    let reasoning_capability = selected_provider.reasoning_capability.clone();
     let provider = selected_provider.binding;
 
     let begun = conversation_store
@@ -524,10 +536,12 @@ pub(crate) async fn run_canonical_chat(
     )?;
     let privacy_engine = state.privacy_engine.lock().await.clone();
     let client = OpenLifeProviderClient::new(
-        provider_runtime.scheduler,
+        selected_provider.scheduler,
         privacy_engine,
         provider_runtime.config.system.network_policy,
-    );
+    )
+    .with_reasoning_effort(provider.reasoning_effort)
+    .with_reasoning_capability(reasoning_capability);
     let personal_context = crate::personal_intelligence_ports::load_personal_intelligence_context(
         state,
         crate::personal_intelligence_ports::PersonalIntelligenceContextRequest {
@@ -996,6 +1010,8 @@ mod tests {
                     content: "hello".into(),
                 }],
                 selected_skill_id: None,
+                provider_profile_id: None,
+                reasoning_effort: None,
                 stream: true,
             },
             &state,
@@ -1076,6 +1092,8 @@ mod tests {
                         content: prompt.into(),
                     }],
                     selected_skill_id: None,
+                    provider_profile_id: None,
+                    reasoning_effort: None,
                     stream: false,
                 },
                 &state,
@@ -1136,6 +1154,8 @@ mod tests {
                     content: "解释为什么 rm -rf / 很危险；只回答，不要执行。".into(),
                 }],
                 selected_skill_id: None,
+                provider_profile_id: None,
+                reasoning_effort: None,
                 stream: false,
             },
             &state,
@@ -1204,6 +1224,8 @@ mod tests {
                     content: user_text.into(),
                 }],
                 selected_skill_id: None,
+                provider_profile_id: None,
+                reasoning_effort: None,
                 stream: false,
             },
             &state,
@@ -1269,6 +1291,8 @@ mod tests {
                     content: "请在当前 Project 记住：STAGE6_MEMORY_TEST 偏好先给结论。".into(),
                 }],
                 selected_skill_id: None,
+                provider_profile_id: None,
+                reasoning_effort: None,
                 stream: false,
             },
             &state,
@@ -1341,6 +1365,8 @@ mod tests {
                     content: "只允许使用 Agent Memory 回答：当前发布标记是什么？".into(),
                 }],
                 selected_skill_id: None,
+                provider_profile_id: None,
+                reasoning_effort: None,
                 stream: false,
             },
             &state,
@@ -1384,6 +1410,8 @@ mod tests {
                     content: "My work timezone is Central European Time.".into(),
                 }],
                 selected_skill_id: None,
+                provider_profile_id: None,
+                reasoning_effort: None,
                 stream: false,
             },
             &state,
@@ -1455,6 +1483,8 @@ mod tests {
                 content: "same".into(),
             }],
             selected_skill_id: None,
+            provider_profile_id: None,
+            reasoning_effort: None,
             stream: false,
         };
         let mut first_events = Vec::new();
@@ -1496,6 +1526,8 @@ mod tests {
                     content: "hello".into(),
                 }],
                 selected_skill_id: None,
+                provider_profile_id: None,
+                reasoning_effort: None,
                 stream: false,
             },
             &state,
@@ -1504,7 +1536,85 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_eq!(error, "configured_provider_unavailable");
+        assert_eq!(error, "provider_selected_local_route_unavailable");
+        let store = state.conversation_store.as_ref().unwrap().lock().await;
+        assert!(store.get_turn(&turn_id).unwrap().is_none());
+        assert!(store.list_items(&conversation_id, 10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_profile_does_not_create_a_partial_turn() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Unknown provider profile")
+            .unwrap();
+
+        let error = run_canonical_chat(
+            CanonicalChatInput {
+                turn_id: turn_id.clone(),
+                conversation_id: conversation_id.clone(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "hello".into(),
+                }],
+                selected_skill_id: None,
+                provider_profile_id: Some("provider-profile:not-in-registry".into()),
+                reasoning_effort: None,
+                stream: false,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "provider_profile_not_found");
+        let store = state.conversation_store.as_ref().unwrap().lock().await;
+        assert!(store.get_turn(&turn_id).unwrap().is_none());
+        assert!(store.list_items(&conversation_id, 10).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn unsupported_reasoning_effort_does_not_create_a_partial_turn() {
+        let state = canonical_state("unused result").await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Unsupported reasoning")
+            .unwrap();
+
+        let error = run_canonical_chat(
+            CanonicalChatInput {
+                turn_id: turn_id.clone(),
+                conversation_id: conversation_id.clone(),
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "hello".into(),
+                }],
+                selected_skill_id: None,
+                provider_profile_id: None,
+                reasoning_effort: Some(ReasoningEffort::High),
+                stream: false,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert_eq!(error, "provider_reasoning_effort_unsupported");
         let store = state.conversation_store.as_ref().unwrap().lock().await;
         assert!(store.get_turn(&turn_id).unwrap().is_none());
         assert!(store.list_items(&conversation_id, 10).unwrap().is_empty());
@@ -1544,6 +1654,8 @@ mod tests {
                     content: "hello".into(),
                 }],
                 selected_skill_id: None,
+                provider_profile_id: None,
+                reasoning_effort: None,
                 stream: false,
             },
             &state,
@@ -1589,6 +1701,8 @@ mod tests {
                         content: "wait for me".into(),
                     }],
                     selected_skill_id: None,
+                    provider_profile_id: None,
+                    reasoning_effort: None,
                     stream: false,
                 },
                 &run_state,

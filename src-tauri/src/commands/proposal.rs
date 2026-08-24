@@ -394,6 +394,12 @@ fn is_lifemodel_v2_typed_diff(proposal: &AgentProposal) -> bool {
         && proposal.affected_path == openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
 }
 
+fn is_legacy_lifemodel_v2_migration(proposal: &AgentProposal) -> bool {
+    proposal.proposal_type == ProposalType::LifeModelUpdate
+        && proposal.affected_path
+            == openlife_core::life_model::legacy_migration::LIFE_MODEL_V2_LEGACY_MIGRATION_PATH
+}
+
 fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
     matches!(
         operation,
@@ -652,7 +658,13 @@ async fn reconcile_artifact_effects_with_state(
             reconciled += 1;
             continue;
         }
-        let resolved = match resolve_artifact_effect_input(state, &proposal).await {
+        let resolved = match if operation == "restore_snapshot"
+            && proposal.after.get("undoOfArtifactId").is_some()
+        {
+            resolve_artifact_undo_restore_input(state, &proposal).await
+        } else {
+            resolve_artifact_effect_input(state, &proposal).await
+        } {
             Ok(resolved) => resolved,
             Err(_) => {
                 persist_artifact_unknown(
@@ -1075,7 +1087,12 @@ async fn confirmed_artifact_receipt_from_store(
         receipt.artifact_id = artifact_id_for_proposal(proposal);
         return Ok(Some(receipt));
     }
-    let resolved = resolve_artifact_effect_input(state, proposal).await?;
+    let resolved =
+        if operation == "restore_snapshot" && proposal.after.get("undoOfArtifactId").is_some() {
+            resolve_artifact_undo_restore_input(state, proposal).await?
+        } else {
+            resolve_artifact_effect_input(state, proposal).await?
+        };
     let path = resolved.path.as_str();
     let content = resolved.content.as_slice();
     let safe_paths =
@@ -1125,7 +1142,9 @@ async fn project_confirmed_canonical_work_artifact(
         .get("operation")
         .and_then(Value::as_str)
         .unwrap_or("propose_write");
-    if operation == "trash" && proposal.after.get("undoOfArtifactId").is_some() {
+    if proposal.after.get("undoOfArtifactId").is_some()
+        && matches!(operation, "trash" | "restore_snapshot")
+    {
         let store = store.lock().await;
         store
             .confirm_artifact_undone(
@@ -1228,13 +1247,30 @@ async fn project_canonical_work_review_rejection(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
 ) -> Result<(), String> {
-    if canonical_work_artifact_id(proposal).is_none() {
-        return Ok(());
-    }
     let store = state
         .canonical_task_runtime_store
         .as_ref()
         .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    if canonical_work_tool_review_identity(proposal).is_some() {
+        let projected = store
+            .lock()
+            .await
+            .mark_tool_review_rejected(&proposal.id)
+            .map_err(|error| format!("canonical Work tool Review rejection failed: {error}"))?;
+        if projected.is_some() {
+            let registry = state
+                .main_chat_runtime_state
+                .lock()
+                .await
+                .work_review_decision_registry
+                .clone();
+            let _ = registry.resolve(&proposal.id, crate::state::WorkReviewDecision::Rejected)?;
+        }
+        return Ok(());
+    }
+    if canonical_work_artifact_id(proposal).is_none() {
+        return Ok(());
+    }
     if proposal.after.get("undoOfArtifactId").is_some() {
         return store
             .lock()
@@ -1249,6 +1285,131 @@ async fn project_canonical_work_review_rejection(
         .mark_artifact_review_rejected(&proposal.id)
         .map(|_| ())
         .map_err(|error| format!("canonical Work Review rejection projection failed: {error}"))
+}
+
+fn canonical_work_tool_review_identity(proposal: &AgentProposal) -> Option<(&str, &str)> {
+    if proposal.proposal_type != ProposalType::ToolPermission
+        || proposal.source != ProposalSource::ChatConversation
+    {
+        return None;
+    }
+    let pending = proposal.after.get("pending_action_identity")?;
+    let task_id = pending.get("taskId").and_then(Value::as_str)?;
+    let run_id = pending.get("runId").and_then(Value::as_str)?;
+    (proposal.source_detail.as_deref() == Some(task_id)
+        && proposal.run_id.as_deref() == Some(run_id))
+    .then_some((task_id, run_id))
+}
+
+async fn require_active_canonical_work_tool_review(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<(), String> {
+    let Some((task_id, run_id)) = canonical_work_tool_review_identity(proposal) else {
+        return Ok(());
+    };
+    let scope_digest = canonical_work_tool_review_scope_digest(&proposal.after)?;
+    let checkpoint = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
+        .lock()
+        .await
+        .load_tool_review_checkpoint(&proposal.id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_work_tool_review_checkpoint_missing".to_string())?;
+    if checkpoint.task_id != task_id
+        || checkpoint.run_id != run_id
+        || checkpoint.scope_digest != scope_digest
+        || checkpoint.status != "waiting"
+    {
+        return Err("canonical_work_tool_review_checkpoint_not_active".into());
+    }
+    Ok(())
+}
+
+async fn project_canonical_work_tool_review_acceptance(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<bool, String> {
+    if canonical_work_tool_review_identity(proposal).is_none() {
+        return Ok(false);
+    }
+    let scope_digest = canonical_work_tool_review_scope_digest(&proposal.after)?;
+    let registry = state
+        .main_chat_runtime_state
+        .lock()
+        .await
+        .work_review_decision_registry
+        .clone();
+    let live_continuation_available = registry.has_waiter(&proposal.id)?;
+    let projected = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
+        .lock()
+        .await
+        .mark_tool_review_accepted(&proposal.id, &scope_digest, live_continuation_available)
+        .map_err(|error| format!("canonical Work tool Review acceptance failed: {error}"))?;
+    if projected.is_some() {
+        if live_continuation_available
+            && !registry.resolve(&proposal.id, crate::state::WorkReviewDecision::Accepted)?
+        {
+            state
+                .canonical_task_runtime_store
+                .as_ref()
+                .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
+                .lock()
+                .await
+                .terminalize_general_run(
+                    proposal
+                        .source_detail
+                        .as_deref()
+                        .ok_or_else(|| "canonical_work_tool_review_task_missing".to_string())?,
+                    proposal
+                        .run_id
+                        .as_deref()
+                        .ok_or_else(|| "canonical_work_tool_review_run_missing".to_string())?,
+                    openlife_core::task_runtime::CanonicalTaskStatus::Interrupted,
+                )
+                .map_err(|error| {
+                    format!("canonical Work tool Review wake race reconciliation failed: {error}")
+                })?;
+        }
+        return Ok(true);
+    }
+    Ok(false)
+}
+
+fn canonical_work_tool_review_scope_digest(after: &Value) -> Result<String, String> {
+    match tool_permission_scope_kind(after)? {
+        ToolPermissionScopeKind::ActionBound => {
+            Ok(action_bound_tool_permission_scope(after)?.binding_digest())
+        }
+        ToolPermissionScopeKind::NetworkPolicy => {
+            let digest = after
+                .get("canonical_scope")
+                .and_then(|scope| scope.get("scope_digest"))
+                .and_then(Value::as_str)
+                .ok_or_else(|| {
+                    "canonical Work network Review missing canonical scope digest".to_string()
+                })?;
+            let Some(hex) = digest.strip_prefix("sha256:") else {
+                return Err("canonical Work network Review scope digest is invalid".into());
+            };
+            if hex.len() != 64
+                || !hex
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+            {
+                return Err("canonical Work network Review scope digest is invalid".into());
+            }
+            Ok(digest.to_string())
+        }
+        ToolPermissionScopeKind::ManifestPolicy => {
+            Err("canonical Work Review cannot bind a reusable manifest policy".into())
+        }
+    }
 }
 
 fn confirmed_effect_reconciliation_response(
@@ -1485,6 +1646,60 @@ async fn resolve_artifact_effect_input(
     })
 }
 
+async fn resolve_artifact_undo_restore_input(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<ResolvedArtifactEffectInput, String> {
+    let artifact_id = proposal
+        .after
+        .get("artifactId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "canonical_artifact_undo_artifact_missing".to_string())?;
+    let version = proposal
+        .after
+        .get("artifactVersion")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "canonical_artifact_undo_version_missing".to_string())?;
+    let store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let undo = store
+        .lock()
+        .await
+        .load_artifact_undo_version(artifact_id, version)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_artifact_undo_missing".to_string())?;
+    if undo.proposal_id != proposal.id
+        || undo.operation
+            != openlife_core::task_runtime::CanonicalArtifactUndoOperation::RestoreReplaced
+        || proposal.after.get("snapshot_path").and_then(Value::as_str)
+            != Some(undo.source_reference.as_str())
+        || proposal.after.get("path").and_then(Value::as_str)
+            != Some(undo.target_reference.as_str())
+        || proposal.after.get("restore_digest").and_then(Value::as_str)
+            != Some(undo.content_digest.as_str())
+    {
+        return Err("canonical_artifact_replacement_undo_identity_mismatch".into());
+    }
+    let expected_target_digest = undo
+        .expected_target_digest
+        .ok_or_else(|| "canonical_artifact_replacement_undo_precondition_missing".to_string())?;
+    let content = std::fs::read(&undo.source_reference)
+        .map_err(|_| "canonical_artifact_pre_change_snapshot_unavailable".to_string())?;
+    if content.len() > EXTERNAL_WRITE_MAX_SIZE
+        || artifact_content_digest(&content) != undo.content_digest
+    {
+        return Err("canonical_artifact_pre_change_snapshot_changed".into());
+    }
+    Ok(ResolvedArtifactEffectInput {
+        artifact_id: artifact_id.to_string(),
+        path: undo.target_reference,
+        content,
+        target_precondition: ArtifactTargetPrecondition::ContentDigest(expected_target_digest),
+    })
+}
+
 async fn apply_external_write_artifact(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
@@ -1498,7 +1713,13 @@ async fn apply_external_write_artifact(
     if matches!(operation, "move" | "trash" | "restore") {
         return apply_external_move_artifact(state, proposal, claim_id).await;
     }
-    let resolved = match resolve_artifact_effect_input(state, proposal).await {
+    let resolved = match if operation == "restore_snapshot"
+        && proposal.after.get("undoOfArtifactId").is_some()
+    {
+        resolve_artifact_undo_restore_input(state, proposal).await
+    } else {
+        resolve_artifact_effect_input(state, proposal).await
+    } {
         Ok(resolved) => resolved,
         Err(error) => {
             let code = "artifact_canonical_source_invalid";
@@ -1544,13 +1765,24 @@ async fn apply_external_write_artifact(
             return ArtifactApplyOutcome::FailedBeforeEffect(error);
         }
     };
-    let expected_hash = match canonical_artifact_review_subject(proposal) {
-        Ok(subject) => subject.content_digest,
-        Err(error) => {
-            let code = "artifact_review_subject_invalid";
-            let _ =
-                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
-            return ArtifactApplyOutcome::FailedBeforeEffect(error);
+    let expected_hash = if operation == "restore_snapshot"
+        && proposal.after.get("undoOfArtifactId").is_some()
+    {
+        proposal
+            .after
+            .get("restore_digest")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    } else {
+        match canonical_artifact_review_subject(proposal) {
+            Ok(subject) => subject.content_digest,
+            Err(error) => {
+                let code = "artifact_review_subject_invalid";
+                let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code)
+                    .await;
+                return ArtifactApplyOutcome::FailedBeforeEffect(error);
+            }
         }
     };
     if expected_hash != prepared.content_digest {
@@ -2033,6 +2265,25 @@ pub(crate) fn validate_proposal_payload(
                     reviewed_artifact_target_precondition(after)?;
                     Ok(())
                 }
+                "restore_snapshot" => {
+                    for field in [
+                        "snapshot_path",
+                        "path",
+                        "restore_digest",
+                        "expected_target_digest",
+                    ] {
+                        if after
+                            .get(field)
+                            .and_then(Value::as_str)
+                            .is_none_or(|value| value.trim().is_empty())
+                        {
+                            return Err(format!(
+                                "ExternalWriteAction restore_snapshot Proposal 缺少 after.{field}（非空字符串）。"
+                            ));
+                        }
+                    }
+                    Ok(())
+                }
                 _ => Err(format!(
                     "ExternalWriteAction Proposal 包含不受支持的 operation：{operation}。"
                 )),
@@ -2043,7 +2294,20 @@ pub(crate) fn validate_proposal_payload(
 
 fn validate_proposal_for_acceptance(proposal: &AgentProposal) -> Result<(), String> {
     validate_proposal_payload(proposal.proposal_type, &proposal.after)?;
-    if is_lifemodel_v2_typed_diff(proposal) {
+    if is_legacy_lifemodel_v2_migration(proposal) {
+        if proposal.source != ProposalSource::Manual
+            || proposal.source_detail.as_deref() != Some("legacy_lifemodel_migration")
+            || proposal.base_hash.is_some()
+        {
+            return Err("lifemodel_v2_migration_proposal_source_mismatch".into());
+        }
+        let plan = serde_json::from_value::<
+            openlife_core::life_model::legacy_migration::LegacyLifeModelMigrationPlanV2,
+        >(proposal.after.clone())
+        .map_err(|_| "invalid_lifemodel_v2_migration_payload".to_string())?;
+        plan.validate_contract()
+            .map_err(|error| error.to_string())?;
+    } else if is_lifemodel_v2_typed_diff(proposal) {
         let diff = serde_json::from_value::<openlife_core::life_model::v2::LifeModelTypedDiffV2>(
             proposal.after.clone(),
         )
@@ -2275,6 +2539,16 @@ async fn apply_proposal_to_state(
 
     match proposal.proposal_type {
         ProposalType::LifeModelUpdate => {
+            if is_legacy_lifemodel_v2_migration(proposal) {
+                let plan = serde_json::from_value::<
+                    openlife_core::life_model::legacy_migration::LegacyLifeModelMigrationPlanV2,
+                >(after)
+                .map_err(|_| "invalid_lifemodel_v2_migration_payload".to_string())?;
+                return life_model_write_gateway::materialize_accepted_legacy_lifemodel_migration_with_state(
+                    state, proposal, &plan,
+                )
+                .await;
+            }
             if is_lifemodel_v2_typed_diff(proposal) {
                 let diff = serde_json::from_value::<
                     openlife_core::life_model::v2::LifeModelTypedDiffV2,
@@ -2548,6 +2822,17 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
                         &mut warnings,
                     )
                     .await;
+                let canonical_tool_review_projection_status =
+                    match project_canonical_work_tool_review_acceptance(state, &accepted).await {
+                        Ok(true) => "confirmed",
+                        Ok(false) => "not_applicable",
+                        Err(error) => {
+                            warnings.push(format!(
+                                "Tool permission 已确认，但 canonical Work 等待点仍需 reconciliation: {error}"
+                            ));
+                            "reconciliation_required"
+                        }
+                    };
                 let mut response = confirmed_effect_reconciliation_response(
                     &accepted,
                     true,
@@ -2559,6 +2844,8 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
                 }
                 response["canonical_task_runtime_projection_status"] =
                     canonical_task_runtime_projection_status.into();
+                response["canonical_tool_review_projection_status"] =
+                    canonical_tool_review_projection_status.into();
                 Ok(response)
             }
             Err(error) => {
@@ -2604,6 +2891,17 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
                 &mut warnings,
             )
             .await;
+        let canonical_tool_review_projection_status =
+            match project_canonical_work_tool_review_acceptance(state, &proposal).await {
+                Ok(true) => "confirmed",
+                Ok(false) => "not_applicable",
+                Err(error) => {
+                    warnings.push(format!(
+                        "Tool permission 已确认，但 canonical Work 等待点仍需 reconciliation: {error}"
+                    ));
+                    "reconciliation_required"
+                }
+            };
         let mut response =
             confirmed_effect_reconciliation_response(&proposal, true, warnings, artifact_receipt);
         if let Some(learning) = learning {
@@ -2611,10 +2909,13 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
         }
         response["canonical_task_runtime_projection_status"] =
             canonical_task_runtime_projection_status.into();
+        response["canonical_tool_review_projection_status"] =
+            canonical_tool_review_projection_status.into();
         return Ok(response);
     }
     ensure_pending_or_postponed(&proposal)?;
     validate_proposal_for_acceptance(&proposal)?;
+    require_active_canonical_work_tool_review(state, &proposal).await?;
     let dispatch_claim_id = {
         let store = state
             .proposal_store
@@ -2866,6 +3167,22 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
         false
     };
     let dispatch_projection_confirmed = proposal_projected;
+    let canonical_tool_review_projection_status = if proposal_projected {
+        match project_canonical_work_tool_review_acceptance(state, &proposal).await {
+            Ok(true) => "confirmed",
+            Ok(false) => "not_applicable",
+            Err(error) => {
+                warnings.push(format!(
+                    "Tool permission 已确认，但 canonical Work 等待点仍需 reconciliation: {error}"
+                ));
+                "reconciliation_required"
+            }
+        }
+    } else if canonical_work_tool_review_identity(&proposal).is_some() {
+        "reconciliation_required"
+    } else {
+        "not_applicable"
+    };
     // Check for blocked_action in the patch result error field
     let blocked_action_info = if let Some(ref err) = result.error {
         if err.starts_with("__blocked_action__:") {
@@ -2887,6 +3204,7 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
             "reconciliation_required"
         },
         "canonical_task_runtime_projection_status": canonical_task_runtime_projection_status,
+        "canonical_tool_review_projection_status": canonical_tool_review_projection_status,
         "warnings": warnings,
     });
     if let Some(receipt) = artifact_materialization {
@@ -3252,6 +3570,20 @@ pub struct ArtifactUndoProposalResponse {
     pub status: &'static str,
 }
 
+enum PreparedArtifactUndo {
+    TrashCreated {
+        source: String,
+        target: String,
+        content_digest: String,
+    },
+    RestoreReplaced {
+        snapshot: String,
+        target: String,
+        restore_digest: String,
+        expected_target_digest: String,
+    },
+}
+
 #[tauri::command]
 pub async fn request_artifact_undo(
     artifact_id: String,
@@ -3297,25 +3629,57 @@ pub(crate) async fn request_artifact_undo_with_state(
         })
         .ok_or_else(|| "canonical_artifact_review_origin_missing".to_string())?;
     let original_proposal = get_proposal_with_state(state, &original_proposal_id).await?;
-    if original_proposal
-        .after
-        .get("expected_target_absent")
-        .and_then(Value::as_bool)
-        != Some(true)
-    {
-        return Err("canonical_artifact_undo_unavailable_without_original_bytes".into());
-    }
+    let original_target_absent = matches!(
+        reviewed_artifact_target_precondition(&original_proposal.after)?,
+        ArtifactTargetPrecondition::Absent
+    );
     let safe_paths =
         crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, &original_proposal)
             .await?;
-    let target = crate::artifact_materializer::trash_target_for_source(&source, &safe_paths)?;
-    let prepared = crate::artifact_materializer::prepare_artifact_move(
-        "artifact-undo-preview",
-        &source,
-        &target.to_string_lossy(),
-        &artifact.content_digest,
-        &safe_paths,
-    )?;
+    let prepared_undo = if original_target_absent {
+        let target = crate::artifact_materializer::trash_target_for_source(&source, &safe_paths)?;
+        crate::artifact_materializer::prepare_artifact_move(
+            "artifact-undo-preview",
+            &source,
+            &target.to_string_lossy(),
+            &artifact.content_digest,
+            &safe_paths,
+        )?;
+        PreparedArtifactUndo::TrashCreated {
+            source: source.clone(),
+            target: target.to_string_lossy().into_owned(),
+            content_digest: artifact.content_digest.clone(),
+        }
+    } else {
+        let pre_change = canonical_store
+            .lock()
+            .await
+            .load_artifact_pre_change_snapshot(&artifact.id, artifact.current_version)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| {
+                "canonical_artifact_undo_unavailable_without_original_bytes".to_string()
+            })?;
+        let bytes = std::fs::read(&pre_change.snapshot_reference)
+            .map_err(|_| "canonical_artifact_pre_change_snapshot_unavailable".to_string())?;
+        if artifact_content_digest(&bytes) != pre_change.content_digest {
+            return Err("canonical_artifact_pre_change_snapshot_changed".into());
+        }
+        crate::artifact_materializer::prepare_artifact_materialization_with_precondition_for_artifact_bytes(
+            &artifact.id,
+            "artifact-undo-preview",
+            "artifact-undo-preview",
+            &source,
+            &bytes,
+            &safe_paths,
+            ArtifactTargetPrecondition::ContentDigest(artifact.content_digest.clone()),
+        )?;
+        PreparedArtifactUndo::RestoreReplaced {
+            snapshot: pre_change.snapshot_reference,
+            target: source.clone(),
+            restore_digest: pre_change.content_digest,
+            expected_target_digest: artifact.content_digest.clone(),
+        }
+    };
     let task_snapshot = canonical_store
         .lock()
         .await
@@ -3327,19 +3691,17 @@ pub(crate) async fn request_artifact_undo_with_state(
         .iter()
         .find(|item| item.id == artifact.source_item_id)
         .ok_or_else(|| "canonical_artifact_source_item_missing".to_string())?;
-    let mut proposal = AgentProposal::new(
-        ProposalType::ExternalWriteAction,
-        &format!(
-            "filesystem.{}->{}",
-            prepared.source_path.display(),
-            prepared.target_path.display()
-        ),
-        serde_json::json!({
+    let after = match &prepared_undo {
+        PreparedArtifactUndo::TrashCreated {
+            source,
+            target,
+            content_digest,
+        } => serde_json::json!({
             "operation": "trash",
-            "source_path": prepared.source_path,
-            "target_path": prepared.target_path,
-            "source_digest": prepared.content_digest,
-            "contentDigest": artifact.content_digest,
+            "source_path": source,
+            "target_path": target,
+            "source_digest": content_digest,
+            "contentDigest": content_digest,
             "canonicalTaskId": artifact.task_id,
             "artifactDraftItemId": artifact.source_item_id,
             "artifactId": artifact.id,
@@ -3350,6 +3712,41 @@ pub(crate) async fn request_artifact_undo_with_state(
             "directWritesExecuted": false,
             "externalWritesExecuted": false,
         }),
+        PreparedArtifactUndo::RestoreReplaced {
+            snapshot,
+            target,
+            restore_digest,
+            expected_target_digest,
+        } => serde_json::json!({
+            "operation": "restore_snapshot",
+            "snapshot_path": snapshot,
+            "path": target,
+            "restore_digest": restore_digest,
+            "expected_target_digest": expected_target_digest,
+            "contentDigest": restore_digest,
+            "canonicalTaskId": artifact.task_id,
+            "artifactDraftItemId": artifact.source_item_id,
+            "artifactId": artifact.id,
+            "artifactVersion": artifact.current_version,
+            "undoOfArtifactId": artifact.id,
+            "undoOfProposalId": original_proposal_id,
+            "sourceRunId": source_item.run_id,
+            "directWritesExecuted": false,
+            "externalWritesExecuted": false,
+        }),
+    };
+    let affected_path = match &prepared_undo {
+        PreparedArtifactUndo::TrashCreated { source, target, .. } => {
+            format!("filesystem.{source}->{target}")
+        }
+        PreparedArtifactUndo::RestoreReplaced { target, .. } => {
+            format!("filesystem.{target}")
+        }
+    };
+    let mut proposal = AgentProposal::new(
+        ProposalType::ExternalWriteAction,
+        &affected_path,
+        after,
         "User requested a governed Undo for a verified OpenLife-created Artifact.",
         1.0,
         RiskLevel::High,
@@ -3374,17 +3771,33 @@ pub(crate) async fn request_artifact_undo_with_state(
         .submit(request)
         .map_err(|error| error.to_string())?;
     drop(proposal_store);
-    canonical_store
-        .lock()
-        .await
-        .bind_artifact_undo(
+    match prepared_undo {
+        PreparedArtifactUndo::TrashCreated {
+            source,
+            target,
+            content_digest,
+        } => canonical_store.lock().await.bind_artifact_undo(
             &artifact.id,
             review.proposal_id(),
             &source,
-            &target.to_string_lossy(),
-            &artifact.content_digest,
-        )
-        .map_err(|error| error.to_string())?;
+            &target,
+            &content_digest,
+        ),
+        PreparedArtifactUndo::RestoreReplaced {
+            snapshot,
+            target,
+            restore_digest,
+            expected_target_digest,
+        } => canonical_store.lock().await.bind_artifact_replacement_undo(
+            &artifact.id,
+            review.proposal_id(),
+            &snapshot,
+            &target,
+            &restore_digest,
+            &expected_target_digest,
+        ),
+    }
+    .map_err(|error| error.to_string())?;
     Ok(ArtifactUndoProposalResponse {
         artifact_id: artifact.id,
         proposal_id: review.proposal_id().to_string(),

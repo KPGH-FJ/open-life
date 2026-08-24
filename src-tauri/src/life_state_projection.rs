@@ -20,8 +20,15 @@ pub struct LifeStateProjection {
     pub safe_mode: LifeSafeModeProjection,
     pub credential_bootstrap: crate::state::CredentialBootstrapSnapshot,
     pub tool_permissions: LifeToolPermissionProjection,
-    pub safe_paths: Vec<String>,
+    pub filesystem_scopes: LifeFilesystemScopeProjection,
     pub source_refs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Default, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LifeFilesystemScopeProjection {
+    pub artifact_output_directory: Option<String>,
+    pub additional_read_roots: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -112,12 +119,15 @@ pub(crate) async fn get_life_state_projection_with_state(
     );
     let task_state = build_task_state_projection(state).await;
     let tool_permissions = build_tool_permission_projection(state).await;
-    let safe_paths = {
+    let filesystem_scopes = {
         let cfg = state.config.lock().await;
-        cfg.system.safe_paths.clone()
+        LifeFilesystemScopeProjection {
+            artifact_output_directory: cfg.system.artifact_output_directory.clone(),
+            additional_read_roots: cfg.system.additional_read_roots.clone(),
+        }
     };
     Ok(LifeStateProjection {
-        version: "life_state_projection_v1".into(),
+        version: "life_state_projection_v2".into(),
         generated_at: Utc::now().to_rfc3339(),
         persistence: diagnostics.persistence_health.clone(),
         pending,
@@ -126,13 +136,13 @@ pub(crate) async fn get_life_state_projection_with_state(
         safe_mode,
         credential_bootstrap: state.credential_bootstrap_snapshot.clone(),
         tool_permissions,
-        safe_paths,
+        filesystem_scopes,
         source_refs: vec![
             "diagnostics".into(),
             "proposal_store:pending_and_edited".into(),
             "canonical_task_runtime_store".into(),
             "tool_permission_store".into(),
-            "config:safe_paths".into(),
+            "config:filesystem_scopes".into(),
             "bootstrap:credential_snapshot".into(),
         ],
     })

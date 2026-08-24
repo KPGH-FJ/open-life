@@ -44,6 +44,9 @@ describe("OpenLife product shell", () => {
     expect(
       await screen.findByRole("heading", { name: "读取本地客户访谈记录", level: 2 })
     ).toBeInTheDocument();
+    expect(
+      screen.getByText("ollama · qwen2.5:14b · 模型默认推理 · 标准执行 · Project 客户研究 r3")
+    ).toBeInTheDocument();
   });
 
   it("shows a completed answer Work in Results even when it has no file artifact", async () => {
@@ -92,6 +95,86 @@ describe("OpenLife product shell", () => {
     expect(screen.queryByText("这项工作还没有可交付的结果。")).not.toBeInTheDocument();
   });
 
+  it("restores the canonical Steering lifecycle and applied plan revision", async () => {
+    const fixture = workbenchFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      load: async () => {
+        const snapshot = await fixture.load();
+        const baseTask = snapshot.tasksEnvelope.data!.items[0];
+        return {
+          ...snapshot,
+          tasksEnvelope: {
+            ...snapshot.tasksEnvelope,
+            data: {
+              ...snapshot.tasksEnvelope.data!,
+              items: [
+                {
+                  ...baseTask,
+                  steerings: [
+                    {
+                      steeringId: "steering-applied-1",
+                      runId: baseTask.relatedRunIds[0],
+                      status: "applied" as const,
+                      basePlanRevision: 1,
+                      appliedPlanRevision: 2,
+                      resolutionCode: "work_steering_plan_applied",
+                      createdAt: "2026-08-24T04:00:00Z",
+                      resolvedAt: "2026-08-24T04:00:01Z",
+                    },
+                  ],
+                },
+              ],
+            },
+          },
+        };
+      },
+    };
+
+    render(
+      <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
+    );
+
+    expect(await screen.findByTestId("canonical-task-steerings")).toHaveTextContent("已应用");
+    expect(screen.getByTestId("canonical-task-steerings")).toHaveTextContent("计划版本 1 → 2");
+  });
+
+  it("opens an archived Conversation from global Activity without making it writable", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchFixtureDataSource("fixture-ready");
+    const loadConversation = vi.spyOn(dataSource, "loadConversation");
+
+    render(
+      <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
+    );
+
+    expect(
+      await screen.findByText("帮我整理这三次访谈，找出下周最值得验证的问题。")
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "归档" }));
+    expect(await screen.findByRole("button", { name: "恢复对话" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "新对话" }));
+    await waitFor(() =>
+      expect(
+        screen.queryByText("帮我整理这三次访谈，找出下周最值得验证的问题。")
+      ).not.toBeInTheDocument()
+    );
+
+    await user.click(
+      screen.getByRole("button", { name: /整理三次客户访谈，归纳下周要验证的问题/ })
+    );
+
+    expect(
+      await screen.findByText("帮我整理这三次访谈，找出下周最值得验证的问题。")
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "恢复对话" })).toBeEnabled();
+    expect(screen.getByRole("textbox", { name: "消息" })).toBeDisabled();
+    expect(
+      screen.getAllByText("这段对话已归档；可以查看历史，恢复后才能继续发送。")
+    ).not.toHaveLength(0);
+    expect(loadConversation).toHaveBeenLastCalledWith("conversation-research-plan");
+  });
+
   it("does not present a disclosed evidence limitation as fully verified completion", async () => {
     const fixture = workbenchFixtureDataSource("fixture-ready");
     const dataSource = {
@@ -112,6 +195,13 @@ describe("OpenLife product shell", () => {
                   terminalDeliveryStatus: "delivered" as const,
                   finalDeliveryEvidencePresent: true,
                   completionDisposition: "complete_with_disclosed_limitations" as const,
+                  completionLimitations: [
+                    {
+                      requirementId: "official-permission-evidence",
+                      description: "一项官方权限模式的直接来源仍不可用。",
+                      evidenceRefs: ["candidate-output://run-limited"],
+                    },
+                  ],
                   artifacts: [],
                   pendingBlockers: [],
                   pendingReviewItemRefs: [],
@@ -136,6 +226,8 @@ describe("OpenLife product shell", () => {
 
     expect(await screen.findByText("最终回答已交付，含已说明限制")).toBeInTheDocument();
     expect(screen.getByText("已交付，含限制")).toBeInTheDocument();
+    expect(screen.getByText("一项官方权限模式的直接来源仍不可用。")).toBeInTheDocument();
+    expect(screen.getByText(/这是限制披露，不是来源支持/)).toBeInTheDocument();
     expect(screen.queryByText(/^已完成$/)).not.toBeInTheDocument();
   });
 
@@ -165,6 +257,9 @@ describe("OpenLife product shell", () => {
           ...baseTask,
           canonicalTaskId: targetTaskId,
           title: "比较 ChatGPT Work 和 Codex",
+          relatedRunIds: retried
+            ? ["failed-web-artifact", "retry-web-artifact"]
+            : ["failed-web-artifact"],
           lifecycleStatus: retried ? ("completed" as const) : ("failed" as const),
           terminalDeliveryStatus: retried ? ("delivered" as const) : ("failed" as const),
           finalDeliveryEvidencePresent: retried,
@@ -205,15 +300,16 @@ describe("OpenLife product shell", () => {
 
     expect(await screen.findByRole("heading", { name: "失败", level: 4 })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "failed" })).not.toBeInTheDocument();
-    await user.click(await screen.findByRole("button", { name: "重试失败步骤" }));
+    await user.click(await screen.findByRole("button", { name: "重试并创建新运行" }));
     await waitFor(() =>
       expect(screen.getByTestId("canonical-task-answer")).toHaveTextContent(
         "精确重试目标已经完成。"
       )
     );
-    const targetRow = screen.getAllByRole("button", {
-      name: /比较 ChatGPT Work 和 Codex/,
-    })[0];
+    const targetRow = screen
+      .getAllByRole("button", { name: /比较 ChatGPT Work 和 Codex/ })
+      .find(button => button.hasAttribute("aria-pressed"));
+    expect(targetRow).toBeDefined();
     expect(targetRow).toHaveAttribute("aria-pressed", "true");
   });
 
@@ -243,6 +339,15 @@ describe("OpenLife product shell", () => {
             kind: "evidence" as const,
             label: "清单产物草稿",
           },
+          sourceRunProvenance: baseTask.latestRunProvenance,
+          sourceResourceRefs: [
+            {
+              id: "resource:travel-notes",
+              label: "出行要求.md",
+              source: "resource" as const,
+              sensitivity: "local_private" as const,
+            },
+          ],
           evidenceRefs: baseTask.evidenceRefs,
           change: {
             kind: "create" as const,
@@ -256,16 +361,23 @@ describe("OpenLife product shell", () => {
             observedContentDigest: "sha256:travel-checklist-v1",
             verificationItemPresent: true,
           },
-          undo: { available: false, reasonCode: "not_requested" },
+          undo: { available: true },
+          revision: { available: true },
         },
       ],
     };
     const openArtifactResult = vi.fn().mockResolvedValue(undefined);
     const exportArtifactResult = vi.fn().mockResolvedValue("/tmp/travel-checklist.md");
+    const requestArtifactUndo = vi
+      .fn()
+      .mockRejectedValue(new Error("canonical_artifact_undo_unavailable_without_original_bytes"));
+    const reviseArtifact = vi.fn().mockResolvedValue(undefined);
     const dataSource = {
       ...fixture,
       openArtifactResult,
       exportArtifactResult,
+      requestArtifactUndo,
+      reviseArtifact,
       async load() {
         const current = await fixture.load();
         return {
@@ -285,12 +397,46 @@ describe("OpenLife product shell", () => {
 
     await user.click(await screen.findByRole("button", { name: "打开文件" }));
     expect(screen.getByText("文件完整性已核验")).toBeInTheDocument();
+    expect(screen.getByText("出行要求.md")).toBeInTheDocument();
+    expect(screen.getByText(/当前 v1 · 初始版本/)).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "另存为…" }));
 
     await waitFor(() => {
       expect(openArtifactResult).toHaveBeenCalledWith("artifact:travel-checklist", 1);
       expect(exportArtifactResult).toHaveBeenCalledWith("artifact:travel-checklist", 1);
     });
+
+    openArtifactResult.mockRejectedValueOnce(new Error("artifact_file_changed"));
+    await user.click(screen.getByRole("button", { name: "打开文件" }));
+    expect(
+      await screen.findByText("目标文件已经变化，当前版本不再通过摘要核验，因此没有打开或导出。")
+    ).toBeInTheDocument();
+
+    exportArtifactResult.mockRejectedValueOnce(new Error("artifact_export_digest_mismatch"));
+    await user.click(screen.getByRole("button", { name: "另存为…" }));
+    expect(
+      await screen.findByText("另存操作或写后摘要核验没有完成；原产物没有被修改。")
+    ).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "聚焦修订此版本" }));
+    await user.type(
+      screen.getByRole("textbox", { name: "只说明要改动的部分" }),
+      "把结论压缩为三点，其他章节保持不变。"
+    );
+    await user.click(screen.getByRole("button", { name: "开始新修订" }));
+    await waitFor(() =>
+      expect(reviseArtifact).toHaveBeenCalledWith(
+        artifactTask.canonicalTaskId,
+        "artifact:travel-checklist",
+        1,
+        "把结论压缩为三点，其他章节保持不变。"
+      )
+    );
+    expect(await screen.findByRole("button", { name: "聚焦修订此版本" })).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "申请撤销此产物" }));
+    expect(await screen.findByText("撤销申请没有创建")).toBeInTheDocument();
+    expect(requestArtifactUndo).toHaveBeenCalledWith("artifact:travel-checklist");
   });
 
   it("renders a materialized Artifact while verification is still pending", async () => {
@@ -318,6 +464,7 @@ describe("OpenLife product shell", () => {
             kind: "evidence" as const,
             label: "待核验产物",
           },
+          sourceResourceRefs: [],
           evidenceRefs: baseTask.evidenceRefs,
           change: {
             kind: "create" as const,
@@ -331,6 +478,10 @@ describe("OpenLife product shell", () => {
             verificationItemPresent: false,
           },
           undo: { available: false, reasonCode: "artifact_undo_requires_verified_materialization" },
+          revision: {
+            available: false,
+            reasonCode: "artifact_revision_requires_verified_current_version",
+          },
         },
       ],
     };

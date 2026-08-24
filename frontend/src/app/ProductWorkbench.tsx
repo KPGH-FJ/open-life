@@ -16,6 +16,7 @@ import {
   type WorkbenchNavigationItem,
 } from "@/ui/shell";
 import { ResultsView } from "@/features/work/ResultsView";
+import { GlobalActivityView } from "@/features/work/GlobalActivityView";
 import { buildReadModelErrorEnvelope } from "@/shared/readModelEnvelope";
 import { taskLifecyclePresentation } from "@/features/work/taskPresentation";
 import { useConversationController } from "@/features/conversation/useConversationController";
@@ -180,8 +181,7 @@ function taskInspector(
   const needsDecision = (selectedTask?.pendingReviewItemRefs.length ?? 0) > 0;
   const hasEnabledTaskControl =
     selectedTask?.allowedControls.some(
-      control =>
-        control.enabled && ["resume", "retry", "cancel", "refresh_context"].includes(control.kind)
+      control => control.enabled && ["resume", "retry", "stop_run"].includes(control.kind)
     ) ?? false;
 
   return {
@@ -231,6 +231,20 @@ function taskInspector(
         value: boundaryEnvelope.data?.blockedReason ?? "none",
       },
       { label: "taskId", value: selectedTask?.canonicalTaskId ?? "none" },
+      {
+        label: "providerModel",
+        value: selectedTask?.latestRunProvenance
+          ? `${selectedTask.latestRunProvenance.providerId}/${selectedTask.latestRunProvenance.modelId}`
+          : "none",
+      },
+      {
+        label: "projectScope",
+        value: selectedTask?.latestRunProvenance?.projectScopeDigest ?? "none",
+      },
+      {
+        label: "turnErrorCode",
+        value: selectedTask?.latestRunProvenance?.turnErrorCode ?? "none",
+      },
       { label: "lifecycleStatus", value: selectedTask?.lifecycleStatus ?? "none" },
       {
         label: "terminalDelivery",
@@ -304,21 +318,24 @@ export function ProductWorkbench({
   }, []);
   const workbench = useWorkbenchController(workbenchDataSource, setAnnouncement);
   const selectedConversationIdRef = useRef<string | null>(null);
-  const refreshWorkbenchAfterTurn = useCallback(async () => {
-    if (workbenchDataSource) {
-      // A completed/blocked turn may have created a new canonical Task. The
-      // prior manual Task selection must not pin Results to stale work after
-      // the active Conversation has just produced a newer Task.
-      setSelectedTask(null);
-      await workbench.load(false, selectedConversationIdRef.current ?? "");
-    }
-  }, [workbench.load, workbenchDataSource]);
+  const refreshWorkbenchAfterTurn = useCallback(
+    async (completedConversationId: string) => {
+      if (workbenchDataSource && selectedConversationIdRef.current === completedConversationId) {
+        // A completed/blocked turn may have created a new canonical Task. The
+        // prior manual Task selection must not pin Results to stale work after
+        // the active Conversation has just produced a newer Task.
+        setSelectedTask(null);
+        await workbench.load(false, completedConversationId);
+      }
+    },
+    [workbench.load, workbenchDataSource]
+  );
   const conversation = useConversationController(
     conversationDataSource,
     setAnnouncement,
     refreshWorkbenchAfterTurn,
     null,
-    workbench.cancelRunningTask
+    workbench.stopRunningTask
   );
   const personalIntelligence = usePersonalIntelligenceController(
     personalIntelligenceDataSource,
@@ -764,6 +781,24 @@ export function ProductWorkbench({
         }`}
         data-testid="conversation-workbench"
       >
+        <GlobalActivityView
+          items={workbench.snapshot?.tasksEnvelope.data?.items ?? []}
+          selectedTaskId={effectiveSelectedTask?.canonicalTaskId ?? null}
+          onOpenTask={task => {
+            setSelectedTask(task);
+            setExplicitReviewItemId(null);
+            setWorkspaceInspectorContext("task");
+            setSelectedEvidence("");
+            if (
+              conversationDataSource &&
+              task.conversationId &&
+              task.conversationId !== conversation.selectedSessionId
+            ) {
+              conversation.selectSession(task.conversationId);
+            }
+            setAnnouncement(`已打开全局活动“${task.title}”；正在核对它的对话与运行状态。`);
+          }}
+        />
         <WorkspaceView
           snapshot={workbench.snapshot}
           refreshing={workbench.refreshing}
@@ -813,6 +848,16 @@ export function ProductWorkbench({
               setAnnouncement("撤销请求已进入当前 Work 的决定节点；批准前不会移动文件。");
               await workbench.load(true);
             }}
+            onReviseArtifact={async (taskId, artifactId, baseVersion, instruction) => {
+              await workbenchDataSource.reviseArtifact(
+                taskId,
+                artifactId,
+                baseVersion,
+                instruction
+              );
+              setAnnouncement("聚焦修订已创建新 Run；当前版本会保留到新版本完成验证与必要审核。");
+              await workbench.load(true);
+            }}
             onOpenArtifact={async (artifactId, version) => {
               await workbenchDataSource.openArtifactResult(artifactId, version);
               setAnnouncement("已核验并打开文件。");
@@ -849,6 +894,7 @@ export function ProductWorkbench({
         onRollbackMemory={personalIntelligence.rollbackMemory}
         onPrivacyEraseMemory={personalIntelligence.privacyEraseMemory}
         onDraftLifeModelChange={personalIntelligence.draftLifeModelChange}
+        onDraftLegacyLifeModelMigration={personalIntelligence.draftLegacyLifeModelMigration}
         onDraftLifeModelRollback={personalIntelligence.draftLifeModelRollback}
         onDraftLifeModelExport={personalIntelligence.draftLifeModelExport}
         onConfirmLearningCandidate={personalIntelligence.confirmLifeModelLearningCandidate}

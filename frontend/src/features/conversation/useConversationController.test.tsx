@@ -224,6 +224,9 @@ describe("conversation controller", () => {
         operationId: exactTurnOperationId,
         mode: "work",
         selectedSkillId: undefined,
+        providerProfileId: undefined,
+        reasoningEffort: undefined,
+        executionMode: "scoped_agent",
         taskId: expect.any(String),
         runId: expect.any(String),
       },
@@ -459,8 +462,9 @@ describe("conversation controller", () => {
   it("does not switch conversations while a resource is bound to the pending turn", async () => {
     const announce = vi.fn();
     const dataSource = source();
+    const onAfterTurn = vi.fn().mockResolvedValue(undefined);
     const { result } = renderHook(() =>
-      useConversationController(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+      useConversationController(dataSource, announce, onAfterTurn)
     );
     await act(async () => result.current.reload());
     await act(async () => result.current.attachResources());
@@ -647,11 +651,295 @@ describe("conversation controller", () => {
     expect(dataSource.createSession).not.toHaveBeenCalled();
     expect(result.current.sendAction().enabled).toBe(false);
 
+    await act(async () => expect(await result.current.setMemoryMode("off")).toBe(true));
+    expect(result.current.memoryMode).toBe("off");
     act(() => result.current.setDraft("规划本周"));
     await act(async () => result.current.send());
 
-    expect(dataSource.createSession).toHaveBeenCalledWith(expect.any(String), "规划本周");
+    expect(dataSource.createSession).toHaveBeenCalledWith(expect.any(String), "规划本周", {
+      projectId: null,
+      memoryMode: "off",
+      selectedSkillId: null,
+    });
     expect(dataSource.streamTurn).toHaveBeenCalledTimes(1);
+  });
+
+  it("binds the explicitly selected ready model profile to the exact next turn", async () => {
+    const profiles = [
+      {
+        profileId: "provider-profile:configured-cloud",
+        providerId: "deepseek",
+        modelId: "deepseek-chat",
+        endpointClass: "cloud",
+        selected: true,
+        availability: "unverified" as const,
+        unavailableReason: "provider_validation_unvalidated",
+        sizeBytes: null,
+        protocol: "openai_compatible_chat_completions" as const,
+        structuredOutputContract: "json_object_requested_locally_validated" as const,
+        reasoningControl: "effort_selector" as const,
+        supportedReasoningEfforts: ["none", "high", "max"] as const,
+        defaultReasoningEffort: "high" as const,
+        reasoningMandatory: false,
+        reasoningCapabilitySource: "official_builtin" as const,
+        chatCompatibility: "unverified" as const,
+        workCompatibility: "unverified" as const,
+        workCompatibilityReason: null,
+      },
+      {
+        profileId: "provider-profile:local-llama3",
+        providerId: "ollama",
+        modelId: "llama3:latest",
+        endpointClass: "local",
+        selected: false,
+        availability: "ready" as const,
+        unavailableReason: null,
+        sizeBytes: 4_920_753_328,
+        protocol: "ollama_chat" as const,
+        structuredOutputContract: "json_schema_requested_locally_validated" as const,
+        reasoningControl: "provider_default_only" as const,
+        supportedReasoningEfforts: [],
+        defaultReasoningEffort: null,
+        reasoningMandatory: false,
+        reasoningCapabilitySource: "unavailable" as const,
+        chatCompatibility: "reachable_unverified" as const,
+        workCompatibility: "unverified" as const,
+        workCompatibilityReason: null,
+      },
+    ];
+    const streamTurn = vi.fn().mockResolvedValue(turnResult("completed"));
+    const dataSource = source({
+      streamTurn,
+      loadConversation: vi.fn().mockResolvedValue({
+        status: "ready",
+        conversations: [
+          {
+            session_id: "conversation-1",
+            title: "访谈整理",
+            created_at: "2026-07-21T00:00:00Z",
+            updated_at: "2026-07-21T00:01:00Z",
+          },
+        ],
+        projects: [],
+        selectedProjectId: null,
+        selectedConversationId: "conversation-1",
+        globalMemoryEnabled: true,
+        selectedMemoryMode: "use_and_learn",
+        messages: existingMessages,
+        latestTurn: null,
+        providerStatus: "unavailable",
+        providerProfiles: profiles,
+        selectedProviderProfileId: profiles[0].profileId,
+        providerErrorCode: "provider_validation_unvalidated",
+        workStatus: "available",
+      }),
+    });
+    const announce = vi.fn();
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+
+    act(() => {
+      expect(result.current.selectProviderProfile(profiles[0].profileId)).toBe(false);
+      expect(result.current.selectProviderProfile(profiles[1].profileId)).toBe(true);
+      result.current.setDraft("只回复：本地模型绑定成功");
+    });
+    await act(async () => result.current.send());
+
+    expect(streamTurn.mock.calls[0]?.[2]).toMatchObject({
+      providerProfileId: profiles[1].profileId,
+      mode: "chat",
+    });
+    expect(announce).toHaveBeenCalledWith("这个模型当前不可用，未改变本轮模型。");
+    expect(announce).toHaveBeenCalledWith("本轮将使用 ollama · llama3:latest。");
+  });
+
+  it("refreshes provider capability truth from the post-turn Conversation read model", async () => {
+    const canonicalMessages = existingMessages.map((message, index) => ({
+      ...message,
+      turnId: `turn-${index + 1}`,
+      attachmentsStatus: message.role === "user" ? ("ready" as const) : ("not_applicable" as const),
+      attachments: [],
+    }));
+    const initialProfile = {
+      profileId: "provider-profile:local-llama3",
+      providerId: "ollama",
+      modelId: "llama3:latest",
+      endpointClass: "local",
+      selected: true,
+      availability: "ready" as const,
+      unavailableReason: null,
+      sizeBytes: 4_920_753_328,
+      protocol: "ollama_chat" as const,
+      structuredOutputContract: "json_schema_requested_locally_validated" as const,
+      reasoningControl: "provider_default_only" as const,
+      supportedReasoningEfforts: [],
+      defaultReasoningEffort: null,
+      reasoningMandatory: false,
+      reasoningCapabilitySource: "unavailable" as const,
+      chatCompatibility: "reachable_unverified" as const,
+      workCompatibility: "unverified" as const,
+      workCompatibilityReason: null,
+    };
+    const initial: ConversationViewModel = {
+      status: "ready",
+      conversations: [
+        {
+          session_id: "conversation-1",
+          title: "访谈整理",
+          created_at: "2026-07-21T00:00:00Z",
+          updated_at: "2026-07-21T00:01:00Z",
+        },
+      ],
+      projects: [],
+      selectedProjectId: null,
+      selectedConversationId: "conversation-1",
+      globalMemoryEnabled: true,
+      selectedMemoryMode: "use_and_learn",
+      messages: canonicalMessages,
+      latestTurn: null,
+      providerStatus: "ready",
+      providerProfiles: [initialProfile],
+      selectedProviderProfileId: initialProfile.profileId,
+      providerErrorCode: null,
+      workStatus: "unavailable",
+    };
+    const refreshed: ConversationViewModel = {
+      ...initial,
+      messages: [
+        ...canonicalMessages,
+        {
+          role: "assistant",
+          content: "NATIVE-CHAT-OK",
+          turnId: "turn-3",
+          attachmentsStatus: "not_applicable",
+          attachments: [],
+        },
+      ],
+      providerProfiles: [
+        {
+          ...initialProfile,
+          chatCompatibility: "validated",
+          workCompatibility: "observed_contract_failure",
+          workCompatibilityReason: "agent_step_artifact_format_not_allowed",
+        },
+      ],
+      workStatus: "available",
+    };
+    const loadConversation = vi.fn().mockResolvedValueOnce(initial).mockResolvedValue(refreshed);
+    const dataSource = source({ loadConversation });
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    expect(result.current.provider.profiles[0]?.chatCompatibility).toBe("reachable_unverified");
+
+    act(() => result.current.setDraft("请只回复：NATIVE-CHAT-OK"));
+    await act(async () => result.current.send());
+
+    expect(result.current.provider.profiles[0]).toMatchObject({
+      chatCompatibility: "validated",
+      workCompatibility: "observed_contract_failure",
+      workCompatibilityReason: "agent_step_artifact_format_not_allowed",
+    });
+    expect(result.current.workStatus).toBe("available");
+    expect(result.current.messages[result.current.messages.length - 1]?.content).toBe(
+      "NATIVE-CHAT-OK"
+    );
+  });
+
+  it("binds an admitted reasoning effort to the exact next turn", async () => {
+    const profile = {
+      profileId: "provider-profile:openai-gpt-5-6-sol",
+      providerId: "openai",
+      modelId: "gpt-5.6-sol",
+      endpointClass: "cloud",
+      selected: true,
+      availability: "ready" as const,
+      unavailableReason: null,
+      sizeBytes: null,
+      protocol: "openai_compatible_chat_completions" as const,
+      structuredOutputContract: "json_object_requested_locally_validated" as const,
+      reasoningControl: "effort_selector" as const,
+      supportedReasoningEfforts: ["none", "low", "medium", "high", "xhigh", "max"] as const,
+      defaultReasoningEffort: "medium" as const,
+      reasoningMandatory: false,
+      reasoningCapabilitySource: "official_builtin" as const,
+      chatCompatibility: "validated" as const,
+      workCompatibility: "unverified" as const,
+      workCompatibilityReason: null,
+    };
+    const streamTurn = vi.fn().mockResolvedValue(turnResult("completed"));
+    const dataSource = source({
+      streamTurn,
+      loadConversation: vi.fn().mockResolvedValue({
+        status: "ready",
+        conversations: [
+          {
+            session_id: "conversation-1",
+            title: "访谈整理",
+            created_at: "2026-07-21T00:00:00Z",
+            updated_at: "2026-07-21T00:01:00Z",
+          },
+        ],
+        projects: [],
+        selectedProjectId: null,
+        selectedConversationId: "conversation-1",
+        globalMemoryEnabled: true,
+        selectedMemoryMode: "use_and_learn",
+        messages: existingMessages,
+        latestTurn: null,
+        providerStatus: "ready",
+        providerProfiles: [profile],
+        selectedProviderProfileId: profile.profileId,
+        providerErrorCode: null,
+        workStatus: "available",
+      }),
+    });
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+
+    act(() => {
+      expect(result.current.provider.selectedReasoningEffort).toBeNull();
+      expect(result.current.selectReasoningEffort("high")).toBe(true);
+      result.current.setDraft("分析这一组材料");
+    });
+    await act(async () => result.current.send());
+
+    expect(streamTurn.mock.calls[0]?.[2]).toMatchObject({
+      providerProfileId: profile.profileId,
+      reasoningEffort: "high",
+    });
+  });
+
+  it("binds the selected execution ceiling to the exact Work run", async () => {
+    const streamTurn = vi.fn().mockResolvedValue(turnResult("completed"));
+    const dataSource = source({ streamTurn });
+    const announce = vi.fn();
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+
+    act(() => {
+      result.current.setMode("work");
+      expect(result.current.setExecutionMode("observe_only")).toBe(true);
+      result.current.setDraft("只读取并比较当前资料");
+    });
+    await act(async () => result.current.send());
+
+    expect(streamTurn.mock.calls[0]?.[2]).toMatchObject({
+      mode: "work",
+      executionMode: "observe_only",
+      taskId: expect.any(String),
+      runId: expect.any(String),
+    });
+    expect(announce).toHaveBeenCalledWith(
+      "本轮 Work 已设为只读研究；不会创建文件或写入个人长期状态。"
+    );
   });
 
   it("fails closed when post-dispatch history refresh cannot confirm persistence", async () => {
@@ -744,7 +1032,6 @@ describe("conversation controller", () => {
     );
     const steerTask = vi.fn().mockResolvedValue({
       steering: { steeringId: "steering-1", status: "pending" },
-      scopeExpansionBlocked: false,
     });
     const announce = vi.fn();
     const dataSource = source({ streamTurn, steerTask });
@@ -768,7 +1055,9 @@ describe("conversation controller", () => {
       })
     );
     expect(result.current.draft).toBe("");
-    expect(announce).toHaveBeenLastCalledWith("调整已加入当前任务，将在下一次安全步骤生效。");
+    expect(announce).toHaveBeenLastCalledWith(
+      "调整已加入当前任务，正在等待 canonical Work 的安全检查点处理。"
+    );
     await act(async () => finishTurn(turnResult("completed")));
   });
 
@@ -861,8 +1150,9 @@ describe("conversation controller", () => {
       loadHistory,
       streamTurn,
     });
+    const onAfterTurn = vi.fn().mockResolvedValue(undefined);
     const { result } = renderHook(() =>
-      useConversationController(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+      useConversationController(dataSource, announce, onAfterTurn)
     );
     await act(async () => result.current.reload());
     act(() => result.current.setMode("work"));
@@ -880,6 +1170,7 @@ describe("conversation controller", () => {
 
     await act(async () => finishTurn(turnResult("completed")));
     expect(result.current.selectedSessionId).toBe("conversation-2");
+    expect(onAfterTurn).toHaveBeenCalledWith("conversation-1");
   });
 
   it("cancels the exact active task and waits for the stream terminal state", async () => {
@@ -906,7 +1197,7 @@ describe("conversation controller", () => {
         });
       }
     );
-    const cancelWorkTask = vi.fn().mockResolvedValue({ status: "cancelled" });
+    const stopRunningWork = vi.fn().mockResolvedValue({ status: "cancelled" });
     const dataSource = source({ streamTurn });
     const { result } = renderHook(() =>
       useConversationController(
@@ -914,7 +1205,7 @@ describe("conversation controller", () => {
         vi.fn(),
         vi.fn().mockResolvedValue(undefined),
         undefined,
-        cancelWorkTask
+        stopRunningWork
       )
     );
     await act(async () => result.current.reload());
@@ -925,7 +1216,7 @@ describe("conversation controller", () => {
 
     await act(async () => result.current.cancel());
 
-    expect(cancelWorkTask).toHaveBeenCalledWith(emittedTaskId);
+    expect(stopRunningWork).toHaveBeenCalledWith(emittedTaskId, expect.any(String));
     expect(result.current.turnState.phase).toBe("cancelling");
 
     await act(async () => finishTurn(turnResult("cancelled")));
@@ -958,12 +1249,12 @@ describe("conversation controller", () => {
         });
       }
     );
-    const cancelWorkTask = vi.fn().mockResolvedValue({ status: "cancelled" });
+    const stopRunningWork = vi.fn().mockResolvedValue({ status: "cancelled" });
     const announce = vi.fn();
     const afterTurn = vi.fn().mockResolvedValue(undefined);
     const dataSource = source({ streamTurn });
     const { result } = renderHook(() =>
-      useConversationController(dataSource, announce, afterTurn, undefined, cancelWorkTask)
+      useConversationController(dataSource, announce, afterTurn, undefined, stopRunningWork)
     );
     await act(async () => result.current.reload());
     act(() => result.current.setMode("work"));
@@ -1052,7 +1343,7 @@ describe("conversation controller", () => {
         });
       }
     );
-    const cancelWorkTask = vi.fn(
+    const stopRunningWork = vi.fn(
       () =>
         new Promise<void>((_resolve, reject) => {
           rejectCancel = reject;
@@ -1066,7 +1357,7 @@ describe("conversation controller", () => {
         announce,
         vi.fn().mockResolvedValue(undefined),
         undefined,
-        cancelWorkTask
+        stopRunningWork
       )
     );
     await act(async () => result.current.reload());
@@ -1123,6 +1414,7 @@ describe("conversation controller", () => {
     const project = {
       id: "project-1",
       name: "访谈研究",
+      workspaceRoot: "/tmp/interviews",
       revision: 1,
       createdAt: "2026-08-14T00:00:00Z",
       updatedAt: "2026-08-14T00:00:00Z",
@@ -1154,7 +1446,7 @@ describe("conversation controller", () => {
       .fn()
       .mockResolvedValueOnce(canonical(false))
       .mockResolvedValueOnce(canonical(true));
-    const createProject = vi.fn().mockResolvedValue(project);
+    const createProject = vi.fn().mockResolvedValue({ cancelled: false, project });
     const assignProject = vi.fn().mockResolvedValue(undefined);
     const dataSource = source({ loadConversation, createProject, assignProject });
     const { result } = renderHook(() =>
@@ -1168,6 +1460,242 @@ describe("conversation controller", () => {
     expect(assignProject).toHaveBeenCalledWith("conversation-1", "project-1");
     expect(result.current.projects).toEqual([project]);
     expect(result.current.selectedProjectId).toBe("project-1");
+  });
+
+  it("keeps a newly selected Project for the first conversation turn", async () => {
+    const project = {
+      id: "project-first-turn",
+      name: "First turn workspace",
+      workspaceRoot: "/tmp/first-turn-workspace",
+      revision: 1,
+      createdAt: "2026-08-14T00:00:00Z",
+      updatedAt: "2026-08-14T00:00:00Z",
+    };
+    const empty = {
+      status: "empty" as const,
+      conversations: [],
+      projects: [],
+      selectedProjectId: null,
+      selectedConversationId: null,
+      globalMemoryEnabled: true,
+      selectedMemoryMode: "use_and_learn" as const,
+      messages: [],
+      latestTurn: null,
+      providerStatus: "ready" as const,
+      providerProfiles: [],
+      selectedProviderProfileId: null,
+      providerErrorCode: null,
+      workStatus: "available" as const,
+    };
+    const loadConversation = vi
+      .fn()
+      .mockResolvedValueOnce(empty)
+      .mockResolvedValueOnce({ ...empty, projects: [project] });
+    const createProject = vi.fn().mockResolvedValue({ cancelled: false, project });
+    const dataSource = source({ loadConversation, createProject });
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+
+    await act(async () => expect(await result.current.createProject("")).toBe(true));
+
+    expect(createProject).toHaveBeenCalledWith(expect.any(String), undefined);
+    expect(result.current.selectedProjectId).toBe(project.id);
+  });
+
+  it("treats closing the native Project picker as cancellation, not failure", async () => {
+    const createProject = vi.fn().mockResolvedValue({ cancelled: true, project: null });
+    const announce = vi.fn();
+    const dataSource = source({ createProject });
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, announce, vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+
+    await act(async () => expect(await result.current.createProject("")).toBe(false));
+
+    expect(result.current.sessionMutation).toEqual({ phase: "idle" });
+    expect(announce).toHaveBeenLastCalledWith("已取消选择 Project 文件夹。");
+  });
+
+  it("accepts a Project lifecycle mutation only after the canonical view confirms it", async () => {
+    const project = {
+      id: "project-lifecycle",
+      name: "Lifecycle Project",
+      workspaceRoot: "/tmp/lifecycle",
+      additionalReadRoots: [],
+      revision: 2,
+      status: "active" as const,
+      createdAt: "2026-08-24T00:00:00Z",
+      updatedAt: "2026-08-24T00:00:00Z",
+      activeConversationCount: 0,
+      totalConversationCount: 0,
+      taskRunReferenceCount: 0,
+      selectedForNewConversation: false,
+      allowedControls: ["update", "archive"] as ("update" | "archive")[],
+      blockerCodes: [],
+    };
+    const canonical = (archived: boolean): ConversationViewModel => ({
+      status: "empty",
+      conversations: [],
+      projects: [
+        archived
+          ? {
+              ...project,
+              revision: 3,
+              status: "archived",
+              allowedControls: ["restore", "delete"],
+            }
+          : project,
+      ],
+      selectedProjectId: null,
+      selectedConversationId: null,
+      globalMemoryEnabled: true,
+      selectedMemoryMode: "use_and_learn",
+      messages: [],
+      latestTurn: null,
+      providerStatus: "ready",
+      providerProfiles: [],
+      selectedProviderProfileId: null,
+      providerErrorCode: null,
+      workStatus: "available",
+    });
+    const loadConversation = vi
+      .fn()
+      .mockResolvedValueOnce(canonical(false))
+      .mockResolvedValueOnce(canonical(true));
+    const archiveProject = vi.fn().mockResolvedValue({ ...project, status: "archived" });
+    const dataSource = source({ loadConversation, archiveProject });
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+
+    await act(async () =>
+      expect(await result.current.archiveProject(project.id, project.revision)).toBe(true)
+    );
+
+    expect(archiveProject).toHaveBeenCalledWith(project.id, project.revision);
+    expect(result.current.projects[0]).toMatchObject({ status: "archived", revision: 3 });
+    expect(result.current.sessionMutation).toEqual({ phase: "idle" });
+  });
+
+  it("accepts Project read-root changes only after canonical reload", async () => {
+    const project = {
+      id: "project-read-roots",
+      name: "Read roots",
+      workspaceRoot: "/tmp/primary",
+      additionalReadRoots: [],
+      revision: 2,
+      status: "active" as const,
+      createdAt: "2026-08-24T00:00:00Z",
+      updatedAt: "2026-08-24T00:00:00Z",
+      activeConversationCount: 0,
+      totalConversationCount: 0,
+      taskRunReferenceCount: 0,
+      selectedForNewConversation: true,
+      allowedControls: ["update", "archive"] as ("update" | "archive")[],
+      blockerCodes: [],
+    };
+    const added = {
+      ...project,
+      revision: 3,
+      additionalReadRoots: [{ id: "root-1", name: "Reference notes", path: "/tmp/reference" }],
+    };
+    const removed = { ...project, revision: 4 };
+    const canonical = (current: typeof project | typeof added): ConversationViewModel => ({
+      status: "empty",
+      conversations: [],
+      projects: [current],
+      selectedProjectId: current.id,
+      selectedConversationId: null,
+      globalMemoryEnabled: true,
+      selectedMemoryMode: "use_and_learn",
+      messages: [],
+      latestTurn: null,
+      providerStatus: "ready",
+      providerProfiles: [],
+      selectedProviderProfileId: null,
+      providerErrorCode: null,
+      workStatus: "available",
+    });
+    const loadConversation = vi
+      .fn()
+      .mockResolvedValueOnce(canonical(project))
+      .mockResolvedValueOnce(canonical(added))
+      .mockResolvedValueOnce(canonical(removed));
+    const addProjectReadRoot = vi.fn().mockResolvedValue({ cancelled: false, project: added });
+    const removeProjectReadRoot = vi.fn().mockResolvedValue(removed);
+    const dataSource = source({ loadConversation, addProjectReadRoot, removeProjectReadRoot });
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+
+    await act(async () =>
+      expect(await result.current.addProjectReadRoot(project.id, project.revision)).toBe(true)
+    );
+    expect(result.current.projects[0].additionalReadRoots).toEqual(added.additionalReadRoots);
+
+    await act(async () =>
+      expect(await result.current.removeProjectReadRoot(added.id, "root-1", added.revision)).toBe(
+        true
+      )
+    );
+    expect(removeProjectReadRoot).toHaveBeenCalledWith(added.id, "root-1", added.revision);
+    expect(result.current.projects[0].additionalReadRoots).toEqual([]);
+    expect(result.current.projects[0].revision).toBe(4);
+  });
+
+  it("selects an existing Project before the first Conversation is created", async () => {
+    const project = {
+      id: "project-next",
+      name: "Next Conversation Project",
+      workspaceRoot: "/tmp/project-next",
+      additionalReadRoots: [],
+      revision: 1,
+      status: "active" as const,
+      createdAt: "2026-08-24T00:00:00Z",
+      updatedAt: "2026-08-24T00:00:00Z",
+      activeConversationCount: 0,
+      totalConversationCount: 0,
+      taskRunReferenceCount: 0,
+      selectedForNewConversation: false,
+      allowedControls: ["update", "archive"] as ("update" | "archive")[],
+      blockerCodes: [],
+    };
+    const canonical = (selected: boolean): ConversationViewModel => ({
+      status: "empty",
+      conversations: [],
+      projects: [{ ...project, selectedForNewConversation: selected }],
+      selectedProjectId: selected ? project.id : null,
+      selectedConversationId: null,
+      globalMemoryEnabled: true,
+      selectedMemoryMode: "use_and_learn",
+      messages: [],
+      latestTurn: null,
+      providerStatus: "ready",
+      providerProfiles: [],
+      selectedProviderProfileId: null,
+      providerErrorCode: null,
+      workStatus: "available",
+    });
+    const loadConversation = vi
+      .fn()
+      .mockResolvedValueOnce(canonical(false))
+      .mockResolvedValueOnce(canonical(true));
+    const selectProjectForNewConversation = vi.fn().mockResolvedValue(undefined);
+    const dataSource = source({ loadConversation, selectProjectForNewConversation });
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+
+    await act(async () => expect(await result.current.assignProject(project.id)).toBe(true));
+
+    expect(selectProjectForNewConversation).toHaveBeenCalledWith(project.id);
+    expect(result.current.selectedProjectId).toBe(project.id);
   });
 
   it("does not rename or delete a conversation while a resource is bound to the pending turn", async () => {
@@ -1198,6 +1726,17 @@ describe("conversation controller", () => {
       unselectedSkillsInjected: false,
       controls: ["clear_skill"],
     });
+    const getSkillDetail = vi.fn().mockResolvedValue({
+      skillId: "research",
+      manifest: {},
+      boundedInstructionsPreview: "Review evidence only.",
+      allowedTools: ["web.search"],
+      disallowedTools: ["write"],
+      policyNotes: ["Bounded context only."],
+      requiredPermissions: [],
+      evidenceDigest: "sha256:skill-detail",
+      redactionSummary: "bounded",
+    });
     const streamTurn = vi.fn().mockResolvedValue(turnResult("completed"));
     const dataSource = source({
       listSkills: vi.fn().mockResolvedValue([
@@ -1222,6 +1761,7 @@ describe("conversation controller", () => {
       }),
       selectSkill,
       clearSkill: vi.fn(),
+      getSkillDetail,
       streamTurn,
     });
     const { result } = renderHook(() =>
@@ -1231,6 +1771,8 @@ describe("conversation controller", () => {
     await waitFor(() => expect(result.current.capabilityState.phase).toBe("ready"));
 
     await act(async () => expect(await result.current.selectSkill("research")).toBe(true));
+    await waitFor(() => expect(result.current.selectedSkillDetail?.skillId).toBe("research"));
+    expect(getSkillDetail).toHaveBeenCalledWith("research");
     act(() => result.current.setDraft("请研究这个问题"));
     await act(async () => result.current.send());
 
@@ -1241,6 +1783,62 @@ describe("conversation controller", () => {
       expect.objectContaining({ selectedSkillId: "research" }),
       expect.any(Object)
     );
+  });
+
+  it("selects a skill before the first message and binds it in Conversation creation", async () => {
+    const skill = {
+      skillId: "research",
+      name: "Research",
+      source: "bundled:research",
+      scope: "session",
+      description: "Evidence-backed research",
+      riskLevel: "low",
+      available: true,
+      selected: false,
+      instructionDigest: "sha256:skill",
+      sourceKind: "bundled",
+    };
+    const empty: ConversationViewModel = {
+      status: "empty",
+      conversations: [],
+      projects: [],
+      selectedProjectId: null,
+      selectedConversationId: null,
+      globalMemoryEnabled: true,
+      selectedMemoryMode: "use_and_learn",
+      messages: [],
+      latestTurn: null,
+      providerStatus: "ready",
+      providerProfiles: [],
+      selectedProviderProfileId: null,
+      providerErrorCode: null,
+      workStatus: "available",
+    };
+    const createSession = vi.fn().mockResolvedValue(undefined);
+    const selectSkill = vi.fn();
+    const dataSource = source({
+      loadConversation: vi.fn().mockResolvedValue(empty),
+      listSkills: vi.fn().mockResolvedValue([skill]),
+      createSession,
+      selectSkill,
+      streamTurn: vi.fn().mockResolvedValue(turnResult("completed")),
+    });
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    await waitFor(() => expect(result.current.capabilityState.phase).toBe("ready"));
+
+    await act(async () => expect(await result.current.selectSkill("research")).toBe(true));
+    act(() => result.current.setDraft("先用技能研究"));
+    await act(async () => result.current.send());
+
+    expect(selectSkill).not.toHaveBeenCalled();
+    expect(createSession).toHaveBeenCalledWith(expect.any(String), "先用技能研究", {
+      projectId: null,
+      memoryMode: "use_and_learn",
+      selectedSkillId: "research",
+    });
   });
 
   it("deletes only after the explicit controller action and re-reads the remaining sessions", async () => {

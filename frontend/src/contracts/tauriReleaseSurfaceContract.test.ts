@@ -49,11 +49,62 @@ describe("release Tauri surface", () => {
       "draft_memory_correction_proposal",
       "draft_memory_archive_proposal",
       "restore_archived_chunks",
-      "draft_legacy_lifemodel_migration",
       "get_state_alerts",
       "get_state_history",
     ]) {
       expect(releaseClient, retiredCommand).not.toContain(`"${retiredCommand}"`);
     }
+  });
+
+  it("exposes the governed legacy LifeModel migration command", () => {
+    expect(read("src/ipc/personalIntelligence.ts")).toContain(
+      'safeInvoke("draft_legacy_lifemodel_migration", { request })'
+    );
+  });
+
+  it("creates Project scope only through the native directory picker", () => {
+    const conversationIpc = read("src/ipc/conversation.ts");
+    expect(conversationIpc).toContain(
+      'safeInvoke<ProjectDirectoryCreationResult>("create_project_from_directory"'
+    );
+    expect(conversationIpc).toContain(
+      'safeInvoke<ProjectDirectoryCreationResult>("bind_project_directory"'
+    );
+    expect(conversationIpc).not.toContain('safeInvoke<ProjectRecord>("create_project"');
+  });
+
+  it("exposes revision-bound Project lifecycle controls", () => {
+    const conversationIpc = read("src/ipc/conversation.ts");
+    for (const command of [
+      "update_project_name",
+      "archive_project",
+      "restore_project",
+      "delete_project",
+      "select_new_conversation_project",
+    ]) {
+      expect(conversationIpc).toContain(`"${command}"`);
+    }
+  });
+
+  it("exposes canonical tool permission inspection and revocation", () => {
+    const settingsIpc = read("src/ipc/settings.ts");
+    expect(settingsIpc).toContain('"get_tool_permission_view_model"');
+    expect(settingsIpc).toContain('"revoke_tool_permission"');
+  });
+
+  it("exposes the exact Artifact-bound focused revision command", () => {
+    const workIpc = read("src/ipc/work.ts");
+    expect(workIpc).toContain('safeInvoke<SendMessageResult>("revise_work_artifact"');
+    for (const field of [
+      "taskId",
+      "artifactId",
+      "baseVersion",
+      "instruction",
+      "newRunId",
+      "newTurnId",
+    ]) {
+      expect(workIpc).toContain(field);
+    }
+    expect(workIpc).toContain("receipt.run_id !== newRunId");
   });
 });

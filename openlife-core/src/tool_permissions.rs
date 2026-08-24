@@ -718,12 +718,24 @@ impl ToolPermissionStore {
                     .or_else(|| scope.get("endpointDigest"))
             })
             .and_then(serde_json::Value::as_str);
-        let canonical_scope_suffix =
-            network_decision_id
-                .zip(endpoint_digest)
-                .map(|(decision_id, endpoint_digest)| {
-                    format!("@{decision_id}#endpoint:{endpoint_digest}")
-                });
+        let action_digest = canonical_scope
+            .and_then(|scope| {
+                scope
+                    .get("action_digest")
+                    .or_else(|| scope.get("actionDigest"))
+            })
+            .and_then(serde_json::Value::as_str);
+        let canonical_scope_suffix = network_decision_id.and_then(|decision_id| {
+            endpoint_digest
+                .map(|digest| format!("@{decision_id}#endpoint:{digest}"))
+                .or_else(|| action_digest.map(|digest| format!("@{decision_id}#action:{digest}")))
+        });
+        let exact_digest = endpoint_digest.or(action_digest);
+        let action_scoped_network_consent = action_digest.is_some()
+            && endpoint_digest.is_none()
+            && source == "network_policy"
+            && risk_level == "medium"
+            && tool_name.starts_with("network-consent@");
         let expected_proposal_risk = match risk_level {
             "medium" => Some(crate::agent::RiskLevel::Medium),
             "high" => Some(crate::agent::RiskLevel::High),
@@ -740,7 +752,7 @@ impl ToolPermissionStore {
             || canonical_scope_suffix
                 .as_deref()
                 .is_none_or(|suffix| !tool_name.ends_with(suffix))
-            || endpoint_digest.is_none_or(|digest| {
+            || exact_digest.is_none_or(|digest| {
                 !digest.strip_prefix("sha256:").is_some_and(|hex| {
                     hex.len() == 64
                         && hex
@@ -751,6 +763,7 @@ impl ToolPermissionStore {
             || tool_name.trim().is_empty()
             || source.trim().is_empty()
             || action_type != "network"
+            || (action_digest.is_some() && !action_scoped_network_consent)
         {
             anyhow::bail!("reviewed network permission scope is invalid");
         }

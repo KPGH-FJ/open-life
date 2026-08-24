@@ -26,12 +26,22 @@ export function WorkspaceView({
   const model = envelope && ["ready", "stale"].includes(envelope.status) ? envelope.data : null;
   const activeTask = activeScopedTask(snapshot);
   const selectedConversationId = conversation?.selectedSessionId ?? null;
+  const selectedConversation = conversation
+    ? [...conversation.sessions, ...conversation.archivedSessions].find(
+        session => session.session_id === conversation.selectedSessionId
+      )
+    : undefined;
+  const conversationReadOnlyReason =
+    selectedConversation?.status === "archived"
+      ? "这段对话已归档；可以查看历史，恢复后才能继续发送。"
+      : undefined;
   const projectionMatchesConversation =
     !conversation ||
     (model?.selectedConversationId ?? null) === selectedConversationId ||
     (model?.selectedConversationId === "" && selectedConversationId === null);
   const conversationDisabledReason = (() => {
     if (!conversation) return undefined;
+    if (conversationReadOnlyReason) return conversationReadOnlyReason;
     const boundary = snapshot?.boundaryEnvelope.data;
     if (
       boundary?.localOnlyRequired &&
@@ -92,6 +102,7 @@ export function WorkspaceView({
           controller={conversation}
           onOpenLifeModel={onOpenLifeModel}
           disabledReason={conversationDisabledReason}
+          readOnlyReason={conversationReadOnlyReason}
           inlineCheckpoint={inlineCheckpoint}
         />
       )}

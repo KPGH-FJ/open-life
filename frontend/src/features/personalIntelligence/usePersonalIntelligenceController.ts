@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
+  DraftLegacyLifeModelMigrationRequest,
   DraftLifeModelV2ChangeRequest,
   DraftLifeModelV2ExportRequest,
   DraftLifeModelV2RollbackRequest,
@@ -50,7 +51,7 @@ export function usePersonalIntelligenceController(
     error?: string;
   } | null>(null);
   const [lifeModelAction, setLifeModelAction] = useState<{
-    kind: "change" | "rollback" | "export";
+    kind: "migration" | "change" | "rollback" | "export";
     status: "submitting" | "review_required" | "failed";
     proposalId?: string;
     error?: string;
@@ -209,7 +210,7 @@ export function usePersonalIntelligenceController(
   );
   const draftLifeModelOperation = useCallback(
     async (
-      kind: "change" | "rollback" | "export",
+      kind: "migration" | "change" | "rollback" | "export",
       operation: (source: PersonalIntelligenceDataSource) => Promise<string>
     ): Promise<boolean> => {
       if (!dataSource || lifeModelAction?.status === "submitting") return false;
@@ -234,6 +235,11 @@ export function usePersonalIntelligenceController(
       }
     },
     [announce, dataSource, lifeModelAction?.status, load]
+  );
+  const draftLegacyLifeModelMigration = useCallback(
+    (request: DraftLegacyLifeModelMigrationRequest) =>
+      draftLifeModelOperation("migration", source => source.draftLegacyLifeModelMigration(request)),
+    [draftLifeModelOperation]
   );
 
   const draftLifeModelChange = useCallback(
@@ -405,6 +411,7 @@ export function usePersonalIntelligenceController(
     rollbackMemory,
     privacyEraseMemory,
     draftLifeModelChange,
+    draftLegacyLifeModelMigration,
     draftLifeModelRollback,
     draftLifeModelExport,
     confirmLifeModelLearningCandidate,

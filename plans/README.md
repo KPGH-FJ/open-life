@@ -16,10 +16,10 @@ working tree.
 
 ## Current Development Status
 
-`openlife_agent_capability_rebuild_plan.md` is the one active implementation
-plan. It replaces the completed capable-product plan, which remains available
-in Git history. Product direction lives in `PRODUCT.md`; accepted architecture
-lives in ADRs.
+`openlife_foundation_control_loop_plan.md` is the one active implementation
+plan. It supersedes the completed Agent capability rebuild plan, which remains
+available in Git history. Product direction lives in `PRODUCT.md`; accepted
+architecture lives in ADRs.
 
 ## Accepted Decisions
 

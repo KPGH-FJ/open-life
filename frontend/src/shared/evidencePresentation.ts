@@ -26,6 +26,7 @@ export function toWorkbenchEvidence(ref: EvidenceRef): WorkbenchEvidenceReferenc
     lifemodel: "LifeModel",
     settings: "设置记录",
     provider: "模型路由",
+    resource: "本地资源",
   };
   const sensitivityLabels: Record<NonNullable<EvidenceRef["sensitivity"]>, string> = {
     public: "公开",

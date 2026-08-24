@@ -2,6 +2,9 @@ use crate::agent::product_read_model::{
     EvidenceRef, EvidenceSensitivity, ExternalTransmissionStatus,
 };
 use crate::agent::types::{AgentProposal, ProposalSource, ProposalType};
+use crate::life_model::legacy_migration::{
+    LegacyLifeModelMigrationPlanV2, LIFE_MODEL_V2_LEGACY_MIGRATION_PATH,
+};
 use crate::life_model::v2::{
     LifeModelItemV2, LifeModelTypedDiffV2, LifeModelTypedOperationV2, LifeModelUserValueV2,
     LIFE_MODEL_V2_TYPED_DIFF_PATH,
@@ -187,6 +190,7 @@ pub fn build_review_decision_context(
     proposal: &AgentProposal,
     evidence_refs: &[EvidenceRef],
 ) -> ReviewDecisionContext {
+    let legacy_life_model_migration = reviewed_legacy_lifemodel_migration(proposal);
     let life_model_v2_diff = reviewed_lifemodel_v2_diff(proposal);
     let permission = (proposal.proposal_type == ProposalType::ToolPermission)
         .then(|| build_permission_decision_context(proposal, evidence_refs));
@@ -200,6 +204,8 @@ pub fn build_review_decision_context(
             sensitivity: EvidenceSensitivity::Redacted,
             truncated: false,
         }
+    } else if let Some(plan) = legacy_life_model_migration.as_ref() {
+        readable_legacy_lifemodel_migration(plan)
     } else if let Some(diff) = life_model_v2_diff.as_ref() {
         readable_lifemodel_v2_diff(diff)
     } else if proposal.proposal_type == ProposalType::MemoryWrite {
@@ -207,16 +213,27 @@ pub fn build_review_decision_context(
     } else {
         readable_value(&proposal.after)
     };
-    let before = life_model_v2_diff.as_ref().map(|diff| ReviewReadableValue {
-        kind: ReviewReadableValueKind::Object,
-        summary: diff.base_version.map_or_else(
-            || "Empty LifeModel v2".into(),
-            |version| format!("LifeModel v2 version {version}"),
-        ),
-        detail: diff.base_document_digest.clone(),
-        sensitivity: EvidenceSensitivity::LocalPrivate,
-        truncated: false,
-    });
+    let before = legacy_life_model_migration
+        .as_ref()
+        .map(|plan| ReviewReadableValue {
+            kind: ReviewReadableValueKind::Object,
+            summary: "Preserved legacy LifeModel YAML".into(),
+            detail: Some(format!("source digest {}", plan.legacy_source_digest)),
+            sensitivity: EvidenceSensitivity::LocalPrivate,
+            truncated: false,
+        })
+        .or_else(|| {
+            life_model_v2_diff.as_ref().map(|diff| ReviewReadableValue {
+                kind: ReviewReadableValueKind::Object,
+                summary: diff.base_version.map_or_else(
+                    || "Empty LifeModel v2".into(),
+                    |version| format!("LifeModel v2 version {version}"),
+                ),
+                detail: diff.base_document_digest.clone(),
+                sensitivity: EvidenceSensitivity::LocalPrivate,
+                truncated: false,
+            })
+        });
 
     ReviewDecisionContext {
         review_item_id: proposal.id.clone(),
@@ -225,7 +242,9 @@ pub fn build_review_decision_context(
         before: before.or_else(|| proposal.before.as_ref().map(readable_value)),
         after,
         reason_summary: bounded_text(&proposal.reason, "No reason was supplied."),
-        source_summary: if life_model_learning.is_some() {
+        source_summary: if legacy_life_model_migration.is_some() {
+            "User-reviewed legacy LifeModel migration".into()
+        } else if life_model_learning.is_some() {
             "User-confirmed LifeModel learning evidence".into()
         } else {
             proposal_source_summary(proposal.source).into()
@@ -237,6 +256,35 @@ pub fn build_review_decision_context(
         action_contract: build_governed_action_review_contract(proposal),
         life_model_learning,
         evidence_refs: evidence_refs.to_vec(),
+    }
+}
+
+fn reviewed_legacy_lifemodel_migration(
+    proposal: &AgentProposal,
+) -> Option<LegacyLifeModelMigrationPlanV2> {
+    (proposal.proposal_type == ProposalType::LifeModelUpdate
+        && proposal.affected_path == LIFE_MODEL_V2_LEGACY_MIGRATION_PATH)
+        .then(|| serde_json::from_value(proposal.after.clone()).ok())
+        .flatten()
+        .filter(|plan: &LegacyLifeModelMigrationPlanV2| plan.validate_contract().is_ok())
+}
+
+fn readable_legacy_lifemodel_migration(
+    plan: &LegacyLifeModelMigrationPlanV2,
+) -> ReviewReadableValue {
+    ReviewReadableValue {
+        kind: ReviewReadableValueKind::Object,
+        summary: format!(
+            "Migrate {} selected item(s); preserve {} excluded item(s) in the legacy archive",
+            plan.included_candidate_ids.len(),
+            plan.excluded_candidate_ids.len()
+        ),
+        detail: Some(format!(
+            "legacy source {} · resulting v2 document {} · {} non-LifeModel field(s) acknowledged",
+            plan.legacy_source_digest, plan.result_document_digest, plan.non_lifemodel_item_count
+        )),
+        sensitivity: EvidenceSensitivity::LocalPrivate,
+        truncated: false,
     }
 }
 
@@ -731,6 +779,9 @@ fn proposal_operation(proposal: &AgentProposal) -> Option<&str> {
 }
 
 fn proposal_title(proposal: &AgentProposal) -> String {
+    if reviewed_legacy_lifemodel_migration(proposal).is_some() {
+        return "Review legacy LifeModel migration".into();
+    }
     if reviewed_lifemodel_learning_context(proposal).is_some() {
         return "Review a learned long-term fact".into();
     }
@@ -763,6 +814,10 @@ fn proposal_title(proposal: &AgentProposal) -> String {
 }
 
 fn proposal_summary(proposal: &AgentProposal) -> String {
+    if reviewed_legacy_lifemodel_migration(proposal).is_some() {
+        return "Review the exact legacy source digest and every include or exclude decision before one atomic v2 cutover. The legacy source remains preserved."
+            .into();
+    }
     if reviewed_lifemodel_learning_context(proposal).is_some() {
         return "Review one user-confirmed candidate and its exact sources before it becomes part of LifeModel v2."
             .into();
@@ -826,6 +881,9 @@ fn impact_summary(proposal: &AgentProposal) -> &'static str {
 }
 
 fn affected_object_label(proposal: &AgentProposal) -> String {
+    if reviewed_legacy_lifemodel_migration(proposal).is_some() {
+        return "Legacy LifeModel to canonical v2 cutover".into();
+    }
     if reviewed_lifemodel_v2_diff(proposal).is_some() {
         return "LifeModel v2 canonical version".into();
     }
@@ -1167,6 +1225,54 @@ mod tests {
         assert_eq!(
             context.affected_object_labels,
             vec!["LifeModel v2 canonical version"]
+        );
+    }
+
+    #[test]
+    fn legacy_lifemodel_migration_has_source_bound_review_language() {
+        use crate::life_model::legacy_migration::{
+            LegacyLifeModelMigrationDecisionV2, LegacyLifeModelMigrationPreviewV2,
+            LegacyLifeModelMigrationSelectionV2,
+        };
+
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+            "identity:\n  name: Alice\ngoals:\n  short_term:\n    - name: Ship now\n",
+        )
+        .unwrap();
+        let selections = preview
+            .candidates
+            .iter()
+            .map(|candidate| LegacyLifeModelMigrationSelectionV2 {
+                candidate_id: candidate.candidate_id.clone(),
+                decision: LegacyLifeModelMigrationDecisionV2::Include,
+                edited_value: None,
+            })
+            .collect::<Vec<_>>();
+        let plan = preview
+            .build_migration_plan(&selections, true, "2026-08-23T12:00:00Z")
+            .unwrap();
+        let mut proposal = proposal(
+            ProposalType::LifeModelUpdate,
+            serde_json::to_value(plan).unwrap(),
+        );
+        proposal.affected_path = LIFE_MODEL_V2_LEGACY_MIGRATION_PATH.into();
+
+        let context = build_review_decision_context(&proposal, &[]);
+
+        assert_eq!(context.title, "Review legacy LifeModel migration");
+        assert_eq!(
+            context.before.unwrap().summary,
+            "Preserved legacy LifeModel YAML"
+        );
+        assert!(context.after.summary.contains("Migrate 1 selected item"));
+        assert!(context
+            .after
+            .detail
+            .unwrap()
+            .contains("resulting v2 document"));
+        assert_eq!(
+            context.affected_object_labels,
+            vec!["Legacy LifeModel to canonical v2 cutover"]
         );
     }
 

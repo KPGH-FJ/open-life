@@ -40,6 +40,110 @@ describe("Personal Intelligence route", () => {
     expect(document.getElementById("intelligence-panel-life-model")).not.toBeVisible();
   });
 
+  it("shows preserved legacy data instead of a fresh empty LifeModel", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchFixtureDataSource("fixture-ready");
+    const snapshot = buildPersonalIntelligenceFixtureSnapshot("fixture-ready", "pending");
+    if (!snapshot.lifeModelEnvelope.data) throw new Error("fixture LifeModel missing");
+    snapshot.lifeModelEnvelope.status = "ready";
+    snapshot.lifeModelEnvelope.data.truthMode = "migration_required";
+    snapshot.lifeModelEnvelope.data.legacyMigrationInventory = {
+      schemaVersion: "openlife.lifemodel.legacy-inventory.v1",
+      currentSourcePresent: true,
+      currentSourceBytes: 2218,
+      currentSourceModifiedAt: "2026-08-13T07:10:47Z",
+      currentSourceDigest: "sha256:legacy",
+      historyManifestPresent: true,
+      historyManifestEntryCount: 39,
+      historyManifestDigest: "sha256:manifest",
+      historyYamlFileCount: 39,
+      historyYamlTotalBytes: 168000,
+      preview: {
+        schemaVersion: "openlife.lifemodel.legacy-migration-preview.v1",
+        sourceDigest: "sha256:legacy",
+        items: [
+          {
+            sourcePath: "identity.name",
+            valuePreview: "Alice",
+            valueDigest: "sha256:value",
+            valueTruncated: false,
+            disposition: "review_required",
+            targetOwner: "life_model_v2",
+            targetSection: "identity",
+            reasonCode: "legacy_identity_requires_user_confirmation",
+            sensitive: false,
+          },
+          {
+            sourcePath: "state.current_focus",
+            valuePreview: "Launch",
+            valueDigest: "sha256:state",
+            valueTruncated: false,
+            disposition: "external_owner",
+            targetOwner: "state",
+            targetSection: null,
+            reasonCode: "current_state_belongs_to_state",
+            sensitive: false,
+          },
+        ],
+        reviewRequiredCount: 1,
+        externalOwnerCount: 1,
+        manualClassificationCount: 0,
+        notMigratedCount: 0,
+        migrationMetadataCount: 0,
+        containsSensitiveItems: true,
+        candidates: [
+          {
+            candidateId: "legacy-candidate:alice",
+            itemId: "legacy:alice",
+            sourcePaths: ["identity.name"],
+            targetSection: "identity",
+            proposedValue: { kind: "statement", value: { statement: "Alice" } },
+            sensitive: false,
+          },
+        ],
+      },
+    };
+    dataSource.loadPersonalIntelligence = async () => snapshot;
+    const draft = vi.spyOn(dataSource, "draftLegacyLifeModelMigration");
+
+    render(
+      <ProductWorkbench
+        workbenchDataSource={dataSource}
+        personalIntelligenceDataSource={dataSource}
+        initialSurface="life-model"
+      />
+    );
+
+    expect(await screen.findByRole("heading", { name: "发现待迁移的旧版长期信息" })).toBeVisible();
+    expect(screen.getByText("旧版 LifeModel 已安全保留")).toBeVisible();
+    expect(screen.getByText(/39 个 YAML 文件/)).toBeVisible();
+    expect(screen.getByText(/1 项需要逐项确认/)).toBeVisible();
+    expect(
+      screen.queryByRole("button", { name: "创建首条 LifeModel 建议" })
+    ).not.toBeInTheDocument();
+    const submit = screen.getByRole("button", { name: "创建迁移审核建议" });
+    expect(submit).toBeDisabled();
+    await user.click(screen.getByLabelText("审核后迁移到 v2"));
+    expect(submit).toBeDisabled();
+    await user.click(screen.getByLabelText(/我理解还有 1 个字段属于/));
+    expect(submit).toBeEnabled();
+    await user.click(submit);
+    await waitFor(() =>
+      expect(draft).toHaveBeenCalledWith({
+        sourceDigest: "sha256:legacy",
+        selections: [
+          {
+            candidateId: "legacy-candidate:alice",
+            decision: "include",
+            editedValue: { kind: "statement", value: { statement: "Alice" } },
+          },
+        ],
+        nonLifemodelItemsAcknowledged: true,
+      })
+    );
+    expect(screen.getByText("迁移建议已进入 Review")).toBeVisible();
+  });
+
   it("shows and deletes a learning candidate without presenting it as LifeModel or Review", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchFixtureDataSource("fixture-ready");

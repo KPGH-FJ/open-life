@@ -7,7 +7,9 @@ const tauriMocks = vi.hoisted(() => ({
   getProviderPrivacyBoundarySummary: vi.fn(),
   getProductDiagnosticsViewModel: vi.fn(),
   getReviewCenterViewModel: vi.fn(),
+  getToolPermissionViewModel: vi.fn(),
   recoverRequiredCredentialAccess: vi.fn(),
+  revokeToolPermission: vi.fn(),
   saveConfig: vi.fn(),
   selectArtifactOutputDirectory: vi.fn(),
   testLlmConnection: vi.fn(),
@@ -22,7 +24,9 @@ vi.mock("@/ipc/settings", () => ({
   getLifeStateProjection: tauriMocks.getLifeStateProjection,
   getProductDiagnosticsViewModel: tauriMocks.getProductDiagnosticsViewModel,
   getProviderPrivacyBoundarySummary: tauriMocks.getProviderPrivacyBoundarySummary,
+  getToolPermissionViewModel: tauriMocks.getToolPermissionViewModel,
   recoverRequiredCredentialAccess: tauriMocks.recoverRequiredCredentialAccess,
+  revokeToolPermission: tauriMocks.revokeToolPermission,
   saveConfig: tauriMocks.saveConfig,
   selectArtifactOutputDirectory: tauriMocks.selectArtifactOutputDirectory,
   testLlmConnection: tauriMocks.testLlmConnection,
@@ -53,6 +57,21 @@ describe("Tauri settings privacy data source", () => {
       stores: [],
       counts: {},
       blockerCodes: [],
+    });
+    tauriMocks.getToolPermissionViewModel.mockResolvedValue({
+      data: {
+        items: [],
+        totalCount: 0,
+        activeCount: 0,
+        revocableCount: 0,
+        contractLimitations: [],
+      },
+      status: "empty",
+      lastUpdatedAt: "2026-08-24T00:00:00Z",
+      source: "backend-readmodel",
+      evidenceRefs: [],
+      warnings: [],
+      actions: { primary: [], review: [], debugOnly: [] },
     });
   });
 
@@ -100,6 +119,29 @@ describe("Tauri settings privacy data source", () => {
       selectedPath: "/tmp/openlife-artifacts",
     });
     expect(tauriMocks.selectArtifactOutputDirectory).toHaveBeenCalledTimes(1);
+  });
+
+  it("loads and revokes only through the canonical permission commands", async () => {
+    tauriMocks.getConfig.mockResolvedValue(config);
+    tauriMocks.getProviderPrivacyBoundarySummary.mockResolvedValue({
+      data: null,
+      status: "empty",
+      lastUpdatedAt: null,
+      source: "backend-readmodel",
+      evidenceRefs: [],
+      warnings: [],
+      actions: { primary: [], review: [], debugOnly: [] },
+    });
+    const snapshot = await tauriSettingsDataSource.loadSettings();
+    expect(snapshot.toolPermissionEnvelope.status).toBe("empty");
+
+    tauriMocks.revokeToolPermission.mockResolvedValue(undefined);
+    await expect(
+      tauriSettingsDataSource.revokeToolPermission?.("00000000-0000-4000-8000-000000000001")
+    ).resolves.toBeUndefined();
+    expect(tauriMocks.revokeToolPermission).toHaveBeenCalledWith(
+      "00000000-0000-4000-8000-000000000001"
+    );
   });
 
   it("keeps Safe Mode unknown when LifeStateProjection cannot be read", async () => {

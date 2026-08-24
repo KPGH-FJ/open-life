@@ -47,7 +47,7 @@ export type WorkbenchController = {
   cancelReviewConfirmation: () => void;
   editLifeModelLearning: (statement: string) => Promise<boolean>;
   requestTaskControl: (control: TaskControl, expectedTaskId: string) => void;
-  cancelRunningTask: (taskId: string) => Promise<void>;
+  stopRunningTask: (taskId: string, runId: string) => Promise<void>;
   confirmTaskControl: () => void;
   cancelTaskControlConfirmation: () => void;
 };
@@ -168,19 +168,19 @@ export function useWorkbenchController(
     [announce, loadSnapshot]
   );
 
-  const cancelRunningTask = useCallback(
-    async (taskId: string): Promise<void> => {
+  const stopRunningTask = useCallback(
+    async (taskId: string, runId: string): Promise<void> => {
       if (
         !dataSource ||
         activeReviewOperationRef.current !== null ||
         activeTaskControlOperationRef.current !== null
       ) {
-        throw new Error("work_task_cancel_busy_or_unavailable");
+        throw new Error("work_run_stop_busy_or_unavailable");
       }
       const operationId = ++operationSequenceRef.current;
       activeTaskControlOperationRef.current = operationId;
       try {
-        await dataSource.cancelTask(taskId);
+        await dataSource.stopRun(taskId, runId);
       } finally {
         if (activeTaskControlOperationRef.current === operationId) {
           activeTaskControlOperationRef.current = null;
@@ -454,14 +454,12 @@ export function useWorkbenchController(
           announce("任务请求已发送，但刷新后找不到同一任务；当前保持未知。");
         } else if (verification.phase === "awaiting_projection") {
           announce("任务请求已发送，但刷新后的同一任务尚未确认该变化。");
-        } else if (verification.phase === "resolved" && control.kind === "cancel") {
-          announce("刷新后的同一任务已确认取消。");
-        } else if (verification.phase === "resolved" && control.kind === "refresh_context") {
-          announce("任务上下文已经重新读取；任务结果没有因此被解释成完成。");
+        } else if (verification.phase === "resolved" && control.kind === "stop_run") {
+          announce("刷新后的同一任务已确认当前运行停止；继续会创建新运行。");
         } else if (verification.phase === "resolved" && control.kind === "retry") {
-          announce("刷新后的同一任务已离开失败状态；这还不是完成结论。");
+          announce("刷新后的同一任务已创建新的重试运行；这还不是完成结论。");
         } else if (verification.phase === "resolved") {
-          announce("刷新后的同一任务已确认继续；这还不是完成结论。");
+          announce("刷新后的同一任务已创建新的继续运行；这还不是完成结论。");
         }
         if (!dependentsReady) {
           announce("任务状态已核对，但对话记录刷新失败；请重新读取后再判断最终回答。");
@@ -551,7 +549,7 @@ export function useWorkbenchController(
     cancelReviewConfirmation,
     editLifeModelLearning,
     requestTaskControl,
-    cancelRunningTask,
+    stopRunningTask,
     confirmTaskControl,
     cancelTaskControlConfirmation,
   };

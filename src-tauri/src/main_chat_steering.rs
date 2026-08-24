@@ -31,29 +31,6 @@ fn steering_app_error(error: String) -> AppError {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SubmitMainChatSteeringResponse {
     pub steering: CanonicalSteeringRecord,
-    pub scope_expansion_blocked: bool,
-}
-
-fn steering_requests_scope_expansion(content: &str) -> bool {
-    let lower = content.to_ascii_lowercase();
-    [
-        "full access",
-        "访问其他目录",
-        "workspace 外",
-        "联网",
-        "network",
-        "切换模型",
-        "switch model",
-        "换 provider",
-        "send email",
-        "发送邮件",
-        "删除",
-        "delete",
-        "shell",
-        "terminal",
-    ]
-    .iter()
-    .any(|marker| lower.contains(marker))
 }
 
 pub(crate) async fn submit_main_chat_task_steering_with_state(
@@ -86,14 +63,8 @@ pub(crate) async fn submit_main_chat_task_steering_with_state(
         .resolve_general_run_target_for_conversation(task_id, run_id, session_id)
         .map_err(|error| format!("load steering target failed: {error}"))?
         .ok_or_else(|| "canonical_steering_target_missing".to_string())?;
-    let scope_expansion_blocked = steering_requests_scope_expansion(content);
     task_store
-        .validate_steering_admission(
-            &target.task_id,
-            run_id,
-            target.plan_revision,
-            scope_expansion_blocked,
-        )
+        .validate_steering_admission(&target.task_id, run_id, target.plan_revision)
         .map_err(|error| format!("validate canonical Work steering failed: {error}"))?;
     let conversation_store = state
         .conversation_store
@@ -125,13 +96,9 @@ pub(crate) async fn submit_main_chat_task_steering_with_state(
             source_message_digest: &commit.item.content_digest,
             steering_digest: &steering_digest,
             base_plan_revision: target.plan_revision,
-            scope_expansion_blocked,
         })
         .map_err(|error| format!("submit canonical Work steering failed: {error}"))?;
-    Ok(SubmitMainChatSteeringResponse {
-        steering,
-        scope_expansion_blocked,
-    })
+    Ok(SubmitMainChatSteeringResponse { steering })
 }
 
 #[tauri::command]
@@ -232,6 +199,7 @@ mod tests {
                 project_id: None,
                 project_revision: None,
                 scope_digest: None,
+                execution_mode: openlife_core::task_runtime::WorkExecutionMode::ScopedAgent,
             })
             .unwrap();
         (state, conversation_id, task_id, run_id, turn_id)
@@ -267,6 +235,7 @@ mod tests {
                     executor_kind: "provider",
                     provider_profile_id: None,
                     provider_model_id: None,
+                    provider_reasoning_effort: None,
                     request_digest: &request_digest,
                 })
                 .unwrap();
@@ -283,7 +252,6 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(response.steering.status, CanonicalSteeringStatus::Pending);
-        assert!(!response.scope_expansion_blocked);
         let turn = state
             .conversation_store
             .as_ref()
@@ -329,6 +297,7 @@ mod tests {
                     executor_kind: "provider",
                     provider_profile_id: None,
                     provider_model_id: None,
+                    provider_reasoning_effort: None,
                     request_digest: &request_digest,
                 })
                 .unwrap();

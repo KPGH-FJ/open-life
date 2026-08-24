@@ -41,7 +41,12 @@ pub(crate) async fn get_review_center_view_model_with_state(
         canonical_artifact_evidence_overrides(state, &proposals).await;
     let artifact_evidence = canonical_artifact_evidence;
     let config = state.config.lock().await;
-    let safe_paths = config.system.safe_paths.clone();
+    let safe_paths = config
+        .system
+        .artifact_output_directory
+        .clone()
+        .into_iter()
+        .collect();
     drop(config);
 
     let (safe_path_overrides, mut safe_path_warnings) =
@@ -210,7 +215,11 @@ fn is_dispatch_backed_review_item(proposal: &AgentProposal) -> bool {
     match proposal.proposal_type {
         ProposalType::MemoryArchive => true,
         ProposalType::LifeModelUpdate => {
-            proposal.affected_path == openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
+            matches!(
+                proposal.affected_path.as_str(),
+                openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH
+                    | openlife_core::life_model::legacy_migration::LIFE_MODEL_V2_LEGACY_MIGRATION_PATH
+            )
         }
         _ => false,
     }
@@ -350,38 +359,44 @@ mod tests {
     }
 
     #[test]
-    fn review_projection_reads_confirmed_lifemodel_v2_dispatch_receipt() {
+    fn review_projection_reads_confirmed_lifemodel_v2_and_migration_dispatch_receipts() {
         let store = ProposalStore::new_in_memory().expect("proposal store");
-        let mut proposal = AgentProposal::new(
-            ProposalType::LifeModelUpdate,
+        for affected_path in [
             openlife_core::life_model::v2::LIFE_MODEL_V2_TYPED_DIFF_PATH,
-            json!({"schemaVersion": "openlife.lifemodel.typed-diff.v2"}),
-            "Apply one reviewed LifeModel v2 change.",
-            1.0,
-            RiskLevel::Medium,
-            ProposalSource::Manual,
-        );
-        store.create_proposal(&proposal).expect("create proposal");
-        let claim = store
-            .claim_dispatch(&proposal.id)
-            .expect("claim dispatch")
-            .expect("claim id");
-        assert!(store
-            .mark_effect_confirmed_projection_pending(&proposal.id, &claim)
-            .expect("persist confirmed effect"));
-        proposal.accept();
-        assert!(store
-            .project_confirmed_effect(&proposal, &claim)
-            .expect("project accepted proposal"));
+            openlife_core::life_model::legacy_migration::LIFE_MODEL_V2_LEGACY_MIGRATION_PATH,
+        ] {
+            let mut proposal = AgentProposal::new(
+                ProposalType::LifeModelUpdate,
+                affected_path,
+                json!({"schemaVersion": "review-projection-test"}),
+                "Apply one reviewed LifeModel v2 change.",
+                1.0,
+                RiskLevel::Medium,
+                ProposalSource::Manual,
+            );
+            store.create_proposal(&proposal).expect("create proposal");
+            let claim = store
+                .claim_dispatch(&proposal.id)
+                .expect("claim dispatch")
+                .expect("claim id");
+            assert!(store
+                .mark_effect_confirmed_projection_pending(&proposal.id, &claim)
+                .expect("persist confirmed effect"));
+            proposal.accept();
+            assert!(store
+                .project_confirmed_effect(&proposal, &claim)
+                .expect("project accepted proposal"));
 
-        let (overrides, warnings) =
-            dispatch_materialization_overrides(&store, std::slice::from_ref(&proposal));
+            let (overrides, warnings) =
+                dispatch_materialization_overrides(&store, std::slice::from_ref(&proposal));
 
-        assert!(warnings.is_empty());
-        assert_eq!(
-            overrides.get(&proposal.id),
-            Some(&ReviewItemMaterializationStatus::Applied)
-        );
+            assert!(warnings.is_empty());
+            assert_eq!(
+                overrides.get(&proposal.id),
+                Some(&ReviewItemMaterializationStatus::Applied),
+                "confirmed dispatch receipt must close {affected_path}"
+            );
+        }
     }
 
     #[test]

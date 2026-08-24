@@ -1,5 +1,6 @@
 import {
   type LifeModelViewModel,
+  type DraftLegacyLifeModelMigrationRequest,
   type DraftLifeModelV2ChangeRequest,
   type DraftLifeModelV2ExportRequest,
   type DraftLifeModelV2RollbackRequest,
@@ -15,6 +16,7 @@ import {
   draftLifeModelV2Change,
   draftLifeModelV2Export,
   draftLifeModelV2Rollback,
+  draftLegacyLifeModelMigration,
   confirmLifeModelLearningCandidate,
   deleteLifeModelLearningCandidate,
   pauseLifeModelLearningSuggestionClass,
@@ -57,6 +59,7 @@ export interface PersonalIntelligenceDataSource {
   rollbackMemory(memoryId: string, reason: string): Promise<void>;
   privacyEraseMemory(memoryId: string): Promise<void>;
   draftLifeModelChange(request: DraftLifeModelV2ChangeRequest): Promise<string>;
+  draftLegacyLifeModelMigration(request: DraftLegacyLifeModelMigrationRequest): Promise<string>;
   draftLifeModelRollback(request: DraftLifeModelV2RollbackRequest): Promise<string>;
   draftLifeModelExport(request: DraftLifeModelV2ExportRequest): Promise<string>;
   confirmLifeModelLearningCandidate(candidateId: string): Promise<void>;
@@ -323,6 +326,25 @@ export const tauriPersonalIntelligenceDataSource: PersonalIntelligenceDataSource
   async draftLifeModelChange(request) {
     const receipt = await draftLifeModelV2Change(request);
     return requireLifeModelProposalReceipt(receipt, request.baseVersion);
+  },
+  async draftLegacyLifeModelMigration(request) {
+    const receipt = await draftLegacyLifeModelMigration(request);
+    const includedCandidateCount = request.selections.filter(
+      selection => selection.decision === "include"
+    ).length;
+    const excludedCandidateCount = request.selections.length - includedCandidateCount;
+    if (
+      !receipt.proposalId ||
+      receipt.status !== "review_required" ||
+      receipt.sourceDigest !== request.sourceDigest ||
+      !receipt.resultDocumentDigest.startsWith("sha256:") ||
+      receipt.includedCandidateCount !== includedCandidateCount ||
+      receipt.excludedCandidateCount !== excludedCandidateCount ||
+      receipt.durableWriteExecuted
+    ) {
+      throw new Error("lifemodel_v2_migration_proposal_receipt_unverified");
+    }
+    return receipt.proposalId;
   },
   async draftLifeModelRollback(request) {
     const receipt = await draftLifeModelV2Rollback(request);
