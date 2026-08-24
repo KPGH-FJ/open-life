@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { fireEvent, render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type { CredentialBootstrapStatus } from "@/tauri";
 import type { SettingsDataSource, SettingsSnapshot } from "./settingsDataSource";
@@ -112,6 +112,75 @@ describe("SettingsView", () => {
     expect(memorySwitch).toHaveAttribute("aria-checked", "false");
   });
 
+  it("shows backend-owned permission scope and revokes the exact reusable grant", async () => {
+    const source = credentialSettingsSource(null);
+    const base = await source.loadSettings();
+    const permissionId = "00000000-0000-4000-8000-000000000001";
+    const withPermission: SettingsSnapshot = {
+      ...base,
+      toolPermissionEnvelope: {
+        data: {
+          items: [
+            {
+              id: permissionId,
+              toolName: "web.search",
+              source: "builtin",
+              riskLevel: "medium",
+              actionType: "network",
+              policy: "allow_until_revoked",
+              lifecycleState: "active",
+              createdAt: "2026-08-24T00:00:00Z",
+              revocable: true,
+            },
+          ],
+          totalCount: 1,
+          activeCount: 1,
+          revocableCount: 1,
+          contractLimitations: [],
+        },
+        status: "ready",
+        lastUpdatedAt: "2026-08-24T00:00:00Z",
+        source: "backend-readmodel",
+        evidenceRefs: [],
+        warnings: [],
+        actions: { primary: [], review: [], debugOnly: [] },
+      },
+    };
+    const withoutPermission: SettingsSnapshot = {
+      ...base,
+      toolPermissionEnvelope: {
+        data: {
+          items: [],
+          totalCount: 0,
+          activeCount: 0,
+          revocableCount: 0,
+          contractLimitations: [],
+        },
+        status: "empty",
+        lastUpdatedAt: "2026-08-24T00:00:01Z",
+        source: "backend-readmodel",
+        evidenceRefs: [],
+        warnings: [],
+        actions: { primary: [], review: [], debugOnly: [] },
+      },
+    };
+    source.loadSettings = vi
+      .fn()
+      .mockResolvedValueOnce(withPermission)
+      .mockResolvedValueOnce(withoutPermission);
+    source.revokeToolPermission = vi.fn().mockResolvedValue(undefined);
+
+    render(<SafeModeSettings source={source} surface="privacy-network" />);
+
+    expect(await screen.findByRole("heading", { name: "工具权限" })).toBeInTheDocument();
+    expect(screen.getByText("web.search")).toBeInTheDocument();
+    expect(screen.getByText("允许直至撤销")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "撤销权限" }));
+
+    await waitFor(() => expect(source.revokeToolPermission).toHaveBeenCalledWith(permissionId));
+    expect(await screen.findByText(/当前没有持久化工具权限/)).toBeInTheDocument();
+  });
+
   it("renders only canonical product diagnostics and reports blockers explicitly", async () => {
     const source = credentialSettingsSource(null);
     const snapshot = await source.loadSettings();
@@ -187,7 +256,7 @@ describe("SettingsView", () => {
         },
         prefer_local_model: false,
         local_model: "local",
-        system: { search_provider: "duckduckgo", safe_paths: [] },
+        system: { search_provider: "duckduckgo", artifact_output_directory: undefined },
       },
     });
 
@@ -198,8 +267,8 @@ describe("SettingsView", () => {
     model.unmount();
 
     render(<SafeModeSettings source={source} surface="privacy-network" />);
-    expect(await screen.findByRole("heading", { name: "Artifact 输出目录" })).toBeInTheDocument();
-    expect(screen.getByText(/生成 artifact 时会被系统明确阻止/)).toBeInTheDocument();
+    expect(await screen.findByRole("heading", { name: "非 Project 导出目录" })).toBeInTheDocument();
+    expect(screen.getByText(/Work Artifact 使用当前 Project 或应用托管目录/)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "选择输出文件夹" })).toBeEnabled();
   });
 
@@ -226,6 +295,21 @@ describe("SettingsView", () => {
         actions: { primary: [], review: [], debugOnly: [] },
       },
       safeMode: { active: false, reason: "", sourceRefs: [] },
+      toolPermissionEnvelope: {
+        data: {
+          items: [],
+          totalCount: 0,
+          activeCount: 0,
+          revocableCount: 0,
+          contractLimitations: [],
+        },
+        status: "empty",
+        lastUpdatedAt: null,
+        source: "backend-readmodel",
+        evidenceRefs: [],
+        warnings: [],
+        actions: { primary: [], review: [], debugOnly: [] },
+      },
       diagnostics: [
         { id: "sanitized_config", status: "loaded" },
         { id: "provider_privacy_boundary", status: "loaded" },
@@ -272,6 +356,15 @@ describe("SettingsView", () => {
         active: true,
         reason: "credential_store_unavailable",
         sourceRefs: ["safe-mode:credential-store"],
+      },
+      toolPermissionEnvelope: {
+        data: null,
+        status: "error",
+        lastUpdatedAt: null,
+        source: "backend-readmodel",
+        evidenceRefs: [],
+        warnings: [],
+        actions: { primary: [], review: [], debugOnly: [] },
       },
       diagnostics: [
         { id: "sanitized_config", status: "failed", message: "config unavailable" },
@@ -389,6 +482,15 @@ describe("SettingsView", () => {
         actions: { primary: [], review: [], debugOnly: [] },
       },
       safeMode: null,
+      toolPermissionEnvelope: {
+        data: null,
+        status: "error",
+        lastUpdatedAt: null,
+        source: "backend-readmodel",
+        evidenceRefs: [],
+        warnings: [],
+        actions: { primary: [], review: [], debugOnly: [] },
+      },
       diagnostics: [
         { id: "sanitized_config", status: "loaded" },
         { id: "provider_privacy_boundary", status: "loaded" },

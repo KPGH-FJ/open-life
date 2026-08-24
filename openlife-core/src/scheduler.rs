@@ -1239,6 +1239,17 @@ impl InferenceScheduler {
         self.provider_credential_version
     }
 
+    /// Derive one request-scoped local execution generation from the current
+    /// coherent runtime without mutating the user's configured default route.
+    /// The caller must supply a model observed from Ollama discovery; adapter
+    /// preparation re-validates that exact model before dispatch.
+    pub fn with_selected_local_model(mut self, model: String) -> Self {
+        self.local_model = model;
+        self.prefer_local = true;
+        self.provider_config_generation = uuid::Uuid::new_v4().to_string();
+        self
+    }
+
     fn validate_provider_runtime_identity(&self) -> Result<()> {
         let observed = ProviderRuntimeIdentity::capture(
             &self.provider,
@@ -1508,6 +1519,8 @@ impl InferenceScheduler {
             context_manifest,
             provider_target,
             model_target,
+            reasoning_effort: None,
+            reasoning_capability: None,
             provider_endpoint: endpoint.clone(),
             provider_config_generation: self.provider_config_generation.clone(),
             provider_credential_version: self.provider_credential_version,
@@ -1683,6 +1696,8 @@ impl InferenceScheduler {
             context_manifest,
             provider_target,
             model_target,
+            reasoning_effort: None,
+            reasoning_capability: None,
             provider_endpoint: provider_endpoint.clone(),
             provider_config_generation: self.provider_config_generation.clone(),
             provider_credential_version: self.provider_credential_version,
@@ -1842,6 +1857,7 @@ impl InferenceScheduler {
                         _ => None,
                     },
                     deterministic: deterministic_output,
+                    reasoning_effort: request.reasoning_effort,
                 },
                 Some(&request_id),
                 on_started,
@@ -1861,6 +1877,7 @@ impl InferenceScheduler {
                 endpoint: execution_binding.endpoint(),
                 api_key: execution_binding.api_key(),
                 model: &request.model_target,
+                reasoning_effort: request.reasoning_effort,
                 structured_json_output,
                 provider_native_json_mode,
                 provider_tools: &request.provider_tools,
@@ -2165,6 +2182,7 @@ impl InferenceScheduler {
                     &request.model_target,
                     request.messages,
                     system_prompt.as_deref(),
+                    request.reasoning_effort,
                     Some(&request_id),
                     || {
                         let observed_at = chrono::Utc::now();
@@ -2217,6 +2235,7 @@ impl InferenceScheduler {
                 endpoint: execution_binding.endpoint(),
                 api_key: execution_binding.api_key(),
                 model: &request.model_target,
+                reasoning_effort: request.reasoning_effort,
                 structured_json_output: matches!(
                     policy_evidence.payload_purpose,
                     Some(ProviderPayloadPurpose::MainChatWorkSemanticVerification)
@@ -3911,6 +3930,8 @@ mod tests {
             },
             provider_target: "deepseek".into(),
             model_target: "deepseek-chat".into(),
+            reasoning_effort: None,
+            reasoning_capability: None,
             provider_endpoint: crate::llm::chat_completions_url("deepseek", &scheduler.openai_base),
             provider_config_generation: scheduler.provider_config_generation().to_string(),
             provider_credential_version: scheduler.provider_credential_version(),

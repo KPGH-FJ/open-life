@@ -34,6 +34,8 @@ pub struct OpenLifeProviderClient {
     privacy_engine: PrivacyEngine,
     network_policy: NetworkPolicy,
     runtime_state: Option<Arc<AppState>>,
+    reasoning_effort: Option<openlife_core::conversation::ReasoningEffort>,
+    reasoning_capability: Option<openlife_core::llm::ProviderReasoningCapability>,
 }
 
 impl OpenLifeProviderClient {
@@ -47,11 +49,29 @@ impl OpenLifeProviderClient {
             privacy_engine,
             network_policy,
             runtime_state: None,
+            reasoning_effort: None,
+            reasoning_capability: None,
         }
     }
 
     pub(crate) fn with_runtime_state(mut self, state: Arc<AppState>) -> Self {
         self.runtime_state = Some(state);
+        self
+    }
+
+    pub(crate) fn with_reasoning_effort(
+        mut self,
+        effort: Option<openlife_core::conversation::ReasoningEffort>,
+    ) -> Self {
+        self.reasoning_effort = effort;
+        self
+    }
+
+    pub(crate) fn with_reasoning_capability(
+        mut self,
+        capability: Option<openlife_core::llm::ProviderReasoningCapability>,
+    ) -> Self {
+        self.reasoning_capability = capability;
         self
     }
 }
@@ -507,6 +527,15 @@ impl MainChatModelClient for OpenLifeProviderClient {
                 }
             })?;
         prepared.provider_tools = provider_tools;
+        prepared.reasoning_effort = self.reasoning_effort;
+        prepared.reasoning_capability = self.reasoning_effort.and_then(|_| {
+            self.reasoning_capability.clone().or_else(|| {
+                openlife_core::llm::built_in_reasoning_capability(
+                    &prepared.provider_target,
+                    &prepared.model_target,
+                )
+            })
+        });
         prepared.validate().map_err(|error| MainChatModelFailure {
             message: error.to_string(),
             provider_receipt: None,

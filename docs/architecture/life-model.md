@@ -23,16 +23,16 @@ not permit ordinary Main Chat to write durable LifeModel truth directly.
 
 ## Last verified
 
-2026-08-10 during Phase 5.5F authority-convergence closeout.
+2026-08-23 during Gate 0 isolated native migration and rollback verification.
 
 ## Source map
 
 - `plans/adr/0016-agent-memory-lifemodel-domain-boundaries.md`
 - `openlife-core/src/life_model.rs`
+- `openlife-core/src/life_model/legacy_migration.rs`
 - `openlife-core/src/life_model/v2.rs`
 - `openlife-core/src/agent/life_model_runtime_context.rs`
 - `openlife-core/src/life_model/patch.rs`
-- `openlife-core/src/life_model_write_gateway.rs`
 - `openlife-core/src/agent/proposal_store.rs`
 - `openlife-core/src/agent/memory_lifecycle.rs`
 - `src-tauri/src/life_model_write_gateway.rs`
@@ -123,10 +123,10 @@ the backend-owned operation summary and exact values before approval.
 
 ## Patch And Proposal Path
 
-`openlife-core/src/life_model/patch.rs` defines patch objects, patch status,
-patch source, conflict handling, and conversion from proposals to patch inputs.
-`openlife-core/src/life_model/patch_store.rs` persists patches and conflicts in
-SQLite.
+`openlife-core/src/life_model/patch.rs` retains bounded legacy patch value types
+used by existing gateway result contracts. It is not a persisted canonical v2
+owner. Canonical v2 mutation and version persistence live in
+`openlife-core/src/life_model/v2.rs`.
 
 Main Chat proposals must carry current Policy admission into ReviewWorkflow.
 ToolPermission, canonical Plan Items, learning candidates, and other proposal
@@ -143,12 +143,6 @@ state, task progress, Agent tool capability, or procedural work experience.
 including pending, accepted, rejected, edited, and postponed records.
 
 ## Write Gateway
-
-`openlife-core/src/life_model_write_gateway.rs` classifies LifeModel write
-intents. Accepted proposal materialization requires a proposal id and matching
-base/current hashes. Manual and restore/import overrides require explicit
-override evidence. Source-data compatibility writes are allowed only as
-non-truth compatibility. Automatic learning is blocked.
 
 `src-tauri/src/life_model_write_gateway.rs` is the Tauri-side enforcement path.
 The exact `$lifemodel_v2` path parses a `LifeModelTypedDiffV2`, verifies proposal
@@ -221,15 +215,10 @@ ordinary Agent work continues without personalization.
 An explicit stable preference in canonical Work goes through
 `PersonalIntelligenceSuggestionPort`. That boundary can capture a typed
 LifeModel learning candidate, but it does not create a Proposal or mutate the
-canonical version. Existing candidate maturation, typed-diff Review, and
-`LifeModelWriteGateway` materialization remain the only durable path. The
+canonical version. Existing candidate maturation, typed-diff Review, and the
+canonical Tauri LifeModel materializer remain the only durable path. The
 successful capture appears as a canonical Observation Item without giving
 LifeModel any Task, permission, Artifact, or terminal-state authority.
-
-`src-tauri/src/life_model_materializer_guard.rs` limits allowed caller
-contexts. Governed manual override, restore/import, source-data compatibility,
-and accepted-proposal apply have explicit lanes. Unclassified caller contexts
-are blocked.
 
 ## Review Center Application
 

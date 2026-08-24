@@ -6,12 +6,24 @@ const mocks = vi.hoisted(() => ({
   unlisten: vi.fn(),
   startStreamMessage: vi.fn(),
   cancelChatTurn: vi.fn(),
-  createProject: vi.fn(),
+  createChatSession: vi.fn(),
+  createProjectFromDirectory: vi.fn(),
+  bindProjectDirectory: vi.fn(),
+  addProjectReadRoot: vi.fn(),
+  removeProjectReadRoot: vi.fn(),
+  updateProjectName: vi.fn(),
+  archiveProject: vi.fn(),
+  archiveChatSession: vi.fn(),
+  restoreProject: vi.fn(),
+  restoreChatSession: vi.fn(),
+  deleteProject: vi.fn(),
   assignConversationProject: vi.fn(),
+  selectNewConversationProject: vi.fn(),
   setConversationMemoryMode: vi.fn(),
   pickAndImportResources: vi.fn(),
   detachResourceFromTurn: vi.fn(),
   listMainChatSkills: vi.fn(),
+  getMainChatSkillDetail: vi.fn(),
   selectMainChatSkill: vi.fn(),
   clearMainChatSkill: vi.fn(),
   listMainChatToolCandidates: vi.fn(),
@@ -28,9 +40,19 @@ vi.mock("@tauri-apps/api/event", () => ({
 
 vi.mock("@/ipc/conversation", () => ({
   cancelChatTurn: mocks.cancelChatTurn,
-  createChatSession: vi.fn(),
-  createProject: mocks.createProject,
+  createChatSession: mocks.createChatSession,
+  createProjectFromDirectory: mocks.createProjectFromDirectory,
+  bindProjectDirectory: mocks.bindProjectDirectory,
+  addProjectReadRoot: mocks.addProjectReadRoot,
+  removeProjectReadRoot: mocks.removeProjectReadRoot,
+  updateProjectName: mocks.updateProjectName,
+  archiveProject: mocks.archiveProject,
+  archiveChatSession: mocks.archiveChatSession,
+  restoreProject: mocks.restoreProject,
+  restoreChatSession: mocks.restoreChatSession,
+  deleteProject: mocks.deleteProject,
   assignConversationProject: mocks.assignConversationProject,
+  selectNewConversationProject: mocks.selectNewConversationProject,
   setConversationMemoryMode: mocks.setConversationMemoryMode,
   deleteChatSession: vi.fn(),
   getConversationViewModel: mocks.getConversationViewModel,
@@ -39,6 +61,7 @@ vi.mock("@/ipc/conversation", () => ({
   pickAndImportResources: mocks.pickAndImportResources,
   detachResourceFromTurn: mocks.detachResourceFromTurn,
   listMainChatSkills: mocks.listMainChatSkills,
+  getMainChatSkillDetail: mocks.getMainChatSkillDetail,
   selectMainChatSkill: mocks.selectMainChatSkill,
   clearMainChatSkill: mocks.clearMainChatSkill,
   listMainChatToolCandidates: mocks.listMainChatToolCandidates,
@@ -52,12 +75,24 @@ describe("Conversation Tauri stream adapter", () => {
     mocks.listeners.clear();
     mocks.unlisten.mockClear();
     mocks.startStreamMessage.mockReset();
-    mocks.createProject.mockReset();
+    mocks.createChatSession.mockReset();
+    mocks.createProjectFromDirectory.mockReset();
+    mocks.bindProjectDirectory.mockReset();
+    mocks.addProjectReadRoot.mockReset();
+    mocks.removeProjectReadRoot.mockReset();
+    mocks.updateProjectName.mockReset();
+    mocks.archiveProject.mockReset();
+    mocks.archiveChatSession.mockReset();
+    mocks.restoreProject.mockReset();
+    mocks.restoreChatSession.mockReset();
+    mocks.deleteProject.mockReset();
     mocks.assignConversationProject.mockReset();
+    mocks.selectNewConversationProject.mockReset();
     mocks.setConversationMemoryMode.mockReset();
     mocks.pickAndImportResources.mockReset();
     mocks.detachResourceFromTurn.mockReset();
     mocks.listMainChatSkills.mockReset();
+    mocks.getMainChatSkillDetail.mockReset();
     mocks.selectMainChatSkill.mockReset();
     mocks.clearMainChatSkill.mockReset();
     mocks.listMainChatToolCandidates.mockReset();
@@ -67,19 +102,38 @@ describe("Conversation Tauri stream adapter", () => {
 
   it("forwards skill selection and tool discovery through system-owned bridges", async () => {
     mocks.listMainChatSkills.mockResolvedValue([]);
+    mocks.getMainChatSkillDetail.mockResolvedValue({ skillId: "review" });
     mocks.selectMainChatSkill.mockResolvedValue({ sessionId: "conversation-1", skillId: "review" });
     mocks.clearMainChatSkill.mockResolvedValue({ sessionId: "conversation-1", skillId: null });
     mocks.listMainChatToolCandidates.mockResolvedValue({ candidates: [], blockedCount: 0 });
 
     await tauriConversationDataSource.listSkills?.("conversation-1");
+    await tauriConversationDataSource.getSkillDetail?.("review");
     await tauriConversationDataSource.selectSkill?.("conversation-1", "review");
     await tauriConversationDataSource.clearSkill?.("conversation-1");
     await tauriConversationDataSource.listToolCandidates?.("task-1");
 
     expect(mocks.listMainChatSkills).toHaveBeenCalledWith("conversation-1");
+    expect(mocks.getMainChatSkillDetail).toHaveBeenCalledWith("review");
     expect(mocks.selectMainChatSkill).toHaveBeenCalledWith("conversation-1", "review");
     expect(mocks.clearMainChatSkill).toHaveBeenCalledWith("conversation-1");
     expect(mocks.listMainChatToolCandidates).toHaveBeenCalledWith("task-1");
+  });
+
+  it("forwards the complete new-Conversation admission before the first turn", async () => {
+    mocks.createChatSession.mockResolvedValue(undefined);
+
+    await tauriConversationDataSource.createSession("conversation-1", "Private work", {
+      projectId: "project-1",
+      memoryMode: "off",
+      selectedSkillId: "review",
+    });
+
+    expect(mocks.createChatSession).toHaveBeenCalledWith("conversation-1", "Private work", {
+      projectId: "project-1",
+      memoryMode: "off",
+      selectedSkillId: "review",
+    });
   });
 
   it("forwards resource import and detach through the exact Tauri bridge", async () => {
@@ -102,6 +156,39 @@ describe("Conversation Tauri stream adapter", () => {
     await tauriConversationDataSource.setMemoryMode?.("conversation-1", "use_only");
 
     expect(mocks.setConversationMemoryMode).toHaveBeenCalledWith("conversation-1", "use_only");
+  });
+
+  it("forwards revision-bound Project lifecycle mutations", async () => {
+    await tauriConversationDataSource.updateProjectName?.("project-1", "Renamed", 3);
+    await tauriConversationDataSource.archiveProject?.("project-1", 4);
+    await tauriConversationDataSource.restoreProject?.("project-1", 5);
+    await tauriConversationDataSource.deleteProject?.("project-1", 6);
+
+    expect(mocks.updateProjectName).toHaveBeenCalledWith("project-1", "Renamed", 3);
+    expect(mocks.archiveProject).toHaveBeenCalledWith("project-1", 4);
+    expect(mocks.restoreProject).toHaveBeenCalledWith("project-1", 5);
+    expect(mocks.deleteProject).toHaveBeenCalledWith("project-1", 6);
+  });
+
+  it("forwards Conversation archive and restore through distinct lifecycle commands", async () => {
+    await tauriConversationDataSource.archiveSession?.("conversation-1");
+    await tauriConversationDataSource.restoreSession?.("conversation-1");
+
+    expect(mocks.archiveChatSession).toHaveBeenCalledWith("conversation-1");
+    expect(mocks.restoreChatSession).toHaveBeenCalledWith("conversation-1");
+  });
+
+  it("forwards revision-bound Project read-root mutations", async () => {
+    await tauriConversationDataSource.addProjectReadRoot?.("project-1", 7);
+    await tauriConversationDataSource.removeProjectReadRoot?.("project-1", "root-1", 8);
+
+    expect(mocks.addProjectReadRoot).toHaveBeenCalledWith("project-1", 7);
+    expect(mocks.removeProjectReadRoot).toHaveBeenCalledWith("project-1", "root-1", 8);
+  });
+
+  it("forwards the Project selected for a not-yet-created Conversation", async () => {
+    await tauriConversationDataSource.selectProjectForNewConversation?.("project-next");
+    expect(mocks.selectNewConversationProject).toHaveBeenCalledWith("project-next");
   });
 
   it("forwards only events bound to the exact conversation and operation", async () => {

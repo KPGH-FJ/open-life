@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -1223,6 +1223,88 @@ impl Default for LifeModelManager {
 }
 
 impl LifeModelManager {
+    /// Read the retired YAML owner and its sibling version journal without
+    /// creating, rewriting, or deleting any legacy or v2 storage.
+    pub fn inspect_legacy_inventory(
+        &self,
+    ) -> Result<Option<legacy_migration::LegacyLifeModelInventoryV2>> {
+        legacy_migration::inspect_legacy_lifemodel(&self.data_dir)
+    }
+
+    pub fn load_legacy_source_for_migration(&self) -> Result<Option<String>> {
+        let Some(inventory) = self.inspect_legacy_inventory()? else {
+            return Ok(None);
+        };
+        if !inventory.current_source_present {
+            return Ok(None);
+        }
+        let path = self.data_dir.join("life_model.yaml");
+        let source = fs::read_to_string(&path)
+            .with_context(|| format!("read_legacy_lifemodel_source:{path:?}"))?;
+        let preview =
+            legacy_migration::LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(&source)?;
+        if inventory.current_source_digest.as_deref() != Some(&preview.source_digest) {
+            anyhow::bail!("legacy_lifemodel_source_changed_during_read");
+        }
+        Ok(Some(source))
+    }
+
+    pub fn backup_legacy_source_for_migration(
+        &self,
+        expected_source_digest: &str,
+    ) -> Result<legacy_migration::LegacyLifeModelBackupReceiptV2> {
+        let source = self
+            .load_legacy_source_for_migration()?
+            .ok_or_else(|| anyhow::anyhow!("legacy_lifemodel_source_missing"))?;
+        let preview =
+            legacy_migration::LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(&source)?;
+        if preview.source_digest != expected_source_digest {
+            anyhow::bail!("legacy_lifemodel_source_changed_before_backup");
+        }
+        let digest_hex = expected_source_digest
+            .strip_prefix("sha256:")
+            .ok_or_else(|| anyhow::anyhow!("invalid_legacy_lifemodel_source_digest"))?;
+        let backup_file_name = format!("life_model.{digest_hex}.yaml");
+        let backup_dir = self
+            .data_dir
+            .parent()
+            .ok_or_else(|| anyhow::anyhow!("legacy_lifemodel_current_directory_has_no_parent"))?
+            .join("legacy-backups");
+        fs::create_dir_all(&backup_dir)
+            .with_context(|| format!("create_legacy_lifemodel_backup_dir:{backup_dir:?}"))?;
+        let backup_path = backup_dir.join(&backup_file_name);
+        let replayed = if backup_path.exists() {
+            let metadata = fs::symlink_metadata(&backup_path)
+                .with_context(|| format!("inspect_legacy_lifemodel_backup:{backup_path:?}"))?;
+            if metadata.file_type().is_symlink() || !metadata.is_file() {
+                anyhow::bail!("legacy_lifemodel_backup_is_not_regular_file");
+            }
+            let existing = fs::read_to_string(&backup_path)
+                .with_context(|| format!("read_legacy_lifemodel_backup:{backup_path:?}"))?;
+            if existing != source {
+                anyhow::bail!("legacy_lifemodel_backup_digest_conflict");
+            }
+            true
+        } else {
+            crate::atomic_file::write_atomic(&backup_path, source.as_bytes())
+                .with_context(|| format!("write_legacy_lifemodel_backup:{backup_path:?}"))?;
+            false
+        };
+        let backup = fs::read_to_string(&backup_path)
+            .with_context(|| format!("verify_legacy_lifemodel_backup:{backup_path:?}"))?;
+        let backup_preview =
+            legacy_migration::LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(&backup)?;
+        if backup_preview.source_digest != expected_source_digest {
+            anyhow::bail!("legacy_lifemodel_backup_digest_mismatch");
+        }
+        Ok(legacy_migration::LegacyLifeModelBackupReceiptV2 {
+            source_digest: preview.source_digest,
+            backup_digest: backup_preview.source_digest,
+            backup_file_name,
+            replayed,
+        })
+    }
+
     /// Metadata journal colocated with the current YAML compatibility view.
     pub fn v2_store_path(&self) -> PathBuf {
         self.data_dir.join("life_model_v2.db")
@@ -1238,6 +1320,14 @@ impl LifeModelManager {
             return Ok(None);
         }
         v2::LifeModelV2Store::open(path)?.current(model_id)
+    }
+
+    pub fn load_v2_cutover(&self, model_id: &str) -> Result<Option<v2::LifeModelV2CutoverReceipt>> {
+        let path = self.v2_store_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+        v2::LifeModelV2Store::open(path)?.cutover(model_id)
     }
 
     pub fn load_v2_version(
@@ -1287,8 +1377,24 @@ impl LifeModelManager {
             created_at,
         )
     }
+
+    pub fn materialize_reviewed_legacy_v2_migration(
+        &self,
+        plan: &legacy_migration::LegacyLifeModelMigrationPlanV2,
+        proposal_id: &str,
+        backup_digest: &str,
+        cutover_at: &str,
+    ) -> Result<v2::LifeModelLegacyMigrationMaterializationResultV2> {
+        v2::LifeModelV2Store::open(self.v2_store_path())?.materialize_legacy_migration(
+            plan,
+            proposal_id,
+            backup_digest,
+            cutover_at,
+        )
+    }
 }
 
+pub mod legacy_migration;
 pub mod patch;
 pub mod v2;
 

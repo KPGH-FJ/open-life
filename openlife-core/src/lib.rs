@@ -6,7 +6,6 @@ pub mod conversation;
 pub mod embedding;
 pub mod feedback;
 pub mod life_model;
-pub mod life_model_write_gateway;
 pub mod llm;
 pub mod mcp;
 pub mod mcp_audit;

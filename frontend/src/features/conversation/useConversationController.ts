@@ -2,20 +2,28 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type {
   ProviderProfileViewModel,
   ChatSession,
+  ConversationViewModel,
+  ConversationMessageViewModel,
   ConversationMemoryMode,
   ImportedResourceReceipt,
   MainChatSkillSummary,
+  MainChatSkillDetail,
   MainChatLifeModelProductReceipt,
   MainChatToolCandidateList,
   MainChatTurnStatus,
   ProductAction,
-  ProjectRecord,
+  ProjectLifecycleViewModel,
+  ReasoningEffort,
+  WorkExecutionMode,
   StreamMessageChunkPayload,
   StreamMessageStartPayload,
 } from "@/tauri";
 import type { ChatMessage } from "@/types";
 import { productErrorCode as errorText } from "@/shared/productError";
 import type { ConversationDataSource } from "./conversationDataSource";
+
+type ConversationTranscriptMessage = ChatMessage &
+  Partial<Pick<ConversationMessageViewModel, "turnId" | "attachmentsStatus" | "attachments">>;
 
 type Announce = (message: string) => void;
 
@@ -25,17 +33,45 @@ export type ConversationProviderState = {
   status: "unknown" | "ready" | "unavailable";
   profiles: ProviderProfileViewModel[];
   selectedProfileId: string | null;
+  selectedReasoningEffort: ReasoningEffort | null;
   errorCode: string | null;
 };
 export type ConversationWorkStatus = "unknown" | "available" | "unavailable";
+
+function providerStateFromConversation(
+  canonical: ConversationViewModel
+): ConversationProviderState {
+  const persistedEffort =
+    canonical.latestTurn?.providerProfileId === canonical.selectedProviderProfileId
+      ? (canonical.latestTurn.reasoningEffort ?? null)
+      : null;
+  return {
+    status: canonical.providerStatus,
+    profiles: canonical.providerProfiles,
+    selectedProfileId: canonical.selectedProviderProfileId,
+    selectedReasoningEffort: persistedEffort,
+    errorCode: canonical.providerErrorCode,
+  };
+}
 export type WorkspaceSessionMutationState =
   | { phase: "idle" }
   | { phase: "renaming"; sessionId: string }
+  | { phase: "archiving"; sessionId: string }
+  | { phase: "restoring"; sessionId: string }
   | { phase: "deleting"; sessionId: string }
   | { phase: "creating_project" }
   | { phase: "assigning_project"; projectId: string | null }
+  | {
+      phase: "mutating_project";
+      action: "update" | "archive" | "restore" | "delete";
+      projectId: string;
+    }
   | { phase: "assigning_memory"; mode: ConversationMemoryMode }
-  | { phase: "failed"; action: "rename" | "delete" | "project" | "memory"; reason: string };
+  | {
+      phase: "failed";
+      action: "rename" | "archive" | "restore" | "delete" | "project" | "memory";
+      reason: string;
+    };
 
 export type WorkspaceResourceMutationState =
   | { phase: "idle" }
@@ -138,12 +174,13 @@ function steeringFailureAnnouncement(error: unknown): string {
 
 export type ConversationController = {
   sessions: ChatSession[];
-  projects: ProjectRecord[];
+  archivedSessions: ChatSession[];
+  projects: ProjectLifecycleViewModel[];
   selectedProjectId: string | null;
   selectedSessionId: string | null;
   globalMemoryEnabled: boolean;
   memoryMode: ConversationMemoryMode;
-  messages: ChatMessage[];
+  messages: ConversationTranscriptMessage[];
   draft: string;
   loadStatus: ConversationLoadStatus;
   loadError: string | null;
@@ -151,6 +188,7 @@ export type ConversationController = {
   streamingReply: string;
   activeTaskId: string | null;
   mode: ConversationMode;
+  executionMode: WorkExecutionMode;
   provider: ConversationProviderState;
   workStatus: ConversationWorkStatus;
   sessionMutation: WorkspaceSessionMutationState;
@@ -159,6 +197,7 @@ export type ConversationController = {
   resourceMutation: WorkspaceResourceMutationState;
   skills: MainChatSkillSummary[];
   selectedSkillId: string | null;
+  selectedSkillDetail: MainChatSkillDetail | null;
   toolCandidates: MainChatToolCandidateList | null;
   capabilityState: WorkspaceCapabilityState;
   busy: boolean;
@@ -167,10 +206,28 @@ export type ConversationController = {
   selectSession: (sessionId: string) => void;
   startNewConversation: () => void;
   createProject: (name: string) => Promise<boolean>;
+  bindProjectDirectory: (projectId: string, expectedRevision: number) => Promise<boolean>;
+  addProjectReadRoot: (projectId: string, expectedRevision: number) => Promise<boolean>;
+  removeProjectReadRoot: (
+    projectId: string,
+    rootId: string,
+    expectedRevision: number
+  ) => Promise<boolean>;
+  updateProjectName: (
+    projectId: string,
+    name: string,
+    expectedRevision: number
+  ) => Promise<boolean>;
+  archiveProject: (projectId: string, expectedRevision: number) => Promise<boolean>;
+  restoreProject: (projectId: string, expectedRevision: number) => Promise<boolean>;
+  deleteProject: (projectId: string, expectedRevision: number) => Promise<boolean>;
   assignProject: (projectId: string | null) => Promise<boolean>;
   setMemoryMode: (mode: ConversationMemoryMode) => Promise<boolean>;
+  selectProviderProfile: (profileId: string) => boolean;
+  selectReasoningEffort: (effort: ReasoningEffort | null) => boolean;
   setDraft: (value: string) => void;
   setMode: (mode: ConversationMode) => void;
+  setExecutionMode: (mode: WorkExecutionMode) => boolean;
   attachResources: () => Promise<boolean>;
   detachResource: (resourceId: string) => Promise<boolean>;
   selectSkill: (skillId: string | null) => Promise<boolean>;
@@ -179,23 +236,27 @@ export type ConversationController = {
   steer: () => Promise<void>;
   cancel: () => Promise<void>;
   renameSelected: (title: string) => Promise<boolean>;
+  archiveSelected: () => Promise<boolean>;
+  restoreArchived: (sessionId: string) => Promise<boolean>;
+  deleteArchived: (sessionId: string) => Promise<boolean>;
   deleteSelected: () => Promise<boolean>;
 };
 
 export function useConversationController(
   dataSource: ConversationDataSource | undefined,
   announce: Announce,
-  onAfterTurn: () => Promise<void>,
+  onAfterTurn: (conversationId: string) => Promise<void>,
   preferredSessionId?: string | null,
-  cancelRunningWork?: (taskId: string) => Promise<void>
+  stopRunningWork?: (taskId: string, runId: string) => Promise<void>
 ): ConversationController {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [projects, setProjects] = useState<ProjectRecord[]>([]);
+  const [archivedSessions, setArchivedSessions] = useState<ChatSession[]>([]);
+  const [projects, setProjects] = useState<ProjectLifecycleViewModel[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [globalMemoryEnabled, setGlobalMemoryEnabled] = useState(true);
   const [memoryMode, setMemoryModeState] = useState<ConversationMemoryMode>("use_and_learn");
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [messages, setMessages] = useState<ConversationTranscriptMessage[]>([]);
   const [draft, setDraft] = useState("");
   const [loadStatus, setLoadStatus] = useState<ConversationLoadStatus>("idle");
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -203,10 +264,12 @@ export function useConversationController(
   const [streamingReply, setStreamingReply] = useState("");
   const [activeTaskId, setActiveTaskId] = useState<string | null>(null);
   const [mode, setModeState] = useState<ConversationMode>("chat");
+  const [executionMode, setExecutionModeState] = useState<WorkExecutionMode>("scoped_agent");
   const [provider, setProvider] = useState<ConversationProviderState>({
     status: "unknown",
     profiles: [],
     selectedProfileId: null,
+    selectedReasoningEffort: null,
     errorCode: null,
   });
   const [workStatus, setWorkStatus] = useState<ConversationWorkStatus>("unknown");
@@ -222,6 +285,7 @@ export function useConversationController(
   });
   const [skills, setSkills] = useState<MainChatSkillSummary[]>([]);
   const [selectedSkillId, setSelectedSkillId] = useState<string | null>(null);
+  const [selectedSkillDetail, setSelectedSkillDetail] = useState<MainChatSkillDetail | null>(null);
   const [toolCandidates, setToolCandidates] = useState<MainChatToolCandidateList | null>(null);
   const [capabilityState, setCapabilityState] = useState<WorkspaceCapabilityState>({
     phase: "idle",
@@ -239,6 +303,7 @@ export function useConversationController(
     loadedRef.current = false;
     explicitConversationChoiceRef.current = false;
     setSessions([]);
+    setArchivedSessions([]);
     setProjects([]);
     setSelectedProjectId(null);
     setSelectedSessionId(null);
@@ -252,10 +317,12 @@ export function useConversationController(
     setStreamingReply("");
     setActiveTaskId(null);
     setModeState("chat");
+    setExecutionModeState("scoped_agent");
     setProvider({
       status: "unknown",
       profiles: [],
       selectedProfileId: null,
+      selectedReasoningEffort: null,
       errorCode: null,
     });
     setWorkStatus("unknown");
@@ -265,6 +332,7 @@ export function useConversationController(
     setResourceMutation({ phase: "idle" });
     setSkills([]);
     setSelectedSkillId(null);
+    setSelectedSkillDetail(null);
     setToolCandidates(null);
     setCapabilityState({ phase: "idle" });
     return () => {
@@ -316,6 +384,27 @@ export function useConversationController(
     };
   }, [activeTaskId, dataSource, loadStatus, mode, selectedSessionId, workStatus]);
 
+  useEffect(() => {
+    let active = true;
+    if (!selectedSkillId || !dataSource?.getSkillDetail) {
+      setSelectedSkillDetail(null);
+      return () => {
+        active = false;
+      };
+    }
+    void dataSource
+      .getSkillDetail(selectedSkillId)
+      .then(detail => {
+        if (active && detail.skillId === selectedSkillId) setSelectedSkillDetail(detail);
+      })
+      .catch(() => {
+        if (active) setSelectedSkillDetail(null);
+      });
+    return () => {
+      active = false;
+    };
+  }, [dataSource, selectedSkillId]);
+
   const loadHistory = useCallback(
     async (sessionId: string, requestId: number): Promise<void> => {
       if (!dataSource) throw new Error("workspace_conversation_data_source_unavailable");
@@ -323,14 +412,15 @@ export function useConversationController(
       if (canonical.selectedConversationId !== sessionId) {
         throw new Error("conversation_view_model_selection_mismatch");
       }
+      if (requestId !== requestRef.current) return;
       setProjects(canonical.projects);
       setSelectedProjectId(canonical.selectedProjectId);
       setGlobalMemoryEnabled(canonical.globalMemoryEnabled);
       setMemoryModeState(canonical.selectedMemoryMode);
-      const history = canonical.messages;
-      if (requestId !== requestRef.current) return;
+      setProvider(providerStateFromConversation(canonical));
+      setWorkStatus(canonical.workStatus);
       setSelectedSessionId(sessionId);
-      setMessages(history);
+      setMessages(canonical.messages);
       if (
         canonical.latestTurn?.status === "failed" ||
         canonical.latestTurn?.status === "cancelled" ||
@@ -359,16 +449,12 @@ export function useConversationController(
         selectedSessionId ?? preferredSessionId ?? undefined
       );
       const nextSessions = canonical.conversations;
+      setArchivedSessions(canonical.archivedConversations ?? []);
       setProjects(canonical.projects);
       setSelectedProjectId(canonical.selectedProjectId);
       setGlobalMemoryEnabled(canonical.globalMemoryEnabled);
       setMemoryModeState(canonical.selectedMemoryMode);
-      setProvider({
-        status: canonical.providerStatus,
-        profiles: canonical.providerProfiles,
-        selectedProfileId: canonical.selectedProviderProfileId,
-        errorCode: canonical.providerErrorCode,
-      });
+      setProvider(providerStateFromConversation(canonical));
       setWorkStatus(canonical.workStatus);
       if (requestId !== requestRef.current) return false;
       setSessions(nextSessions);
@@ -470,15 +556,41 @@ export function useConversationController(
     ["creating_session", "sending", "streaming", "cancelling", "refreshing"].includes(
       turnState.phase
     ) ||
-    ["renaming", "deleting"].includes(sessionMutation.phase) ||
+    [
+      "renaming",
+      "archiving",
+      "restoring",
+      "deleting",
+      "creating_project",
+      "assigning_project",
+      "mutating_project",
+    ].includes(sessionMutation.phase) ||
     ["importing", "detaching"].includes(resourceMutation.phase) ||
     capabilityState.phase === "selecting";
 
   const selectSkill = useCallback(
     async (skillId: string | null): Promise<boolean> => {
+      if (!selectedSessionId) {
+        const selected = skillId
+          ? skills.find(skill => skill.skillId === skillId && skill.available)
+          : null;
+        if (skillId && !selected) {
+          announce("所选技能当前不可用；新对话不会绑定它。");
+          return false;
+        }
+        setSelectedSkillId(skillId);
+        setSkills(current =>
+          current.map(skill => ({ ...skill, selected: skill.skillId === skillId }))
+        );
+        announce(
+          skillId
+            ? "技能将在创建对话时原子绑定；它不会扩大模型、网络、工具或写入权限。"
+            : "新对话将不使用技能。"
+        );
+        return true;
+      }
       if (
         !dataSource ||
-        !selectedSessionId ||
         busy ||
         (skillId && !dataSource.selectSkill) ||
         (!skillId && !dataSource.clearSkill)
@@ -514,7 +626,7 @@ export function useConversationController(
         return false;
       }
     },
-    [announce, busy, dataSource, selectedSessionId]
+    [announce, busy, dataSource, selectedSessionId, skills]
   );
 
   const selectSession = useCallback(
@@ -683,8 +795,8 @@ export function useConversationController(
                 ? "先输入要发送的内容。"
                 : mode === "work" && workStatus !== "available"
                   ? "Work 模式当前不可用。"
-                  : mode === "chat" && provider.status === "unavailable"
-                    ? "当前选择的模型不可用；请先在设置中完成模型配置。"
+                  : provider.status === "unavailable"
+                    ? "当前选择的模型不可用；请选择可用模型或前往设置完成配置。"
                     : undefined);
       return {
         id: selectedSessionId
@@ -742,10 +854,11 @@ export function useConversationController(
         if (!sessionId) {
           setTurnState({ phase: "creating_session" });
           sessionId = crypto.randomUUID();
-          await dataSource.createSession(sessionId, sessionTitle(text));
-          if (selectedProjectId && dataSource.assignProject) {
-            await dataSource.assignProject(sessionId, selectedProjectId);
-          }
+          await dataSource.createSession(sessionId, sessionTitle(text), {
+            projectId: selectedProjectId,
+            memoryMode,
+            selectedSkillId,
+          });
           sessionCreated = true;
           if (operationId !== operationRef.current) return;
           const timestamp = new Date().toISOString();
@@ -777,6 +890,9 @@ export function useConversationController(
           {
             operationId: turnOperationId,
             selectedSkillId: selectedSkillId ?? undefined,
+            providerProfileId: provider.selectedProfileId ?? undefined,
+            reasoningEffort: provider.selectedReasoningEffort ?? undefined,
+            executionMode: mode === "work" ? executionMode : undefined,
             mode,
             taskId: workTaskId,
             runId: workRunId,
@@ -821,7 +937,10 @@ export function useConversationController(
             },
           }
         );
-        if (operationId !== operationRef.current) return;
+        if (operationId !== operationRef.current) {
+          await onAfterTurn(turnSessionId).catch(() => undefined);
+          return;
+        }
         if (
           pendingResources.length > 0 &&
           (resourceStreamIdentityMismatch ||
@@ -839,18 +958,20 @@ export function useConversationController(
         setActiveTaskId(result.task_id ?? null);
         setTurnState({ phase: "refreshing", sessionId, status });
 
-        let refreshedHistory: ChatMessage[];
+        let refreshedConversation: ConversationViewModel;
         try {
-          refreshedHistory = (await dataSource.loadConversation(sessionId)).messages;
+          refreshedConversation = await dataSource.loadConversation(sessionId);
         } catch (error) {
           if (operationId !== operationRef.current) return;
           setTurnState({ phase: "failed", stage: "refresh", reason: errorText(error) });
           announce("命令已返回，但会话记录刷新失败；当前不确认回复已持久化。");
-          await onAfterTurn();
+          await onAfterTurn(sessionId);
           return;
         }
         if (operationId !== operationRef.current) return;
-        setMessages(refreshedHistory);
+        setMessages(refreshedConversation.messages);
+        setProvider(providerStateFromConversation(refreshedConversation));
+        setWorkStatus(refreshedConversation.workStatus);
         setStreamingReply("");
         setActiveTaskId(null);
         setTurnState({
@@ -860,10 +981,13 @@ export function useConversationController(
           blockers: result.blockers ?? [],
           lifeModelInfluence: result.life_model_influence,
         });
-        await onAfterTurn();
+        await onAfterTurn(sessionId);
         announce(turnAnnouncement(status));
       } catch (error) {
-        if (operationId !== operationRef.current) return;
+        if (operationId !== operationRef.current) {
+          if (sessionId) await onAfterTurn(sessionId).catch(() => undefined);
+          return;
+        }
         cancelRequestRef.current += 1;
         const failureCode = errorText(error);
         if (
@@ -873,9 +997,11 @@ export function useConversationController(
             failureCode === "canonical_chat_turn_cancelled")
         ) {
           try {
-            const refreshedHistory = (await dataSource.loadConversation(sessionId)).messages;
+            const refreshedConversation = await dataSource.loadConversation(sessionId);
             if (operationId !== operationRef.current) return;
-            setMessages(refreshedHistory);
+            setMessages(refreshedConversation.messages);
+            setProvider(providerStateFromConversation(refreshedConversation));
+            setWorkStatus(refreshedConversation.workStatus);
           } catch {
             if (operationId !== operationRef.current) return;
           }
@@ -887,7 +1013,7 @@ export function useConversationController(
             status: "cancelled",
             blockers: [],
           });
-          await onAfterTurn();
+          await onAfterTurn(sessionId);
           announce(turnAnnouncement("cancelled"));
           return;
         }
@@ -906,8 +1032,12 @@ export function useConversationController(
         );
         try {
           if (sessionId) {
-            const refreshedHistory = (await dataSource.loadConversation(sessionId)).messages;
-            if (operationId === operationRef.current) setMessages(refreshedHistory);
+            const refreshedConversation = await dataSource.loadConversation(sessionId);
+            if (operationId === operationRef.current) {
+              setMessages(refreshedConversation.messages);
+              setProvider(providerStateFromConversation(refreshedConversation));
+              setWorkStatus(refreshedConversation.workStatus);
+            }
           }
         } catch {
           // The explicit failed state already communicates that persistence is unverified.
@@ -917,15 +1047,17 @@ export function useConversationController(
         // the backend-owned Workspace projection on both success and failure
         // so Results / Needs Attention never disappear behind the composer
         // error state.
-        if (operationId === operationRef.current) await onAfterTurn();
+        if (operationId === operationRef.current && sessionId) await onAfterTurn(sessionId);
       }
     },
     [
       announce,
       dataSource,
       draft,
+      memoryMode,
       messages,
       mode,
+      executionMode,
       provider,
       workStatus,
       onAfterTurn,
@@ -933,6 +1065,7 @@ export function useConversationController(
       pendingResources,
       selectedSessionId,
       selectedSkillId,
+      selectedSkillDetail,
       selectedProjectId,
       sendAction,
     ]
@@ -940,16 +1073,16 @@ export function useConversationController(
 
   const cancel = useCallback(async (): Promise<void> => {
     if (!dataSource || turnState.phase !== "streaming" || !turnState.turnId.trim()) {
-      announce("当前没有可以取消的运行中对话。");
+      announce("当前没有可以停止的运行。");
       return;
     }
-    const { sessionId, turnId, taskId } = turnState;
+    const { sessionId, turnId, taskId, runId } = turnState;
     const cancelRequestId = ++cancelRequestRef.current;
     setTurnState({ phase: "cancelling", sessionId, turnId, taskId });
-    announce("正在请求取消；只有系统终态返回后才会显示已取消。");
+    announce("正在停止当前运行；只有系统终态返回后才会确认已停止。");
     try {
-      if (mode === "work" && taskId && cancelRunningWork) {
-        await cancelRunningWork(taskId);
+      if (mode === "work" && taskId && runId && stopRunningWork) {
+        await stopRunningWork(taskId, runId);
       } else if (dataSource.cancelChatTurn) {
         await dataSource.cancelChatTurn(sessionId, turnId);
       } else {
@@ -965,9 +1098,9 @@ export function useConversationController(
         runId: turnState.runId,
         cancelError: errorText(error),
       });
-      announce("取消请求失败；当前不会把任务显示为已取消。");
+      announce("停止请求失败；当前运行仍按进行中处理。");
     }
-  }, [announce, cancelRunningWork, dataSource, mode, turnState]);
+  }, [announce, dataSource, mode, stopRunningWork, turnState]);
 
   const steer = useCallback(async (): Promise<void> => {
     const text = draft.trim();
@@ -983,7 +1116,7 @@ export function useConversationController(
       return;
     }
     try {
-      const result = await dataSource.steerTask({
+      await dataSource.steerTask({
         steeringId: crypto.randomUUID(),
         taskId: activeTaskId,
         runId: turnState.runId,
@@ -991,11 +1124,7 @@ export function useConversationController(
         content: text,
       });
       setDraft("");
-      announce(
-        result.scopeExpansionBlocked
-          ? "这条调整会扩大权限范围，已记录为阻断项；当前任务不会获得新权限。"
-          : "调整已加入当前任务，将在下一次安全步骤生效。"
-      );
+      announce("调整已加入当前任务，正在等待 canonical Work 的安全检查点处理。");
     } catch (error) {
       announce(steeringFailureAnnouncement(error));
     }
@@ -1054,22 +1183,98 @@ export function useConversationController(
     }
   }, [announce, busy, dataSource, pendingResources.length, reload, selectedSessionId]);
 
+  const archiveSelected = useCallback(async (): Promise<boolean> => {
+    if (!dataSource?.archiveSession || !selectedSessionId || busy || pendingResources.length > 0) {
+      announce("当前不能归档这段对话。");
+      return false;
+    }
+    const targetSessionId = selectedSessionId;
+    setSessionMutation({ phase: "archiving", sessionId: targetSessionId });
+    try {
+      await dataSource.archiveSession(targetSessionId);
+      if (!(await reload())) throw new Error("conversation_refresh_failed_after_archive");
+      setSessionMutation({ phase: "idle" });
+      announce("对话已归档；消息、任务、文件和证据仍由原所有者保留。");
+      return true;
+    } catch (error) {
+      setSessionMutation({ phase: "failed", action: "archive", reason: errorText(error) });
+      announce("对话归档失败；当前仍按未归档处理。");
+      return false;
+    }
+  }, [announce, busy, dataSource, pendingResources.length, reload, selectedSessionId]);
+
+  const restoreArchived = useCallback(
+    async (sessionId: string): Promise<boolean> => {
+      if (!dataSource?.restoreSession || busy) {
+        announce("当前不能恢复这段对话。");
+        return false;
+      }
+      setSessionMutation({ phase: "restoring", sessionId });
+      try {
+        await dataSource.restoreSession(sessionId);
+        if (!(await reload())) throw new Error("conversation_refresh_failed_after_restore");
+        setSessionMutation({ phase: "idle" });
+        announce("对话已恢复并由系统重新读取确认。");
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "restore", reason: errorText(error) });
+        announce("对话恢复失败；当前仍按已归档处理。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload]
+  );
+
+  const deleteArchived = useCallback(
+    async (sessionId: string): Promise<boolean> => {
+      if (!dataSource || busy) {
+        announce("当前不能永久删除这段对话记录。");
+        return false;
+      }
+      setSessionMutation({ phase: "deleting", sessionId });
+      try {
+        await dataSource.deleteSession(sessionId);
+        if (!(await reload())) throw new Error("conversation_refresh_failed_after_delete");
+        setSessionMutation({ phase: "idle" });
+        announce("空对话记录的永久删除已由系统重新读取确认。");
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "delete", reason: errorText(error) });
+        announce("对话删除失败；当前仍按未删除处理。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload]
+  );
+
   const createProject = useCallback(
     async (name: string): Promise<boolean> => {
       const normalized = name.replace(/\s+/g, " ").trim();
-      if (!dataSource?.createProject || !normalized || busy) {
+      if (!dataSource?.createProject || busy) {
         announce("当前不能创建 Project。");
         return false;
       }
       setSessionMutation({ phase: "creating_project" });
       try {
-        const project = await dataSource.createProject(crypto.randomUUID(), normalized);
+        const result = await dataSource.createProject(crypto.randomUUID(), normalized || undefined);
+        if (result.cancelled) {
+          setSessionMutation({ phase: "idle" });
+          announce("已取消选择 Project 文件夹。");
+          return false;
+        }
+        const project = result.project;
+        if (!project?.workspaceRoot) throw new Error("project_workspace_root_missing");
         if (selectedSessionId && dataSource.assignProject) {
           await dataSource.assignProject(selectedSessionId, project.id);
         }
         if (!(await reload())) throw new Error("project_refresh_failed_after_create");
+        if (!selectedSessionId) setSelectedProjectId(project.id);
         setSessionMutation({ phase: "idle" });
-        announce(selectedSessionId ? "Project 已创建并绑定到当前对话。" : "Project 已创建。");
+        announce(
+          selectedSessionId
+            ? "Project 文件夹已创建并绑定到当前对话。"
+            : "Project 文件夹已创建，将绑定到新对话。"
+        );
         return true;
       } catch (error) {
         setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
@@ -1080,18 +1285,190 @@ export function useConversationController(
     [announce, busy, dataSource, reload, selectedSessionId]
   );
 
+  const bindProjectDirectory = useCallback(
+    async (projectId: string, expectedRevision: number): Promise<boolean> => {
+      if (!dataSource?.bindProjectDirectory || busy) {
+        announce("当前不能改变 Project 文件夹。");
+        return false;
+      }
+      setSessionMutation({ phase: "creating_project" });
+      try {
+        const result = await dataSource.bindProjectDirectory(projectId, expectedRevision);
+        if (result.cancelled) {
+          setSessionMutation({ phase: "idle" });
+          announce("已取消选择 Project 文件夹。");
+          return false;
+        }
+        if (!result.project?.workspaceRoot) throw new Error("project_workspace_root_missing");
+        if (!(await reload())) throw new Error("project_refresh_failed_after_directory_binding");
+        setSessionMutation({ phase: "idle" });
+        announce("Project 文件夹范围已更新并由系统重新读取确认。");
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
+        announce("Project 文件夹更新未得到系统确认。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload]
+  );
+
+  const addProjectReadRoot = useCallback(
+    async (projectId: string, expectedRevision: number): Promise<boolean> => {
+      if (!dataSource?.addProjectReadRoot || busy) {
+        announce("当前不能添加 Project 读取文件夹。");
+        return false;
+      }
+      setSessionMutation({ phase: "creating_project" });
+      try {
+        const result = await dataSource.addProjectReadRoot(projectId, expectedRevision);
+        if (result.cancelled) {
+          setSessionMutation({ phase: "idle" });
+          announce("已取消添加读取文件夹。");
+          return false;
+        }
+        if (!result.project) throw new Error("project_read_root_missing");
+        if (!(await reload())) throw new Error("project_refresh_failed_after_read_root_add");
+        setSessionMutation({ phase: "idle" });
+        announce("读取文件夹已加入 Project 范围；它不会获得文件写入权限。");
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
+        announce("读取文件夹没有加入 Project 范围。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload]
+  );
+
+  const removeProjectReadRoot = useCallback(
+    async (projectId: string, rootId: string, expectedRevision: number): Promise<boolean> => {
+      if (!dataSource?.removeProjectReadRoot || busy) {
+        announce("当前不能移除 Project 读取文件夹。");
+        return false;
+      }
+      setSessionMutation({ phase: "mutating_project", action: "update", projectId });
+      try {
+        await dataSource.removeProjectReadRoot(projectId, rootId, expectedRevision);
+        if (!(await reload())) throw new Error("project_refresh_failed_after_read_root_remove");
+        setSessionMutation({ phase: "idle" });
+        announce("读取范围已移除；本地文件夹和文件没有被删除。");
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
+        announce("读取范围移除没有得到系统确认。");
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload]
+  );
+
+  const mutateProject = useCallback(
+    async (
+      action: "update" | "archive" | "restore" | "delete",
+      projectId: string,
+      expectedRevision: number,
+      name?: string
+    ): Promise<boolean> => {
+      const operation = {
+        update: dataSource?.updateProjectName,
+        archive: dataSource?.archiveProject,
+        restore: dataSource?.restoreProject,
+        delete: dataSource?.deleteProject,
+      }[action];
+      if (!operation || busy) {
+        announce("当前不能改变 Project。请等待现有操作结束后重试。");
+        return false;
+      }
+      setSessionMutation({ phase: "mutating_project", action, projectId });
+      try {
+        if (action === "update") {
+          const normalized = name?.replace(/\s+/g, " ").trim() ?? "";
+          if (!normalized) throw new Error("project_name_empty");
+          await dataSource!.updateProjectName!(projectId, normalized, expectedRevision);
+        } else if (action === "archive") {
+          await dataSource!.archiveProject!(projectId, expectedRevision);
+        } else if (action === "restore") {
+          await dataSource!.restoreProject!(projectId, expectedRevision);
+        } else {
+          await dataSource!.deleteProject!(projectId, expectedRevision);
+        }
+        if (!(await reload())) throw new Error(`project_refresh_failed_after_${action}`);
+        setSessionMutation({ phase: "idle" });
+        announce(
+          {
+            update: "Project 名称已更新并由系统重新读取确认。",
+            archive: "Project 已归档；本地文件夹和内容没有被删除。",
+            restore: "Project 已恢复，可以重新绑定到对话。",
+            delete: "Project 元数据已永久删除；本地文件夹和内容没有被删除。",
+          }[action]
+        );
+        return true;
+      } catch (error) {
+        setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
+        announce(
+          action === "delete"
+            ? "Project 删除没有完成；系统仍按未删除处理。"
+            : "Project 变更没有得到系统确认。"
+        );
+        return false;
+      }
+    },
+    [announce, busy, dataSource, reload]
+  );
+
+  const updateProjectName = useCallback(
+    (projectId: string, name: string, expectedRevision: number) =>
+      mutateProject("update", projectId, expectedRevision, name),
+    [mutateProject]
+  );
+
+  const archiveProject = useCallback(
+    (projectId: string, expectedRevision: number) =>
+      mutateProject("archive", projectId, expectedRevision),
+    [mutateProject]
+  );
+
+  const restoreProject = useCallback(
+    (projectId: string, expectedRevision: number) =>
+      mutateProject("restore", projectId, expectedRevision),
+    [mutateProject]
+  );
+
+  const deleteProject = useCallback(
+    (projectId: string, expectedRevision: number) =>
+      mutateProject("delete", projectId, expectedRevision),
+    [mutateProject]
+  );
+
   const assignProject = useCallback(
     async (projectId: string | null): Promise<boolean> => {
-      if (!dataSource?.assignProject || !selectedSessionId || busy) {
+      const canAssignExisting = Boolean(selectedSessionId && dataSource?.assignProject);
+      const canSelectForNew = Boolean(
+        !selectedSessionId && dataSource?.selectProjectForNewConversation
+      );
+      if ((!canAssignExisting && !canSelectForNew) || busy) {
         announce("当前不能改变这段对话的 Project。");
         return false;
       }
       setSessionMutation({ phase: "assigning_project", projectId });
       try {
-        await dataSource.assignProject(selectedSessionId, projectId);
+        if (selectedSessionId) {
+          await dataSource!.assignProject!(selectedSessionId, projectId);
+        } else {
+          await dataSource!.selectProjectForNewConversation!(projectId);
+        }
         if (!(await reload())) throw new Error("project_refresh_failed_after_assign");
         setSessionMutation({ phase: "idle" });
-        announce(projectId ? "当前对话已绑定到 Project。" : "当前对话已移出 Project。");
+        announce(
+          selectedSessionId
+            ? projectId
+              ? "当前对话已绑定到 Project。"
+              : "当前对话已移出 Project。"
+            : projectId
+              ? "Project 已选为下一段新对话的工作范围。"
+              : "下一段新对话将不属于 Project。"
+        );
         return true;
       } catch (error) {
         setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
@@ -1104,7 +1481,16 @@ export function useConversationController(
 
   const setMemoryMode = useCallback(
     async (nextMode: ConversationMemoryMode): Promise<boolean> => {
-      if (!dataSource?.setMemoryMode || !selectedSessionId || busy) {
+      if (busy || !globalMemoryEnabled) {
+        announce("当前不能改变这段对话的记忆设置。");
+        return false;
+      }
+      if (!selectedSessionId) {
+        setMemoryModeState(nextMode);
+        announce("下一段新对话将使用这个记忆设置。");
+        return true;
+      }
+      if (!dataSource?.setMemoryMode) {
         announce("当前不能改变这段对话的记忆设置。");
         return false;
       }
@@ -1121,12 +1507,65 @@ export function useConversationController(
         return false;
       }
     },
-    [announce, busy, dataSource, reload, selectedSessionId]
+    [announce, busy, dataSource, globalMemoryEnabled, reload, selectedSessionId]
+  );
+
+  const selectProviderProfile = useCallback(
+    (profileId: string): boolean => {
+      if (busy) return false;
+      const selected = provider.profiles.find(profile => profile.profileId === profileId);
+      if (!selected || selected.availability !== "ready") {
+        announce("这个模型当前不可用，未改变本轮模型。");
+        return false;
+      }
+      setProvider(current => ({
+        ...current,
+        status: "ready",
+        selectedProfileId: selected.profileId,
+        selectedReasoningEffort: null,
+        errorCode: null,
+      }));
+      announce(`本轮将使用 ${selected.providerId} · ${selected.modelId}。`);
+      return true;
+    },
+    [announce, busy, provider.profiles]
+  );
+
+  const selectReasoningEffort = useCallback(
+    (effort: ReasoningEffort | null): boolean => {
+      if (busy) return false;
+      const selected = provider.profiles.find(
+        profile => profile.profileId === provider.selectedProfileId
+      );
+      if (!selected || (effort !== null && !selected.supportedReasoningEfforts.includes(effort))) {
+        announce("当前模型不支持这个推理强度，未改变本轮设置。");
+        return false;
+      }
+      setProvider(current => ({ ...current, selectedReasoningEffort: effort }));
+      announce(effort === null ? "本轮将使用模型默认推理。" : `本轮推理强度已设为 ${effort}。`);
+      return true;
+    },
+    [announce, busy, provider.profiles, provider.selectedProfileId]
+  );
+
+  const setExecutionMode = useCallback(
+    (nextMode: WorkExecutionMode): boolean => {
+      if (busy) return false;
+      setExecutionModeState(nextMode);
+      announce(
+        nextMode === "observe_only"
+          ? "本轮 Work 已设为只读研究；不会创建文件或写入个人长期状态。"
+          : "本轮 Work 已设为标准执行；范围扩展和敏感动作仍会请求确认。"
+      );
+      return true;
+    },
+    [announce, busy]
   );
 
   return useMemo(
     () => ({
       sessions,
+      archivedSessions,
       projects,
       selectedProjectId,
       selectedSessionId,
@@ -1140,6 +1579,7 @@ export function useConversationController(
       streamingReply,
       activeTaskId,
       mode,
+      executionMode,
       provider,
       workStatus,
       sessionMutation,
@@ -1148,6 +1588,7 @@ export function useConversationController(
       resourceMutation,
       skills,
       selectedSkillId,
+      selectedSkillDetail,
       toolCandidates,
       capabilityState,
       busy,
@@ -1156,10 +1597,20 @@ export function useConversationController(
       selectSession,
       startNewConversation,
       createProject,
+      bindProjectDirectory,
+      addProjectReadRoot,
+      removeProjectReadRoot,
+      updateProjectName,
+      archiveProject,
+      restoreProject,
+      deleteProject,
       assignProject,
       setMemoryMode,
+      selectProviderProfile,
+      selectReasoningEffort,
       setDraft: updateDraft,
       setMode,
+      setExecutionMode,
       attachResources,
       detachResource,
       selectSkill,
@@ -1168,13 +1619,23 @@ export function useConversationController(
       steer,
       cancel,
       renameSelected,
+      archiveSelected,
+      restoreArchived,
+      deleteArchived,
       deleteSelected,
     }),
     [
       busy,
       cancel,
       capabilityState,
+      bindProjectDirectory,
+      addProjectReadRoot,
+      archiveProject,
+      archiveSelected,
+      archivedSessions,
       createProject,
+      deleteProject,
+      deleteArchived,
       deleteSelected,
       detachResource,
       draft,
@@ -1184,18 +1645,25 @@ export function useConversationController(
       loadStatus,
       messages,
       mode,
+      executionMode,
       pendingResources,
       pendingResourceTurnOperationId,
       projects,
       renameSelected,
+      removeProjectReadRoot,
+      restoreProject,
+      restoreArchived,
       reload,
       resourceMutation,
+      selectProviderProfile,
+      selectReasoningEffort,
       selectSkill,
       selectSession,
       selectedProjectId,
       globalMemoryEnabled,
       memoryMode,
       setMode,
+      setExecutionMode,
       selectedSessionId,
       selectedSkillId,
       sessionMutation,
@@ -1212,6 +1680,7 @@ export function useConversationController(
       turnState,
       toolCandidates,
       updateDraft,
+      updateProjectName,
     ]
   );
 }

@@ -240,6 +240,55 @@
   line-height: var(--ol-line-body);
 }
 
+.ol-settings-permission-list {
+  display: grid;
+  gap: var(--ol-space-3);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.ol-settings-permission-list > li {
+  display: grid;
+  gap: var(--ol-space-3);
+  padding: var(--ol-space-4);
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: var(--ol-radius-3);
+  background: var(--ol-surface-subtle);
+}
+
+.ol-settings-permission-list__identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--ol-space-2);
+}
+
+.ol-settings-permission-list__identity span,
+.ol-settings-permission-list dd {
+  color: var(--ol-ink-secondary);
+}
+
+.ol-settings-permission-list dl {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(8rem, 1fr));
+  gap: var(--ol-space-2) var(--ol-space-4);
+  margin: 0;
+}
+
+.ol-settings-permission-list dl > div {
+  display: grid;
+  gap: var(--ol-space-1);
+}
+
+.ol-settings-permission-list dt,
+.ol-settings-permission-list dd {
+  margin: 0;
+  font-size: var(--ol-type-body);
+  line-height: var(--ol-line-body);
+}
+
 .ol-settings-advanced {
   color: var(--ol-ink-secondary);
   font-size: var(--ol-type-body);

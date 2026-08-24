@@ -3,9 +3,10 @@ use openlife_core::agent::{
     build_tasks_view_model, build_workspace_view_model, BackendEntityKind, BackendEntityRef,
     EvidenceRef, EvidenceSensitivity, EvidenceSource, ProviderPrivacyBoundarySummary,
     ReviewCenterViewModel, TaskArtifactChangeKind, TaskArtifactChangeViewModel,
-    TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel, TaskArtifactUndoViewModel,
-    TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel, TaskArtifactViewModel,
-    TaskCompletionDisposition, TaskItemViewModel, TaskLifecycleStatus, TaskTerminalDeliveryStatus,
+    TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel, TaskArtifactRevisionViewModel,
+    TaskArtifactUndoViewModel, TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel,
+    TaskArtifactViewModel, TaskCompletionDisposition, TaskItemViewModel, TaskLifecycleStatus,
+    TaskRunProvenanceViewModel, TaskSteeringViewModel, TaskTerminalDeliveryStatus,
     TaskViewModelTaskInput, TaskWorkPlanStepViewModel, TaskWorkPlanViewModel, TasksViewModel,
     TasksViewModelBuildInput, ViewModelEnvelope, ViewModelStatus, ViewModelWarning,
     ViewModelWarningSeverity, WorkspaceActivityItem, WorkspaceViewModel,
@@ -122,7 +123,13 @@ pub(crate) async fn get_workbench_view_model_with_state(
     let snapshot = load_tasks_read_model_snapshot(state).await?;
     let tasks = snapshot.envelope.clone();
     let review = snapshot.review_envelope.clone();
-    let provider_boundary = load_provider_boundary_envelope(state).await;
+    let provider_turn_id = selected_active_run_turn_id(&tasks, requested_conversation_id);
+    let provider_boundary = load_provider_boundary_envelope(
+        state,
+        requested_conversation_id,
+        provider_turn_id.as_deref(),
+    )
+    .await;
     let workspace = compose_workspace_envelope(
         snapshot,
         provider_boundary.clone(),
@@ -139,14 +146,41 @@ pub(crate) async fn get_workbench_view_model_with_state(
 
 async fn load_provider_boundary_envelope(
     state: &Arc<AppState>,
+    conversation_id: Option<&str>,
+    turn_id: Option<&str>,
 ) -> ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
-    match get_provider_privacy_boundary_summary_with_state(state).await {
+    match get_provider_privacy_boundary_summary_with_state(state, conversation_id, turn_id).await {
         Ok(envelope) => envelope,
         Err(error) => error_envelope(
             "provider_privacy_boundary_unavailable",
             format!("Provider privacy boundary could not be loaded: {error}"),
         ),
     }
+}
+
+fn selected_active_run_turn_id(
+    tasks: &ViewModelEnvelope<TasksViewModel>,
+    conversation_id: Option<&str>,
+) -> Option<String> {
+    tasks.data.as_ref()?.items.iter().find_map(|item| {
+        let in_selected_conversation = conversation_id
+            .is_none_or(|selected| item.conversation_id.as_deref() == Some(selected));
+        if in_selected_conversation
+            && matches!(
+                item.lifecycle_status,
+                TaskLifecycleStatus::Running
+                    | TaskLifecycleStatus::WaitingReview
+                    | TaskLifecycleStatus::WaitingPermission
+                    | TaskLifecycleStatus::Blocked
+            )
+        {
+            item.latest_run_provenance
+                .as_ref()
+                .map(|provenance| provenance.turn_id.clone())
+        } else {
+            None
+        }
+    })
 }
 
 fn compose_workspace_envelope(
@@ -335,6 +369,20 @@ async fn canonical_task_input(
             }],
         })
         .collect::<Vec<_>>();
+    let canonical_steerings = snapshot
+        .steerings
+        .iter()
+        .map(|steering| TaskSteeringViewModel {
+            steering_id: steering.steering_id.clone(),
+            run_id: steering.run_id.clone(),
+            status: steering.status,
+            base_plan_revision: steering.base_plan_revision,
+            applied_plan_revision: steering.applied_plan_revision,
+            resolution_code: steering.resolution_code.clone(),
+            created_at: steering.created_at,
+            resolved_at: steering.resolved_at,
+        })
+        .collect::<Vec<_>>();
     let mut canonical_artifacts = Vec::with_capacity(snapshot.artifacts.len());
     for artifact in &snapshot.artifacts {
         canonical_artifacts.push(canonical_artifact_view(state, &snapshot, artifact).await);
@@ -344,7 +392,7 @@ async fn canonical_task_input(
     } else {
         canonical_general_delivery_status(&snapshot)
     };
-    let pending_review_item_refs = snapshot
+    let mut pending_review_item_refs = snapshot
         .artifacts
         .iter()
         .filter(|artifact| artifact.artifact.status == CanonicalArtifactStatus::WaitingReview)
@@ -358,6 +406,18 @@ async fn canonical_task_input(
             href: None,
         })
         .collect::<Vec<_>>();
+    pending_review_item_refs.extend(
+        snapshot
+            .tool_review_checkpoints
+            .iter()
+            .filter(|checkpoint| checkpoint.status == "waiting")
+            .map(|checkpoint| BackendEntityRef {
+                id: checkpoint.proposal_id.clone(),
+                kind: BackendEntityKind::ReviewItem,
+                label: "Tool permission review".into(),
+                href: None,
+            }),
+    );
     let blockers = snapshot
         .items
         .iter()
@@ -402,6 +462,7 @@ async fn canonical_task_input(
         })
         .collect();
     let title = canonical_task_title(state, &snapshot).await;
+    let latest_run_provenance = canonical_latest_run_provenance(state, &snapshot).await;
     let attention_reason_codes = snapshot
         .attention
         .iter()
@@ -420,12 +481,18 @@ async fn canonical_task_input(
             TaskCompletionDisposition::Complete
         }
     });
+    let completion_limitations = snapshot
+        .final_result
+        .as_ref()
+        .map(|result| result.completion_limitations.clone())
+        .unwrap_or_default();
     (
         TaskViewModelTaskInput {
             task_id: snapshot.task.id.clone(),
             canonical_task_id: Some(snapshot.task.id.clone()),
             conversation_id: Some(snapshot.task.conversation_id),
             title,
+            latest_run_provenance,
             related_run_ids: run_ids,
             final_delivery_present: false,
             final_delivery_status: None,
@@ -433,7 +500,9 @@ async fn canonical_task_input(
             canonical_terminal_delivery_status: Some(terminal_status),
             canonical_final_delivery_evidence_present: Some(delivery_proven),
             completion_disposition,
+            completion_limitations,
             canonical_items,
+            canonical_steerings,
             work_plan: work_plan.map(|record| TaskWorkPlanViewModel {
                 revision: record.plan_revision,
                 steps: record
@@ -457,18 +526,22 @@ async fn canonical_task_input(
             pending_review_item_refs,
             review_projection_authoritative,
             allowed_control_ids: match snapshot.task.status {
-                CanonicalTaskStatus::Running => vec!["cancel".into()],
-                CanonicalTaskStatus::Failed
-                | CanonicalTaskStatus::Blocked
-                | CanonicalTaskStatus::Cancelled
-                | CanonicalTaskStatus::Interrupted
+                CanonicalTaskStatus::Running | CanonicalTaskStatus::WaitingReview => {
+                    vec!["stop_run".into()]
+                }
+                CanonicalTaskStatus::Failed | CanonicalTaskStatus::Blocked
                     if !retry_scope_stale =>
                 {
                     vec!["retry".into()]
                 }
+                CanonicalTaskStatus::Cancelled | CanonicalTaskStatus::Interrupted
+                    if !retry_scope_stale =>
+                {
+                    vec!["resume".into()]
+                }
                 _ => Vec::new(),
             },
-            retry_action_id: snapshot.runs.last().map(|run| run.run_id.clone()),
+            restart_run_id: snapshot.runs.last().map(|run| run.run_id.clone()),
             next_recommended_control: Some("open_trace".into()),
             latest_result_preview: preview,
             evidence_refs: canonical_evidence,
@@ -476,6 +549,60 @@ async fn canonical_task_input(
         },
         activity,
     )
+}
+
+async fn canonical_latest_run_provenance(
+    state: &Arc<AppState>,
+    snapshot: &CanonicalTaskSnapshot,
+) -> Option<TaskRunProvenanceViewModel> {
+    let run_id = snapshot.runs.last()?.run_id.as_str();
+    canonical_run_provenance(state, snapshot, run_id).await
+}
+
+async fn canonical_run_provenance(
+    state: &Arc<AppState>,
+    snapshot: &CanonicalTaskSnapshot,
+    run_id: &str,
+) -> Option<TaskRunProvenanceViewModel> {
+    let run = snapshot.runs.iter().find(|run| run.run_id == run_id)?;
+    let attempt = snapshot.attempts.iter().rev().find(|attempt| {
+        attempt.run_id == run.run_id
+            && attempt.provider_profile_id.is_some()
+            && attempt.provider_model_id.is_some()
+    })?;
+    let provider_profile_id = attempt.provider_profile_id.as_deref()?;
+    let provider_model_id = attempt.provider_model_id.as_deref()?;
+    let store = state.conversation_store.as_ref()?.lock().await;
+    let turn = store
+        .find_turn_for_work_binding(
+            &snapshot.task.conversation_id,
+            &snapshot.task.initial_outcome_digest,
+            provider_profile_id,
+            provider_model_id,
+            attempt.provider_reasoning_effort,
+        )
+        .ok()??;
+    let project_name = run
+        .project_id
+        .as_deref()
+        .and_then(|project_id| store.get_project(project_id).ok().flatten())
+        .map(|project| project.name);
+    Some(TaskRunProvenanceViewModel {
+        run_id: run.run_id.clone(),
+        turn_id: turn.id,
+        turn_status: turn.status.as_str().into(),
+        turn_error_code: turn.error_code,
+        provider_profile_id: turn.provider.profile_id,
+        provider_id: turn.provider.provider_id,
+        model_id: turn.provider.model_id,
+        endpoint_class: turn.provider.endpoint_class,
+        reasoning_effort: turn.provider.reasoning_effort,
+        execution_mode: run.execution_mode,
+        project_id: run.project_id.clone(),
+        project_name,
+        project_revision: run.project_revision,
+        project_scope_digest: run.scope_digest.clone(),
+    })
 }
 
 async fn canonical_task_title(state: &Arc<AppState>, snapshot: &CanonicalTaskSnapshot) -> String {
@@ -786,6 +913,16 @@ async fn canonical_artifact_view(
     task: &CanonicalTaskSnapshot,
     snapshot: &CanonicalArtifactSnapshot,
 ) -> TaskArtifactViewModel {
+    let source_run_id = task
+        .items
+        .iter()
+        .find(|item| item.id == snapshot.artifact.source_item_id)
+        .map(|item| item.run_id.as_str());
+    let source_run_provenance = match source_run_id {
+        Some(run_id) => canonical_run_provenance(state, task, run_id).await,
+        None => None,
+    };
+    let source_resource_refs = artifact_source_resource_refs(state, source_run_provenance.as_ref());
     let proposal_ref = snapshot
         .review_checkpoint
         .as_ref()
@@ -814,9 +951,14 @@ async fn canonical_artifact_view(
         });
     let presentation =
         artifact_presentation(state, snapshot, task, verification_item_present).await;
+    let revision_available = task.task.status == CanonicalTaskStatus::Completed
+        && presentation.verification.status == TaskArtifactVerificationStatus::Verified
+        && snapshot.undo.is_none();
     TaskArtifactViewModel {
         artifact_id: snapshot.artifact.id.clone(),
         version: snapshot.current_version.version,
+        previous_version: (snapshot.current_version.version > 1)
+            .then(|| snapshot.current_version.version - 1),
         status: snapshot.artifact.status,
         media_type: snapshot.artifact.media_type.clone(),
         content_digest: snapshot.artifact.content_digest.clone(),
@@ -830,17 +972,69 @@ async fn canonical_artifact_view(
             label: "ArtifactDraft Item".into(),
             href: None,
         },
-        evidence_refs: vec![EvidenceRef {
+        source_run_provenance,
+        source_resource_refs: source_resource_refs.clone(),
+        evidence_refs: std::iter::once(EvidenceRef {
             id: snapshot.artifact.id.clone(),
             label: "Canonical ArtifactVersion".into(),
             source: EvidenceSource::Task,
             sensitivity: Some(EvidenceSensitivity::LocalPrivate),
-        }],
+        })
+        .chain(source_resource_refs)
+        .collect(),
         undo: artifact_undo_view(snapshot, &presentation.change, &presentation.verification),
+        revision: TaskArtifactRevisionViewModel {
+            available: revision_available,
+            reason_code: (!revision_available).then(|| {
+                if task.task.status != CanonicalTaskStatus::Completed {
+                    "artifact_revision_requires_completed_task".into()
+                } else if presentation.verification.status
+                    != TaskArtifactVerificationStatus::Verified
+                {
+                    "artifact_revision_requires_verified_current_version".into()
+                } else {
+                    "artifact_revision_conflicts_with_undo".into()
+                }
+            }),
+        },
         change: presentation.change,
         preview: presentation.preview,
         verification: presentation.verification,
     }
+}
+
+fn artifact_source_resource_refs(
+    state: &Arc<AppState>,
+    provenance: Option<&TaskRunProvenanceViewModel>,
+) -> Vec<EvidenceRef> {
+    let Some(provenance) = provenance else {
+        return Vec::new();
+    };
+    if state
+        .persistence_coordinator
+        .require_trusted_read("ResourceStore")
+        .is_err()
+    {
+        return Vec::new();
+    }
+    let Some(store) = state
+        .resource_runtime
+        .as_ref()
+        .map(|runtime| runtime.gateway().store())
+    else {
+        return Vec::new();
+    };
+    store
+        .list_resources_for_message(&provenance.turn_id)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|resource| EvidenceRef {
+            id: resource.resource_id,
+            label: resource.filename,
+            source: EvidenceSource::Resource,
+            sensitivity: Some(EvidenceSensitivity::LocalPrivate),
+        })
+        .collect()
 }
 
 fn artifact_undo_view(
@@ -851,6 +1045,7 @@ fn artifact_undo_view(
     if let Some(undo) = snapshot.undo.as_ref() {
         return TaskArtifactUndoViewModel {
             available: false,
+            operation: Some(undo.operation),
             status: Some(undo.status.clone()),
             proposal_ref: Some(BackendEntityRef {
                 id: undo.proposal_id.clone(),
@@ -862,15 +1057,27 @@ fn artifact_undo_view(
                 .then(|| "artifact_undo_pending_or_failed".into()),
         };
     }
+    let recoverable_change = change.kind == TaskArtifactChangeKind::Create
+        || (change.kind == TaskArtifactChangeKind::Replace
+            && snapshot
+                .pre_change_snapshot
+                .as_ref()
+                .is_some_and(|pre_change| {
+                    snapshot.current_version.expected_target_digest.as_deref()
+                        == Some(pre_change.content_digest.as_str())
+                }));
     let available = snapshot.artifact.status == CanonicalArtifactStatus::Materialized
         && verification.status == TaskArtifactVerificationStatus::Verified
-        && change.kind == TaskArtifactChangeKind::Create;
+        && recoverable_change;
     TaskArtifactUndoViewModel {
         available,
+        operation: None,
         status: None,
         proposal_ref: None,
         reason_code: (!available).then(|| {
-            if change.kind == TaskArtifactChangeKind::Replace {
+            if change.kind == TaskArtifactChangeKind::Replace
+                && snapshot.pre_change_snapshot.is_none()
+            {
                 "artifact_undo_unavailable_without_original_bytes".into()
             } else if verification.status != TaskArtifactVerificationStatus::Verified {
                 "artifact_undo_requires_verified_materialization".into()
@@ -1350,6 +1557,10 @@ mod tests {
                     content: goal.into(),
                 }],
                 selected_skill_id: None,
+                provider_profile_id: None,
+                reasoning_effort: None,
+                execution_mode: openlife_core::task_runtime::WorkExecutionMode::ScopedAgent,
+                revision_context: None,
                 stream: false,
             },
             &state,
@@ -1361,6 +1572,13 @@ mod tests {
         let envelope = get_tasks_view_model_with_state(&state).await.unwrap();
         let task = envelope.data.unwrap().items.into_iter().next().unwrap();
         assert_eq!(task.title, goal);
+        let provenance = task
+            .latest_run_provenance
+            .expect("exact Work Run provenance");
+        assert_eq!(provenance.provider_id, "openai");
+        assert_eq!(provenance.model_id, "gpt-local-provider-harness");
+        assert_eq!(provenance.turn_status, "completed");
+        assert!(provenance.project_id.is_none());
     }
 
     #[test]
@@ -1451,6 +1669,7 @@ mod tests {
                 project_id: None,
                 project_revision: None,
                 scope_digest: None,
+                execution_mode: openlife_core::task_runtime::WorkExecutionMode::ScopedAgent,
             })
             .unwrap();
         store
@@ -1527,8 +1746,6 @@ mod tests {
         let artifact_dir = tempfile::tempdir().unwrap();
         let artifact_path = artifact_dir.path().join("report-view.md");
         let artifact_path_text = artifact_path.to_string_lossy().into_owned();
-        state.config.lock().await.system.safe_paths =
-            vec![artifact_dir.path().to_string_lossy().into_owned()];
         let content = "# Canonical report";
         let content_digest = format!("sha256:{:x}", Sha256::digest(content.as_bytes()));
         let conversation_id = uuid::Uuid::new_v4().to_string();
@@ -1576,16 +1793,25 @@ mod tests {
                 project_id: Some(&project_id),
                 project_revision: Some(project.revision),
                 scope_digest: Some(&scope_digest),
+                execution_mode: openlife_core::task_runtime::WorkExecutionMode::ScopedAgent,
             })
             .unwrap();
         let work_plan = openlife_core::work_orchestration::StructuredWorkPlan {
             schema_version: openlife_core::work_orchestration::WORK_PLAN_SCHEMA_VERSION.into(),
             steps: vec![
                 openlife_core::work_orchestration::WorkPlanStep {
+                    id: "research".into(),
+                    kind: openlife_core::work_orchestration::WorkPlanStepKind::WebSearch,
+                    required: true,
+                    depends_on: Vec::new(),
+                    target_id: None,
+                    target_contract_digest: None,
+                },
+                openlife_core::work_orchestration::WorkPlanStep {
                     id: "draft".into(),
                     kind: openlife_core::work_orchestration::WorkPlanStepKind::DraftArtifact,
                     required: true,
-                    depends_on: Vec::new(),
+                    depends_on: vec!["research".into()],
                     target_id: None,
                     target_contract_digest: None,
                 },
@@ -1616,6 +1842,13 @@ mod tests {
                         evidence_kind:
                             openlife_core::work_orchestration::WorkCompletionEvidenceKind::Result,
                         allow_transparent_limitation: false,
+                    },
+                    openlife_core::work_orchestration::WorkCompletionRequirement {
+                        id: "official_source".into(),
+                        description: "One requested official source remained unavailable.".into(),
+                        evidence_kind:
+                            openlife_core::work_orchestration::WorkCompletionEvidenceKind::Source,
+                        allow_transparent_limitation: true,
                     },
                 ],
                 requires_review_before_write: false,
@@ -1659,12 +1892,15 @@ mod tests {
             .lock()
             .await
             .bind_general_artifact_version_source(
-                &prepared.artifact_id,
-                prepared.version,
-                &artifact_path_text,
-                &draft_path.to_string_lossy(),
-                true,
-                None,
+                openlife_core::task_runtime::BindArtifactVersionSourceInput {
+                    artifact_id: &prepared.artifact_id,
+                    version: prepared.version,
+                    target_reference: &artifact_path_text,
+                    draft_reference: &draft_path.to_string_lossy(),
+                    expected_target_absent: true,
+                    expected_target_digest: None,
+                    pre_change_snapshot: None,
+                },
             )
             .unwrap();
         let mut proposal = openlife_core::agent::AgentProposal::new(
@@ -1709,6 +1945,12 @@ mod tests {
             .await
             .bind_artifact_review(&prepared.artifact_id, "proposal-report-view")
             .unwrap();
+        let completion_limitations =
+            vec![openlife_core::task_runtime::CanonicalCompletionLimitation {
+                requirement_id: "official_source".into(),
+                description: "One requested official source remained unavailable.".into(),
+                evidence_refs: vec!["candidate-output://report-view".into()],
+            }];
         state
             .canonical_task_runtime_store
             .as_ref()
@@ -1723,7 +1965,8 @@ mod tests {
                     "sha256:{:x}",
                     Sha256::digest(b"report view waiting review")
                 ),
-                summary_code: "work_artifact_completed",
+                summary_code: "work_artifact_completed_with_disclosed_limitations",
+                completion_limitations: &completion_limitations,
             })
             .unwrap();
 
@@ -1741,7 +1984,7 @@ mod tests {
         assert_eq!(task.items.len(), 4);
         let projected_plan = task.work_plan.as_ref().expect("work plan is projected");
         assert_eq!(projected_plan.revision, 1);
-        assert_eq!(projected_plan.steps.len(), 3);
+        assert_eq!(projected_plan.steps.len(), 4);
         assert_eq!(
             projected_plan.completion.result_kind,
             openlife_core::work_orchestration::WorkResultKind::Artifact
@@ -1757,6 +2000,10 @@ mod tests {
             ]
         );
         assert_eq!(task.artifacts.len(), 1);
+        assert_eq!(task.artifacts[0].version, 1);
+        assert!(task.artifacts[0].previous_version.is_none());
+        assert!(task.artifacts[0].source_run_provenance.is_none());
+        assert!(task.artifacts[0].source_resource_refs.is_empty());
         assert_eq!(
             task.artifacts[0].status,
             openlife_core::task_runtime::CanonicalArtifactStatus::WaitingReview
@@ -1771,6 +2018,11 @@ mod tests {
             Some("# Canonical report")
         );
         assert!(!task.artifacts[0].undo.available);
+        assert!(!task.artifacts[0].revision.available);
+        assert_eq!(
+            task.artifacts[0].revision.reason_code.as_deref(),
+            Some("artifact_revision_requires_completed_task")
+        );
         assert_eq!(
             task.artifacts[0].verification.status,
             openlife_core::agent::TaskArtifactVerificationStatus::Pending
@@ -1835,6 +2087,11 @@ mod tests {
             openlife_core::agent::TaskTerminalDeliveryStatus::Delivered
         );
         assert!(task.final_delivery_evidence_present);
+        assert_eq!(
+            task.completion_disposition,
+            Some(openlife_core::agent::TaskCompletionDisposition::CompleteWithDisclosedLimitations)
+        );
+        assert_eq!(task.completion_limitations, completion_limitations);
         assert!(task
             .latest_result_preview
             .as_ref()
@@ -1865,6 +2122,8 @@ mod tests {
         );
         assert!(task.artifacts[0].undo.available);
         assert!(task.artifacts[0].undo.status.is_none());
+        assert!(task.artifacts[0].revision.available);
+        assert!(task.artifacts[0].revision.reason_code.is_none());
 
         std::fs::write(&artifact_path, "# Tampered after delivery").unwrap();
         let drifted = get_tasks_view_model_with_state(&state).await.unwrap();
@@ -1879,6 +2138,11 @@ mod tests {
             openlife_core::agent::TaskArtifactVerificationStatus::Failed
         );
         assert!(task.artifacts[0].preview.content.is_none());
+        assert!(!task.artifacts[0].revision.available);
+        assert_eq!(
+            task.artifacts[0].revision.reason_code.as_deref(),
+            Some("artifact_revision_requires_verified_current_version")
+        );
         assert!(!task.final_delivery_evidence_present);
     }
 }

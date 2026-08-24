@@ -2,6 +2,8 @@ import type {
   ConfirmLifeModelLearningCandidateReceipt,
   DeleteLifeModelLearningCandidateReceipt,
   DraftLifeModelV2ChangeRequest,
+  DraftLegacyLifeModelMigrationRequest,
+  DraftLegacyLifeModelMigrationReceipt,
   DraftLifeModelV2ExportRequest,
   DraftLifeModelV2RollbackRequest,
   LifeModelLearningDecisionReceipt,
@@ -20,6 +22,12 @@ import { safeInvoke } from "./invoke";
 
 export async function getLifeModelViewModel(): Promise<ViewModelEnvelope<LifeModelViewModel>> {
   return safeInvoke<ViewModelEnvelope<LifeModelViewModel>>("get_life_model_view_model");
+}
+
+export async function draftLegacyLifeModelMigration(
+  request: DraftLegacyLifeModelMigrationRequest
+): Promise<DraftLegacyLifeModelMigrationReceipt> {
+  return safeInvoke("draft_legacy_lifemodel_migration", { request });
 }
 
 export async function deleteLifeModelLearningCandidate(

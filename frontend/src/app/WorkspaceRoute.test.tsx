@@ -625,10 +625,11 @@ describe("Workspace route", () => {
     expect(reviewItemStatus(moved)).toMatchObject({ label: "文件移动已核验", status: "success" });
   });
 
-  it("does not delete a conversation until the explicit confirmation action", async () => {
+  it("archives retained Conversation history instead of exposing direct deletion", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchFixtureDataSource("fixture-ready");
     const deleteSession = vi.spyOn(dataSource, "deleteSession");
+    const archiveSession = vi.spyOn(dataSource, "archiveSession");
 
     render(
       <ProductWorkbench
@@ -638,14 +639,12 @@ describe("Workspace route", () => {
       />
     );
 
-    expect(await screen.findByRole("button", { name: "删除" })).toBeEnabled();
-    await user.click(screen.getByRole("button", { name: "删除" }));
-    const dialog = screen.getByRole("dialog", { name: "删除这段对话？" });
+    expect(await screen.findByRole("button", { name: "归档" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "归档" }));
+    await waitFor(() => expect(archiveSession).toHaveBeenCalledTimes(1));
     expect(deleteSession).not.toHaveBeenCalled();
-
-    await user.click(within(dialog).getByRole("button", { name: "确认删除" }));
-
-    await waitFor(() => expect(deleteSession).toHaveBeenCalledTimes(1));
-    expect(screen.queryByRole("dialog", { name: "删除这段对话？" })).not.toBeInTheDocument();
+    await user.click(await screen.findByText("已归档对话（1）"));
+    expect(screen.getByRole("button", { name: "永久删除空记录" })).toBeDisabled();
+    expect(screen.getByText("对话仍有消息或 Turn 历史，必须保留原始记录。")).toBeInTheDocument();
   });
 });

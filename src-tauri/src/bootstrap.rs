@@ -1090,6 +1090,8 @@ fn bootstrap_with_secret_store(
         #[cfg(test)]
         work_initial_decision_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         #[cfg(test)]
+        work_steering_replan_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+        #[cfg(test)]
         work_agent_step_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         #[cfg(test)]
         work_semantic_verification_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),

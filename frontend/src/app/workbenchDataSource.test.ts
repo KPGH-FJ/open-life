@@ -9,12 +9,14 @@ const tauriMocks = vi.hoisted(() => ({
 }));
 
 const workIpcMocks = vi.hoisted(() => ({
-  cancelWorkTask: vi.fn(),
+  resumeWorkTask: vi.fn(),
   exportArtifactResult: vi.fn(),
   getWorkbenchViewModel: vi.fn(),
   openArtifactResult: vi.fn(),
   requestArtifactUndo: vi.fn(),
+  reviseWorkArtifact: vi.fn(),
   retryWorkTask: vi.fn(),
+  stopWorkRun: vi.fn(),
 }));
 
 vi.mock("@/ipc/personalIntelligence", () => ({
@@ -192,6 +194,16 @@ describe("Workbench Tauri data source", () => {
   it("dispatches only exact executable TaskControl contracts", async () => {
     const controls: TaskControl[] = [
       {
+        id: "task-1:resume",
+        label: "Continue in a new run",
+        kind: "resume",
+        effect: "task_resume_request",
+        enabled: true,
+        targetTaskId: "task-1",
+        targetActionId: "run-1",
+        completionProofAfterDispatch: false,
+      },
+      {
         id: "task-1:retry",
         label: "Retry",
         kind: "retry",
@@ -202,13 +214,13 @@ describe("Workbench Tauri data source", () => {
         completionProofAfterDispatch: false,
       },
       {
-        id: "task-1:cancel",
-        label: "Cancel",
-        kind: "cancel",
-        effect: "task_cancel_request",
+        id: "task-1:stop_run",
+        label: "Stop current run",
+        kind: "stop_run",
+        effect: "task_stop_run_request",
         enabled: true,
-        requiresConfirmation: true,
         targetTaskId: "task-1",
+        targetActionId: "run-3",
         completionProofAfterDispatch: false,
       },
     ];
@@ -217,8 +229,9 @@ describe("Workbench Tauri data source", () => {
       await tauriWorkbenchDataSource.dispatchTaskControl(control);
     }
 
+    expect(workIpcMocks.resumeWorkTask).toHaveBeenCalledWith("task-1", "run-1");
     expect(workIpcMocks.retryWorkTask).toHaveBeenCalledWith("task-1", "run-2");
-    expect(workIpcMocks.cancelWorkTask).toHaveBeenCalledWith("task-1");
+    expect(workIpcMocks.stopWorkRun).toHaveBeenCalledWith("task-1", "run-3");
   });
 
   it("verifies an exact verified Artifact Undo review receipt", async () => {
@@ -243,6 +256,37 @@ describe("Workbench Tauri data source", () => {
     await expect(tauriWorkbenchDataSource.requestArtifactUndo("artifact-1")).rejects.toThrow(
       "artifact_undo_receipt_unverified"
     );
+  });
+
+  it("starts a focused revision only through the exact Artifact version contract", async () => {
+    workIpcMocks.reviseWorkArtifact.mockResolvedValue({
+      reply: "等待审核",
+      status: "completed",
+      blockers: [],
+      run_id: "11111111-1111-4111-8111-111111111111",
+    });
+
+    await tauriWorkbenchDataSource.reviseArtifact("task-1", "artifact:1", 3, "只缩短结论");
+
+    expect(workIpcMocks.reviseWorkArtifact).toHaveBeenCalledWith(
+      "task-1",
+      "artifact:1",
+      3,
+      "只缩短结论"
+    );
+  });
+
+  it("does not accept a non-terminal focused revision receipt", async () => {
+    workIpcMocks.reviseWorkArtifact.mockResolvedValue({
+      reply: "unexpected",
+      status: "blocked",
+      blockers: ["artifact_revision_base_changed"],
+      run_id: "11111111-1111-4111-8111-111111111111",
+    });
+
+    await expect(
+      tauriWorkbenchDataSource.reviseArtifact("task-1", "artifact:1", 3, "只缩短结论")
+    ).rejects.toThrow("artifact_revision_receipt_unverified");
   });
 
   it("opens only the exact Artifact identity and version selected by the result view", async () => {

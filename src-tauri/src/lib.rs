@@ -60,20 +60,24 @@ pub use state::AppState;
 
 // Re-exports for test modules (imported as crate::...)
 use commands::main_chat_tools::{
-    clear_main_chat_skill, list_main_chat_skills, list_main_chat_tool_candidates,
-    select_main_chat_skill,
+    clear_main_chat_skill, get_main_chat_skill_detail, list_main_chat_skills,
+    list_main_chat_tool_candidates, select_main_chat_skill,
 };
 
 use commands::artifact::open_artifact_result;
 use commands::chat::{
-    assign_conversation_project, create_chat_session, create_project, delete_chat_session,
-    get_conversation_view_model, rename_chat_session, set_conversation_memory_mode,
+    add_project_read_root, archive_chat_session, archive_project, assign_conversation_project,
+    bind_project_directory, create_chat_session, create_project_from_directory,
+    delete_chat_session, delete_project, get_conversation_view_model, remove_project_read_root,
+    rename_chat_session, restore_chat_session, restore_project, select_new_conversation_project,
+    set_conversation_memory_mode, update_project_name,
 };
 use commands::life_model::{
     confirm_lifemodel_learning_candidate, delete_lifemodel_learning_candidate,
-    draft_lifemodel_v2_change, draft_lifemodel_v2_export, draft_lifemodel_v2_rollback,
-    edit_lifemodel_learning_proposal, pause_lifemodel_learning_suggestion_class,
-    reject_lifemodel_learning_candidate, stage_lifemodel_learning_candidate,
+    draft_legacy_lifemodel_migration, draft_lifemodel_v2_change, draft_lifemodel_v2_export,
+    draft_lifemodel_v2_rollback, edit_lifemodel_learning_proposal,
+    pause_lifemodel_learning_suggestion_class, reject_lifemodel_learning_candidate,
+    stage_lifemodel_learning_candidate,
 };
 use commands::memory::{
     archive_memory, correct_memory, privacy_erase_memory_asset, restore_memory,
@@ -85,6 +89,7 @@ use commands::proposal::{
 use commands::settings::{
     get_config, recover_required_credential_access, save_config, test_llm_connection,
 };
+use commands::tool_permissions::revoke_tool_permission;
 use life_state_projection::get_life_state_projection;
 use main_chat_steering::submit_main_chat_task_steering;
 pub use openlife_core::privacy::PrivacyEngine;
@@ -94,6 +99,7 @@ use read_models::memory::get_memory_view_model;
 use read_models::provider_privacy::get_provider_privacy_boundary_summary;
 use read_models::review_center::get_review_center_view_model;
 use read_models::tasks::get_workbench_view_model;
+use read_models::tool_permissions::get_tool_permission_view_model;
 use storage::app_data_dir;
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
@@ -222,6 +228,9 @@ async fn send_message(
     session_id: String,
     messages: Vec<ChatMessage>,
     selected_skill_id: Option<String>,
+    provider_profile_id: Option<String>,
+    reasoning_effort: Option<openlife_core::conversation::ReasoningEffort>,
+    execution_mode: Option<openlife_core::task_runtime::WorkExecutionMode>,
     mode: Option<String>,
     task_id: Option<String>,
     run_id: Option<String>,
@@ -235,18 +244,27 @@ async fn send_message(
                 session_id,
                 messages,
                 selected_skill_id,
+                provider_profile_id,
+                reasoning_effort,
                 state.inner(),
             )
             .await
         }
         "work" => {
             main_chat_send::send_canonical_work_with_state(
-                operation_id,
-                task_id.ok_or_else(|| "canonical_work_task_id_missing".to_string())?,
-                run_id.ok_or_else(|| "canonical_work_run_id_missing".to_string())?,
-                session_id,
-                messages,
-                selected_skill_id,
+                canonical_work_runtime::CanonicalWorkInput {
+                    turn_id: operation_id,
+                    task_id: task_id.ok_or_else(|| "canonical_work_task_id_missing".to_string())?,
+                    run_id: run_id.ok_or_else(|| "canonical_work_run_id_missing".to_string())?,
+                    conversation_id: session_id,
+                    messages,
+                    selected_skill_id,
+                    provider_profile_id,
+                    reasoning_effort,
+                    execution_mode: execution_mode.unwrap_or_default(),
+                    revision_context: None,
+                    stream: false,
+                },
                 state.inner(),
             )
             .await
@@ -263,6 +281,12 @@ struct StartStreamMessageArgs {
     messages: Vec<ChatMessage>,
     #[serde(default)]
     selected_skill_id: Option<String>,
+    #[serde(default)]
+    provider_profile_id: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<openlife_core::conversation::ReasoningEffort>,
+    #[serde(default)]
+    execution_mode: Option<openlife_core::task_runtime::WorkExecutionMode>,
     #[serde(default)]
     mode: Option<String>,
     #[serde(default)]
@@ -283,6 +307,12 @@ impl std::fmt::Debug for StartStreamMessageArgs {
                 "selected_skill_id_present",
                 &self.selected_skill_id.is_some(),
             )
+            .field(
+                "provider_profile_id_present",
+                &self.provider_profile_id.is_some(),
+            )
+            .field("reasoning_effort", &self.reasoning_effort)
+            .field("execution_mode", &self.execution_mode)
             .field("mode", &self.mode)
             .field("task_id_present", &self.task_id.is_some())
             .field("run_id_present", &self.run_id.is_some())
@@ -301,6 +331,9 @@ async fn start_stream_message<R: tauri::Runtime>(
         session_id,
         messages,
         selected_skill_id,
+        provider_profile_id,
+        reasoning_effort,
+        execution_mode,
         mode,
         task_id,
         run_id,
@@ -314,10 +347,15 @@ async fn start_stream_message<R: tauri::Runtime>(
     match mode.as_deref().unwrap_or("chat") {
         "chat" => {
             main_chat_streaming::start_canonical_chat_stream_with_state(
-                operation_id,
-                session_id,
-                messages,
-                selected_skill_id,
+                canonical_chat_runtime::CanonicalChatInput {
+                    turn_id: operation_id,
+                    conversation_id: session_id,
+                    messages,
+                    selected_skill_id,
+                    provider_profile_id,
+                    reasoning_effort,
+                    stream: true,
+                },
                 state.inner(),
                 emit,
             )
@@ -332,6 +370,10 @@ async fn start_stream_message<R: tauri::Runtime>(
                     conversation_id: session_id,
                     messages,
                     selected_skill_id,
+                    provider_profile_id,
+                    reasoning_effort,
+                    execution_mode: execution_mode.unwrap_or_default(),
+                    revision_context: None,
                     stream: true,
                 },
                 state.inner(),
@@ -353,11 +395,12 @@ async fn cancel_chat_turn(
 }
 
 #[tauri::command]
-async fn cancel_work_task(
+async fn stop_work_run(
     task_id: String,
+    run_id: String,
     state: State<'_, Arc<AppState>>,
 ) -> Result<canonical_work_runtime::CanonicalWorkControlResult, String> {
-    canonical_work_runtime::cancel_canonical_work_task(&task_id, state.inner()).await
+    canonical_work_runtime::stop_canonical_work_run(&task_id, &run_id, state.inner()).await
 }
 
 #[tauri::command]
@@ -371,6 +414,48 @@ async fn retry_work_task(
     canonical_work_runtime::retry_canonical_work_task(
         task_id,
         prior_run_id,
+        new_run_id,
+        new_turn_id,
+        state.inner(),
+    )
+    .await
+    .map(|output| output.result)
+}
+
+#[tauri::command]
+async fn resume_work_task(
+    task_id: String,
+    prior_run_id: String,
+    new_run_id: String,
+    new_turn_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<SendMessageResult, String> {
+    canonical_work_runtime::resume_canonical_work_task(
+        task_id,
+        prior_run_id,
+        new_run_id,
+        new_turn_id,
+        state.inner(),
+    )
+    .await
+    .map(|output| output.result)
+}
+
+#[tauri::command]
+async fn revise_work_artifact(
+    task_id: String,
+    artifact_id: String,
+    base_version: u64,
+    instruction: String,
+    new_run_id: String,
+    new_turn_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<SendMessageResult, String> {
+    canonical_work_runtime::revise_canonical_work_artifact(
+        task_id,
+        artifact_id,
+        base_version,
+        instruction,
         new_run_id,
         new_turn_id,
         state.inner(),
@@ -647,6 +732,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            draft_legacy_lifemodel_migration,
             draft_lifemodel_v2_change,
             draft_lifemodel_v2_rollback,
             draft_lifemodel_v2_export,
@@ -663,11 +749,14 @@ pub fn run() {
             get_provider_privacy_boundary_summary,
             get_workbench_view_model,
             get_product_diagnostics_view_model,
+            get_tool_permission_view_model,
             get_config,
             save_config,
             select_artifact_output_directory,
             recover_required_credential_access,
+            revoke_tool_permission,
             list_main_chat_skills,
+            get_main_chat_skill_detail,
             select_main_chat_skill,
             clear_main_chat_skill,
             list_main_chat_tool_candidates,
@@ -686,18 +775,30 @@ pub fn run() {
             send_message,
             start_stream_message,
             cancel_chat_turn,
-            cancel_work_task,
+            stop_work_run,
             retry_work_task,
+            resume_work_task,
+            revise_work_artifact,
             pick_and_import_resources,
             detach_resource_from_turn,
             submit_main_chat_task_steering,
             get_conversation_view_model,
             test_llm_connection,
             create_chat_session,
-            create_project,
+            create_project_from_directory,
+            bind_project_directory,
+            add_project_read_root,
+            remove_project_read_root,
+            update_project_name,
+            archive_project,
+            restore_project,
+            delete_project,
             assign_conversation_project,
+            select_new_conversation_project,
             set_conversation_memory_mode,
             rename_chat_session,
+            archive_chat_session,
+            restore_chat_session,
             delete_chat_session,
         ])
         .build(tauri::generate_context!())

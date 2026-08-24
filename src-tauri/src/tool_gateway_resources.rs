@@ -28,7 +28,7 @@ use crate::AppState;
 
 #[derive(Clone)]
 pub(crate) struct SharedToolGatewayResources {
-    pub(crate) safe_paths: Vec<String>,
+    pub(crate) additional_read_roots: Vec<String>,
     pub(crate) permission_store: openlife_core::tool_permissions::ToolPermissionStore,
     pub(crate) registry: openlife_core::mcp::McpRegistry,
     pub(crate) audit_store: openlife_core::mcp_audit::McpAuditStore,
@@ -49,7 +49,7 @@ pub(crate) struct MainChatReadToolGatewayResources {
 }
 
 struct CapturedToolRuntimeConfig {
-    safe_paths: Vec<String>,
+    additional_read_roots: Vec<String>,
     network_policy: openlife_core::config::NetworkPolicy,
     search_provider: openlife_core::agent::action_executor::helpers::SearchProviderConfig,
 }
@@ -71,7 +71,7 @@ async fn capture_tool_runtime_config(state: &Arc<AppState>) -> CapturedToolRunti
         search_provider.model = config.llm.chat_model.clone();
     }
     CapturedToolRuntimeConfig {
-        safe_paths: config.system.safe_paths.clone(),
+        additional_read_roots: config.system.additional_read_roots.clone(),
         network_policy: config.system.network_policy.clone(),
         search_provider,
     }
@@ -79,14 +79,14 @@ async fn capture_tool_runtime_config(state: &Arc<AppState>) -> CapturedToolRunti
 
 async fn capture_shared_after_config(
     state: &Arc<AppState>,
-    safe_paths: Vec<String>,
+    additional_read_roots: Vec<String>,
 ) -> SharedToolGatewayResources {
     let permission_store = { state.tool_permission_store.lock().await.clone() };
     let registry = { state.mcp_registry.lock().await.clone() };
     let audit_store = { state.mcp_audit_store.lock().await.clone() };
     let privacy_engine = { state.privacy_engine.lock().await.clone() };
     SharedToolGatewayResources {
-        safe_paths,
+        additional_read_roots,
         permission_store,
         registry,
         audit_store,
@@ -99,7 +99,7 @@ async fn capture_governed(
     state: &Arc<AppState>,
 ) -> (GovernedToolGatewayResources, CapturedToolRuntimeConfig) {
     let config = capture_tool_runtime_config(state).await;
-    let shared = capture_shared_after_config(state, config.safe_paths.clone()).await;
+    let shared = capture_shared_after_config(state, config.additional_read_roots.clone()).await;
     (
         GovernedToolGatewayResources {
             shared,
@@ -149,6 +149,47 @@ mod tests {
             first.search_provider.provider, "brave",
             "an in-flight ToolGateway snapshot must remain bound to its original config generation"
         );
+    }
+
+    #[tokio::test]
+    async fn artifact_output_directory_never_becomes_generic_read_authority() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let artifact_root = tempfile::tempdir().unwrap();
+        let read_root = tempfile::tempdir().unwrap();
+        let mut config = state.config.lock().await.clone();
+        config.system.artifact_output_directory = Some(
+            artifact_root
+                .path()
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned(),
+        );
+        config.system.additional_read_roots = vec![read_root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned()];
+        state.replace_provider_runtime_config(config).await;
+
+        let (captured, _) = capture_governed(&state).await;
+        let canonical_artifact_root = artifact_root
+            .path()
+            .canonicalize()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
+
+        assert_eq!(captured.shared.additional_read_roots.len(), 1);
+        assert_eq!(
+            captured.shared.additional_read_roots[0],
+            read_root.path().canonicalize().unwrap().to_string_lossy()
+        );
+        assert!(!captured
+            .shared
+            .additional_read_roots
+            .contains(&canonical_artifact_root));
     }
 
     #[tokio::test]

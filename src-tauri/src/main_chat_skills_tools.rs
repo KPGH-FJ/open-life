@@ -1000,6 +1000,7 @@ mod tests {
                 project_id: None,
                 project_revision: None,
                 scope_digest: None,
+                execution_mode: openlife_core::task_runtime::WorkExecutionMode::ScopedAgent,
             })
             .unwrap();
         store
@@ -1021,6 +1022,7 @@ mod tests {
                 executor_kind: "tool",
                 provider_profile_id: None,
                 provider_model_id: None,
+                provider_reasoning_effort: None,
                 request_digest: &format!("sha256:{}", "3".repeat(64)),
             })
             .unwrap();

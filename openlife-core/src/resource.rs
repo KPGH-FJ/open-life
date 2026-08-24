@@ -691,6 +691,29 @@ impl ResourceStore {
             .map_err(Into::into)
     }
 
+    /// Return the durable attachment provenance for one message without
+    /// loading blob bytes or extracted chunk content into a read model.
+    pub fn list_resources_for_message(&self, message_id: &str) -> Result<Vec<StoredResource>> {
+        if message_id.trim().is_empty() || message_id.len() > 256 {
+            anyhow::bail!("resource_context_message_id_invalid");
+        }
+        let conn = self.lock_connection()?;
+        let mut statement = conn.prepare(
+            "SELECT resources.resource_id, resources.filename,
+                    resources.declared_mime, resources.detected_mime,
+                    resources.format, resources.digest, resources.byte_count,
+                    resources.chunk_count, resources.created_at
+             FROM resource_message_bindings bindings
+             JOIN imported_resources resources
+               ON resources.resource_id = bindings.resource_id
+             WHERE bindings.message_id = ?1 AND resources.deleted_at IS NULL
+             ORDER BY bindings.created_at ASC, resources.resource_id ASC",
+        )?;
+        let rows = statement.query_map([message_id], stored_resource_from_row)?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
     pub fn has_context_for_message(&self, message_id: &str) -> Result<bool> {
         if message_id.trim().is_empty() || message_id.len() > 256 {
             anyhow::bail!("resource_context_message_id_invalid");
@@ -1369,5 +1392,37 @@ mod tests {
         assert!(detach_one.resource_deleted);
         assert!(store.get_resource(&resource_id).unwrap().is_none());
         assert!(store.list_chunks(&resource_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn message_resource_projection_is_metadata_only_and_tracks_detach() {
+        let store = ResourceStore::new_in_memory().unwrap();
+        let message_id = "message-with-attachment";
+        let receipt = store
+            .commit_import_batch(batch(
+                Uuid::new_v4().to_string(),
+                message_id,
+                vec![text_candidate(b"bounded provenance")],
+            ))
+            .unwrap();
+
+        let resources = store.list_resources_for_message(message_id).unwrap();
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].resource_id, receipt.resources[0].resource_id);
+        assert_eq!(resources[0].filename, "roadshow.md");
+        assert_eq!(resources[0].byte_count, b"bounded provenance".len() as u64);
+        assert_eq!(resources[0].chunk_count, 1);
+
+        store
+            .detach_resource_from_message(
+                &Uuid::new_v4().to_string(),
+                message_id,
+                &receipt.resources[0].resource_id,
+            )
+            .unwrap();
+        assert!(store
+            .list_resources_for_message(message_id)
+            .unwrap()
+            .is_empty());
     }
 }

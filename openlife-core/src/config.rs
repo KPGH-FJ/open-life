@@ -109,9 +109,22 @@ pub struct SystemConfig {
     /// Explicit user management remains available while this is disabled.
     #[serde(default = "default_agent_memory_enabled")]
     pub agent_memory_enabled: bool,
-    /// Safe paths for file.read tool (workspace directories allowed for file access)
+    /// User-selected destination for reviewed exports that are not owned by a
+    /// Project Run. Canonical Work Artifacts bind their destination to the
+    /// exact Run's Project or app-managed storage instead of this setting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_output_directory: Option<String>,
+    /// Extra filesystem roots granted to generic read tools. Project roots are
+    /// bound independently at Conversation/Run admission and never come from
+    /// this global list.
     #[serde(default)]
-    pub safe_paths: Vec<String>,
+    pub additional_read_roots: Vec<String>,
+    /// One-way reader for the former overloaded setting. The product UI used
+    /// `safe_paths[0]` as its Artifact output directory, so existing values are
+    /// migrated to that narrower write scope and are never silently retained
+    /// as generic read authority.
+    #[serde(default, rename = "safe_paths", skip_serializing)]
+    legacy_safe_paths: Vec<String>,
     /// Network access policy for web tools
     #[serde(default)]
     pub network_policy: NetworkPolicy,
@@ -139,7 +152,9 @@ impl Default for SystemConfig {
             ollama_cache_ttl_seconds: default_ollama_cache_ttl_seconds(),
             memory_search_top_k: default_memory_search_top_k(),
             agent_memory_enabled: default_agent_memory_enabled(),
-            safe_paths: Vec::new(),
+            artifact_output_directory: None,
+            additional_read_roots: Vec::new(),
+            legacy_safe_paths: Vec::new(),
             network_policy: NetworkPolicy::default(),
             search_provider: default_search_provider(),
             search_provider_key: String::new(),
@@ -253,6 +268,7 @@ impl AppConfig {
     pub fn load(path: impl AsRef<Path>) -> Result<Self> {
         let content = fs::read_to_string(path)?;
         let mut config: Self = serde_yaml::from_str(&content)?;
+        config.migrate_legacy_filesystem_scopes();
         config.normalize_provider_from_base();
         Ok(config)
     }
@@ -288,6 +304,8 @@ impl AppConfig {
         let base = self.llm.openai_base.to_lowercase();
         self.llm.provider = if base.contains("api.deepseek.com") {
             "deepseek".to_string()
+        } else if base.contains("generativelanguage.googleapis.com") {
+            "gemini".to_string()
         } else if base.contains("openrouter.ai") {
             "openrouter".to_string()
         } else if base.contains("api.siliconflow.cn") {
@@ -302,6 +320,18 @@ impl AppConfig {
             self.llm.provider.clone()
         };
         self.normalize_provider_embedding_defaults();
+    }
+
+    fn migrate_legacy_filesystem_scopes(&mut self) {
+        if self.system.artifact_output_directory.is_none() {
+            self.system.artifact_output_directory = self
+                .system
+                .legacy_safe_paths
+                .iter()
+                .find(|path| !path.trim().is_empty())
+                .cloned();
+        }
+        self.system.legacy_safe_paths.clear();
     }
 
     fn normalize_provider_embedding_defaults(&mut self) {
@@ -339,6 +369,7 @@ impl AppConfig {
             "deepseek" => "DeepSeek".to_string(),
             "openrouter" => "OpenRouter".to_string(),
             "openai" => "OpenAI".to_string(),
+            "gemini" => "Google Gemini".to_string(),
             "siliconflow" => "SiliconFlow".to_string(),
             "moonshot" => "Moonshot/Kimi".to_string(),
             "dashscope" => "通义千问 DashScope".to_string(),
@@ -407,6 +438,20 @@ mod tests {
     }
 
     #[test]
+    fn gemini_openai_compatible_endpoint_normalizes_to_its_own_provider() {
+        let mut config = AppConfig::default();
+        config.llm.openai_base = "https://generativelanguage.googleapis.com/v1beta/openai".into();
+        config.normalize_provider_from_base();
+
+        assert_eq!(config.llm.provider, "gemini");
+        assert!(crate::llm::provider_endpoint_is_official(
+            "gemini",
+            &config.llm.openai_base
+        ));
+        assert_eq!(config.effective_provider_label(), "Google Gemini");
+    }
+
+    #[test]
     fn config_save_and_load_roundtrip() {
         let file = NamedTempFile::new().unwrap();
         let mut config = AppConfig {
@@ -445,6 +490,31 @@ mod tests {
         assert!(saved.contains("openai_key_ref:"));
         assert!(!saved.contains("search_provider_key:"));
         assert!(saved.contains("search_provider_key_ref:"));
+    }
+
+    #[test]
+    fn legacy_safe_paths_migrate_only_to_artifact_output_scope() {
+        let file = NamedTempFile::new().unwrap();
+        std::fs::write(
+            file.path(),
+            "system:\n  safe_paths:\n    - /tmp/openlife-artifacts\n    - /tmp/legacy-extra\n",
+        )
+        .unwrap();
+
+        let loaded = AppConfig::load(file.path()).expect("legacy config remains readable");
+
+        assert_eq!(
+            loaded.system.artifact_output_directory.as_deref(),
+            Some("/tmp/openlife-artifacts")
+        );
+        assert!(loaded.system.additional_read_roots.is_empty());
+
+        loaded.save(file.path()).expect("save typed config shape");
+        let saved = std::fs::read_to_string(file.path()).unwrap();
+        assert!(saved.contains("artifact_output_directory: /tmp/openlife-artifacts"));
+        assert!(saved.contains("additional_read_roots: []"));
+        assert!(!saved.contains("safe_paths:"));
+        assert!(!saved.contains("legacy-extra"));
     }
 
     #[test]

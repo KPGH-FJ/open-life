@@ -15,6 +15,7 @@ use openlife_core::vectors::VectorStore;
 use openlife_core::versioning::VersionManager;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
@@ -164,9 +165,67 @@ fn provider_runtime_is_coherent(config: &AppConfig, scheduler: &InferenceSchedul
 /// In-memory Main Chat route evidence for the current app process.
 const DEFAULT_MAIN_CHAT_CONCURRENCY_LIMIT: usize = 3;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum WorkReviewDecision {
+    Accepted,
+    Rejected,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct WorkReviewDecisionRegistry {
+    pending:
+        Arc<std::sync::Mutex<HashMap<String, tokio::sync::oneshot::Sender<WorkReviewDecision>>>>,
+}
+
+impl WorkReviewDecisionRegistry {
+    pub(crate) fn register(
+        &self,
+        proposal_id: &str,
+    ) -> Result<tokio::sync::oneshot::Receiver<WorkReviewDecision>, String> {
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        let mut pending = self
+            .pending
+            .lock()
+            .map_err(|_| "work_review_decision_registry_poisoned".to_string())?;
+        if pending.contains_key(proposal_id) {
+            return Err("work_review_decision_owner_conflict".into());
+        }
+        pending.insert(proposal_id.to_string(), sender);
+        Ok(receiver)
+    }
+
+    pub(crate) fn resolve(
+        &self,
+        proposal_id: &str,
+        decision: WorkReviewDecision,
+    ) -> Result<bool, String> {
+        let sender = self
+            .pending
+            .lock()
+            .map_err(|_| "work_review_decision_registry_poisoned".to_string())?
+            .remove(proposal_id);
+        Ok(sender.is_some_and(|sender| sender.send(decision).is_ok()))
+    }
+
+    pub(crate) fn has_waiter(&self, proposal_id: &str) -> Result<bool, String> {
+        Ok(self
+            .pending
+            .lock()
+            .map_err(|_| "work_review_decision_registry_poisoned".to_string())?
+            .contains_key(proposal_id))
+    }
+
+    pub(crate) fn discard(&self, proposal_id: &str) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(proposal_id);
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct MainChatRuntimeState {
     pub(crate) cancellation_registry: crate::main_chat_cancellation::MainChatCancellationRegistry,
+    pub(crate) work_review_decision_registry: WorkReviewDecisionRegistry,
     pub(crate) execution_slots: Arc<tokio::sync::Semaphore>,
 }
 
@@ -174,6 +233,7 @@ impl Default for MainChatRuntimeState {
     fn default() -> Self {
         Self {
             cancellation_registry: Default::default(),
+            work_review_decision_registry: Default::default(),
             execution_slots: Arc::new(tokio::sync::Semaphore::new(
                 DEFAULT_MAIN_CHAT_CONCURRENCY_LIMIT,
             )),
@@ -233,6 +293,10 @@ pub struct AppState {
     /// substituting deterministic keyword planning.
     #[cfg(test)]
     pub work_initial_decision_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Controlled typed replanning output for an authenticated Steering item.
+    /// Product builds always use the selected provider at the safe checkpoint.
+    #[cfg(test)]
+    pub work_steering_replan_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Ordered model outputs for typed AgentStep decisions. This seam exists
     /// only in controlled tests; production always asks the selected provider.
     #[cfg(test)]

@@ -4,7 +4,10 @@ use std::path::{Component, Path, PathBuf};
 pub(crate) fn resolve_main_chat_workspace_file_target(
     user_text: &str,
 ) -> Result<(String, String), String> {
-    resolve_workspace_file_relative_target(&select_workspace_file_relative_path(user_text))
+    resolve_workspace_file_relative_target(
+        &resolve_workspace_root()?,
+        &select_workspace_file_relative_path(user_text),
+    )
 }
 
 /// Resolve an already model-selected relative path against the authenticated
@@ -12,9 +15,15 @@ pub(crate) fn resolve_main_chat_workspace_file_target(
 /// separate: the model supplies only the relative path, while this boundary
 /// owns traversal and scope enforcement.
 pub(crate) fn resolve_workspace_file_relative_target(
+    workspace_root: &Path,
     relative: &str,
 ) -> Result<(String, String), String> {
-    let workspace = resolve_workspace_root()?;
+    let workspace = workspace_root
+        .canonicalize()
+        .map_err(|err| format!("project workspace canonicalization failed: {err}"))?;
+    if !workspace.is_dir() {
+        return Err("project workspace root is not a directory".into());
+    }
     let safe_relative = validate_relative_workspace_path(relative)?;
     let candidate = workspace.join(&safe_relative);
     if !candidate.starts_with(&workspace) {
@@ -143,6 +152,16 @@ mod tests {
     }
 
     #[test]
+    fn rejects_an_absolute_path_even_when_the_file_exists() {
+        let outside = tempfile::NamedTempFile::new().unwrap();
+
+        let error =
+            validate_relative_workspace_path(&outside.path().to_string_lossy()).unwrap_err();
+
+        assert!(error.contains("absolute file read paths are blocked"));
+    }
+
+    #[test]
     fn missing_workspace_candidate_is_resolved_without_pre_gateway_io() {
         let (label, path) = resolve_main_chat_workspace_file_target(
             "Read frontend/definitely-missing-tool-gateway-owner.md",
@@ -152,6 +171,26 @@ mod tests {
         assert_eq!(label, "frontend/definitely-missing-tool-gateway-owner.md");
         assert!(path.ends_with("frontend/definitely-missing-tool-gateway-owner.md"));
         assert!(!std::path::Path::new(&path).exists());
+    }
+
+    #[test]
+    fn resolves_only_against_the_supplied_project_root() {
+        let project = tempfile::tempdir().unwrap();
+        let unrelated = tempfile::tempdir().unwrap();
+        std::fs::write(project.path().join("scope.txt"), "project").unwrap();
+        std::fs::write(unrelated.path().join("scope.txt"), "unrelated").unwrap();
+
+        let (_, resolved) =
+            resolve_workspace_file_relative_target(project.path(), "scope.txt").unwrap();
+
+        assert_eq!(
+            PathBuf::from(resolved),
+            project.path().canonicalize().unwrap().join("scope.txt")
+        );
+        assert_ne!(
+            project.path().canonicalize().unwrap(),
+            unrelated.path().canonicalize().unwrap()
+        );
     }
 
     #[test]

@@ -30,6 +30,7 @@ import {
   personalIntelligenceReviewItems,
 } from "./personalIntelligencePresentation";
 import { LifeModelBuilderPanel } from "./LifeModelBuilderPanel";
+import { LegacyLifeModelMigrationPanel } from "./LegacyLifeModelMigrationPanel";
 import { LifeModelV2ControlsPanel } from "./LifeModelV2ControlsPanel";
 
 const learningSectionLabel: Partial<Record<LifeModelLearningCandidate["section"], string>> = {
@@ -140,6 +141,7 @@ export function PersonalIntelligenceView({
   onPrivacyEraseMemory,
   lifeModelAction,
   onDraftLifeModelChange,
+  onDraftLegacyLifeModelMigration,
   onDraftLifeModelRollback,
   onDraftLifeModelExport,
   learningAction,
@@ -168,7 +170,13 @@ export function PersonalIntelligenceView({
   onRestoreMemory: (memoryId: string) => Promise<boolean>;
   onRollbackMemory: (memoryId: string, reason: string) => Promise<boolean>;
   onPrivacyEraseMemory: (memoryId: string) => Promise<boolean>;
-  lifeModelAction: Parameters<typeof LifeModelV2ControlsPanel>[0]["action"];
+  lifeModelAction: {
+    kind: "migration" | "change" | "rollback" | "export";
+    status: "submitting" | "review_required" | "failed";
+    proposalId?: string;
+    error?: string;
+  } | null;
+  onDraftLegacyLifeModelMigration: Parameters<typeof LegacyLifeModelMigrationPanel>[0]["onDraft"];
   onDraftLifeModelChange: Parameters<typeof LifeModelV2ControlsPanel>[0]["onChange"];
   onDraftLifeModelRollback: Parameters<typeof LifeModelV2ControlsPanel>[0]["onRollback"];
   onDraftLifeModelExport: Parameters<typeof LifeModelV2ControlsPanel>[0]["onExport"];
@@ -240,6 +248,14 @@ export function PersonalIntelligenceView({
 
   const canonical = lifeModel?.canonicalSummary;
   const canonicalView = lifeModel?.truthMode === "canonical" ? (canonical ?? null) : null;
+  const legacyMigration = lifeModel?.legacyMigrationInventory ?? null;
+  const v2LifeModelAction: Parameters<typeof LifeModelV2ControlsPanel>[0]["action"] =
+    lifeModelAction && lifeModelAction.kind !== "migration"
+      ? {
+          ...lifeModelAction,
+          kind: lifeModelAction.kind,
+        }
+      : null;
   const focusedLifeModelItem =
     canonicalView && focusedLifeModelItemRef
       ? findCanonicalLifeModelItem(canonicalView.document, focusedLifeModelItemRef)
@@ -252,6 +268,9 @@ export function PersonalIntelligenceView({
     if (statuses.includes("stale")) return "长期状态已陈旧；请先重新读取。";
     if (statuses.includes("loading")) {
       return "长期状态读模型尚不可用。";
+    }
+    if (legacyMigration) {
+      return "检测到旧版 LifeModel 数据；完成逐项迁移审核前不能建立新的规范版本。";
     }
     if (canonical?.conflictStatus && canonical.conflictStatus !== "none") {
       return "当前规范版本存在冲突；请先重新读取并解决冲突。";
@@ -363,7 +382,11 @@ export function PersonalIntelligenceView({
                 <div>
                   <span>当前理解</span>
                   <h2 id="intelligence-current-title">
-                    {canonicalView ? canonicalView.title : "长期理解尚未建立"}
+                    {canonicalView
+                      ? canonicalView.title
+                      : legacyMigration
+                        ? "发现待迁移的旧版长期信息"
+                        : "长期理解尚未建立"}
                   </h2>
                 </div>
                 <FoundationStatusLabel
@@ -374,7 +397,9 @@ export function PersonalIntelligenceView({
               <p>
                 {canonicalView
                   ? canonicalView.summary
-                  : "尚未建立 LifeModel。你可以从一条明确、可审核的长期信息开始。"}
+                  : legacyMigration
+                    ? "旧数据仍在原位置保留，当前不会把它当作规范 LifeModel 使用，也不会静默删除或自动迁移。"
+                    : "尚未建立 LifeModel。你可以从一条明确、可审核的长期信息开始。"}
               </p>
               {canonicalView ? (
                 <small>
@@ -385,6 +410,29 @@ export function PersonalIntelligenceView({
                 </small>
               ) : null}
             </section>
+
+            {legacyMigration ? (
+              <FoundationNotice title="旧版 LifeModel 已安全保留" tone="protection" live>
+                <p>
+                  当前文件 {legacyMigration.currentSourceBytes} 字节；历史目录包含
+                  {legacyMigration.historyYamlFileCount} 个 YAML 文件，索引记录
+                  {legacyMigration.historyManifestEntryCount} 条。迁移预览识别出
+                  {legacyMigration.preview?.reviewRequiredCount ?? 0} 项需要逐项确认、
+                  {legacyMigration.preview?.externalOwnerCount ?? 0} 项属于其他数据域、
+                  {legacyMigration.preview?.manualClassificationCount ?? 0} 项需要人工分类。
+                </p>
+                <p>本阶段只有只读盘点；迁移、备份、切换与删除均未执行。</p>
+              </FoundationNotice>
+            ) : null}
+
+            {legacyMigration ? (
+              <LegacyLifeModelMigrationPanel
+                inventory={legacyMigration}
+                action={lifeModelAction}
+                onDraft={onDraftLegacyLifeModelMigration}
+                onOpenReview={onOpenReviewCenter}
+              />
+            ) : null}
 
             <section className="ol-intelligence-current" aria-labelledby="lifemodel-learning-title">
               <header className="ol-intelligence-section-heading">
@@ -517,10 +565,10 @@ export function PersonalIntelligenceView({
               )}
             </section>
 
-            {!hasEstablishedView && onOpenReviewCenter && (
+            {!hasEstablishedView && !legacyMigration && onOpenReviewCenter && (
               <LifeModelBuilderPanel
                 disabledReason={builderDisabledReason}
-                action={lifeModelAction}
+                action={v2LifeModelAction}
                 onChange={onDraftLifeModelChange}
                 onOpenReview={onOpenReviewCenter}
               />
@@ -531,7 +579,7 @@ export function PersonalIntelligenceView({
                 canonical={canonicalView}
                 history={lifeModel?.versionHistory ?? []}
                 disabledReason={builderDisabledReason}
-                action={lifeModelAction}
+                action={v2LifeModelAction}
                 onChange={onDraftLifeModelChange}
                 onRollback={onDraftLifeModelRollback}
                 onExport={onDraftLifeModelExport}

@@ -28,6 +28,9 @@ describe("useWorkbenchController", () => {
         const current = snapshot.tasksEnvelope.data!.items[0];
         const task = {
           ...current,
+          relatedRunIds: retried
+            ? ["failed-web-search", "retry-web-search"]
+            : ["failed-web-search"],
           lifecycleStatus: retried ? ("completed" as const) : ("failed" as const),
           allowedControls: retried ? [] : [control],
         };

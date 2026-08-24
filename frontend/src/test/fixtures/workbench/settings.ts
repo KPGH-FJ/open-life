@@ -265,6 +265,21 @@ function settingsSnapshot(
     config: cloneSettingsConfig(config),
     boundaryEnvelope: boundaryEnvelope(boundary, stale ? "stale" : "ready"),
     safeMode: { active: false, reason: "", sourceRefs: [] },
+    toolPermissionEnvelope: {
+      data: {
+        items: [],
+        totalCount: 0,
+        activeCount: 0,
+        revocableCount: 0,
+        contractLimitations: [],
+      },
+      status: "empty",
+      lastUpdatedAt: "2026-07-21T04:15:00.000Z",
+      source: "backend-readmodel",
+      evidenceRefs: [],
+      warnings: [],
+      actions: { primary: [], review: [], debugOnly: [] },
+    },
     diagnostics: [
       { id: "sanitized_config", status: "loaded" },
       { id: "provider_privacy_boundary", status: "loaded" },

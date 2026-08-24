@@ -343,7 +343,7 @@ impl super::ActionExecutor {
                                 ),
                                 policy_id: None,
                             };
-                            let (action, observation) = self.build_blocked_action_observation(
+                            let (action, mut observation) = self.build_blocked_action_observation(
                                 tool_name,
                                 &args,
                                 &inspection,
@@ -351,6 +351,33 @@ impl super::ActionExecutor {
                                 manifest.as_ref(),
                                 &request,
                             );
+                            if let Some(object) = observation
+                                .structured_result
+                                .as_mut()
+                                .and_then(Value::as_object_mut)
+                            {
+                                object.insert(
+                                    "networkPolicyDecisionId".into(),
+                                    serde_json::json!(network_decision.decision_id),
+                                );
+                                object.insert(
+                                    "networkPermissionScope".into(),
+                                    serde_json::json!(permission_scope),
+                                );
+                                object.insert(
+                                    "networkHost".into(),
+                                    serde_json::json!(network_decision.host),
+                                );
+                                object.insert(
+                                    "networkCapability".into(),
+                                    serde_json::json!(network_decision.capability),
+                                );
+                                object.insert(
+                                    "networkPolicyReasonCode".into(),
+                                    serde_json::json!(network_decision.reason_code),
+                                );
+                                object.insert("directWritesExecuted".into(), Value::Bool(false));
+                            }
                             return Ok(ActionExecutionResult {
                                 action,
                                 observation,

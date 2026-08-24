@@ -277,6 +277,7 @@ mod tests {
                     project_id: None,
                     project_revision: None,
                     scope_digest: None,
+                    execution_mode: openlife_core::task_runtime::WorkExecutionMode::ScopedAgent,
                 })
                 .unwrap();
         }
@@ -335,6 +336,7 @@ mod tests {
                         project_id: None,
                         project_revision: None,
                         scope_digest: None,
+                        execution_mode: openlife_core::task_runtime::WorkExecutionMode::ScopedAgent,
                     })
                     .unwrap();
             }

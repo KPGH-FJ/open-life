@@ -3,6 +3,7 @@ import {
   Download,
   FileSearch,
   FolderOpen,
+  PencilLine,
   Play,
   RefreshCw,
   RotateCcw,
@@ -37,6 +38,11 @@ import {
 } from "@/features/work/taskPresentation";
 
 type TaskFilter = "all" | "attention" | "active" | "terminal";
+type ArtifactActionFailure = {
+  artifactId: string;
+  action: "open" | "export" | "undo" | "revision";
+  error: unknown;
+};
 
 function taskMatchesFilter(item: TaskViewModelItem, filter: TaskFilter): boolean {
   if (filter === "all") return true;
@@ -67,17 +73,55 @@ function taskSearchText(item: TaskViewModelItem): string {
     item.latestResultPreview?.label ?? "",
     item.latestResultPreview?.preview ?? "",
     item.workPlan?.steps.map(step => step.kind).join(" ") ?? "",
+    item.latestRunProvenance
+      ? `${item.latestRunProvenance.providerId} ${item.latestRunProvenance.modelId} ${item.latestRunProvenance.projectName ?? ""}`
+      : "",
     item.artifacts.map(artifact => artifact.materializedReference ?? artifact.mediaType).join(" "),
   ]
     .join(" ")
     .toLocaleLowerCase("zh-CN");
 }
 
+function provenanceLabel(
+  provenance: NonNullable<TaskViewModelItem["latestRunProvenance"]>
+): string {
+  const project = provenance.projectName
+    ? ` · Project ${provenance.projectName} r${provenance.projectRevision ?? "?"}`
+    : "";
+  const reasoning = provenance.reasoningEffort
+    ? ` · 推理 ${provenance.reasoningEffort}`
+    : " · 模型默认推理";
+  const executionMode = provenance.executionMode === "observe_only" ? " · 只读研究" : " · 标准执行";
+  return `${provenance.providerId} · ${provenance.modelId}${reasoning}${executionMode}${project}`;
+}
+
+function runProvenanceLabel(item: TaskViewModelItem): string | null {
+  return item.latestRunProvenance ? provenanceLabel(item.latestRunProvenance) : null;
+}
+
+function artifactFailureTitle(action: ArtifactActionFailure["action"]): string {
+  if (action === "open") return "文件没有打开";
+  if (action === "export") return "文件没有另存";
+  if (action === "revision") return "聚焦修订没有开始";
+  return "撤销申请没有创建";
+}
+
+function artifactFailureFallback(action: ArtifactActionFailure["action"]): string {
+  if (action === "open") return "文件核验或打开没有完成；原文件没有被修改。";
+  if (action === "export") return "文件另存或写后核验没有完成；请重新选择位置后重试。";
+  if (action === "revision") return "新修订运行没有创建；当前版本仍保持原状态。";
+  return "撤销申请没有进入审核；当前产物仍保持原状态。";
+}
+
 function statusDetail(item: TaskViewModelItem): string {
+  if (item.latestRunProvenance?.turnErrorCode) {
+    return `模型执行未完成：${reasonLabel(item.latestRunProvenance.turnErrorCode)}`;
+  }
   if (item.needsAttention && item.attentionReasonCodes?.[0]) {
     return `需要处理：${reasonLabel(item.attentionReasonCodes[0])}`;
   }
-  if (item.lifecycleStatus === "waiting_review") return "报告产物正在等待你的审核，任务尚未完成。";
+  if (item.lifecycleStatus === "waiting_review")
+    return "当前运行已停在一个审核节点；完成决定后，系统只会继续该节点绑定的动作。";
   if (item.pendingReviewItemRefs.length > 0) return "有事项等待决定，任务尚未完成。";
   if (item.pendingBlockers.length > 0) return reasonLabel(item.pendingBlockers[0]);
   if (item.latestResultPreview?.preview) return item.latestResultPreview.preview;
@@ -91,6 +135,10 @@ function statusDetail(item: TaskViewModelItem): string {
 function reasonLabel(reason: string): string {
   const labels: Record<string, string> = {
     read_tool_blocked: "所需资料当前不可访问",
+    tool_permission_required: "当前工具动作正在等待你的授权",
+    tool_permission_rejected: "你已拒绝当前工具动作；本轮工作已停止",
+    tool_review_live_continuation_unavailable:
+      "授权已记录，但原运行进程已中断；可以从保留的任务创建新的继续运行",
     web_search_challenge_detected: "搜索服务要求人机验证，请稍后重试或改用已配置的搜索服务",
     web_search_no_structured_results: "搜索服务没有返回可核验的结果",
     web_artifact_source_validation_failed: "当前读取的来源不足以支持这份结果",
@@ -110,11 +158,18 @@ function reasonLabel(reason: string): string {
     artifact_undo_unavailable_without_original_bytes: "缺少可恢复的原始内容",
     artifact_undo_requires_verified_materialization: "结果核验后才能撤销",
     artifact_undo_unavailable: "当前结果不可撤销",
+    artifact_revision_requires_completed_task: "任务完成后才能继续修改这个版本",
+    artifact_revision_requires_verified_current_version: "当前版本通过完整性核验后才能继续修改",
+    artifact_revision_conflicts_with_undo: "当前产物已有撤销记录，不能同时开始修订",
     work_provider_binding_stale: "Provider 或模型已经变化，请作为新的工作重新提交",
     work_project_assignment_stale: "对话所属 Project 已经变化，请作为新的工作重新提交",
     work_project_scope_stale: "Project 范围已经变化，请核对后作为新的工作重新提交",
     work_skill_binding_stale: "所选技能已经变化，请作为新的工作重新提交",
+    canonical_work_observe_only_write_forbidden:
+      "本轮采用只读研究模式，系统已阻止创建文件或写入个人长期状态",
     provider_quota_exhausted: "当前模型额度不足，额度恢复后可以重试",
+    agent_step_artifact_content_type_invalid:
+      "所选模型返回了不符合 Agent 执行契约的结果；请选择已验证支持 Work 的模型后重试",
     work_semantic_verification_needs_more_evidence: "现有来源不足以支持交付要求",
     work_semantic_verification_stalled: "现有来源仍不足，任务已停止，没有交付未经支持的结果",
   };
@@ -189,6 +244,15 @@ function taskItemStatusLabel(status: CanonicalTaskItemStatus): string {
   return "结果未知";
 }
 
+function steeringStatusLabel(
+  status: NonNullable<TaskViewModelItem["steerings"]>[number]["status"]
+): string {
+  if (status === "pending") return "等待安全检查点";
+  if (status === "applied") return "已应用";
+  if (status === "blocked") return "范围扩大已阻断";
+  return "未应用";
+}
+
 function taskItemStatusTone(
   status: CanonicalTaskItemStatus
 ): "waiting" | "success" | "error" | "unknown" {
@@ -219,6 +283,27 @@ function workPlanStepLabel(
 function completionContractLabel(plan: NonNullable<TaskViewModelItem["workPlan"]>): string {
   const result = plan.completion.resultKind === "artifact" ? "交付可审阅产物" : "交付最终回答";
   return plan.completion.requiresVerification ? `${result}，并完成结果核验` : result;
+}
+
+function CompletionLimitations({ task }: { task: TaskViewModelItem }) {
+  if (task.completionDisposition !== "complete_with_disclosed_limitations") return null;
+  return (
+    <section className="ol-task-result-card__section" aria-label="已说明限制">
+      <span>已说明限制</span>
+      {task.completionLimitations.length > 0 ? (
+        <ul>
+          {task.completionLimitations.map(limitation => (
+            <li key={limitation.requirementId}>
+              <strong>{limitation.description}</strong>
+              <small>要求：{limitation.requirementId} · 这是限制披露，不是来源支持。</small>
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p>旧结果只保留了“含限制”的结论，具体限制条目不可用；不会补猜。</p>
+      )}
+    </section>
+  );
 }
 
 function taskItemSummary(summaryCode: string): string {
@@ -255,17 +340,16 @@ function actionAttributes(action: ProductAction) {
 }
 
 function taskControlLabel(control: TaskControl): string {
-  if (control.kind === "resume") return "继续任务";
-  if (control.kind === "retry") return "重试失败步骤";
-  if (control.kind === "cancel") return "取消任务";
-  if (control.kind === "refresh_context") return "刷新上下文";
+  if (control.kind === "resume") return "继续并创建新运行";
+  if (control.kind === "retry") return "重试并创建新运行";
+  if (control.kind === "stop_run") return "停止当前运行";
   return control.label;
 }
 
 function taskControlIcon(control: TaskControl) {
   if (control.kind === "resume") return <Play size={17} aria-hidden="true" />;
   if (control.kind === "retry") return <RotateCcw size={17} aria-hidden="true" />;
-  if (control.kind === "cancel") return <XCircle size={17} aria-hidden="true" />;
+  if (control.kind === "stop_run") return <XCircle size={17} aria-hidden="true" />;
   return <RefreshCw size={17} aria-hidden="true" />;
 }
 
@@ -307,16 +391,11 @@ function taskControlFeedback(state: TaskControlDispatchState) {
     };
   }
   return {
-    title:
-      state.control.kind === "cancel"
-        ? "任务已取消"
-        : state.control.kind === "refresh_context"
-          ? "上下文已刷新"
-          : "任务状态已更新",
+    title: state.control.kind === "stop_run" ? "当前运行已停止" : "任务状态已更新",
     body:
-      state.control.kind === "cancel"
-        ? "刷新后的同一任务已确认取消。"
-        : `刷新后的同一任务当前为 ${state.refreshedTask.lifecycleStatus}；这不是完成证明。`,
+      state.control.kind === "stop_run"
+        ? "刷新后的同一任务已确认当前运行终止；继续会创建新运行。"
+        : `刷新后的同一任务当前为 ${state.refreshedTask.lifecycleStatus}，且已创建新运行；这不是完成证明。`,
     tone: "neutral" as const,
   };
 }
@@ -334,6 +413,7 @@ export function ResultsView({
   onConfirmTaskControl,
   onCancelTaskControlConfirmation,
   onRequestArtifactUndo,
+  onReviseArtifact,
   onOpenArtifact,
   onExportArtifact,
   fixedFilter,
@@ -352,6 +432,12 @@ export function ResultsView({
   onConfirmTaskControl: () => void;
   onCancelTaskControlConfirmation: () => void;
   onRequestArtifactUndo: (artifactId: string) => Promise<void>;
+  onReviseArtifact: (
+    taskId: string,
+    artifactId: string,
+    baseVersion: number,
+    instruction: string
+  ) => Promise<void>;
   onOpenArtifact: (artifactId: string, version: number) => Promise<void>;
   onExportArtifact: (artifactId: string, version: number) => Promise<void>;
   fixedFilter?: TaskFilter;
@@ -361,8 +447,16 @@ export function ResultsView({
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [undoingArtifactId, setUndoingArtifactId] = useState<string | null>(null);
+  const [revisingArtifactId, setRevisingArtifactId] = useState<string | null>(null);
+  const [revisionDraft, setRevisionDraft] = useState<{
+    artifactId: string;
+    instruction: string;
+  } | null>(null);
   const [openingArtifactId, setOpeningArtifactId] = useState<string | null>(null);
   const [exportingArtifactId, setExportingArtifactId] = useState<string | null>(null);
+  const [artifactActionFailure, setArtifactActionFailure] = useState<ArtifactActionFailure | null>(
+    null
+  );
   const items = scopedItems ? [...scopedItems] : (envelope.data?.items ?? []);
   const listAvailable = envelope.data !== null && !["error", "loading"].includes(envelope.status);
   const normalizedQuery = query.trim().toLocaleLowerCase("zh-CN");
@@ -507,6 +601,7 @@ export function ResultsView({
               {visibleItems.map(item => {
                 const lifecycle = taskLifecyclePresentation(item);
                 const updatedAt = formatBackendTime(item.updatedAt);
+                const provenance = runProvenanceLabel(item);
                 return (
                   <button
                     key={item.canonicalTaskId}
@@ -519,6 +614,7 @@ export function ResultsView({
                     <span className="ol-workbench-result-task-row__copy">
                       <strong>{item.title}</strong>
                       <span>{statusDetail(item)}</span>
+                      {provenance && <small>{provenance}</small>}
                       {updatedAt && <small>最近更新 {updatedAt}</small>}
                     </span>
                     <FoundationStatusLabel
@@ -594,6 +690,34 @@ export function ResultsView({
               </h3>
             </div>
           </div>
+          {selectedTask && (selectedTask.steerings?.length ?? 0) > 0 && (
+            <ol className="ol-task-item-timeline" data-testid="canonical-task-steerings">
+              {selectedTask.steerings?.map(steering => (
+                <li key={steering.steeringId} data-steering-status={steering.status}>
+                  <div>
+                    <strong>运行中调整</strong>
+                    <p>
+                      {steeringStatusLabel(steering.status)}
+                      {steering.appliedPlanRevision
+                        ? ` · 计划版本 ${steering.basePlanRevision} → ${steering.appliedPlanRevision}`
+                        : ` · 基于计划版本 ${steering.basePlanRevision}`}
+                    </p>
+                  </div>
+                  <FoundationStatusLabel
+                    label={steeringStatusLabel(steering.status)}
+                    status={
+                      steering.status === "applied"
+                        ? "success"
+                        : steering.status === "pending"
+                          ? "waiting"
+                          : "blocked"
+                    }
+                    verified={steering.status === "applied"}
+                  />
+                </li>
+              ))}
+            </ol>
+          )}
           {selectedTask && selectedTask.items.length > 0 ? (
             <ol className="ol-task-item-timeline" data-testid="canonical-task-items">
               {selectedTask.items.map(item => (
@@ -628,6 +752,7 @@ export function ResultsView({
               </h3>
             </div>
           </div>
+          {selectedTask && <CompletionLimitations task={selectedTask} />}
           {selectedTask && selectedTask.artifacts.length > 0 ? (
             <div className="ol-task-result-grid" data-testid="canonical-task-artifacts">
               {selectedTask.artifacts.map(artifact => (
@@ -659,6 +784,45 @@ export function ResultsView({
                       }
                     />
                   </header>
+
+                  {artifactActionFailure?.artifactId === artifact.artifactId && (
+                    <FoundationNotice
+                      title={artifactFailureTitle(artifactActionFailure.action)}
+                      tone="error"
+                      live
+                    >
+                      <p>
+                        {productErrorMessage(
+                          artifactActionFailure.error,
+                          artifactFailureFallback(artifactActionFailure.action)
+                        )}
+                      </p>
+                    </FoundationNotice>
+                  )}
+
+                  <section className="ol-task-result-card__section" aria-label="Provenance">
+                    <span>来源与版本</span>
+                    <strong>
+                      当前 v{artifact.version}
+                      {artifact.previousVersion
+                        ? ` · 基于 v${artifact.previousVersion}`
+                        : " · 初始版本"}
+                    </strong>
+                    {artifact.sourceRunProvenance ? (
+                      <p>{provenanceLabel(artifact.sourceRunProvenance)}</p>
+                    ) : (
+                      <p>本版本的 Run / 模型 provenance 当前不可用，不使用当前设置代替。</p>
+                    )}
+                    {artifact.sourceResourceRefs.length > 0 ? (
+                      <ul aria-label="本版本绑定的本地资源">
+                        {artifact.sourceResourceRefs.map(resource => (
+                          <li key={resource.id}>{resource.label}</li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <small>本版本没有投影已绑定的本地资源。</small>
+                    )}
+                  </section>
 
                   <section className="ol-task-result-card__section" aria-label="Changes">
                     <span>变更</span>
@@ -718,10 +882,18 @@ export function ResultsView({
                       <div className="ol-task-result-card__actions">
                         <FoundationActionButton
                           onClick={() => {
+                            setArtifactActionFailure(null);
                             setOpeningArtifactId(artifact.artifactId);
-                            void onOpenArtifact(artifact.artifactId, artifact.version).finally(() =>
-                              setOpeningArtifactId(null)
-                            );
+                            void onOpenArtifact(artifact.artifactId, artifact.version)
+                              .catch(error => {
+                                setArtifactActionFailure({
+                                  artifactId: artifact.artifactId,
+                                  action: "open",
+                                  error,
+                                });
+                                onAnnounce("文件没有打开；产物仍保持原状态。");
+                              })
+                              .finally(() => setOpeningArtifactId(null));
                           }}
                           label="打开文件"
                           icon={<FolderOpen aria-hidden="true" />}
@@ -730,10 +902,18 @@ export function ResultsView({
                         />
                         <FoundationActionButton
                           onClick={() => {
+                            setArtifactActionFailure(null);
                             setExportingArtifactId(artifact.artifactId);
-                            void onExportArtifact(artifact.artifactId, artifact.version).finally(
-                              () => setExportingArtifactId(null)
-                            );
+                            void onExportArtifact(artifact.artifactId, artifact.version)
+                              .catch(error => {
+                                setArtifactActionFailure({
+                                  artifactId: artifact.artifactId,
+                                  action: "export",
+                                  error,
+                                });
+                                onAnnounce("文件没有另存；原产物仍保持原状态。");
+                              })
+                              .finally(() => setExportingArtifactId(null));
                           }}
                           label="另存为…"
                           icon={<Download aria-hidden="true" />}
@@ -745,15 +925,117 @@ export function ResultsView({
                       <p>文件通过物化与摘要核验后才可打开。</p>
                     )}
                   </section>
+                  <section className="ol-task-result-card__section" aria-label="Focused revision">
+                    <span>继续修改</span>
+                    {artifact.revision.available ? (
+                      revisionDraft?.artifactId === artifact.artifactId ? (
+                        <form
+                          className="ol-task-result-card__revision"
+                          onSubmit={event => {
+                            event.preventDefault();
+                            const instruction = revisionDraft.instruction.trim();
+                            if (!instruction || !selectedTask) return;
+                            setArtifactActionFailure(null);
+                            setRevisingArtifactId(artifact.artifactId);
+                            void onReviseArtifact(
+                              selectedTask.canonicalTaskId,
+                              artifact.artifactId,
+                              artifact.version,
+                              instruction
+                            )
+                              .then(() => setRevisionDraft(null))
+                              .catch(error => {
+                                setArtifactActionFailure({
+                                  artifactId: artifact.artifactId,
+                                  action: "revision",
+                                  error,
+                                });
+                                onAnnounce("聚焦修订没有开始；当前版本仍保持原状态。");
+                              })
+                              .finally(() => setRevisingArtifactId(null));
+                          }}
+                        >
+                          <label htmlFor={`artifact-revision-${artifact.artifactId}`}>
+                            只说明要改动的部分
+                          </label>
+                          <textarea
+                            id={`artifact-revision-${artifact.artifactId}`}
+                            value={revisionDraft.instruction}
+                            onChange={event =>
+                              setRevisionDraft({
+                                artifactId: artifact.artifactId,
+                                instruction: event.target.value,
+                              })
+                            }
+                            placeholder="例如：把结论压缩为三点，其他章节保持不变。"
+                            maxLength={10_000}
+                            rows={4}
+                            autoFocus
+                          />
+                          <div className="ol-task-result-card__actions">
+                            <FoundationActionButton
+                              type="submit"
+                              label="开始新修订"
+                              icon={<PencilLine aria-hidden="true" />}
+                              disabled={!revisionDraft.instruction.trim()}
+                              disabledReason={
+                                !revisionDraft.instruction.trim()
+                                  ? "先说明这个版本需要修改什么。"
+                                  : undefined
+                              }
+                              loading={revisingArtifactId === artifact.artifactId}
+                              loadingLabel="正在修订并核验…"
+                            />
+                            <FoundationActionButton
+                              type="button"
+                              variant="quiet"
+                              label="取消"
+                              disabled={revisingArtifactId === artifact.artifactId}
+                              disabledReason={
+                                revisingArtifactId === artifact.artifactId
+                                  ? "修订请求正在创建，完成前不能关闭表单。"
+                                  : undefined
+                              }
+                              onClick={() => setRevisionDraft(null)}
+                            />
+                          </div>
+                        </form>
+                      ) : (
+                        <FoundationActionButton
+                          onClick={() =>
+                            setRevisionDraft({ artifactId: artifact.artifactId, instruction: "" })
+                          }
+                          label="聚焦修订此版本"
+                          icon={<PencilLine aria-hidden="true" />}
+                        />
+                      )
+                    ) : (
+                      <p>
+                        暂不可修订：
+                        {reasonLabel(
+                          artifact.revision.reasonCode ?? "缺少可验证的当前版本或任务尚未完成"
+                        )}
+                      </p>
+                    )}
+                    <small>新指令会创建绑定当前版本的新 Run；原版本和历史结果不会被删除。</small>
+                  </section>
                   <section className="ol-task-result-card__section" aria-label="Undo">
                     <span>撤销</span>
                     {artifact.undo.available ? (
                       <FoundationActionButton
                         onClick={() => {
+                          setArtifactActionFailure(null);
                           setUndoingArtifactId(artifact.artifactId);
-                          void onRequestArtifactUndo(artifact.artifactId).finally(() =>
-                            setUndoingArtifactId(null)
-                          );
+                          void onRequestArtifactUndo(artifact.artifactId)
+                            .catch(error => {
+                              setArtifactActionFailure({
+                                artifactId: artifact.artifactId,
+                                action: "undo",
+                                error,
+                              });
+                              onAnnounce("撤销申请没有创建；产物仍保持原状态。");
+                            })
+                            .finally(() => setUndoingArtifactId(null));
                         }}
                         label="申请撤销此产物"
                         icon={<RotateCcw aria-hidden="true" />}
@@ -763,7 +1045,9 @@ export function ResultsView({
                     ) : artifact.undo.proposalRef ? (
                       <p>
                         {artifact.undo.status === "undone"
-                          ? "已撤销，原文件已移入 OpenLife 安全回收位置。"
+                          ? artifact.undo.operation === "restore_replaced"
+                            ? "已撤销，替换前的原始内容已恢复并核验。"
+                            : "已撤销，OpenLife 新建的文件已移入安全回收位置。"
                           : "撤销正在等待审核或 reconciliation。"}
                       </p>
                     ) : (
@@ -852,7 +1136,7 @@ export function ResultsView({
                     key={control.id}
                     label={taskControlLabel(control)}
                     icon={taskControlIcon(control)}
-                    variant={control.kind === "cancel" ? "danger" : "secondary"}
+                    variant={control.kind === "stop_run" ? "danger" : "secondary"}
                     loading={busyForControl}
                     loadingLabel={taskControlState.phase === "refreshing" ? "正在核对" : "正在请求"}
                     disabled={disabled}
@@ -911,11 +1195,7 @@ export function ResultsView({
 
       <FoundationDialog
         open={taskControlState.phase === "confirming"}
-        title={
-          taskControlState.phase === "confirming" && taskControlState.control.kind === "cancel"
-            ? "确认取消这项任务？"
-            : "确认执行这项任务动作？"
-        }
+        title="确认执行这项任务动作？"
         description="确认只发送一次精确任务命令；最终状态仍以系统刷新结果为准。"
         onClose={onCancelTaskControlConfirmation}
         footer={
@@ -931,12 +1211,7 @@ export function ResultsView({
                   ? taskControlLabel(taskControlState.control)
                   : "确认"
               }
-              variant={
-                taskControlState.phase === "confirming" &&
-                taskControlState.control.kind === "cancel"
-                  ? "danger"
-                  : "primary"
-              }
+              variant="primary"
               onClick={onConfirmTaskControl}
             />
           </>

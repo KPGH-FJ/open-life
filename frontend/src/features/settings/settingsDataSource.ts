@@ -8,6 +8,7 @@ import {
   type ProviderPrivacyBoundarySummary,
   type ProductDiagnosticsViewModel,
   type ReviewItem,
+  type ToolPermissionViewModel,
   type ViewModelEnvelope,
 } from "@/tauri";
 import { getReviewCenterViewModel } from "@/ipc/review";
@@ -16,7 +17,9 @@ import {
   getLifeStateProjection,
   getProductDiagnosticsViewModel,
   getProviderPrivacyBoundarySummary,
+  getToolPermissionViewModel,
   recoverRequiredCredentialAccess,
+  revokeToolPermission,
   saveConfig,
   selectArtifactOutputDirectory,
   testLlmConnection,
@@ -29,6 +32,7 @@ export type SettingsDiagnostic = {
     | "sanitized_config"
     | "provider_privacy_boundary"
     | "life_state_projection"
+    | "tool_permission_view_model"
     | "review_item_resolution"
     | "product_diagnostics";
   status: "loaded" | "failed" | "not_requested" | "missing";
@@ -40,6 +44,7 @@ export type SettingsSnapshot = {
   boundaryEnvelope: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
   safeMode: LifeSafeModeProjection | null;
   credentialBootstrap?: CredentialBootstrapSnapshot | null;
+  toolPermissionEnvelope: ViewModelEnvelope<ToolPermissionViewModel>;
   productDiagnostics?: ProductDiagnosticsViewModel | null;
   diagnostics: SettingsDiagnostic[];
 };
@@ -57,6 +62,7 @@ export interface SettingsDataSource {
   testProviderConnection(config: AppConfig): Promise<SettingsConnectionTestOutcome>;
   saveSettings(config: AppConfig): Promise<void>;
   selectArtifactOutputDirectory?(): Promise<ArtifactOutputDirectorySelection>;
+  revokeToolPermission?(permissionId: string): Promise<void>;
 }
 
 function boundaryErrorEnvelope(message: string): ViewModelEnvelope<ProviderPrivacyBoundarySummary> {
@@ -67,6 +73,14 @@ function boundaryErrorEnvelope(message: string): ViewModelEnvelope<ProviderPriva
   );
 }
 
+function permissionErrorEnvelope(message: string): ViewModelEnvelope<ToolPermissionViewModel> {
+  return buildReadModelErrorEnvelope(
+    "ToolPermissionViewModel",
+    "tool_permission_view_model.load_failed",
+    `ToolPermissionViewModel could not be loaded: ${message}`
+  );
+}
+
 export function buildSettingsErrorSnapshot(error: unknown): SettingsSnapshot {
   const message = errorText(error);
   return {
@@ -74,23 +88,26 @@ export function buildSettingsErrorSnapshot(error: unknown): SettingsSnapshot {
     boundaryEnvelope: boundaryErrorEnvelope(message),
     safeMode: null,
     credentialBootstrap: null,
+    toolPermissionEnvelope: permissionErrorEnvelope(message),
     productDiagnostics: null,
     diagnostics: [
       { id: "sanitized_config", status: "failed", message },
       { id: "provider_privacy_boundary", status: "failed", message },
       { id: "life_state_projection", status: "failed", message },
+      { id: "tool_permission_view_model", status: "failed", message },
       { id: "review_item_resolution", status: "not_requested" },
     ],
   };
 }
 
 async function loadSettings(): Promise<SettingsSnapshot> {
-  const [configResult, boundaryResult, projectionResult, diagnosticsResult] =
+  const [configResult, boundaryResult, projectionResult, diagnosticsResult, permissionsResult] =
     await Promise.allSettled([
       getConfig(),
       getProviderPrivacyBoundarySummary(),
       getLifeStateProjection(),
       getProductDiagnosticsViewModel(),
+      getToolPermissionViewModel(),
     ]);
   const configError = configResult.status === "rejected" ? errorText(configResult.reason) : null;
   const boundaryError =
@@ -99,6 +116,8 @@ async function loadSettings(): Promise<SettingsSnapshot> {
     projectionResult.status === "rejected" ? errorText(projectionResult.reason) : null;
   const diagnosticsError =
     diagnosticsResult.status === "rejected" ? errorText(diagnosticsResult.reason) : null;
+  const permissionsError =
+    permissionsResult.status === "rejected" ? errorText(permissionsResult.reason) : null;
 
   return {
     config: configResult.status === "fulfilled" ? configResult.value : null,
@@ -111,6 +130,10 @@ async function loadSettings(): Promise<SettingsSnapshot> {
       projectionResult.status === "fulfilled"
         ? (projectionResult.value.credentialBootstrap ?? null)
         : null,
+    toolPermissionEnvelope:
+      permissionsResult.status === "fulfilled"
+        ? permissionsResult.value
+        : permissionErrorEnvelope(permissionsError ?? "unknown_error"),
     productDiagnostics: diagnosticsResult.status === "fulfilled" ? diagnosticsResult.value : null,
     diagnostics: [
       configError
@@ -122,6 +145,9 @@ async function loadSettings(): Promise<SettingsSnapshot> {
       projectionError
         ? { id: "life_state_projection", status: "failed", message: projectionError }
         : { id: "life_state_projection", status: "loaded" },
+      permissionsError
+        ? { id: "tool_permission_view_model", status: "failed", message: permissionsError }
+        : { id: "tool_permission_view_model", status: "loaded" },
       { id: "review_item_resolution", status: "not_requested" },
       diagnosticsError
         ? { id: "product_diagnostics", status: "failed", message: diagnosticsError }
@@ -187,4 +213,5 @@ export const tauriSettingsDataSource: SettingsDataSource = {
   testProviderConnection,
   saveSettings: saveConfig,
   selectArtifactOutputDirectory,
+  revokeToolPermission,
 };

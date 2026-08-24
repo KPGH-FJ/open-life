@@ -2,7 +2,8 @@ use crate::agent::product_read_model::{
     BackendEntityKind, BackendEntityRef, EvidenceRef, EvidenceSensitivity, EvidenceSource,
 };
 use crate::task_runtime::{
-    CanonicalArtifactStatus, CanonicalTaskItemKind, CanonicalTaskItemStatus,
+    CanonicalArtifactStatus, CanonicalArtifactUndoOperation, CanonicalCompletionLimitation,
+    CanonicalTaskItemKind, CanonicalTaskItemStatus,
 };
 use crate::work_orchestration::{WorkCompletionContract, WorkPlanStepKind, WorkRunBudgetPolicy};
 use chrono::{DateTime, Utc};
@@ -97,8 +98,7 @@ impl TaskTerminalDeliveryStatus {
 pub enum TaskControlKind {
     Resume,
     Retry,
-    Cancel,
-    RefreshContext,
+    StopRun,
     OpenTrace,
     OpenRun,
     OpenReviewItem,
@@ -110,8 +110,7 @@ pub enum TaskControlKind {
 pub enum TaskControlEffect {
     TaskResumeRequest,
     TaskRetryRequest,
-    TaskCancelRequest,
-    TaskRefreshRequest,
+    TaskStopRunRequest,
     NavigationOnly,
     EvidenceOnly,
 }
@@ -121,8 +120,7 @@ impl TaskControlKind {
         match self {
             Self::Resume => TaskControlEffect::TaskResumeRequest,
             Self::Retry => TaskControlEffect::TaskRetryRequest,
-            Self::Cancel => TaskControlEffect::TaskCancelRequest,
-            Self::RefreshContext => TaskControlEffect::TaskRefreshRequest,
+            Self::StopRun => TaskControlEffect::TaskStopRunRequest,
             Self::OpenRun | Self::OpenReviewItem => TaskControlEffect::NavigationOnly,
             Self::OpenTrace | Self::ViewEvidence => TaskControlEffect::EvidenceOnly,
         }
@@ -255,6 +253,8 @@ pub struct TaskWorkPlanViewModel {
 pub struct TaskArtifactViewModel {
     pub artifact_id: String,
     pub version: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_version: Option<u64>,
     pub status: CanonicalArtifactStatus,
     pub media_type: String,
     pub content_digest: String,
@@ -266,12 +266,17 @@ pub struct TaskArtifactViewModel {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal_ref: Option<BackendEntityRef>,
     pub source_item_ref: BackendEntityRef,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_run_provenance: Option<TaskRunProvenanceViewModel>,
+    #[serde(default)]
+    pub source_resource_refs: Vec<EvidenceRef>,
     #[serde(default)]
     pub evidence_refs: Vec<EvidenceRef>,
     pub change: TaskArtifactChangeViewModel,
     pub preview: TaskArtifactPreviewViewModel,
     pub verification: TaskArtifactVerificationViewModel,
     pub undo: TaskArtifactUndoViewModel,
+    pub revision: TaskArtifactRevisionViewModel,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -279,9 +284,19 @@ pub struct TaskArtifactViewModel {
 pub struct TaskArtifactUndoViewModel {
     pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub operation: Option<CanonicalArtifactUndoOperation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal_ref: Option<BackendEntityRef>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactRevisionViewModel {
+    pub available: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
 }
@@ -360,13 +375,19 @@ pub struct TaskViewModelItem {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub conversation_id: Option<String>,
     pub title: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_run_provenance: Option<TaskRunProvenanceViewModel>,
     pub lifecycle_status: TaskLifecycleStatus,
     pub terminal_delivery_status: TaskTerminalDeliveryStatus,
     pub final_delivery_evidence_present: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub completion_disposition: Option<TaskCompletionDisposition>,
     #[serde(default)]
+    pub completion_limitations: Vec<CanonicalCompletionLimitation>,
+    #[serde(default)]
     pub items: Vec<TaskItemViewModel>,
+    #[serde(default)]
+    pub steerings: Vec<TaskSteeringViewModel>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub work_plan: Option<TaskWorkPlanViewModel>,
     #[serde(default)]
@@ -388,6 +409,47 @@ pub struct TaskViewModelItem {
     pub evidence_refs: Vec<EvidenceRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskSteeringViewModel {
+    pub steering_id: String,
+    pub run_id: String,
+    pub status: crate::task_runtime::CanonicalSteeringStatus,
+    pub base_plan_revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_plan_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolution_code: Option<String>,
+    pub created_at: DateTime<Utc>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub resolved_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskRunProvenanceViewModel {
+    pub run_id: String,
+    pub turn_id: String,
+    pub turn_status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub turn_error_code: Option<String>,
+    pub provider_profile_id: String,
+    pub provider_id: String,
+    pub model_id: String,
+    pub endpoint_class: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<crate::conversation::ReasoningEffort>,
+    pub execution_mode: crate::task_runtime::WorkExecutionMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_revision: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub project_scope_digest: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -590,6 +652,7 @@ pub struct TaskViewModelTaskInput {
     pub canonical_task_id: Option<String>,
     pub conversation_id: Option<String>,
     pub title: String,
+    pub latest_run_provenance: Option<TaskRunProvenanceViewModel>,
     pub related_run_ids: Vec<String>,
     pub final_delivery_present: bool,
     pub final_delivery_status: Option<String>,
@@ -597,7 +660,9 @@ pub struct TaskViewModelTaskInput {
     pub canonical_terminal_delivery_status: Option<TaskTerminalDeliveryStatus>,
     pub canonical_final_delivery_evidence_present: Option<bool>,
     pub completion_disposition: Option<TaskCompletionDisposition>,
+    pub completion_limitations: Vec<CanonicalCompletionLimitation>,
     pub canonical_items: Vec<TaskItemViewModel>,
+    pub canonical_steerings: Vec<TaskSteeringViewModel>,
     pub work_plan: Option<TaskWorkPlanViewModel>,
     pub canonical_artifacts: Vec<TaskArtifactViewModel>,
     pub pending_blockers: Vec<String>,
@@ -606,7 +671,7 @@ pub struct TaskViewModelTaskInput {
     pub pending_review_item_refs: Vec<BackendEntityRef>,
     pub review_projection_authoritative: bool,
     pub allowed_control_ids: Vec<String>,
-    pub retry_action_id: Option<String>,
+    pub restart_run_id: Option<String>,
     pub next_recommended_control: Option<String>,
     pub latest_result_preview: Option<String>,
     pub evidence_refs: Vec<EvidenceRef>,
@@ -738,11 +803,14 @@ fn task_item_from_input(input: TaskViewModelTaskInput) -> TaskViewModelItem {
         } else {
             input.title
         },
+        latest_run_provenance: input.latest_run_provenance,
         lifecycle_status,
         terminal_delivery_status,
         final_delivery_evidence_present,
         completion_disposition: input.completion_disposition,
+        completion_limitations: input.completion_limitations,
         items: input.canonical_items,
+        steerings: input.canonical_steerings,
         work_plan: input.work_plan,
         artifacts: input.canonical_artifacts,
         pending_blockers: dedup_strings(input.pending_blockers),
@@ -822,9 +890,14 @@ fn controls_for_task(
                 let resume = TaskControl::new(
                     &input.task_id,
                     "resume",
-                    "Resume",
+                    "Continue in a new run",
                     TaskControlKind::Resume,
                 );
+                let resume = if let Some(run_id) = &input.restart_run_id {
+                    resume.with_target_action_id(run_id)
+                } else {
+                    resume.disabled("No stopped run is available in the backend read model.")
+                };
                 controls.push(if pending_review {
                     resume.disabled(
                         "Pending review items must be resolved before requesting task resume.",
@@ -840,28 +913,26 @@ fn controls_for_task(
                     "Retry",
                     TaskControlKind::Retry,
                 );
-                let retry = if let Some(action_id) = &input.retry_action_id {
+                let retry = if let Some(action_id) = &input.restart_run_id {
                     retry.with_target_action_id(action_id)
                 } else {
                     retry.disabled("No retryable failed action is available in the backend read model.")
                 };
                 controls.push(retry);
             }
-            "cancel" => controls.push(
-                TaskControl::new(
+            "stop_run" => {
+                let stop = TaskControl::new(
                     &input.task_id,
-                    "cancel",
-                    "Cancel",
-                    TaskControlKind::Cancel,
-                )
-                .requiring_confirmation(),
-            ),
-            "refresh_context" => controls.push(TaskControl::new(
-                &input.task_id,
-                "refresh_context",
-                "Refresh context",
-                TaskControlKind::RefreshContext,
-            )),
+                    "stop_run",
+                    "Stop current run",
+                    TaskControlKind::StopRun,
+                );
+                controls.push(if let Some(run_id) = &input.restart_run_id {
+                    stop.with_target_action_id(run_id)
+                } else {
+                    stop.disabled("No active run is available in the backend read model.")
+                });
+            }
             "open_trace" => {}
             _ => controls.push(
                 TaskControl::new(
@@ -877,10 +948,7 @@ fn controls_for_task(
 
     if lifecycle_status.is_terminal() {
         for control in &mut controls {
-            if matches!(
-                control.kind,
-                TaskControlKind::Resume | TaskControlKind::Cancel
-            ) {
+            if control.kind == TaskControlKind::StopRun {
                 control.enabled = false;
                 control.disabled_reason =
                     Some("Terminal task state cannot be changed by this request control.".into());

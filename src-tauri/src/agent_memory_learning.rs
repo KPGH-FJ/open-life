@@ -147,6 +147,7 @@ async fn run_one(
         state.privacy_engine.lock().await.clone(),
         runtime.config.system.network_policy,
     )
+    .with_reasoning_effort(latest_turn.provider.reasoning_effort)
     .with_runtime_state(Arc::clone(state));
     let request = MainChatModelRequest {
         session_id: conversation_id.to_string(),
@@ -463,6 +464,7 @@ mod tests {
             model_id: "must-not-be-called".into(),
             endpoint_class: "cloud".into(),
             config_generation: "test".into(),
+            reasoning_effort: None,
         };
         let user_text = "My work timezone is Central European Time.";
 

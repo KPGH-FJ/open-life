@@ -28,6 +28,7 @@ function task(overrides: Partial<TaskViewModelItem> = {}): TaskViewModelItem {
     lifecycleStatus: "running",
     terminalDeliveryStatus: "not_terminal",
     finalDeliveryEvidencePresent: false,
+    completionLimitations: [],
     items: [],
     artifacts: [],
     pendingBlockers: [],
@@ -48,24 +49,23 @@ describe("task control dispatch contract", () => {
     });
     expect(state).toMatchObject({
       phase: "blocked",
-      reason: "task_retry_target_action_missing",
+      reason: "task_retry_target_run_missing",
     });
   });
 
-  it("requires confirmation for cancellation even if the backend omitted it", () => {
+  it("requires an exact active run target for stop", () => {
     const state = taskControlDispatchReducer(initialTaskControlDispatchState, {
       type: "request",
       control: control({
-        id: "task-1:cancel",
-        label: "取消任务",
-        kind: "cancel",
-        effect: "task_cancel_request",
+        id: "task-1:stop_run",
+        label: "停止当前运行",
+        kind: "stop_run",
+        effect: "task_stop_run_request",
         targetActionId: undefined,
-        requiresConfirmation: false,
       }),
       expectedTaskId: "task-1",
     });
-    expect(state).toMatchObject({ phase: "blocked", reason: "task_cancel_requires_confirmation" });
+    expect(state).toMatchObject({ phase: "blocked", reason: "task_stop_run_target_run_missing" });
   });
 
   it("does not resolve a command until the exact refreshed task confirms it", () => {
@@ -78,18 +78,44 @@ describe("task control dispatch contract", () => {
     const refreshing = taskControlDispatchReducer(dispatching, { type: "dispatch_succeeded" });
     const unresolved = taskControlDispatchReducer(refreshing, {
       type: "refresh_succeeded",
-      task: task({ lifecycleStatus: "failed" }),
+      task: task({ lifecycleStatus: "failed", relatedRunIds: ["action-3"] }),
     });
     expect(unresolved.phase).toBe("awaiting_projection");
 
     const resolved = taskControlDispatchReducer(refreshing, {
       type: "refresh_succeeded",
-      task: task({ lifecycleStatus: "running" }),
+      task: task({ lifecycleStatus: "running", relatedRunIds: ["action-3", "run-4"] }),
     });
     expect(resolved).toMatchObject({
       phase: "resolved",
       refreshedTask: { canonicalTaskId: "task-1", lifecycleStatus: "running" },
     });
+  });
+
+  it("resolves resume only after a different new run is projected", () => {
+    const resume = control({
+      id: "task-1:resume",
+      label: "继续并创建新运行",
+      kind: "resume",
+      effect: "task_resume_request",
+    });
+    const dispatching = taskControlDispatchReducer(initialTaskControlDispatchState, {
+      type: "request",
+      control: resume,
+      expectedTaskId: "task-1",
+    });
+    const refreshing = taskControlDispatchReducer(dispatching, { type: "dispatch_succeeded" });
+    const unchanged = taskControlDispatchReducer(refreshing, {
+      type: "refresh_succeeded",
+      task: task({ lifecycleStatus: "cancelled", relatedRunIds: ["action-3"] }),
+    });
+    expect(unchanged.phase).toBe("awaiting_projection");
+
+    const resolved = taskControlDispatchReducer(refreshing, {
+      type: "refresh_succeeded",
+      task: task({ lifecycleStatus: "running", relatedRunIds: ["action-3", "run-4"] }),
+    });
+    expect(resolved.phase).toBe("resolved");
   });
 
   it("blocks controls that claim completion from dispatch", () => {

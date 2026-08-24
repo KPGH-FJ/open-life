@@ -1,8 +1,9 @@
 //! Versioned canonical LifeModel document.
 //!
 //! This module defines the user-owned LifeModel boundary and its append-only
-//! SQLite authority. Historical YAML compatibility is intentionally not part
-//! of the shipped model.
+//! SQLite authority. Historical YAML is never a runtime personalization owner.
+//! A bounded reviewed migration may establish the first v2 version and an
+//! atomic cutover receipt; ordinary reads then use only this store.
 
 use anyhow::{anyhow, bail, Context, Result};
 use chrono::DateTime;
@@ -15,9 +16,11 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use super::legacy_migration::LegacyLifeModelMigrationPlanV2;
+
 pub const LIFE_MODEL_V2_SCHEMA_VERSION: &str = "openlife.lifemodel.v2";
 pub const DEFAULT_LIFE_MODEL_V2_MODEL_ID: &str = "primary";
-const LIFE_MODEL_V2_STORE_SCHEMA_VERSION: i64 = 2;
+const LIFE_MODEL_V2_STORE_SCHEMA_VERSION: i64 = 3;
 const MAX_DOCUMENT_BYTES: usize = 256 * 1024;
 const MAX_ITEMS_PER_SECTION: usize = 512;
 const MAX_ITEM_ID_CHARS: usize = 160;
@@ -111,6 +114,7 @@ pub enum LifeModelSectionV2 {
 
 pub const LIFE_MODEL_V2_TYPED_DIFF_SCHEMA: &str = "openlife.lifemodel.v2.typed-diff.v1";
 pub const LIFE_MODEL_V2_TYPED_DIFF_PATH: &str = "$lifemodel_v2";
+pub const LIFE_MODEL_V2_CUTOVER_SCHEMA: &str = "openlife.lifemodel.v2.cutover.v1";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(
@@ -204,6 +208,27 @@ pub struct LifeModelTypedDiffV2 {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LifeModelPatchMaterializationResultV2 {
     pub version: LifeModelVersionV2,
+    pub replayed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelV2CutoverReceipt {
+    pub schema_version: String,
+    pub model_id: String,
+    pub legacy_source_digest: String,
+    pub backup_digest: String,
+    pub model_version: u64,
+    pub document_digest: String,
+    pub proposal_id: String,
+    pub cutover_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct LifeModelLegacyMigrationMaterializationResultV2 {
+    pub version: LifeModelVersionV2,
+    pub cutover: LifeModelV2CutoverReceipt,
     pub replayed: bool,
 }
 
@@ -1296,6 +1321,16 @@ impl LifeModelV2Store {
                     model_id TEXT PRIMARY KEY,
                     model_version INTEGER NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS life_model_v2_cutovers (
+                    model_id TEXT PRIMARY KEY,
+                    schema_version TEXT NOT NULL,
+                    legacy_source_digest TEXT NOT NULL,
+                    backup_digest TEXT NOT NULL,
+                    model_version INTEGER NOT NULL,
+                    document_digest TEXT NOT NULL,
+                    proposal_id TEXT NOT NULL,
+                    cutover_at TEXT NOT NULL
+                );
                 ",
             )
             .context("initialize_lifemodel_v2_store")?;
@@ -1314,6 +1349,15 @@ impl LifeModelV2Store {
             .lock()
             .map_err(|_| anyhow!("lifemodel_v2_store_lock_poisoned"))?;
         load_current(&connection, model_id)
+    }
+
+    pub(crate) fn cutover(&self, model_id: &str) -> Result<Option<LifeModelV2CutoverReceipt>> {
+        validate_identifier(model_id, "invalid_lifemodel_v2_cutover_model_id")?;
+        let connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("lifemodel_v2_store_lock_poisoned"))?;
+        load_cutover(&connection, model_id)
     }
 
     pub(crate) fn version(
@@ -1562,6 +1606,134 @@ impl LifeModelV2Store {
             replayed: committed.replayed,
         })
     }
+
+    pub(crate) fn materialize_legacy_migration(
+        &self,
+        plan: &LegacyLifeModelMigrationPlanV2,
+        proposal_id: &str,
+        backup_digest: &str,
+        cutover_at: &str,
+    ) -> Result<LifeModelLegacyMigrationMaterializationResultV2> {
+        plan.validate_contract()?;
+        validate_identifier(proposal_id, "invalid_lifemodel_v2_migration_proposal_id")?;
+        if !is_sha256_digest(backup_digest) || backup_digest != plan.legacy_source_digest {
+            bail!("lifemodel_v2_migration_backup_digest_mismatch");
+        }
+        DateTime::parse_from_rfc3339(cutover_at)
+            .map_err(|_| anyhow!("invalid_lifemodel_v2_migration_cutover_at"))?;
+        let document = plan.result_document()?;
+        let document_json = document.canonical_json()?;
+        let document_digest = document.digest()?;
+        if document_digest != plan.result_document_digest {
+            bail!("lifemodel_v2_migration_result_digest_mismatch");
+        }
+        let materialization_id = format!("migration:{proposal_id}");
+        let source_refs = normalized_source_refs(&[
+            format!("proposal:{proposal_id}"),
+            format!("legacy-yaml:{}", plan.legacy_source_digest),
+            format!("legacy-backup:{backup_digest}"),
+        ]);
+        validate_version_source_refs(&source_refs)?;
+
+        let mut connection = self
+            .connection
+            .lock()
+            .map_err(|_| anyhow!("lifemodel_v2_store_lock_poisoned"))?;
+        let transaction = connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .context("begin_lifemodel_v2_migration_cutover")?;
+        if let Some(existing) = load_cutover(&transaction, &plan.model_id)? {
+            if existing.legacy_source_digest != plan.legacy_source_digest
+                || existing.backup_digest != backup_digest
+                || existing.document_digest != plan.result_document_digest
+                || existing.proposal_id != proposal_id
+                || existing.cutover_at != cutover_at
+            {
+                bail!("lifemodel_v2_migration_cutover_identity_conflict");
+            }
+            let version = load_version(&transaction, &plan.model_id, existing.model_version)?
+                .ok_or_else(|| anyhow!("lifemodel_v2_migration_cutover_version_missing"))?;
+            return Ok(LifeModelLegacyMigrationMaterializationResultV2 {
+                version,
+                cutover: existing,
+                replayed: true,
+            });
+        }
+        if load_current(&transaction, &plan.model_id)?.is_some() {
+            bail!("lifemodel_v2_migration_existing_canonical_head");
+        }
+
+        let model_version = 1u64;
+        let source_refs_json = serde_json::to_string(&source_refs)
+            .context("serialize_lifemodel_v2_migration_source_refs")?;
+        let version_digest = calculate_version_digest(
+            &plan.model_id,
+            model_version,
+            None,
+            None,
+            &document_digest,
+            &materialization_id,
+            &source_refs,
+            cutover_at,
+        )?;
+        transaction
+            .execute(
+                "INSERT INTO life_model_v2_versions (
+                    model_id, model_version, parent_version, parent_digest,
+                    schema_version, document_json, document_digest, version_digest,
+                    materialization_id, source_refs_json, created_at
+                 ) VALUES (?1, ?2, NULL, NULL, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                params![
+                    plan.model_id,
+                    model_version,
+                    LIFE_MODEL_V2_SCHEMA_VERSION,
+                    document_json,
+                    document_digest,
+                    version_digest,
+                    materialization_id,
+                    source_refs_json,
+                    cutover_at,
+                ],
+            )
+            .context("insert_lifemodel_v2_migration_version")?;
+        transaction
+            .execute(
+                "INSERT INTO life_model_v2_heads (model_id, model_version) VALUES (?1, ?2)",
+                params![plan.model_id, model_version],
+            )
+            .context("advance_lifemodel_v2_migration_head")?;
+        transaction
+            .execute(
+                "INSERT INTO life_model_v2_cutovers (
+                    model_id, schema_version, legacy_source_digest, backup_digest,
+                    model_version, document_digest, proposal_id, cutover_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    plan.model_id,
+                    LIFE_MODEL_V2_CUTOVER_SCHEMA,
+                    plan.legacy_source_digest,
+                    backup_digest,
+                    model_version,
+                    document_digest,
+                    proposal_id,
+                    cutover_at,
+                ],
+            )
+            .context("insert_lifemodel_v2_cutover_receipt")?;
+        transaction
+            .commit()
+            .context("commit_lifemodel_v2_migration_cutover")?;
+
+        let version = load_version(&connection, &plan.model_id, model_version)?
+            .ok_or_else(|| anyhow!("committed_lifemodel_v2_migration_version_missing"))?;
+        let cutover = load_cutover(&connection, &plan.model_id)?
+            .ok_or_else(|| anyhow!("committed_lifemodel_v2_cutover_missing"))?;
+        Ok(LifeModelLegacyMigrationMaterializationResultV2 {
+            version,
+            cutover,
+            replayed: false,
+        })
+    }
 }
 
 fn version_change_summary(
@@ -1680,6 +1852,75 @@ fn load_current(connection: &Connection, model_id: &str) -> Result<Option<LifeMo
         .map(|version| load_version(connection, model_id, version))
         .transpose()
         .map(Option::flatten)
+}
+
+fn load_cutover(
+    connection: &Connection,
+    model_id: &str,
+) -> Result<Option<LifeModelV2CutoverReceipt>> {
+    let row = connection
+        .query_row(
+            "SELECT schema_version, legacy_source_digest, backup_digest,
+                    model_version, document_digest, proposal_id, cutover_at
+             FROM life_model_v2_cutovers WHERE model_id = ?1",
+            params![model_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, u64>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                ))
+            },
+        )
+        .optional()
+        .context("read_lifemodel_v2_cutover")?;
+    let Some((
+        schema_version,
+        legacy_source_digest,
+        backup_digest,
+        model_version,
+        document_digest,
+        proposal_id,
+        cutover_at,
+    )) = row
+    else {
+        return Ok(None);
+    };
+    if schema_version != LIFE_MODEL_V2_CUTOVER_SCHEMA
+        || model_version == 0
+        || !is_sha256_digest(&legacy_source_digest)
+        || !is_sha256_digest(&backup_digest)
+        || !is_sha256_digest(&document_digest)
+    {
+        bail!("stored_lifemodel_v2_cutover_invalid");
+    }
+    validate_identifier(
+        &proposal_id,
+        "invalid_stored_lifemodel_v2_cutover_proposal_id",
+    )?;
+    DateTime::parse_from_rfc3339(&cutover_at)
+        .map_err(|_| anyhow!("invalid_stored_lifemodel_v2_cutover_at"))?;
+    let version = load_version(connection, model_id, model_version)?
+        .ok_or_else(|| anyhow!("stored_lifemodel_v2_cutover_version_missing"))?;
+    if version.document_digest != document_digest
+        || version.materialization_id != format!("migration:{proposal_id}")
+    {
+        bail!("stored_lifemodel_v2_cutover_document_mismatch");
+    }
+    Ok(Some(LifeModelV2CutoverReceipt {
+        schema_version,
+        model_id: model_id.into(),
+        legacy_source_digest,
+        backup_digest,
+        model_version,
+        document_digest,
+        proposal_id,
+        cutover_at,
+    }))
 }
 
 fn load_by_materialization(
@@ -1816,6 +2057,10 @@ fn load_version(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::life_model::legacy_migration::{
+        LegacyLifeModelMigrationDecisionV2, LegacyLifeModelMigrationPreviewV2,
+        LegacyLifeModelMigrationSelectionV2,
+    };
 
     fn statement(id: &str, value: &str) -> LifeModelStatementV2 {
         LifeModelStatementV2 {
@@ -1837,6 +2082,25 @@ mod tests {
         }
     }
 
+    fn legacy_migration_plan() -> LegacyLifeModelMigrationPlanV2 {
+        let preview = LegacyLifeModelMigrationPreviewV2::from_legacy_yaml(
+            "identity:\n  name: Alice\ngoals:\n  short_term:\n    - name: Ship now\n",
+        )
+        .unwrap();
+        let selections = preview
+            .candidates
+            .iter()
+            .map(|candidate| LegacyLifeModelMigrationSelectionV2 {
+                candidate_id: candidate.candidate_id.clone(),
+                decision: LegacyLifeModelMigrationDecisionV2::Include,
+                edited_value: None,
+            })
+            .collect::<Vec<_>>();
+        preview
+            .build_migration_plan(&selections, true, "2026-08-23T12:00:00Z")
+            .unwrap()
+    }
+
     #[test]
     fn empty_document_is_unknown_not_fictional() {
         let document = LifeModelDocumentV2::empty("primary");
@@ -1845,6 +2109,69 @@ mod tests {
         assert_eq!(document.total_item_count(), 0);
         assert!(!document.deterministic_yaml().unwrap().contains("期待"));
         assert!(!document.deterministic_yaml().unwrap().contains("energy"));
+    }
+
+    #[test]
+    fn legacy_migration_cutover_is_atomic_when_receipt_insert_fails() {
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let plan = legacy_migration_plan();
+        {
+            let connection = store.connection.lock().unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TEMP TRIGGER fail_lifemodel_cutover
+                     BEFORE INSERT ON life_model_v2_cutovers
+                     BEGIN SELECT RAISE(ABORT, 'forced cutover failure'); END;",
+                )
+                .unwrap();
+        }
+
+        let error = store
+            .materialize_legacy_migration(
+                &plan,
+                "migration-proposal-atomicity",
+                &plan.legacy_source_digest,
+                "2026-08-23T12:00:00Z",
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("insert_lifemodel_v2_cutover_receipt"));
+        assert!(store.current(&plan.model_id).unwrap().is_none());
+        assert!(store.cutover(&plan.model_id).unwrap().is_none());
+    }
+
+    #[test]
+    fn corrupt_legacy_cutover_receipt_fails_closed() {
+        let store = LifeModelV2Store::new_in_memory().unwrap();
+        let plan = legacy_migration_plan();
+        store
+            .materialize_legacy_migration(
+                &plan,
+                "migration-proposal-corrupt",
+                &plan.legacy_source_digest,
+                "2026-08-23T12:00:00Z",
+            )
+            .unwrap();
+        {
+            let connection = store.connection.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE life_model_v2_cutovers SET document_digest = ?1 WHERE model_id = ?2",
+                    params![
+                        "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                        plan.model_id
+                    ],
+                )
+                .unwrap();
+        }
+
+        assert!(store
+            .cutover(&plan.model_id)
+            .unwrap_err()
+            .to_string()
+            .contains("cutover_document_mismatch"));
     }
 
     #[test]

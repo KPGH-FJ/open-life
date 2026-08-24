@@ -105,9 +105,10 @@ pub use runtime_context::{ContextSourceCandidate, ContextSourceKind};
 pub use tasks_view_model::{
     build_tasks_view_model, build_workspace_view_model, TaskArtifactChangeKind,
     TaskArtifactChangeViewModel, TaskArtifactPreviewStatus, TaskArtifactPreviewViewModel,
-    TaskArtifactUndoViewModel, TaskArtifactVerificationStatus, TaskArtifactVerificationViewModel,
-    TaskArtifactViewModel, TaskCompletionDisposition, TaskControl, TaskControlEffect,
-    TaskControlKind, TaskItemViewModel, TaskLatestResultPreview, TaskLifecycleStatus,
+    TaskArtifactRevisionViewModel, TaskArtifactUndoViewModel, TaskArtifactVerificationStatus,
+    TaskArtifactVerificationViewModel, TaskArtifactViewModel, TaskCompletionDisposition,
+    TaskControl, TaskControlEffect, TaskControlKind, TaskItemViewModel, TaskLatestResultPreview,
+    TaskLifecycleStatus, TaskRunProvenanceViewModel, TaskSteeringViewModel,
     TaskTerminalDeliveryStatus, TaskViewModelContractError, TaskViewModelItem,
     TaskViewModelTaskInput, TaskWorkPlanStepViewModel, TaskWorkPlanViewModel, TasksViewModel,
     TasksViewModelBuildInput, TasksViewModelSummary, WorkspaceActivityItem, WorkspaceActivityKind,

@@ -42,6 +42,7 @@ export const settingsProviderLabels: Record<NonNullable<AppConfig["llm"]["provid
   deepseek: "DeepSeek",
   openai: "OpenAI",
   openrouter: "OpenRouter",
+  gemini: "Google Gemini",
   siliconflow: "SiliconFlow",
   moonshot: "Moonshot / Kimi",
   dashscope: "DashScope",
@@ -78,7 +79,9 @@ function cloneNetworkPolicy(config: AppConfig): AppConfig["system"] {
   if (!config.system) return undefined;
   return {
     ...config.system,
-    safe_paths: config.system.safe_paths ? [...config.system.safe_paths] : undefined,
+    additional_read_roots: config.system.additional_read_roots
+      ? [...config.system.additional_read_roots]
+      : undefined,
     network_policy: config.system.network_policy
       ? {
           ...config.system.network_policy,

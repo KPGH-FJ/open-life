@@ -948,6 +948,11 @@ fn require_config_write_admission(state: &Arc<AppState>) -> Result<(), AppError>
         .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))
 }
 
+fn preserve_backend_owned_filesystem_scopes(submitted: &mut AppConfig, current: &AppConfig) {
+    submitted.system.artifact_output_directory = current.system.artifact_output_directory.clone();
+    submitted.system.additional_read_roots = current.system.additional_read_roots.clone();
+}
+
 async fn persist_artifact_output_directory(
     state: &Arc<AppState>,
     selected_path: &Path,
@@ -968,11 +973,12 @@ async fn persist_artifact_output_directory(
         // path selection may create config.yaml, but it must never serialize them.
         reference_only_config_for_first_persist(state.config.lock().await.clone())
     };
-    persisted.system.safe_paths = vec![canonical.to_string_lossy().into_owned()];
+    persisted.system.artifact_output_directory = Some(canonical.to_string_lossy().into_owned());
     persisted.save(&config_path).map_err(AppError::from)?;
 
     let mut runtime_config = state.config.lock().await;
-    runtime_config.system.safe_paths = persisted.system.safe_paths.clone();
+    runtime_config.system.artifact_output_directory =
+        persisted.system.artifact_output_directory.clone();
     Ok(canonical)
 }
 
@@ -1026,6 +1032,10 @@ pub async fn save_config(
         let cfg = state.config.lock().await;
         cfg.clone()
     };
+    // Filesystem authority is never accepted from the editable Settings JSON.
+    // The native picker owns Artifact destination validation; Project commands
+    // and future dedicated read-root commands own their separate scopes.
+    preserve_backend_owned_filesystem_scopes(&mut config, &current_config);
     let provider_identity_unchanged = provider_endpoint_identity(&config).is_some_and(|identity| {
         provider_endpoint_identity(&current_config).as_deref() == Some(identity.as_str())
     });
@@ -1496,6 +1506,27 @@ mod tests {
 
         assert!(validate_artifact_output_directory(file.path()).is_err());
         assert!(validate_artifact_output_directory(Path::new("/")).is_err());
+    }
+
+    #[test]
+    fn editable_settings_payload_cannot_expand_filesystem_scopes() {
+        let mut current = AppConfig::default();
+        current.system.artifact_output_directory = Some("/authorized/output".into());
+        current.system.additional_read_roots = vec!["/authorized/read".into()];
+        let mut submitted = current.clone();
+        submitted.system.artifact_output_directory = Some("/injected/output".into());
+        submitted.system.additional_read_roots = vec!["/injected/read".into()];
+
+        preserve_backend_owned_filesystem_scopes(&mut submitted, &current);
+
+        assert_eq!(
+            submitted.system.artifact_output_directory.as_deref(),
+            Some("/authorized/output")
+        );
+        assert_eq!(
+            submitted.system.additional_read_roots,
+            vec!["/authorized/read"]
+        );
     }
 
     #[test]

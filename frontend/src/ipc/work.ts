@@ -21,20 +21,60 @@ export async function exportArtifactResult(
   return safeInvoke("export_artifact_result", { artifactId, version });
 }
 
-export async function cancelWorkTask(taskId: string): Promise<CanonicalWorkControlResult> {
-  return safeInvoke<CanonicalWorkControlResult>("cancel_work_task", { taskId });
+export async function stopWorkRun(
+  taskId: string,
+  runId: string
+): Promise<CanonicalWorkControlResult> {
+  return safeInvoke<CanonicalWorkControlResult>("stop_work_run", { taskId, runId });
+}
+
+async function restartWorkTask(
+  command: "retry_work_task" | "resume_work_task",
+  taskId: string,
+  priorRunId: string
+): Promise<SendMessageResult> {
+  return safeInvoke<SendMessageResult>(command, {
+    taskId,
+    priorRunId,
+    newRunId: crypto.randomUUID(),
+    newTurnId: crypto.randomUUID(),
+  });
 }
 
 export async function retryWorkTask(
   taskId: string,
   priorRunId: string
 ): Promise<SendMessageResult> {
-  return safeInvoke<SendMessageResult>("retry_work_task", {
+  return restartWorkTask("retry_work_task", taskId, priorRunId);
+}
+
+export async function resumeWorkTask(
+  taskId: string,
+  priorRunId: string
+): Promise<SendMessageResult> {
+  return restartWorkTask("resume_work_task", taskId, priorRunId);
+}
+
+export async function reviseWorkArtifact(
+  taskId: string,
+  artifactId: string,
+  baseVersion: number,
+  instruction: string
+): Promise<SendMessageResult> {
+  const newRunId = crypto.randomUUID();
+  const newTurnId = crypto.randomUUID();
+  const receipt = await safeInvoke<SendMessageResult>("revise_work_artifact", {
     taskId,
-    priorRunId,
-    newRunId: crypto.randomUUID(),
-    newTurnId: crypto.randomUUID(),
+    artifactId,
+    baseVersion,
+    instruction,
+    newRunId,
+    newTurnId,
   });
+  if (receipt.run_id !== newRunId) {
+    throw new Error("artifact_revision_run_identity_mismatch");
+  }
+  return receipt;
 }
 
 export async function getWorkbenchViewModel(

@@ -52,6 +52,13 @@ pub enum RuntimeEvent {
         content_preview: String,
         content_chars: usize,
     },
+    SteeringResolved {
+        steering_id: String,
+        status: String,
+        base_plan_revision: u64,
+        applied_plan_revision: Option<u64>,
+        resolution_code: String,
+    },
     Blocker {
         code: String,
     },

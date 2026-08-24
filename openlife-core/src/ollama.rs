@@ -661,6 +661,7 @@ where
 pub(crate) struct OllamaOutputContract {
     pub(crate) structured_format: Option<serde_json::Value>,
     pub(crate) deterministic: bool,
+    pub(crate) reasoning_effort: Option<crate::conversation::ReasoningEffort>,
 }
 
 pub(crate) fn main_chat_work_semantic_verification_json_schema() -> serde_json::Value {
@@ -1165,12 +1166,20 @@ where
             "content": msg.content
         }));
     }
+    if let Some(effort) = output_contract.reasoning_effort {
+        let capability = crate::llm::built_in_reasoning_capability("ollama", model)
+            .ok_or_else(|| anyhow::anyhow!("ollama reasoning capability is unavailable"))?;
+        if !capability.supported_efforts.contains(&effort) {
+            anyhow::bail!("ollama reasoning effort is unsupported");
+        }
+    }
 
     let body = ollama_chat_request_body(
         model,
         req_messages,
         output_contract.structured_format,
         output_contract.deterministic,
+        output_contract.reasoning_effort,
     );
 
     let client = ollama_http_client(OLLAMA_CHAT_TIMEOUT)?;
@@ -1219,6 +1228,7 @@ fn ollama_chat_request_body(
     req_messages: Vec<serde_json::Value>,
     structured_format: Option<serde_json::Value>,
     deterministic_output: bool,
+    reasoning_effort: Option<crate::conversation::ReasoningEffort>,
 ) -> serde_json::Value {
     let structured_json_output = structured_format.is_some();
     let mut body = json!({
@@ -1233,6 +1243,9 @@ fn ollama_chat_request_body(
     });
     if let Some(format) = structured_format {
         body["format"] = format;
+    }
+    if let Some(effort) = reasoning_effort {
+        body["think"] = json!(effort.as_str());
     }
     body
 }
@@ -1266,6 +1279,7 @@ where
         model,
         messages,
         system_prompt,
+        None,
         request_id,
         on_started,
     )
@@ -1279,6 +1293,7 @@ pub(crate) async fn chat_with_ollama_raw_stream_at_endpoint_with_start_observer<
     model: &str,
     messages: Vec<ChatMessage>,
     system_prompt: Option<&str>,
+    reasoning_effort: Option<crate::conversation::ReasoningEffort>,
     request_id: Option<&str>,
     on_started: F,
 ) -> Result<StreamResult>
@@ -1301,7 +1316,7 @@ where
         }));
     }
 
-    let body = json!({
+    let mut body = json!({
         "model": model,
         "messages": req_messages,
         "stream": true,
@@ -1311,6 +1326,14 @@ where
             "num_ctx": OLLAMA_CHAT_CONTEXT_TOKENS,
         }
     });
+    if let Some(effort) = reasoning_effort {
+        let capability = crate::llm::built_in_reasoning_capability("ollama", model)
+            .ok_or_else(|| anyhow::anyhow!("ollama reasoning capability is unavailable"))?;
+        if !capability.supported_efforts.contains(&effort) {
+            anyhow::bail!("ollama reasoning effort is unsupported");
+        }
+        body["think"] = json!(effort.as_str());
+    }
 
     let client = ollama_http_client(OLLAMA_CHAT_TIMEOUT)?;
     let mut request = client.post(endpoint).json(&body);
@@ -2095,6 +2118,7 @@ mod tests {
             vec![json!({"role": "user", "content": "draft artifacts"})],
             Some(serde_json::Value::String("json".into())),
             true,
+            None,
         );
 
         assert_eq!(body["format"], "json");
@@ -2109,6 +2133,7 @@ mod tests {
             vec![json!({"role": "user", "content": "verify the requested outcome"})],
             Some(main_chat_work_semantic_verification_json_schema()),
             true,
+            None,
         );
 
         assert_eq!(body["format"]["type"], "object");
@@ -2131,6 +2156,7 @@ mod tests {
             vec![json!({"role": "user", "content": "plan this work"})],
             Some(schema),
             true,
+            None,
         );
 
         assert_eq!(body["format"]["type"], "object");
@@ -2190,11 +2216,26 @@ mod tests {
             vec![json!({"role": "user", "content": "hello"})],
             None,
             false,
+            None,
         );
 
         assert!(body.get("format").is_none());
         assert_eq!(body["options"]["temperature"], 0.7);
         assert_eq!(body["options"]["num_ctx"], 32_768);
+    }
+
+    #[test]
+    fn gpt_oss_request_uses_ollama_think_level() {
+        let body = ollama_chat_request_body(
+            "gpt-oss:20b",
+            vec![json!({"role": "user", "content": "reason carefully"})],
+            None,
+            false,
+            Some(crate::conversation::ReasoningEffort::Medium),
+        );
+
+        assert_eq!(body["think"], "medium");
+        assert!(body.get("reasoning_effort").is_none());
     }
 
     #[test]
@@ -2204,6 +2245,7 @@ mod tests {
             vec![json!({"role": "user", "content": "summarize Web evidence"})],
             None,
             true,
+            None,
         );
 
         assert!(body.get("format").is_none());
@@ -2250,6 +2292,7 @@ mod tests {
                 role: "user".into(),
                 content: "test incomplete stream".into(),
             }],
+            None,
             None,
             None,
             || Ok(()),
