@@ -10,7 +10,7 @@ describe("desktop shell contract", () => {
   it("freezes the approved desktop shell dimensions in token authority", () => {
     const tokens = read("src/ui/foundation/openlife.tokens.css");
     expect(tokens).toContain("--ol-shell-sidebar-width: 232px");
-    expect(tokens).toContain("--ol-shell-inspector-width: 344px");
+    expect(tokens).toContain("--ol-shell-inspector-width: 460px");
     expect(tokens).toContain("--ol-shell-context-height: 56px");
     expect(tokens).toContain("--ol-shell-min-width: 0px");
   });

@@ -58,6 +58,7 @@ export interface OpenLifeWorkbenchShellProps {
   mode: WorkbenchShellMode;
   activeNavigationId: string;
   navigationItems: readonly WorkbenchNavigationItem[];
+  productSidebar?: ReactNode;
   onNavigate: (id: string) => void;
   activeSettingsId: string;
   settingsItems: readonly WorkbenchNavigationItem[];
@@ -71,6 +72,7 @@ export interface OpenLifeWorkbenchShellProps {
   focusKey: string;
   inspectorOpen: boolean;
   inspector: WorkbenchInspectorModel;
+  inspectorContent?: ReactNode;
   onOpenInspector: () => void;
   onCloseInspector: () => void;
   onOpenEvidence: (evidence: WorkbenchEvidenceReference) => void;
@@ -82,6 +84,7 @@ export function OpenLifeWorkbenchShell({
   mode,
   activeNavigationId,
   navigationItems,
+  productSidebar,
   onNavigate,
   activeSettingsId,
   settingsItems,
@@ -95,6 +98,7 @@ export function OpenLifeWorkbenchShell({
   focusKey,
   inspectorOpen,
   inspector,
+  inspectorContent,
   onOpenInspector,
   onCloseInspector,
   onOpenEvidence,
@@ -174,22 +178,24 @@ export function OpenLifeWorkbenchShell({
         </div>
 
         {mode === "product" ? (
-          <nav className="ol-shell-navigation" aria-label="产品区域">
-            {navigationItems.map(item => {
-              const Icon = item.icon;
-              return (
-                <FoundationNavRow
-                  key={item.id}
-                  label={item.label}
-                  meta={item.meta}
-                  icon={<Icon size={19} strokeWidth={1.75} />}
-                  badge={item.badge}
-                  current={activeNavigationId === item.id}
-                  onClick={() => onNavigate(item.id)}
-                />
-              );
-            })}
-          </nav>
+          (productSidebar ?? (
+            <nav className="ol-shell-navigation" aria-label="产品区域">
+              {navigationItems.map(item => {
+                const Icon = item.icon;
+                return (
+                  <FoundationNavRow
+                    key={item.id}
+                    label={item.label}
+                    meta={item.meta}
+                    icon={<Icon size={19} strokeWidth={1.75} />}
+                    badge={item.badge}
+                    current={activeNavigationId === item.id}
+                    onClick={() => onNavigate(item.id)}
+                  />
+                );
+              })}
+            </nav>
+          ))
         ) : (
           <div className="ol-shell-settings-navigation">
             <button type="button" className="ol-shell-back" onClick={onBackFromSettings}>
@@ -321,48 +327,50 @@ export function OpenLifeWorkbenchShell({
             />
           </header>
 
-          <div className="ol-shell-inspector__body">
-            <section>
-              <h3>发生了什么</h3>
-              <p>{inspector.conclusion}</p>
-            </section>
-            <section>
-              <h3>风险</h3>
-              <p>{inspector.risk}</p>
-            </section>
-            <section>
-              <h3>下一步</h3>
-              <p>{inspector.nextAction}</p>
-            </section>
-            <section>
-              <h3>来源与记录</h3>
-              <div className="ol-shell-evidence-list">
-                {inspector.evidence.map(evidence => (
-                  <FoundationEvidenceRow
-                    key={evidence.id}
-                    {...evidence}
-                    onOpen={() => onOpenEvidence(evidence)}
-                  />
-                ))}
-              </div>
-              {inspector.evidenceFeedback && (
-                <p className="ol-shell-evidence-feedback">{inspector.evidenceFeedback}</p>
-              )}
-            </section>
-            {inspector.technicalDetails && inspector.technicalDetails.length > 0 && (
-              <details className="ol-shell-technical-details">
-                <summary>技术检查信息</summary>
-                <dl>
-                  {inspector.technicalDetails.map(detail => (
-                    <div key={detail.label}>
-                      <dt>{detail.label}</dt>
-                      <dd>{detail.value}</dd>
-                    </div>
+          {inspectorContent ?? (
+            <div className="ol-shell-inspector__body">
+              <section>
+                <h3>发生了什么</h3>
+                <p>{inspector.conclusion}</p>
+              </section>
+              <section>
+                <h3>风险</h3>
+                <p>{inspector.risk}</p>
+              </section>
+              <section>
+                <h3>下一步</h3>
+                <p>{inspector.nextAction}</p>
+              </section>
+              <section>
+                <h3>来源与记录</h3>
+                <div className="ol-shell-evidence-list">
+                  {inspector.evidence.map(evidence => (
+                    <FoundationEvidenceRow
+                      key={evidence.id}
+                      {...evidence}
+                      onOpen={() => onOpenEvidence(evidence)}
+                    />
                   ))}
-                </dl>
-              </details>
-            )}
-          </div>
+                </div>
+                {inspector.evidenceFeedback && (
+                  <p className="ol-shell-evidence-feedback">{inspector.evidenceFeedback}</p>
+                )}
+              </section>
+              {inspector.technicalDetails && inspector.technicalDetails.length > 0 && (
+                <details className="ol-shell-technical-details">
+                  <summary>技术检查信息</summary>
+                  <dl>
+                    {inspector.technicalDetails.map(detail => (
+                      <div key={detail.label}>
+                        <dt>{detail.label}</dt>
+                        <dd>{detail.value}</dd>
+                      </div>
+                    ))}
+                  </dl>
+                </details>
+              )}
+            </div>
+          )}
         </aside>
       )}
 

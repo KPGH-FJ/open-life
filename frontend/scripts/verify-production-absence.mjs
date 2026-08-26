@@ -39,6 +39,7 @@ const forbiddenOldOwners = [
   "src/pages/BuilderPage.tsx",
   "src/pages/AgentRunDetail.tsx",
   "src/pages/TodayV2PreviewPage.tsx",
+  "src/features/work/GlobalActivityView.tsx",
   "src/ui/journeys",
   "src/ui/journeys/durableTruth/lifeModelBuilderDataSource.ts",
 ];
@@ -131,6 +132,9 @@ const forbiddenSourceMarkers = [
   "dimensionSummaries",
   '"current_compatibility"',
   "recommend_mcp_manifests",
+  "ol-global-activity",
+  "ol-conversation-workbench-layout--with-results",
+  "ol-workspace-conversation__header",
 ];
 
 for (const filePath of sourceFiles(sourceRoot)) {

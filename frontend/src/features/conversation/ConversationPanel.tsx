@@ -1,15 +1,12 @@
 import {
   Archive,
   FilePlus2,
-  FolderOpen,
-  MessageSquarePlus,
   Pencil,
   RefreshCw,
   RotateCcw,
   Send,
   Sparkles,
   Square,
-  Trash2,
   Wrench,
   X,
 } from "lucide-react";
@@ -276,7 +273,6 @@ export function ConversationPanel({
 }) {
   const [sessionDialog, setSessionDialog] = useState<"rename" | "delete" | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
-  const [sessionQuery, setSessionQuery] = useState("");
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [modelQuery, setModelQuery] = useState("");
   const [projectRenameTargetId, setProjectRenameTargetId] = useState<string | null>(null);
@@ -287,23 +283,9 @@ export function ConversationPanel({
   const selectedSession = [...controller.sessions, ...controller.archivedSessions].find(
     session => session.session_id === controller.selectedSessionId
   );
-  const normalizedSessionQuery = sessionQuery.trim().toLocaleLowerCase("zh-CN");
-  const visibleSessions = controller.sessions.filter(
-    session =>
-      session.session_id === controller.selectedSessionId ||
-      !normalizedSessionQuery ||
-      session.title.toLocaleLowerCase("zh-CN").includes(normalizedSessionQuery)
-  );
-  const visibleArchivedSessions = controller.archivedSessions.filter(
-    session =>
-      !normalizedSessionQuery ||
-      session.title.toLocaleLowerCase("zh-CN").includes(normalizedSessionQuery)
-  );
   const selectedProject = controller.projects.find(
     project => project.id === controller.selectedProjectId
   );
-  const activeProjects = controller.projects.filter(project => project.status === "active");
-  const archivedProjects = controller.projects.filter(project => project.status === "archived");
   const projectRenameTarget = controller.projects.find(
     project => project.id === projectRenameTargetId
   );
@@ -313,15 +295,22 @@ export function ConversationPanel({
   const normalizedModelQuery = modelQuery.trim().toLocaleLowerCase("en-US");
   const matchingProviderProfiles = controller.provider.profiles
     .filter(profile => {
-      if (!normalizedModelQuery) {
-        return (
-          profile.profileId === controller.provider.selectedProfileId ||
-          profile.endpointClass === "local"
-        );
-      }
+      if (!normalizedModelQuery) return true;
       return [profile.displayName, profile.modelId, profile.providerId]
         .filter(Boolean)
         .some(value => value!.toLocaleLowerCase("en-US").includes(normalizedModelQuery));
+    })
+    .sort((left, right) => {
+      const leftSelected = left.profileId === controller.provider.selectedProfileId ? 0 : 1;
+      const rightSelected = right.profileId === controller.provider.selectedProfileId ? 0 : 1;
+      if (leftSelected !== rightSelected) return leftSelected - rightSelected;
+      const leftAvailability = left.availability === "ready" ? 0 : 1;
+      const rightAvailability = right.availability === "ready" ? 0 : 1;
+      if (leftAvailability !== rightAvailability) return leftAvailability - rightAvailability;
+      return (left.displayName ?? left.modelId).localeCompare(
+        right.displayName ?? right.modelId,
+        "zh-CN"
+      );
     })
     .slice(0, 60);
   const selectedWorkspaceName = selectedProject?.workspaceRoot
@@ -341,63 +330,17 @@ export function ConversationPanel({
     controller.resourceMutation.phase
   );
   const pendingResourceCount = controller.pendingResources.length;
-  const backgroundWorkCanDetach =
-    controller.mode === "work" && controller.turnState.phase === "streaming";
-  const conversationSwitchLocked =
-    (controller.busy && !backgroundWorkCanDetach) || pendingResourceCount > 0;
+  const conversationSettingsLocked = controller.busy || pendingResourceCount > 0;
   const sessionMutationDisabledReason = sessionMutationBusy
     ? "会话操作正在等待系统保存并重新读取。"
     : undefined;
 
   return (
-    <section className="ol-workspace-conversation" aria-labelledby="workspace-conversation-title">
-      <header className="ol-workspace-conversation__header">
-        <div>
-          <span>对话</span>
-          <h3 id="workspace-conversation-title">{selectedSession?.title ?? "新对话"}</h3>
-        </div>
+    <section className="ol-workspace-conversation" aria-label="当前对话">
+      {(selectedSession || selectedProject) && (
         <details className="ol-workspace-conversation__manage">
-          <summary>管理对话与 Project</summary>
+          <summary>对话设置</summary>
           <div className="ol-workspace-conversation__tools">
-            <label>
-              <span className="ol-workspace-conversation__tool-label">Project</span>
-              <select
-                value={controller.selectedProjectId ?? ""}
-                disabled={controller.busy || composerLocked || sessionMutationBusy}
-                onChange={event => void controller.assignProject(event.target.value || null)}
-              >
-                <option value="">不属于 Project</option>
-                {activeProjects.map(project => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            {selectedProvider && selectedProvider.supportedReasoningEfforts.length > 0 && (
-              <label>
-                <span>推理强度</span>
-                <select
-                  value={controller.provider.selectedReasoningEffort ?? ""}
-                  disabled={controller.busy || composerLocked}
-                  onChange={event => {
-                    const value = event.target.value;
-                    controller.selectReasoningEffort(value ? (value as ReasoningEffort) : null);
-                  }}
-                >
-                  <option value="">
-                    {selectedProvider.defaultReasoningEffort
-                      ? `模型默认（${reasoningEffortLabel(selectedProvider.defaultReasoningEffort)}）`
-                      : "模型默认"}
-                  </option>
-                  {selectedProvider.supportedReasoningEfforts.map(effort => (
-                    <option key={effort} value={effort}>
-                      {reasoningEffortLabel(effort)}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
             {selectedProject && (
               <span className="ol-workspace-conversation__project-scope">
                 <span role="status">
@@ -477,63 +420,11 @@ export function ConversationPanel({
                 </button>
               </span>
             )}
-            <button
-              type="button"
-              className="ol-workspace-conversation__new"
-              disabled={controller.busy || composerLocked || sessionMutationBusy}
-              onClick={() => void controller.createProject("")}
-            >
-              <FolderOpen size={15} aria-hidden="true" />
-              打开 Project 文件夹
-            </button>
-            {controller.sessions.length + controller.archivedSessions.length > 0 && (
-              <label>
-                <span className="ol-workspace-conversation__tool-label">搜索</span>
-                <input
-                  type="search"
-                  value={sessionQuery}
-                  placeholder="搜索对话"
-                  disabled={conversationSwitchLocked}
-                  onChange={event => setSessionQuery(event.target.value)}
-                />
-              </label>
-            )}
-            {(controller.sessions.length > 0 || selectedSession?.status === "archived") && (
-              <label>
-                <span className="ol-workspace-conversation__tool-label">对话</span>
-                <select
-                  value={controller.selectedSessionId ?? ""}
-                  disabled={conversationSwitchLocked}
-                  onChange={event => controller.selectSession(event.target.value)}
-                >
-                  {!controller.selectedSessionId && <option value="">新对话</option>}
-                  {selectedSession?.status === "archived" && (
-                    <option value={selectedSession.session_id}>
-                      {selectedSession.title}（已归档）
-                    </option>
-                  )}
-                  {visibleSessions.map(session => (
-                    <option key={session.session_id} value={session.session_id}>
-                      {session.title}
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-            <button
-              type="button"
-              className="ol-workspace-conversation__new"
-              disabled={conversationSwitchLocked}
-              onClick={controller.startNewConversation}
-            >
-              <MessageSquarePlus size={16} aria-hidden="true" />
-              新对话
-            </button>
             {selectedSession?.status === "archived" ? (
               <button
                 type="button"
                 className="ol-workspace-conversation__new"
-                disabled={conversationSwitchLocked}
+                disabled={conversationSettingsLocked}
                 onClick={() => void controller.restoreArchived(selectedSession.session_id)}
               >
                 <RotateCcw size={15} aria-hidden="true" />
@@ -544,7 +435,7 @@ export function ConversationPanel({
                 <button
                   type="button"
                   className="ol-workspace-conversation__new"
-                  disabled={conversationSwitchLocked}
+                  disabled={conversationSettingsLocked}
                   onClick={() => {
                     setRenameDraft(selectedSession.title);
                     setSessionDialog("rename");
@@ -557,7 +448,7 @@ export function ConversationPanel({
                   type="button"
                   className="ol-workspace-conversation__new"
                   disabled={
-                    conversationSwitchLocked ||
+                    conversationSettingsLocked ||
                     !(selectedSession.allowedControls?.includes("archive") ?? true)
                   }
                   title={conversationBlockerText(selectedSession.blockerCodes) ?? undefined}
@@ -569,104 +460,6 @@ export function ConversationPanel({
               </>
             ) : null}
           </div>
-        </details>
-      </header>
-
-      {archivedProjects.length > 0 && (
-        <details className="ol-workspace-project-archive">
-          <summary>已归档 Project（{archivedProjects.length}）</summary>
-          <ul>
-            {archivedProjects.map(project => {
-              const blocker = projectBlockerText(project.blockerCodes);
-              return (
-                <li key={project.id}>
-                  <div>
-                    <strong>{project.name}</strong>
-                    <span>
-                      {project.totalConversationCount} 个对话引用 ·{" "}
-                      {project.taskRunReferenceCount === null
-                        ? "任务引用未知"
-                        : `${project.taskRunReferenceCount} 个任务运行引用`}
-                    </span>
-                    {blocker && <small>{blocker}</small>}
-                  </div>
-                  <span>
-                    <button
-                      type="button"
-                      className="ol-workspace-conversation__scope-action"
-                      disabled={controller.busy || sessionMutationBusy}
-                      onClick={() => void controller.restoreProject(project.id, project.revision)}
-                    >
-                      <RotateCcw size={14} aria-hidden="true" />
-                      恢复
-                    </button>
-                    <button
-                      type="button"
-                      className="ol-workspace-conversation__scope-action ol-workspace-conversation__delete"
-                      disabled={
-                        controller.busy ||
-                        sessionMutationBusy ||
-                        !project.allowedControls.includes("delete")
-                      }
-                      title={blocker ?? undefined}
-                      onClick={() => void controller.deleteProject(project.id, project.revision)}
-                    >
-                      <Trash2 size={14} aria-hidden="true" />
-                      永久删除记录
-                    </button>
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
-        </details>
-      )}
-
-      {visibleArchivedSessions.length > 0 && (
-        <details className="ol-workspace-project-archive">
-          <summary>已归档对话（{visibleArchivedSessions.length}）</summary>
-          <ul>
-            {visibleArchivedSessions.map(session => {
-              const blocker = conversationBlockerText(session.blockerCodes);
-              return (
-                <li key={session.session_id}>
-                  <div>
-                    <strong>{session.title}</strong>
-                    <span>
-                      {session.turnCount ?? 0} 个 Turn · {session.taskReferenceCount ?? "未知"} 个
-                      Task 引用
-                    </span>
-                    {blocker && <small>{blocker}</small>}
-                  </div>
-                  <span>
-                    <button
-                      type="button"
-                      className="ol-workspace-conversation__scope-action"
-                      disabled={controller.busy || sessionMutationBusy}
-                      onClick={() => void controller.restoreArchived(session.session_id)}
-                    >
-                      <RotateCcw size={14} aria-hidden="true" />
-                      恢复
-                    </button>
-                    <button
-                      type="button"
-                      className="ol-workspace-conversation__scope-action ol-workspace-conversation__delete"
-                      disabled={
-                        controller.busy ||
-                        sessionMutationBusy ||
-                        !session.allowedControls?.includes("delete")
-                      }
-                      title={blocker ?? undefined}
-                      onClick={() => void controller.deleteArchived(session.session_id)}
-                    >
-                      <Trash2 size={14} aria-hidden="true" />
-                      永久删除空记录
-                    </button>
-                  </span>
-                </li>
-              );
-            })}
-          </ul>
         </details>
       )}
 
@@ -854,6 +647,32 @@ export function ConversationPanel({
             </small>
           </summary>
           <div className="ol-workspace-composer-options__body">
+            {selectedProvider && selectedProvider.supportedReasoningEfforts.length > 0 && (
+              <label className="ol-workspace-memory-mode" htmlFor="ol-workspace-reasoning-effort">
+                <span>推理强度</span>
+                <select
+                  id="ol-workspace-reasoning-effort"
+                  value={controller.provider.selectedReasoningEffort ?? ""}
+                  disabled={controller.busy || composerLocked}
+                  onChange={event => {
+                    const value = event.target.value;
+                    controller.selectReasoningEffort(value ? (value as ReasoningEffort) : null);
+                  }}
+                >
+                  <option value="">
+                    {selectedProvider.defaultReasoningEffort
+                      ? `模型默认（${reasoningEffortLabel(selectedProvider.defaultReasoningEffort)}）`
+                      : "模型默认"}
+                  </option>
+                  {selectedProvider.supportedReasoningEfforts.map(effort => (
+                    <option key={effort} value={effort}>
+                      {reasoningEffortLabel(effort)}
+                    </option>
+                  ))}
+                </select>
+                <small>只影响当前对话的新消息；不会自动切换模型。</small>
+              </label>
+            )}
             {controller.mode === "work" && (
               <label
                 className="ol-workspace-memory-mode ol-workspace-execution-mode"
@@ -1226,10 +1045,6 @@ export function ConversationPanel({
               onChange={event => setModelQuery(event.target.value)}
             />
           </label>
-          {!normalizedModelQuery &&
-            controller.provider.profiles.length > matchingProviderProfiles.length && (
-              <p>已显示当前模型和本地模型；输入名称可搜索远端模型。</p>
-            )}
           <div className="ol-workspace-model-picker__list" role="listbox" aria-label="可用模型">
             {matchingProviderProfiles.map(profile => {
               const available = profile.availability === "ready";

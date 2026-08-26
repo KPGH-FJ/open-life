@@ -22,48 +22,6 @@
     var(--ol-shell-inspector-width);
 }
 
-.ol-workbench-shell[data-shell-mode="product"][data-active-navigation="workspace"] {
-  grid-template-columns: 72px minmax(0, 1fr);
-}
-
-.ol-workbench-shell[data-shell-mode="product"][data-active-navigation="workspace"][data-inspector-open="true"] {
-  grid-template-columns: 72px minmax(0, 1fr) var(--ol-shell-inspector-width);
-}
-
-.ol-workbench-shell[data-shell-mode="product"][data-active-navigation="workspace"]
-  .ol-shell-sidebar {
-  padding-right: var(--ol-space-2);
-  padding-left: var(--ol-space-2);
-}
-
-.ol-workbench-shell[data-shell-mode="product"][data-active-navigation="workspace"] .ol-shell-brand {
-  justify-content: center;
-  padding: 0;
-}
-
-.ol-workbench-shell[data-shell-mode="product"][data-active-navigation="workspace"]
-  .ol-shell-brand__copy,
-.ol-workbench-shell[data-shell-mode="product"][data-active-navigation="workspace"]
-  .ol-nav-row__copy,
-.ol-workbench-shell[data-shell-mode="product"][data-active-navigation="workspace"]
-  .ol-shell-boundary {
-  display: none;
-}
-
-.ol-workbench-shell[data-shell-mode="product"][data-active-navigation="workspace"] .ol-nav-row,
-.ol-workbench-shell[data-shell-mode="product"][data-active-navigation="workspace"]
-  .ol-shell-utility-button {
-  justify-content: center;
-  padding-right: 0;
-  padding-left: 0;
-}
-
-.ol-workbench-shell[data-shell-mode="product"][data-active-navigation="workspace"]
-  .ol-shell-utility-button
-  span {
-  display: none;
-}
-
 .ol-shell-skip-link {
   position: absolute;
   z-index: 100;
@@ -471,45 +429,14 @@
 @media (max-width: 560px) {
   .ol-workbench-shell,
   .ol-workbench-shell[data-inspector-open="true"] {
-    grid-template-columns: 1fr;
-    grid-template-rows: var(--ol-shell-context-height) minmax(0, 1fr) 64px;
+    grid-template-columns: 64px minmax(0, 1fr);
   }
 
-  .ol-shell-sidebar {
-    grid-column: 1;
-    grid-row: 3;
-    flex-direction: row;
-    padding: var(--ol-space-1) var(--ol-space-2);
-    overflow-x: auto;
-    border-top: var(--ol-divider-width) solid var(--ol-line);
-    border-right: 0;
-  }
-
-  .ol-shell-brand,
   .ol-shell-boundary {
     display: none;
   }
 
   .ol-shell-sidebar-footer {
-    display: flex;
-    margin: 0;
-    padding: 0;
-    border: 0;
-  }
-
-  .ol-shell-navigation {
-    display: flex;
-    width: 100%;
-    margin: 0;
-    justify-content: space-around;
-  }
-
-  .ol-shell-sidebar .ol-nav-row {
-    min-width: 52px;
-  }
-
-  .ol-shell-context-bar,
-  .ol-shell-main {
-    grid-column: 1;
+    margin-top: auto;
   }
 }

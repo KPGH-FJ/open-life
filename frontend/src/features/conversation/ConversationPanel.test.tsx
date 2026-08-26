@@ -186,19 +186,14 @@ describe("ConversationPanel", () => {
     expect(screen.getByRole("button", { name: "添加文件" })).toBeInTheDocument();
   });
 
-  it("keeps conversation and Project administration out of the default work surface", async () => {
-    const user = userEvent.setup();
+  it("keeps navigation and lifecycle administration out of a new Conversation", () => {
     const controller = workController();
 
     render(<ConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
 
-    const summary = screen.getByText("管理对话与 Project");
-    const details = summary.closest("details");
-    expect(details).not.toHaveAttribute("open");
-    await user.click(summary);
-    expect(details).toHaveAttribute("open");
-    expect(screen.getByRole("button", { name: "新对话" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "打开 Project 文件夹" })).toBeInTheDocument();
+    expect(screen.queryByText("对话设置")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "新对话" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /打开.*文件夹/ })).not.toBeInTheDocument();
   });
 
   it("offers only the exact backend-owned recovery control beside a failed Work turn", async () => {
@@ -338,17 +333,7 @@ describe("ConversationPanel", () => {
     expect(screen.getByText("包含写入或外部副作用")).toBeInTheDocument();
   });
 
-  it("opens the native Project folder flow directly from the conversation header", async () => {
-    const user = userEvent.setup();
-    const controller = workController();
-
-    render(<ConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
-
-    await user.click(screen.getByRole("button", { name: "打开 Project 文件夹" }));
-    expect(controller.createProject).toHaveBeenCalledWith("");
-  });
-
-  it("renders backend-authorized Project archive, restore, and delete controls", async () => {
+  it("keeps current Project scope controls in a compact Conversation setting", async () => {
     const user = userEvent.setup();
     const controller = workController();
     controller.projects = [
@@ -391,6 +376,9 @@ describe("ConversationPanel", () => {
 
     render(<ConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
 
+    const settings = screen.getByText("对话设置").closest("details");
+    expect(settings).not.toHaveAttribute("open");
+    await user.click(screen.getByText("对话设置"));
     await user.click(screen.getByRole("button", { name: "添加读取文件夹" }));
     expect(controller.addProjectReadRoot).toHaveBeenCalledWith("project-active", 2);
     await user.click(screen.getByRole("button", { name: "移除读取范围 Reference notes" }));
@@ -402,15 +390,10 @@ describe("ConversationPanel", () => {
 
     await user.click(screen.getByRole("button", { name: "归档" }));
     expect(controller.archiveProject).toHaveBeenCalledWith("project-active", 2);
-
-    await user.click(screen.getByText("已归档 Project（1）"));
-    await user.click(screen.getByRole("button", { name: "恢复" }));
-    expect(controller.restoreProject).toHaveBeenCalledWith("project-archived", 5);
-    await user.click(screen.getByRole("button", { name: "永久删除记录" }));
-    expect(controller.deleteProject).toHaveBeenCalledWith("project-archived", 5);
+    expect(screen.queryByText("Archived Project")).not.toBeInTheDocument();
   });
 
-  it("searches active and archived Conversations and exposes only backend-authorized lifecycle controls", async () => {
+  it("keeps current Conversation lifecycle controls compact and archived history elsewhere", async () => {
     const user = userEvent.setup();
     const controller = workController();
     controller.sessions = [
@@ -443,15 +426,11 @@ describe("ConversationPanel", () => {
 
     render(<ConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
 
+    await user.click(screen.getByText("对话设置"));
     await user.click(screen.getByRole("button", { name: "归档" }));
     expect(controller.archiveSelected).toHaveBeenCalled();
-
-    await user.type(screen.getByRole("searchbox", { name: "搜索" }), "空白");
-    await user.click(screen.getByText("已归档对话（1）"));
-    await user.click(screen.getByRole("button", { name: "恢复" }));
-    expect(controller.restoreArchived).toHaveBeenCalledWith("conversation-empty-archived");
-    await user.click(screen.getByRole("button", { name: "永久删除空记录" }));
-    expect(controller.deleteArchived).toHaveBeenCalledWith("conversation-empty-archived");
+    expect(screen.queryByRole("searchbox")).not.toBeInTheDocument();
+    expect(screen.queryByText("空白草稿")).not.toBeInTheDocument();
   });
 
   it("selects a ready model from the composer instead of only displaying Settings", async () => {
@@ -485,6 +464,23 @@ describe("ConversationPanel", () => {
     await user.click(screen.getByRole("button", { name: "模型" }));
     await user.click(screen.getByRole("option", { name: /llama3:latest/ }));
     expect(controller.selectProviderProfile).toHaveBeenCalledWith("local-llama3");
+  });
+
+  it("shows every configured model when the model picker opens", async () => {
+    const user = userEvent.setup();
+    const controller = workController();
+    controller.provider.profiles.push({
+      ...controller.provider.profiles[0],
+      profileId: "openai-gpt-5-6",
+      providerId: "openai",
+      modelId: "gpt-5.6",
+      selected: false,
+    });
+
+    render(<ConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "模型" }));
+    expect(screen.getByRole("option", { name: /gpt-5.6/ })).toBeInTheDocument();
   });
 
   it("shows and changes reasoning effort only for a supported model profile", async () => {

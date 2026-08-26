@@ -1959,6 +1959,75 @@ describe("conversation controller", () => {
     expect(refreshDependentWork).toHaveBeenNthCalledWith(2, null);
   });
 
+  it("keeps a committed Project read-root change successful when dependent work refresh fails", async () => {
+    const project = {
+      id: "project-read-root-refresh-failure",
+      name: "Read root refresh failure",
+      workspaceRoot: "/tmp/primary",
+      additionalReadRoots: [],
+      revision: 2,
+      status: "active" as const,
+      createdAt: "2026-08-24T00:00:00Z",
+      updatedAt: "2026-08-24T00:00:00Z",
+      activeConversationCount: 0,
+      totalConversationCount: 0,
+      taskRunReferenceCount: 0,
+      selectedForNewConversation: true,
+      allowedControls: ["update", "archive"] as ("update" | "archive")[],
+      blockerCodes: [],
+    };
+    const added = {
+      ...project,
+      revision: 3,
+      additionalReadRoots: [{ id: "root-1", name: "Reference notes", path: "/tmp/reference" }],
+    };
+    const canonical = (current: typeof project | typeof added): ConversationViewModel => ({
+      status: "empty",
+      conversations: [],
+      projects: [current],
+      selectedProjectId: current.id,
+      selectedConversationId: null,
+      globalMemoryEnabled: true,
+      selectedMemoryMode: "use_and_learn",
+      messages: [],
+      latestTurn: null,
+      providerStatus: "ready",
+      providerProfiles: [],
+      selectedProviderProfileId: null,
+      providerErrorCode: null,
+      workStatus: "available",
+    });
+    const loadConversation = vi
+      .fn()
+      .mockResolvedValueOnce(canonical(project))
+      .mockResolvedValueOnce(canonical(added));
+    const addProjectReadRoot = vi.fn().mockResolvedValue({ cancelled: false, project: added });
+    const refreshDependentWork = vi.fn().mockRejectedValue(new Error("workbench_refresh_failed"));
+    const announce = vi.fn();
+    const dataSource = source({ loadConversation, addProjectReadRoot });
+    const { result } = renderHook(() =>
+      useConversationController(
+        dataSource,
+        announce,
+        vi.fn().mockResolvedValue(undefined),
+        undefined,
+        undefined,
+        refreshDependentWork
+      )
+    );
+    await act(async () => result.current.reload());
+
+    await act(async () =>
+      expect(await result.current.addProjectReadRoot(project.id, project.revision)).toBe(true)
+    );
+
+    expect(result.current.projects[0].additionalReadRoots).toEqual(added.additionalReadRoots);
+    expect(result.current.sessionMutation).toEqual({ phase: "idle" });
+    expect(announce).toHaveBeenLastCalledWith(
+      "读取文件夹已加入 Project 范围；任务结果暂未刷新，请重新读取。"
+    );
+  });
+
   it("selects an existing Project before the first Conversation is created", async () => {
     const project = {
       id: "project-next",
