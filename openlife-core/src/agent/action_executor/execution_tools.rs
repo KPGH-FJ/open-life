@@ -834,7 +834,11 @@ fn bounded_file_search(root: &Path, query: &str, max_results: usize) -> ToolCall
             if !file_type.is_file() {
                 continue;
             }
-            let relative_text = relative.to_string_lossy().into_owned();
+            let relative_text = relative
+                .iter()
+                .map(|component| component.to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
             let name_match = relative_text.to_lowercase().contains(&query_normalized);
             let content = entry
                 .metadata()
