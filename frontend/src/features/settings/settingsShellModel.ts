@@ -6,11 +6,7 @@ import type {
 } from "@/ui/shell";
 import { boundaryPresentation, toWorkbenchEvidence } from "@/shared/evidencePresentation";
 import type { SettingsController } from "./useSettingsController";
-import {
-  endpointHost,
-  settingsProviderLabels,
-  type SettingsSurfaceId,
-} from "./settingsPresentation";
+import type { SettingsSurfaceId } from "./settingsPresentation";
 
 function uniqueEvidence(refs: WorkbenchEvidenceReference[]): WorkbenchEvidenceReference[] {
   const seen = new Set<string>();
@@ -77,10 +73,6 @@ export function settingsContext(
   switch (controller.state.phase) {
     case "dirty":
       return { eyebrow: "设置", title, status: { label: "有未保存更改", status: "waiting" } };
-    case "testing":
-      return { eyebrow: "设置", title, status: { label: "正在测试", status: "neutral" } };
-    case "tested":
-      return { eyebrow: "设置", title, status: { label: "测试完成，尚未保存", status: "waiting" } };
     case "saving":
       return { eyebrow: "设置", title, status: { label: "正在保存", status: "neutral" } };
     case "refreshing_boundary":
@@ -90,16 +82,6 @@ export function settingsContext(
     case "unknown":
       return { eyebrow: "设置", title, status: { label: "边界待核对", status: "unknown" } };
     case "failed":
-      if (controller.state.failureStage === "test") {
-        return {
-          eyebrow: "设置",
-          title,
-          status: {
-            label: "测试需要处理",
-            status: controller.testPresentation?.status ?? "unknown",
-          },
-        };
-      }
       return {
         eyebrow: "设置",
         title,
@@ -129,10 +111,6 @@ function phaseConclusion(controller: SettingsController): string {
   switch (controller.state.phase) {
     case "dirty":
       return "当前只修改了页面草稿，系统配置与传输边界尚未改变。";
-    case "testing":
-      return "正在验证精确的草稿配置；测试与保存是两个独立动作。";
-    case "tested":
-      return "本次连接测试已有可信回执，但草稿尚未保存。";
     case "saving":
       return "设置保存命令正在执行；当前还没有保存后边界证明。";
     case "refreshing_boundary":
@@ -142,9 +120,7 @@ function phaseConclusion(controller: SettingsController): string {
     case "unknown":
       return "设置命令已经返回，但保存后的传输边界仍然未知。";
     case "failed":
-      return controller.testPresentation?.label
-        ? `连接测试结果：${controller.testPresentation.label}。`
-        : "本次设置操作失败，系统产品状态没有因此变为可用。";
+      return "本次设置操作失败，系统产品状态没有因此变为可用。";
     case "idle":
       return "页面显示清理后的 AppConfig；当前路由与外传结论只来自独立边界读模型。";
   }
@@ -152,27 +128,20 @@ function phaseConclusion(controller: SettingsController): string {
 
 function nextAction(controller: SettingsController): string {
   if (controller.loading) {
-    return "等待本次系统读取结束；期间不修改、不测试、不保存。";
+    return "等待本次系统读取结束；期间不修改、不保存。";
   }
   if (controller.protectionState === "active") {
     return "核对检查器中的系统来源；当前读模型未提供凭据恢复资格时，不执行系统凭据操作。";
   }
   if (controller.protectionState === "unknown") {
-    return "先恢复并重新读取 LifeStateProjection；保护状态未知时不测试、不保存。";
+    return "先恢复并重新读取 LifeStateProjection；保护状态未知时不保存。";
   }
-  const outcome = controller.lastTestOutcome;
-  if (outcome?.result.validation_status === "consent_required") {
-    return outcome.reviewItem
-      ? "按需打开精确待决定项；批准只授权一次请求，之后仍需重新测试。"
-      : "先重新读取需处理事项；找不到精确待决定项时不进行猜测跳转。";
-  }
-  if (controller.state.phase === "dirty") return "可先测试草稿，也可以明确保存；测试不会自动保存。";
-  if (controller.state.phase === "tested") return "确认字段后明确保存；保存后仍需等待边界刷新。";
+  if (controller.state.phase === "dirty") return "确认字段后明确保存；保存后仍需等待边界刷新。";
   if (controller.state.phase === "unknown")
     return controller.state.failureStage === "boundary_refresh"
       ? "使用“重新读取保存结果”重新核对精确配置与边界；未知状态下不要依赖本地确定态。"
       : "重新读取设置与边界；未知状态下不要依赖本地确定态。";
-  if (controller.state.phase === "failed") return "查看返回说明，修改草稿后再测试或保存。";
+  if (controller.state.phase === "failed") return "查看返回说明，修改草稿后再保存。";
   return "修改配置前先核对当前边界；需要更多信息时打开详情。";
 }
 
@@ -211,64 +180,26 @@ export function settingsInspector(
   }
   const boundaryEnvelope = controller.effectiveBoundaryEnvelope;
   const boundary = boundaryPresentation(boundaryEnvelope);
-  const result = controller.lastTestOutcome?.result;
-  const receipt = result?.provider_invocation_receipt;
   const boundaryRefs = [
     ...(boundaryEnvelope.evidenceRefs ?? []),
     ...(boundaryEnvelope.data?.evidenceRefs ?? []),
   ];
-  const reviewRefs = controller.lastTestOutcome?.reviewItem?.evidenceRefs ?? [];
   const safeModeRefs = controller.snapshot?.safeMode?.sourceRefs ?? [];
   const evidence = uniqueEvidence([
     ...evidenceRefs(boundaryRefs),
-    ...evidenceRefs(reviewRefs),
     ...safeModeRefs.map(id => ({
       id,
       label: "安全模式来源",
       source: "LifeStateProjection",
       sensitivity: "metadata_only",
     })),
-    ...(result?.network_policy_decision_id
-      ? [
-          {
-            id: result.network_policy_decision_id,
-            label: "原始网络策略决定",
-            source: "policy",
-            sensitivity: "metadata_only",
-          },
-        ]
-      : []),
-    ...(result?.effective_network_policy_decision_id
-      ? [
-          {
-            id: result.effective_network_policy_decision_id,
-            label: "实际网络策略决定",
-            source: "policy",
-            sensitivity: "metadata_only",
-          },
-        ]
-      : []),
-    ...(receipt
-      ? [
-          {
-            id: receipt.request_id,
-            label: "供应商调用终态回执",
-            source: "provider",
-            sensitivity: "metadata_only",
-          },
-        ]
-      : []),
   ]);
-  const draft = controller.draft;
   const diagnostics = controller.snapshot?.diagnostics ?? [];
 
   return {
     title: surface === "model-provider" ? "模型设置依据" : "隐私与网络依据",
     conclusion: phaseConclusion(controller),
-    risk:
-      controller.testPresentation?.status === "unknown"
-        ? controller.testPresentation.detail
-        : `${boundary.label}。${boundary.detail}`,
+    risk: `${boundary.label}。${boundary.detail}`,
     nextAction: nextAction(controller),
     evidence,
     evidenceFeedback:
@@ -298,20 +229,6 @@ export function settingsInspector(
         value: boundaryEnvelope.data?.externalTransmission ?? "unknown",
       },
       { label: "risk", value: boundaryEnvelope.data?.risk ?? "unknown" },
-      {
-        label: "provider",
-        value: draft?.llm.provider ? settingsProviderLabels[draft.llm.provider] : "unknown",
-      },
-      {
-        label: "endpointHost",
-        value: draft ? (endpointHost(draft.llm.openai_base) ?? "invalid") : "unknown",
-      },
-      { label: "validationStatus", value: result?.validation_status ?? "not_tested" },
-      { label: "consentStatus", value: result?.consent_status ?? "none" },
-      { label: "reviewProposalId", value: result?.review_proposal_id ?? "none" },
-      { label: "reviewItemId", value: controller.lastTestOutcome?.reviewItem?.id ?? "none" },
-      { label: "providerRequestId", value: receipt?.request_id ?? "none" },
-      { label: "providerReceiptStatus", value: receipt?.status ?? "none" },
       {
         label: "sourceDiagnostics",
         value:

@@ -1044,7 +1044,7 @@ fn decision_status_from_proposal(status: ProposalStatus) -> LifeModelCandidateDe
         ProposalStatus::Accepted => LifeModelCandidateDecisionStatus::Accepted,
         ProposalStatus::Edited => LifeModelCandidateDecisionStatus::Edited,
         ProposalStatus::Postponed => LifeModelCandidateDecisionStatus::Postponed,
-        ProposalStatus::Rejected | ProposalStatus::Expired => {
+        ProposalStatus::Rejected | ProposalStatus::Cancelled | ProposalStatus::Expired => {
             LifeModelCandidateDecisionStatus::Unknown
         }
     }

@@ -23,47 +23,6 @@ function boundary(
 }
 
 describe("settings orchestration contract", () => {
-  it("keeps connection tests separate from save state", () => {
-    const dirty = settingsOrchestrationReducer(initialSettingsOrchestrationState, {
-      type: "edit",
-    });
-    const testing = settingsOrchestrationReducer(dirty, { type: "test_requested" });
-    const tested = settingsOrchestrationReducer(testing, {
-      type: "test_succeeded",
-      result: { ok: true, message: "Connection succeeded" },
-    });
-
-    expect(tested.phase).toBe("tested");
-    expect(tested.savedRevision).toBe(0);
-    expect(tested.draftRevision).toBe(1);
-    expect(tested.boundaryAppliesToSavedRevision).toBe(false);
-  });
-
-  it("keeps an already-saved unknown boundary after a successful connection test", () => {
-    const savedUnknown = {
-      ...initialSettingsOrchestrationState,
-      phase: "unknown" as const,
-      draftRevision: 2,
-      savedRevision: 2,
-      providerBoundary: boundary({
-        routeType: "unknown",
-        externalTransmission: "unknown",
-        risk: "unknown",
-      }),
-      boundaryAppliesToSavedRevision: true,
-    };
-    const testing = settingsOrchestrationReducer(savedUnknown, { type: "test_requested" });
-    const tested = settingsOrchestrationReducer(testing, {
-      type: "test_succeeded",
-      result: { ok: true, message: "verified" },
-    });
-
-    expect(tested.phase).toBe("unknown");
-    expect(tested.testResult).toEqual({ ok: true, message: "verified" });
-    expect(tested.savedRevision).toBe(tested.draftRevision);
-    expect(tested.boundaryAppliesToSavedRevision).toBe(true);
-  });
-
   it("requires a boundary refresh after save before reporting ready", () => {
     const dirty = settingsOrchestrationReducer(initialSettingsOrchestrationState, {
       type: "edit",
@@ -121,20 +80,5 @@ describe("settings orchestration contract", () => {
       boundaryAppliesToSavedRevision: true,
       failureStage: null,
     });
-  });
-
-  it("does not treat a failed connection test as a saveable state", () => {
-    const dirty = settingsOrchestrationReducer(initialSettingsOrchestrationState, {
-      type: "edit",
-    });
-    const testing = settingsOrchestrationReducer(dirty, { type: "test_requested" });
-    const failed = settingsOrchestrationReducer(testing, {
-      type: "test_failed",
-      errorCode: "connection_refused",
-    });
-    const unchanged = settingsOrchestrationReducer(failed, { type: "save_requested" });
-
-    expect(unchanged).toEqual(failed);
-    expect(unchanged.phase).toBe("failed");
   });
 });

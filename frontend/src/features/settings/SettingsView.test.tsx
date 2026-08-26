@@ -34,13 +34,6 @@ function credentialSettingsSource(
   return {
     loadSettings: vi.fn().mockResolvedValue({
       config: {
-        llm: {
-          provider: "custom",
-          openai_base: "http://127.0.0.1:11434/v1",
-          openai_key: "***",
-          embedding_model: "local",
-          chat_model: "local",
-        },
         prefer_local_model: true,
         local_model: "local",
       },
@@ -62,12 +55,12 @@ function credentialSettingsSource(
         status === null
           ? null
           : {
-              version: "credential_bootstrap_v1",
+              version: "credential_bootstrap_v2",
               digest: "a".repeat(64),
               purposes: [
                 { purpose: "canonical_task_receipts", status },
                 { purpose: "mcp_audit", status },
-                { purpose: "provider_api_key", status },
+                { purpose: "provider_connections", status },
                 { purpose: "search_provider_api_key", status },
               ],
             },
@@ -85,7 +78,6 @@ function credentialSettingsSource(
       cleanupStatus: "not_required",
       bootstrapSnapshotDigest: "a".repeat(64),
     }),
-    testProviderConnection: vi.fn(),
     saveSettings: vi.fn(),
   };
 }
@@ -193,6 +185,7 @@ describe("SettingsView", () => {
         runtimeBuild: {
           profile: "qa",
           gitSha: "abc123",
+          sourceState: "dirty",
           buildTime: "2026-08-14T00:00:00Z",
           currentExe: "/Applications/OpenLife.app/Contents/MacOS/openlife-tauri",
           binaryKind: "release_bundle",
@@ -247,13 +240,6 @@ describe("SettingsView", () => {
       ...(await source.loadSettings()),
       config: {
         ...((await source.loadSettings()).config ?? {}),
-        llm: {
-          provider: "deepseek",
-          openai_base: "https://api.deepseek.com",
-          openai_key: "***",
-          embedding_model: "local",
-          chat_model: "deepseek-chat",
-        },
         prefer_local_model: false,
         local_model: "local",
         system: { search_provider: "duckduckgo", artifact_output_directory: undefined },
@@ -275,13 +261,6 @@ describe("SettingsView", () => {
   it("renders the sanitized native config shape when the secret field is omitted", async () => {
     const snapshot: SettingsSnapshot = {
       config: {
-        llm: {
-          provider: "openai",
-          openai_base: "https://api.openai.com/v1",
-          openai_key_ref: "keychain://com.openlife.desktop/provider-api-key",
-          embedding_model: "text-embedding-3-small",
-          chat_model: "gpt-4o-mini",
-        },
         prefer_local_model: false,
         local_model: "qwen2.5:14b",
       },
@@ -319,15 +298,14 @@ describe("SettingsView", () => {
     };
     const source: SettingsDataSource = {
       loadSettings: vi.fn().mockResolvedValue(snapshot),
-      testProviderConnection: vi.fn(),
       saveSettings: vi.fn(),
     };
 
     const rendered = render(<SafeModeSettings source={source} />);
 
     expect(await screen.findByRole("heading", { name: "模型与传输边界" })).toBeInTheDocument();
-    expect(screen.getByLabelText("API 凭据")).toHaveValue("");
-    expect(screen.getByText(/系统返回遮罩凭据/)).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "供应商连接" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("API 凭据")).not.toBeInTheDocument();
 
     rendered.unmount();
     const initializationSource = credentialSettingsSource("initialization_required");
@@ -375,7 +353,6 @@ describe("SettingsView", () => {
     };
     const source: SettingsDataSource = {
       loadSettings: vi.fn().mockResolvedValue(snapshot),
-      testProviderConnection: vi.fn(),
       saveSettings: vi.fn(),
     };
 
@@ -427,7 +404,7 @@ describe("SettingsView", () => {
         purposes: [
           { purpose: "canonical_task_receipts", status: "unavailable" },
           { purpose: "mcp_audit", status: "initialization_required" },
-          { purpose: "provider_api_key", status: "unavailable" },
+          { purpose: "provider_connections", status: "unavailable" },
           { purpose: "search_provider_api_key", status: "initialization_required" },
         ],
       },
@@ -436,8 +413,8 @@ describe("SettingsView", () => {
     render(<SafeModeSettings source={source} />);
 
     expect(await screen.findByRole("heading", { name: "凭据访问恢复" })).toBeInTheDocument();
-    expect(screen.getByText(/系统确认有 2 类既有凭据需要恢复访问/)).toBeInTheDocument();
-    expect(screen.queryByText(/5 类既有凭据需要恢复访问/)).not.toBeInTheDocument();
+    expect(screen.getByText(/系统确认有 2 项既有凭据需要恢复访问/)).toBeInTheDocument();
+    expect(screen.queryByText(/5 项既有凭据需要恢复访问/)).not.toBeInTheDocument();
   });
 
   it("does not contradict an explicit credential initialization eligibility", async () => {
@@ -453,13 +430,6 @@ describe("SettingsView", () => {
   it("shows unknown protection and closes actions when LifeStateProjection is unavailable", async () => {
     const snapshot: SettingsSnapshot = {
       config: {
-        llm: {
-          provider: "custom",
-          openai_base: "http://127.0.0.1:11434/v1",
-          openai_key: "***",
-          embedding_model: "nomic-embed-text",
-          chat_model: "qwen2.5:14b",
-        },
         prefer_local_model: true,
         local_model: "qwen2.5:14b",
       },
@@ -504,7 +474,6 @@ describe("SettingsView", () => {
     };
     const source: SettingsDataSource = {
       loadSettings: vi.fn().mockResolvedValue(snapshot),
-      testProviderConnection: vi.fn(),
       saveSettings: vi.fn(),
     };
 
@@ -513,7 +482,7 @@ describe("SettingsView", () => {
     expect(await screen.findByText("保护状态未知")).toBeInTheDocument();
     expect(screen.getByText(/LifeStateProjection 没有提供可核对的保护状态/)).toBeInTheDocument();
     expect(screen.getByText("是否外传未知")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "测试连接" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加连接" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "保存设置" })).toBeDisabled();
   });
 });

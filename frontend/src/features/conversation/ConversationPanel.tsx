@@ -15,8 +15,13 @@ import {
 } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { FoundationActionButton, FoundationDialog, FoundationNotice } from "@/ui/foundation";
-import { productErrorMessage } from "@/shared/productError";
-import type { MainChatBlockedTool, MainChatToolCandidate, ReasoningEffort } from "@/tauri";
+import { productErrorCode, productErrorMessage } from "@/shared/productError";
+import type {
+  MainChatBlockedTool,
+  MainChatToolCandidate,
+  ReasoningEffort,
+  TaskControl,
+} from "@/tauri";
 import type { ConversationController } from "./useConversationController";
 import { MessageContent } from "./MessageContent";
 
@@ -90,12 +95,31 @@ function blockedToolReasonLabel(tool: MainChatBlockedTool): string {
   return "未通过当前运行策略";
 }
 
-function turnFeedback(controller: ConversationController) {
+function recoveryControlLabel(control: TaskControl): string {
+  return control.kind === "retry" ? "重试并创建新运行" : "继续并创建新运行";
+}
+
+function turnFeedback(
+  controller: ConversationController,
+  recoveryControl?: TaskControl,
+  onRequestRecovery?: (control: TaskControl, expectedTaskId: string) => void,
+  onOpenProviderSettings?: () => void
+) {
   const state = controller.turnState;
   if (state.phase === "failed") {
+    const providerRecoveryAvailable =
+      onOpenProviderSettings &&
+      /provider|model.*unavailable|credential/i.test(productErrorCode(state.reason));
     return (
       <FoundationNotice title="会话状态未确认" tone="error" live>
         <p>{productErrorMessage(state.reason, "本轮没有完成。你可以重试，或查看工作详情。")}</p>
+        {providerRecoveryAvailable && (
+          <FoundationActionButton
+            label="检查模型连接"
+            variant="secondary"
+            onClick={onOpenProviderSettings}
+          />
+        )}
       </FoundationNotice>
     );
   }
@@ -142,6 +166,17 @@ function turnFeedback(controller: ConversationController) {
   return copy ? (
     <FoundationNotice title={copy.title} tone={copy.tone} live>
       <p>{copy.body}</p>
+      {recoveryControl &&
+        onRequestRecovery &&
+        state.taskId === recoveryControl.targetTaskId &&
+        recoveryControl.enabled && (
+          <FoundationActionButton
+            label={recoveryControlLabel(recoveryControl)}
+            icon={<RotateCcw size={16} aria-hidden="true" />}
+            variant="secondary"
+            onClick={() => onRequestRecovery(recoveryControl, state.taskId!)}
+          />
+        )}
     </FoundationNotice>
   ) : null;
 }
@@ -226,16 +261,24 @@ export function ConversationPanel({
   disabledReason,
   readOnlyReason,
   inlineCheckpoint,
+  recoveryControl,
+  onRequestRecovery,
+  onOpenProviderSettings,
 }: {
   controller: ConversationController;
   onOpenLifeModel: (itemRef: string) => void;
   disabledReason?: string;
   readOnlyReason?: string;
   inlineCheckpoint?: ReactNode;
+  recoveryControl?: TaskControl;
+  onRequestRecovery?: (control: TaskControl, expectedTaskId: string) => void;
+  onOpenProviderSettings?: () => void;
 }) {
   const [sessionDialog, setSessionDialog] = useState<"rename" | "delete" | null>(null);
   const [renameDraft, setRenameDraft] = useState("");
   const [sessionQuery, setSessionQuery] = useState("");
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelQuery, setModelQuery] = useState("");
   const [projectRenameTargetId, setProjectRenameTargetId] = useState<string | null>(null);
   const [projectRenameDraft, setProjectRenameDraft] = useState("");
   const action = controller.sendAction(disabledReason);
@@ -267,6 +310,20 @@ export function ConversationPanel({
   const selectedProvider = controller.provider.profiles.find(
     profile => profile.profileId === controller.provider.selectedProfileId
   );
+  const normalizedModelQuery = modelQuery.trim().toLocaleLowerCase("en-US");
+  const matchingProviderProfiles = controller.provider.profiles
+    .filter(profile => {
+      if (!normalizedModelQuery) {
+        return (
+          profile.profileId === controller.provider.selectedProfileId ||
+          profile.endpointClass === "local"
+        );
+      }
+      return [profile.displayName, profile.modelId, profile.providerId]
+        .filter(Boolean)
+        .some(value => value!.toLocaleLowerCase("en-US").includes(normalizedModelQuery));
+    })
+    .slice(0, 60);
   const selectedWorkspaceName = selectedProject?.workspaceRoot
     ?.split(/[\\/]/)
     .filter(Boolean)
@@ -299,214 +356,220 @@ export function ConversationPanel({
           <span>对话</span>
           <h3 id="workspace-conversation-title">{selectedSession?.title ?? "新对话"}</h3>
         </div>
-        <div className="ol-workspace-conversation__tools">
-          <label>
-            <span className="ol-workspace-conversation__tool-label">Project</span>
-            <select
-              value={controller.selectedProjectId ?? ""}
-              disabled={controller.busy || composerLocked || sessionMutationBusy}
-              onChange={event => void controller.assignProject(event.target.value || null)}
-            >
-              <option value="">不属于 Project</option>
-              {activeProjects.map(project => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-          </label>
-          {selectedProvider && selectedProvider.supportedReasoningEfforts.length > 0 && (
+        <details className="ol-workspace-conversation__manage">
+          <summary>管理对话与 Project</summary>
+          <div className="ol-workspace-conversation__tools">
             <label>
-              <span>推理强度</span>
+              <span className="ol-workspace-conversation__tool-label">Project</span>
               <select
-                value={controller.provider.selectedReasoningEffort ?? ""}
-                disabled={controller.busy || composerLocked}
-                onChange={event => {
-                  const value = event.target.value;
-                  controller.selectReasoningEffort(value ? (value as ReasoningEffort) : null);
-                }}
+                value={controller.selectedProjectId ?? ""}
+                disabled={controller.busy || composerLocked || sessionMutationBusy}
+                onChange={event => void controller.assignProject(event.target.value || null)}
               >
-                <option value="">
-                  {selectedProvider.defaultReasoningEffort
-                    ? `模型默认（${reasoningEffortLabel(selectedProvider.defaultReasoningEffort)}）`
-                    : "模型默认"}
-                </option>
-                {selectedProvider.supportedReasoningEfforts.map(effort => (
-                  <option key={effort} value={effort}>
-                    {reasoningEffortLabel(effort)}
+                <option value="">不属于 Project</option>
+                {activeProjects.map(project => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
                   </option>
                 ))}
               </select>
             </label>
-          )}
-          {selectedProject && (
-            <span className="ol-workspace-conversation__project-scope">
-              <span role="status">
-                {selectedWorkspaceName
-                  ? `文件夹范围：${selectedWorkspaceName}`
-                  : "此 Project 尚未绑定文件夹"}
-              </span>
-              <button
-                type="button"
-                className="ol-workspace-conversation__scope-action"
-                disabled={controller.busy || sessionMutationBusy}
-                onClick={() =>
-                  void controller.bindProjectDirectory(selectedProject.id, selectedProject.revision)
-                }
-              >
-                {selectedWorkspaceName ? "更换文件夹" : "绑定文件夹"}
-              </button>
-              <button
-                type="button"
-                className="ol-workspace-conversation__scope-action"
-                disabled={controller.busy || sessionMutationBusy}
-                onClick={() =>
-                  void controller.addProjectReadRoot(selectedProject.id, selectedProject.revision)
-                }
-              >
-                添加读取文件夹
-              </button>
-              {selectedProject.additionalReadRoots.map(root => (
-                <span key={root.id} className="ol-workspace-conversation__read-root">
-                  只读：{root.name}
-                  <button
-                    type="button"
-                    className="ol-workspace-conversation__scope-action"
-                    aria-label={`移除读取范围 ${root.name}`}
-                    disabled={controller.busy || sessionMutationBusy}
-                    onClick={() =>
-                      void controller.removeProjectReadRoot(
-                        selectedProject.id,
-                        root.id,
-                        selectedProject.revision
-                      )
-                    }
-                  >
-                    移除
-                  </button>
+            {selectedProvider && selectedProvider.supportedReasoningEfforts.length > 0 && (
+              <label>
+                <span>推理强度</span>
+                <select
+                  value={controller.provider.selectedReasoningEffort ?? ""}
+                  disabled={controller.busy || composerLocked}
+                  onChange={event => {
+                    const value = event.target.value;
+                    controller.selectReasoningEffort(value ? (value as ReasoningEffort) : null);
+                  }}
+                >
+                  <option value="">
+                    {selectedProvider.defaultReasoningEffort
+                      ? `模型默认（${reasoningEffortLabel(selectedProvider.defaultReasoningEffort)}）`
+                      : "模型默认"}
+                  </option>
+                  {selectedProvider.supportedReasoningEfforts.map(effort => (
+                    <option key={effort} value={effort}>
+                      {reasoningEffortLabel(effort)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
+            {selectedProject && (
+              <span className="ol-workspace-conversation__project-scope">
+                <span role="status">
+                  {selectedWorkspaceName
+                    ? `文件夹范围：${selectedWorkspaceName}`
+                    : "此 Project 尚未绑定文件夹"}
                 </span>
-              ))}
-              <button
-                type="button"
-                className="ol-workspace-conversation__scope-action"
-                disabled={controller.busy || sessionMutationBusy}
-                onClick={() => {
-                  setProjectRenameDraft(selectedProject.name);
-                  setProjectRenameTargetId(selectedProject.id);
-                }}
-              >
-                重命名 Project
-              </button>
-              <button
-                type="button"
-                className="ol-workspace-conversation__scope-action"
-                disabled={
-                  controller.busy ||
-                  sessionMutationBusy ||
-                  !selectedProject.allowedControls.includes("archive")
-                }
-                title={projectBlockerText(selectedProject.blockerCodes) ?? undefined}
-                onClick={() =>
-                  void controller.archiveProject(selectedProject.id, selectedProject.revision)
-                }
-              >
-                <Archive size={14} aria-hidden="true" />
-                归档
-              </button>
-            </span>
-          )}
-          <button
-            type="button"
-            className="ol-workspace-conversation__new"
-            disabled={controller.busy || composerLocked || sessionMutationBusy}
-            onClick={() => void controller.createProject("")}
-          >
-            <FolderOpen size={15} aria-hidden="true" />
-            打开 Project 文件夹
-          </button>
-          {controller.sessions.length + controller.archivedSessions.length > 0 && (
-            <label>
-              <span className="ol-workspace-conversation__tool-label">搜索</span>
-              <input
-                type="search"
-                value={sessionQuery}
-                placeholder="搜索对话"
-                disabled={conversationSwitchLocked}
-                onChange={event => setSessionQuery(event.target.value)}
-              />
-            </label>
-          )}
-          {(controller.sessions.length > 0 || selectedSession?.status === "archived") && (
-            <label>
-              <span className="ol-workspace-conversation__tool-label">对话</span>
-              <select
-                value={controller.selectedSessionId ?? ""}
-                disabled={conversationSwitchLocked}
-                onChange={event => controller.selectSession(event.target.value)}
-              >
-                {!controller.selectedSessionId && <option value="">新对话</option>}
-                {selectedSession?.status === "archived" && (
-                  <option value={selectedSession.session_id}>
-                    {selectedSession.title}（已归档）
-                  </option>
-                )}
-                {visibleSessions.map(session => (
-                  <option key={session.session_id} value={session.session_id}>
-                    {session.title}
-                  </option>
+                <button
+                  type="button"
+                  className="ol-workspace-conversation__scope-action"
+                  disabled={controller.busy || sessionMutationBusy}
+                  onClick={() =>
+                    void controller.bindProjectDirectory(
+                      selectedProject.id,
+                      selectedProject.revision
+                    )
+                  }
+                >
+                  {selectedWorkspaceName ? "更换文件夹" : "绑定文件夹"}
+                </button>
+                <button
+                  type="button"
+                  className="ol-workspace-conversation__scope-action"
+                  disabled={controller.busy || sessionMutationBusy}
+                  onClick={() =>
+                    void controller.addProjectReadRoot(selectedProject.id, selectedProject.revision)
+                  }
+                >
+                  添加读取文件夹
+                </button>
+                {selectedProject.additionalReadRoots.map(root => (
+                  <span key={root.id} className="ol-workspace-conversation__read-root">
+                    只读：{root.name}
+                    <button
+                      type="button"
+                      className="ol-workspace-conversation__scope-action"
+                      aria-label={`移除读取范围 ${root.name}`}
+                      disabled={controller.busy || sessionMutationBusy}
+                      onClick={() =>
+                        void controller.removeProjectReadRoot(
+                          selectedProject.id,
+                          root.id,
+                          selectedProject.revision
+                        )
+                      }
+                    >
+                      移除
+                    </button>
+                  </span>
                 ))}
-              </select>
-            </label>
-          )}
-          <button
-            type="button"
-            className="ol-workspace-conversation__new"
-            disabled={conversationSwitchLocked}
-            onClick={controller.startNewConversation}
-          >
-            <MessageSquarePlus size={16} aria-hidden="true" />
-            新对话
-          </button>
-          {selectedSession?.status === "archived" ? (
+                <button
+                  type="button"
+                  className="ol-workspace-conversation__scope-action"
+                  disabled={controller.busy || sessionMutationBusy}
+                  onClick={() => {
+                    setProjectRenameDraft(selectedProject.name);
+                    setProjectRenameTargetId(selectedProject.id);
+                  }}
+                >
+                  重命名 Project
+                </button>
+                <button
+                  type="button"
+                  className="ol-workspace-conversation__scope-action"
+                  disabled={
+                    controller.busy ||
+                    sessionMutationBusy ||
+                    !selectedProject.allowedControls.includes("archive")
+                  }
+                  title={projectBlockerText(selectedProject.blockerCodes) ?? undefined}
+                  onClick={() =>
+                    void controller.archiveProject(selectedProject.id, selectedProject.revision)
+                  }
+                >
+                  <Archive size={14} aria-hidden="true" />
+                  归档
+                </button>
+              </span>
+            )}
+            <button
+              type="button"
+              className="ol-workspace-conversation__new"
+              disabled={controller.busy || composerLocked || sessionMutationBusy}
+              onClick={() => void controller.createProject("")}
+            >
+              <FolderOpen size={15} aria-hidden="true" />
+              打开 Project 文件夹
+            </button>
+            {controller.sessions.length + controller.archivedSessions.length > 0 && (
+              <label>
+                <span className="ol-workspace-conversation__tool-label">搜索</span>
+                <input
+                  type="search"
+                  value={sessionQuery}
+                  placeholder="搜索对话"
+                  disabled={conversationSwitchLocked}
+                  onChange={event => setSessionQuery(event.target.value)}
+                />
+              </label>
+            )}
+            {(controller.sessions.length > 0 || selectedSession?.status === "archived") && (
+              <label>
+                <span className="ol-workspace-conversation__tool-label">对话</span>
+                <select
+                  value={controller.selectedSessionId ?? ""}
+                  disabled={conversationSwitchLocked}
+                  onChange={event => controller.selectSession(event.target.value)}
+                >
+                  {!controller.selectedSessionId && <option value="">新对话</option>}
+                  {selectedSession?.status === "archived" && (
+                    <option value={selectedSession.session_id}>
+                      {selectedSession.title}（已归档）
+                    </option>
+                  )}
+                  {visibleSessions.map(session => (
+                    <option key={session.session_id} value={session.session_id}>
+                      {session.title}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            )}
             <button
               type="button"
               className="ol-workspace-conversation__new"
               disabled={conversationSwitchLocked}
-              onClick={() => void controller.restoreArchived(selectedSession.session_id)}
+              onClick={controller.startNewConversation}
             >
-              <RotateCcw size={15} aria-hidden="true" />
-              恢复对话
+              <MessageSquarePlus size={16} aria-hidden="true" />
+              新对话
             </button>
-          ) : selectedSession ? (
-            <>
+            {selectedSession?.status === "archived" ? (
               <button
                 type="button"
                 className="ol-workspace-conversation__new"
                 disabled={conversationSwitchLocked}
-                onClick={() => {
-                  setRenameDraft(selectedSession.title);
-                  setSessionDialog("rename");
-                }}
+                onClick={() => void controller.restoreArchived(selectedSession.session_id)}
               >
-                <Pencil size={15} aria-hidden="true" />
-                重命名
+                <RotateCcw size={15} aria-hidden="true" />
+                恢复对话
               </button>
-              <button
-                type="button"
-                className="ol-workspace-conversation__new"
-                disabled={
-                  conversationSwitchLocked ||
-                  !(selectedSession.allowedControls?.includes("archive") ?? true)
-                }
-                title={conversationBlockerText(selectedSession.blockerCodes) ?? undefined}
-                onClick={() => void controller.archiveSelected()}
-              >
-                <Archive size={15} aria-hidden="true" />
-                归档
-              </button>
-            </>
-          ) : null}
-        </div>
+            ) : selectedSession ? (
+              <>
+                <button
+                  type="button"
+                  className="ol-workspace-conversation__new"
+                  disabled={conversationSwitchLocked}
+                  onClick={() => {
+                    setRenameDraft(selectedSession.title);
+                    setSessionDialog("rename");
+                  }}
+                >
+                  <Pencil size={15} aria-hidden="true" />
+                  重命名
+                </button>
+                <button
+                  type="button"
+                  className="ol-workspace-conversation__new"
+                  disabled={
+                    conversationSwitchLocked ||
+                    !(selectedSession.allowedControls?.includes("archive") ?? true)
+                  }
+                  title={conversationBlockerText(selectedSession.blockerCodes) ?? undefined}
+                  onClick={() => void controller.archiveSelected()}
+                >
+                  <Archive size={15} aria-hidden="true" />
+                  归档
+                </button>
+              </>
+            ) : null}
+          </div>
+        </details>
       </header>
 
       {archivedProjects.length > 0 && (
@@ -683,7 +746,7 @@ export function ConversationPanel({
         </div>
       )}
 
-      {turnFeedback(controller)}
+      {turnFeedback(controller, recoveryControl, onRequestRecovery, onOpenProviderSettings)}
       {inlineCheckpoint}
       {lifeModelInfluenceFeedback(controller, onOpenLifeModel)}
 
@@ -736,61 +799,22 @@ export function ConversationPanel({
             {controller.workStatus === "unavailable" && " Work 当前不可用；不会回退到旧执行路径。"}
           </small>
         </fieldset>
-        {controller.mode === "work" && (
-          <label
-            className="ol-workspace-memory-mode ol-workspace-execution-mode"
-            htmlFor="ol-workspace-execution-mode"
-          >
-            <span>执行权限</span>
-            <select
-              id="ol-workspace-execution-mode"
-              value={controller.executionMode}
-              disabled={controller.busy || composerLocked}
-              onChange={event =>
-                controller.setExecutionMode(event.target.value as "scoped_agent" | "observe_only")
-              }
-            >
-              <option value="scoped_agent">标准执行</option>
-              <option value="observe_only">只读研究</option>
-            </select>
-            <small>
-              {controller.executionMode === "observe_only"
-                ? "只允许分析与读取；不会创建 Artifact 或写入个人长期状态。"
-                : "在已选范围内自动完成低风险工作；扩展范围、外部写入和破坏性动作仍会请你确认。"}
-            </small>
-          </label>
-        )}
         <div className="ol-workspace-provider" aria-live="polite">
           <label>
             <span>模型</span>
-            <select
-              value={controller.provider.selectedProfileId ?? ""}
+            <button
+              type="button"
+              className="ol-workspace-model-trigger"
               disabled={
                 controller.busy || composerLocked || controller.provider.profiles.length === 0
               }
-              onChange={event => controller.selectProviderProfile(event.target.value)}
+              onClick={() => {
+                setModelQuery("");
+                setModelPickerOpen(true);
+              }}
             >
-              {!controller.provider.selectedProfileId && <option value="">未选择可用模型</option>}
-              {controller.provider.profiles.map(profile => (
-                <option
-                  key={profile.profileId}
-                  value={profile.profileId}
-                  disabled={profile.availability !== "ready"}
-                >
-                  {profile.providerId} · {profile.modelId}
-                  {profile.endpointClass === "local" ? "（本地）" : "（云端）"}
-                  {profile.availability === "unverified" ? " — 未验证" : ""}
-                  {profile.availability === "offline" ? " — 离线" : ""}
-                  {profile.availability === "stale" ? " — 验证已过期" : ""}
-                  {profile.availability === "degraded" ? " — 状态异常" : ""}
-                  {profile.availability === "unconfigured" ? " — 未完成配置" : ""}
-                  {profile.workCompatibility === "validated" ? " — Work 已验证" : ""}
-                  {profile.workCompatibility === "observed_contract_failure"
-                    ? " — Work 协议失败"
-                    : ""}
-                </option>
-              ))}
-            </select>
+              {selectedProvider?.displayName ?? selectedProvider?.modelId ?? "选择模型"}
+            </button>
           </label>
           {controller.provider.status === "unavailable" && (
             <span>当前选择不可用；请选择上方可用模型，或前往设置完成配置。</span>
@@ -798,19 +822,7 @@ export function ConversationPanel({
           {controller.provider.status === "unknown" && <span>正在核对可用模型。</span>}
           {selectedProvider && (
             <small>
-              {selectedProvider.protocol === "ollama_chat" ? "Ollama Chat" : "兼容 Chat API"}
-              {" · "}
-              {selectedProvider.chatCompatibility === "validated"
-                ? "Chat 已验证"
-                : selectedProvider.chatCompatibility === "unavailable"
-                  ? "Chat 不可用"
-                  : "Chat 尚未独立验证"}
-              {" · "}
-              {selectedProvider.workCompatibility === "validated"
-                ? "Work 已验证"
-                : selectedProvider.workCompatibility === "observed_contract_failure"
-                  ? `Work 协议失败（${selectedProvider.workCompatibilityReason ?? "未知契约错误"}）`
-                  : "Work 尚未验证"}
+              {selectedProvider.endpointClass === "local" ? "本地" : selectedProvider.providerId}
               {" · "}
               {selectedProvider.supportedReasoningEfforts.length > 0
                 ? (controller.provider.selectedReasoningEffort ??
@@ -821,38 +833,77 @@ export function ConversationPanel({
                     )}`
                   : "本轮推理：模型默认"
                 : "使用模型默认推理"}
-              {selectedProvider.reasoningCapabilitySource === "official_builtin"
-                ? " · 能力来自官方模型契约"
-                : selectedProvider.reasoningCapabilitySource === "provider_discovery"
-                  ? " · 能力来自 provider 发现"
-                  : selectedProvider.reasoningCapabilitySource === "explicit_configuration"
-                    ? " · 能力来自显式配置"
-                    : ""}
             </small>
           )}
         </div>
-        <label className="ol-workspace-memory-mode" htmlFor="ol-workspace-memory-mode">
-          <span>记忆</span>
-          <select
-            id="ol-workspace-memory-mode"
-            value={controller.memoryMode}
-            disabled={controller.busy || composerLocked || !controller.globalMemoryEnabled}
-            onChange={event =>
-              void controller.setMemoryMode(
-                event.target.value as "use_and_learn" | "use_only" | "off"
-              )
-            }
-          >
-            <option value="use_and_learn">使用并学习</option>
-            <option value="use_only">仅使用</option>
-            <option value="off">关闭</option>
-          </select>
-          <small>
-            {controller.globalMemoryEnabled
-              ? "只影响当前对话；明确要求记住或忘记仍由你发起。"
-              : "Agent 记忆已在设置中关闭。"}
-          </small>
-        </label>
+        <details className="ol-workspace-composer-context ol-workspace-composer-options">
+          <summary>
+            <span>本轮选项</span>
+            <small>
+              {controller.mode === "work"
+                ? controller.executionMode === "observe_only"
+                  ? "只读研究"
+                  : "标准执行"
+                : "Chat"}
+              {" · "}
+              {controller.memoryMode === "off"
+                ? "记忆关闭"
+                : controller.memoryMode === "use_only"
+                  ? "仅使用记忆"
+                  : "使用记忆"}
+            </small>
+          </summary>
+          <div className="ol-workspace-composer-options__body">
+            {controller.mode === "work" && (
+              <label
+                className="ol-workspace-memory-mode ol-workspace-execution-mode"
+                htmlFor="ol-workspace-execution-mode"
+              >
+                <span>执行方式</span>
+                <select
+                  id="ol-workspace-execution-mode"
+                  value={controller.executionMode}
+                  disabled={controller.busy || composerLocked}
+                  onChange={event =>
+                    controller.setExecutionMode(
+                      event.target.value as "scoped_agent" | "observe_only"
+                    )
+                  }
+                >
+                  <option value="scoped_agent">标准执行</option>
+                  <option value="observe_only">只读研究</option>
+                </select>
+                <small>
+                  {controller.executionMode === "observe_only"
+                    ? "只允许分析与读取；不会创建 Artifact 或写入个人长期状态。"
+                    : "已选范围内的低风险工作可自动执行；扩大范围或产生重要外部影响时再请你决定。"}
+                </small>
+              </label>
+            )}
+            <label className="ol-workspace-memory-mode" htmlFor="ol-workspace-memory-mode">
+              <span>记忆</span>
+              <select
+                id="ol-workspace-memory-mode"
+                value={controller.memoryMode}
+                disabled={controller.busy || composerLocked || !controller.globalMemoryEnabled}
+                onChange={event =>
+                  void controller.setMemoryMode(
+                    event.target.value as "use_and_learn" | "use_only" | "off"
+                  )
+                }
+              >
+                <option value="use_and_learn">使用并学习</option>
+                <option value="use_only">仅使用</option>
+                <option value="off">关闭</option>
+              </select>
+              <small>
+                {controller.globalMemoryEnabled
+                  ? "只影响当前对话；明确要求记住或忘记仍由你发起。"
+                  : "Agent 记忆已在设置中关闭。"}
+              </small>
+            </label>
+          </div>
+        </details>
         {controller.mode === "work" && (
           <details className="ol-workspace-composer-context">
             <summary>
@@ -1151,6 +1202,68 @@ export function ConversationPanel({
           </div>
         </div>
       </form>
+
+      <FoundationDialog
+        open={modelPickerOpen}
+        title="选择模型"
+        description="当前对话的新消息将使用这个模型；不会自动切换 Provider。"
+        onClose={() => setModelPickerOpen(false)}
+        footer={
+          <FoundationActionButton
+            label="关闭"
+            variant="quiet"
+            onClick={() => setModelPickerOpen(false)}
+          />
+        }
+      >
+        <div className="ol-workspace-model-picker">
+          <label>
+            <span>搜索模型</span>
+            <input
+              value={modelQuery}
+              autoComplete="off"
+              placeholder="输入模型名称，例如 ox-alpha"
+              onChange={event => setModelQuery(event.target.value)}
+            />
+          </label>
+          {!normalizedModelQuery &&
+            controller.provider.profiles.length > matchingProviderProfiles.length && (
+              <p>已显示当前模型和本地模型；输入名称可搜索远端模型。</p>
+            )}
+          <div className="ol-workspace-model-picker__list" role="listbox" aria-label="可用模型">
+            {matchingProviderProfiles.map(profile => {
+              const available = profile.availability === "ready";
+              const selected = profile.profileId === controller.provider.selectedProfileId;
+              return (
+                <button
+                  type="button"
+                  role="option"
+                  key={profile.profileId}
+                  disabled={!available}
+                  aria-selected={selected}
+                  aria-label={`${profile.displayName ?? profile.modelId}，${profile.providerId}，${profile.modelId}${selected ? "，当前模型" : available ? "" : "，不可用"}`}
+                  onClick={async () => {
+                    if (await controller.selectProviderProfile(profile.profileId)) {
+                      setModelPickerOpen(false);
+                    }
+                  }}
+                >
+                  <span>
+                    <strong>{profile.displayName ?? profile.modelId}</strong>
+                    <small>
+                      {profile.providerId} · {profile.modelId}
+                    </small>
+                  </span>
+                  <span>{selected ? "当前" : available ? "" : "不可用"}</span>
+                </button>
+              );
+            })}
+          </div>
+          {normalizedModelQuery && matchingProviderProfiles.length === 0 && (
+            <p>没有找到可执行的匹配模型。</p>
+          )}
+        </div>
+      </FoundationDialog>
 
       <FoundationDialog
         open={Boolean(projectRenameTarget)}

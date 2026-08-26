@@ -204,62 +204,6 @@ impl Default for AppConfig {
     }
 }
 
-impl AppConfig {
-    /// Resolve the configured search transport without switching the selected
-    /// model route or crossing a credential boundary. Provider-hosted search
-    /// support is a wire capability, never an Agent-policy or planning branch.
-    pub fn effective_search_provider(&self) -> Option<&str> {
-        let configured = self.system.search_provider.trim();
-        if !configured.eq_ignore_ascii_case("auto") {
-            return (!configured.is_empty()).then_some(configured);
-        }
-        if self.prefer_local_model {
-            return None;
-        }
-        match self.llm.provider.trim().to_ascii_lowercase().as_str() {
-            "deepseek" if selected_provider_origin_is(self, "api.deepseek.com", &["", "/v1"]) => {
-                Some("deepseek")
-            }
-            "openrouter" if selected_provider_origin_is(self, "openrouter.ai", &["/api/v1"]) => {
-                Some("openrouter")
-            }
-            _ => None,
-        }
-    }
-
-    /// A hosted search adapter may reuse the selected provider credential only
-    /// on that provider's official HTTPS origin. Custom gateways and local
-    /// routes remain separate trust boundaries.
-    pub fn search_reuses_selected_provider_credential(&self) -> bool {
-        if self.prefer_local_model {
-            return false;
-        }
-        match self.effective_search_provider() {
-            Some("deepseek") if self.llm.provider.eq_ignore_ascii_case("deepseek") => {
-                selected_provider_origin_is(self, "api.deepseek.com", &["", "/v1"])
-            }
-            Some("openrouter") if self.llm.provider.eq_ignore_ascii_case("openrouter") => {
-                selected_provider_origin_is(self, "openrouter.ai", &["/api/v1"])
-            }
-            _ => false,
-        }
-    }
-}
-
-fn selected_provider_origin_is(config: &AppConfig, host: &str, allowed_paths: &[&str]) -> bool {
-    reqwest::Url::parse(config.llm.openai_base.trim()).is_ok_and(|url| {
-        let normalized_path = url.path().trim_end_matches('/');
-        url.scheme() == "https"
-            && url.host_str() == Some(host)
-            && url.port_or_known_default() == Some(443)
-            && url.username().is_empty()
-            && url.password().is_none()
-            && url.query().is_none()
-            && url.fragment().is_none()
-            && allowed_paths.contains(&normalized_path)
-    })
-}
-
 fn default_local_model() -> String {
     "llama2".to_string()
 }
@@ -340,22 +284,6 @@ impl AppConfig {
         }
     }
 
-    /// Get the configured provider base URL.
-    ///
-    /// `OPENAI_API_BASE` used to redirect provider execution independently of
-    /// the canonical config and credential identity. That made it possible for
-    /// an official environment credential to follow a custom endpoint. Custom
-    /// endpoints remain supported through the explicit Settings/config field.
-    pub fn effective_openai_base(&self) -> String {
-        self.llm.openai_base.clone()
-    }
-
-    /// Get the explicit configured key, or the provider-specific environment
-    /// key only when the configured endpoint is that provider's official one.
-    pub fn effective_openai_key(&self) -> String {
-        self.effective_cloud_api_key()
-    }
-
     pub fn effective_cloud_api_key(&self) -> String {
         crate::llm::effective_api_key_for_endpoint(
             &self.llm.provider,
@@ -363,65 +291,12 @@ impl AppConfig {
             &self.llm.openai_key,
         )
     }
-
-    pub fn effective_provider_label(&self) -> String {
-        match self.llm.provider.as_str() {
-            "deepseek" => "DeepSeek".to_string(),
-            "openrouter" => "OpenRouter".to_string(),
-            "openai" => "OpenAI".to_string(),
-            "gemini" => "Google Gemini".to_string(),
-            "siliconflow" => "SiliconFlow".to_string(),
-            "moonshot" => "Moonshot/Kimi".to_string(),
-            "dashscope" => "通义千问 DashScope".to_string(),
-            "zhipu" => "智谱 GLM".to_string(),
-            _ => "OpenAI-compatible".to_string(),
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn automatic_search_reuses_only_a_supported_selected_official_provider_route() {
-        let mut config = AppConfig::default();
-        config.prefer_local_model = false;
-        config.llm.provider = "deepseek".into();
-        config.llm.openai_base = "https://api.deepseek.com".into();
-        config.system.search_provider = "auto".into();
-        assert!(config.search_reuses_selected_provider_credential());
-        assert_eq!(config.effective_search_provider(), Some("deepseek"));
-
-        let mut custom_gateway = config.clone();
-        custom_gateway.llm.openai_base = "https://deepseek-proxy.example.com".into();
-        assert!(!custom_gateway.search_reuses_selected_provider_credential());
-
-        let mut local_first = config.clone();
-        local_first.prefer_local_model = true;
-        assert!(!local_first.search_reuses_selected_provider_credential());
-
-        let mut brave = config;
-        brave.system.search_provider = "brave".into();
-        assert!(!brave.search_reuses_selected_provider_credential());
-
-        let mut openrouter = AppConfig::default();
-        openrouter.prefer_local_model = false;
-        openrouter.llm.provider = "openrouter".into();
-        openrouter.llm.openai_base = "https://openrouter.ai/api/v1".into();
-        openrouter.llm.chat_model = "openrouter/test-model".into();
-        openrouter.system.search_provider = "auto".into();
-        assert!(openrouter.search_reuses_selected_provider_credential());
-        assert_eq!(openrouter.effective_search_provider(), Some("openrouter"));
-
-        openrouter.llm.openai_base = "https://openrouter.ai/api/v1/proxy".into();
-        assert!(!openrouter.search_reuses_selected_provider_credential());
-        assert_eq!(openrouter.effective_search_provider(), None);
-
-        openrouter.llm.openai_base = "https://router-proxy.example.com/v1".into();
-        assert!(!openrouter.search_reuses_selected_provider_credential());
-        assert_eq!(openrouter.effective_search_provider(), None);
-    }
     use tempfile::NamedTempFile;
 
     #[test]
@@ -448,7 +323,6 @@ mod tests {
             "gemini",
             &config.llm.openai_base
         ));
-        assert_eq!(config.effective_provider_label(), "Google Gemini");
     }
 
     #[test]
@@ -543,27 +417,6 @@ mod tests {
     }
 
     #[test]
-    fn config_effective_openai_base_ignores_ambient_redirect() {
-        let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        let config = AppConfig::default();
-        std::env::set_var("OPENAI_API_BASE", "https://env.override.com/v1");
-        assert_eq!(config.effective_openai_base(), config.llm.openai_base);
-        std::env::remove_var("OPENAI_API_BASE");
-        assert_eq!(config.effective_openai_base(), config.llm.openai_base);
-    }
-
-    #[test]
-    fn config_effective_openai_key_env_override() {
-        let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
-        let mut config = AppConfig::default();
-        config.llm.openai_key = "from-config".into();
-        std::env::set_var("OPENAI_API_KEY", "sk-env");
-        assert_eq!(config.effective_openai_key(), "from-config");
-        std::env::remove_var("OPENAI_API_KEY");
-        assert_eq!(config.effective_openai_key(), "from-config");
-    }
-
-    #[test]
     fn config_deepseek_env_fallback() {
         let _guard = crate::ENV_TEST_LOCK.lock().unwrap();
         let mut config = AppConfig::default();
@@ -622,6 +475,5 @@ local_model: ""
         let config = AppConfig::load(file.path()).unwrap();
         assert_eq!(config.llm.provider, "deepseek");
         assert!(!config.llm.embedding_enabled);
-        assert_eq!(config.effective_provider_label(), "DeepSeek");
     }
 }

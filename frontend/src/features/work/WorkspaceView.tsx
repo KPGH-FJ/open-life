@@ -4,6 +4,7 @@ import { FoundationActionButton, FoundationNotice } from "@/ui/foundation";
 import { activeScopedTask, type WorkbenchSnapshot } from "@/app/workbenchDataSource";
 import { ConversationPanel } from "@/features/conversation/ConversationPanel";
 import type { ConversationController } from "@/features/conversation/useConversationController";
+import type { TaskControl } from "@/tauri";
 
 export function WorkspaceView({
   snapshot,
@@ -13,6 +14,9 @@ export function WorkspaceView({
   onOpenLifeModel,
   conversation,
   inlineCheckpoint,
+  recoveryControl,
+  onRequestRecovery,
+  onOpenProviderSettings,
 }: {
   snapshot: WorkbenchSnapshot | null;
   refreshing: boolean;
@@ -21,6 +25,9 @@ export function WorkspaceView({
   onOpenLifeModel: (itemRef: string) => void;
   conversation?: ConversationController;
   inlineCheckpoint?: ReactNode;
+  recoveryControl?: TaskControl;
+  onRequestRecovery?: (control: TaskControl, expectedTaskId: string) => void;
+  onOpenProviderSettings?: () => void;
 }) {
   const envelope = snapshot?.workspaceEnvelope;
   const model = envelope && ["ready", "stale"].includes(envelope.status) ? envelope.data : null;
@@ -104,6 +111,9 @@ export function WorkspaceView({
           disabledReason={conversationDisabledReason}
           readOnlyReason={conversationReadOnlyReason}
           inlineCheckpoint={inlineCheckpoint}
+          recoveryControl={recoveryControl}
+          onRequestRecovery={onRequestRecovery}
+          onOpenProviderSettings={onOpenProviderSettings}
         />
       )}
       {!conversation && inlineCheckpoint}

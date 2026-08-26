@@ -1,15 +1,16 @@
 use crate::config::NetworkPolicy;
 use crate::llm::{
     BoundedContextBlock, ChatMessage, ContextManifest, PreparedProviderOutcome,
-    PreparedProviderRequest, ProviderDataRoute, ProviderInvocationReceipt,
+    PreparedProviderRequest, ProviderDataRoute, ProviderFunctionBinding, ProviderInvocationReceipt,
     ProviderInvocationStatus, ProviderPayloadCategory, ProviderPayloadPurpose,
     ProviderPolicyAuthorization, ProviderPolicyProvenanceKind, ProviderPolicyProvenanceRef,
-    ProviderPolicyReceiptEvidence, StreamResult,
+    ProviderPolicyReceiptEvidence, ProviderToolDefinition, StreamResult,
 };
 use crate::network_client::NetworkPolicyDecision;
 use crate::ollama::{prepare_ollama_chat_target, resolve_ollama_model};
 use anyhow::Result;
 use futures::Stream;
+use ring::digest::{digest, SHA256};
 use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
@@ -1161,6 +1162,18 @@ impl Default for InferenceScheduler {
     }
 }
 
+fn derived_model_generation(parent_generation: &str, route: &str, model: &str) -> String {
+    let material = format!(
+        "openlife_request_scoped_model_generation_v1\0{parent_generation}\0{route}\0{model}"
+    );
+    let hex = digest(&SHA256, material.as_bytes())
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("provider-model:{hex}")
+}
+
 impl InferenceScheduler {
     pub fn provider_label(&self) -> String {
         crate::llm::provider_label(&self.provider)
@@ -1244,9 +1257,32 @@ impl InferenceScheduler {
     /// The caller must supply a model observed from Ollama discovery; adapter
     /// preparation re-validates that exact model before dispatch.
     pub fn with_selected_local_model(mut self, model: String) -> Self {
+        let parent_generation = self.provider_config_generation.clone();
         self.local_model = model;
         self.prefer_local = true;
-        self.provider_config_generation = uuid::Uuid::new_v4().to_string();
+        self.provider_config_generation =
+            derived_model_generation(&parent_generation, "local", &self.local_model);
+        self
+    }
+
+    /// Derive one request-scoped cloud execution generation for a model that
+    /// was discovered on the already configured provider connection. The
+    /// endpoint and credential are immutable; only the exact model target and
+    /// generation change. This prevents a model picker from becoming a label-
+    /// only control while also preventing it from crossing provider scope.
+    pub fn with_selected_cloud_model(mut self, model: String) -> Self {
+        let parent_generation = self.provider_config_generation.clone();
+        self.chat_model = crate::llm::resolve_provider_chat_model(&self.provider, &model);
+        self.prefer_local = false;
+        self.provider_config_generation =
+            derived_model_generation(&parent_generation, "cloud", &self.chat_model);
+        self.provider_runtime_identity = ProviderRuntimeIdentity::capture(
+            &self.provider,
+            &self.openai_base,
+            &self.chat_model,
+            &self.openai_key,
+            self.provider_credential_version,
+        );
         self
     }
 
@@ -1426,7 +1462,7 @@ impl InferenceScheduler {
     /// Unlike conversation generation, this command has no current-user
     /// message subject. Its private capability binds the exact configured
     /// provider/model/endpoint, the already-authorized network decision, the
-    /// consent reference, and the literal `ping` payload.
+    /// consent reference, and the fixed versioned Work compatibility payload.
     pub fn prepare_explicit_provider_probe(
         &self,
         grant: crate::network_client::ExplicitProviderProbeGrant,
@@ -1462,7 +1498,7 @@ impl InferenceScheduler {
 
         let messages = vec![ChatMessage {
             role: "user".into(),
-            content: "ping".into(),
+            content: crate::work_orchestration::work_compatibility_eval_user_message().into(),
         }];
         let context_blocks = Vec::new();
         let policy_authorization = ProviderPolicyAuthorization::from_explicit_provider_probe(
@@ -1494,7 +1530,7 @@ impl InferenceScheduler {
             raw_unbounded_memory_included: false,
         };
         context_manifest.validate_context_truth(&context_blocks)?;
-        policy_authorization.validate_unfiltered_payload(&messages, &context_blocks)?;
+        policy_authorization.validate_unfiltered_payload(&messages, &context_blocks, &[])?;
         policy_authorization.validate_explicit_provider_probe_target(
             &provider_target,
             &model_target,
@@ -1504,6 +1540,7 @@ impl InferenceScheduler {
         let policy_authorization = policy_authorization.bind_prepared_envelope(
             &messages,
             &context_blocks,
+            &[],
             &context_manifest,
             &provider_target,
             &model_target,
@@ -1516,6 +1553,7 @@ impl InferenceScheduler {
         let request = PreparedProviderRequest {
             messages,
             context_blocks,
+            images: Vec::new(),
             context_manifest,
             provider_target,
             model_target,
@@ -1556,6 +1594,7 @@ impl InferenceScheduler {
         self.prepare_chat_request_with_authorized_filter(
             messages,
             context_blocks,
+            Vec::new(),
             context_manifest,
             policy_authorization,
             network_policy,
@@ -1578,6 +1617,7 @@ impl InferenceScheduler {
         &self,
         mut messages: Vec<ChatMessage>,
         mut context_blocks: Vec<BoundedContextBlock>,
+        images: Vec<crate::llm::BoundedProviderImage>,
         mut context_manifest: ContextManifest,
         policy_authorization: ProviderPolicyAuthorization,
         network_policy: NetworkPolicy,
@@ -1597,7 +1637,7 @@ impl InferenceScheduler {
         // payload before provider selection, privacy filtering, credential
         // lookup, or any adapter edge can be reached.
         context_manifest.validate_context_truth(&context_blocks)?;
-        policy_authorization.validate_unfiltered_payload(&messages, &context_blocks)?;
+        policy_authorization.validate_unfiltered_payload(&messages, &context_blocks, &images)?;
         let data_route = policy_authorization.data_route();
         let mut prepared_ollama_target = None;
         let (provider_target, model_target) = if self.scripted_generation_response.is_some() {
@@ -1677,6 +1717,7 @@ impl InferenceScheduler {
         let policy_authorization = policy_authorization.bind_prepared_envelope(
             &messages,
             &context_blocks,
+            &images,
             &context_manifest,
             &provider_target,
             &model_target,
@@ -1693,6 +1734,7 @@ impl InferenceScheduler {
         let request = PreparedProviderRequest {
             messages,
             context_blocks,
+            images,
             context_manifest,
             provider_target,
             model_target,
@@ -1811,51 +1853,55 @@ impl InferenceScheduler {
                 payload_purpose,
                 &request.context_manifest.included_context_categories,
             );
+            let structured_format = match payload_purpose {
+                Some(ProviderPayloadPurpose::MainChatWorkGoalContract) => {
+                    Some(crate::ollama::main_chat_work_goal_contract_json_schema())
+                }
+                Some(ProviderPayloadPurpose::MainChatWorkSemanticVerification) => Some(
+                    ollama_provider_tool_result_schema(&request.provider_tools, false)?,
+                ),
+                Some(ProviderPayloadPurpose::MainChatWorkPlan) => Some(
+                    ollama_provider_tool_result_schema(&request.provider_tools, false)?,
+                ),
+                Some(ProviderPayloadPurpose::MainChatConversationStep) => {
+                    Some(crate::ollama::main_chat_conversation_step_json_schema())
+                }
+                Some(ProviderPayloadPurpose::MainChatInitialWorkDecision) => Some(
+                    ollama_provider_tool_result_schema(&request.provider_tools, false)?,
+                ),
+                Some(ProviderPayloadPurpose::MainChatPersonalIntelligenceStep) => Some(
+                    ollama_provider_tool_result_schema(&request.provider_tools, false)?,
+                ),
+                Some(ProviderPayloadPurpose::MainChatToolArguments) => Some(
+                    ollama_provider_tool_result_schema(&request.provider_tools, false)?,
+                ),
+                Some(ProviderPayloadPurpose::MainChatAgentToolStep) => Some(
+                    ollama_provider_tool_result_schema(&request.provider_tools, false)?,
+                ),
+                Some(ProviderPayloadPurpose::MainChatAgentArtifactOrToolStep) => Some(
+                    ollama_provider_tool_result_schema(&request.provider_tools, true)?,
+                ),
+                Some(ProviderPayloadPurpose::MainChatAgentAnswerOrToolStep) => Some(
+                    ollama_provider_tool_result_schema(&request.provider_tools, true)?,
+                ),
+                Some(ProviderPayloadPurpose::MainChatAgentArtifactStep) => Some(
+                    ollama_provider_tool_result_schema(&request.provider_tools, false)?,
+                ),
+                Some(ProviderPayloadPurpose::MainChatAgentFinalStep) => Some(
+                    ollama_provider_tool_result_schema(&request.provider_tools, false)?,
+                ),
+                _ => None,
+            };
             return crate::ollama::chat_with_ollama_raw_at_endpoint_with_start_observer(
                 execution_binding.endpoint(),
                 &request.model_target,
-                request.messages,
+                crate::ollama::OllamaProviderContent {
+                    messages: request.messages,
+                    images: request.images,
+                },
                 system_prompt.as_deref(),
                 crate::ollama::OllamaOutputContract {
-                    structured_format: match payload_purpose {
-                        Some(ProviderPayloadPurpose::AgentMemoryExtraction) => {
-                            Some(crate::ollama::agent_memory_extraction_json_schema())
-                        }
-                        Some(ProviderPayloadPurpose::MainChatWorkSemanticVerification) => {
-                            Some(crate::ollama::main_chat_work_semantic_verification_json_schema())
-                        }
-                        Some(ProviderPayloadPurpose::MainChatWorkPlan) => {
-                            Some(crate::ollama::main_chat_work_plan_json_schema())
-                        }
-                        Some(ProviderPayloadPurpose::MainChatConversationStep) => {
-                            Some(crate::ollama::main_chat_conversation_step_json_schema())
-                        }
-                        Some(ProviderPayloadPurpose::MainChatInitialWorkDecision) => {
-                            Some(crate::ollama::main_chat_initial_work_decision_json_schema())
-                        }
-                        Some(ProviderPayloadPurpose::MainChatPersonalIntelligenceStep) => {
-                            Some(crate::ollama::main_chat_personal_intelligence_step_json_schema())
-                        }
-                        Some(ProviderPayloadPurpose::MainChatToolArguments) => {
-                            Some(crate::ollama::main_chat_tool_arguments_json_schema())
-                        }
-                        Some(ProviderPayloadPurpose::MainChatAgentToolStep) => {
-                            Some(crate::ollama::main_chat_agent_tool_step_json_schema())
-                        }
-                        Some(ProviderPayloadPurpose::MainChatAgentArtifactOrToolStep) => {
-                            Some(crate::ollama::main_chat_agent_artifact_or_tool_step_json_schema())
-                        }
-                        Some(ProviderPayloadPurpose::MainChatAgentAnswerOrToolStep) => {
-                            Some(crate::ollama::main_chat_agent_answer_or_tool_step_json_schema())
-                        }
-                        Some(ProviderPayloadPurpose::MainChatAgentArtifactStep) => {
-                            Some(crate::ollama::main_chat_agent_artifact_step_json_schema())
-                        }
-                        Some(ProviderPayloadPurpose::MainChatAgentFinalStep) => {
-                            Some(crate::ollama::main_chat_agent_final_step_json_schema())
-                        }
-                        _ => None,
-                    },
+                    structured_format,
                     deterministic: deterministic_output,
                     reasoning_effort: request.reasoning_effort,
                 },
@@ -1872,6 +1918,7 @@ impl InferenceScheduler {
         crate::llm::chat_with_openai_compatible_raw_with_start_observer(
             crate::llm::OpenAiCompatibleAdapterRequest {
                 messages: request.messages,
+                images: request.images,
                 system_prompt: system_prompt.as_deref(),
                 provider: &request.provider_target,
                 endpoint: execution_binding.endpoint(),
@@ -2180,7 +2227,10 @@ impl InferenceScheduler {
                 crate::ollama::chat_with_ollama_raw_stream_at_endpoint_with_start_observer(
                     execution_binding.endpoint(),
                     &request.model_target,
-                    request.messages,
+                    crate::ollama::OllamaProviderContent {
+                        messages: request.messages,
+                        images: request.images,
+                    },
                     system_prompt.as_deref(),
                     request.reasoning_effort,
                     Some(&request_id),
@@ -2230,6 +2280,7 @@ impl InferenceScheduler {
         let result = crate::llm::chat_with_openai_compatible_raw_stream_with_start_observer(
             crate::llm::OpenAiCompatibleAdapterRequest {
                 messages: request.messages,
+                images: request.images,
                 system_prompt: system_prompt.as_deref(),
                 provider: &request.provider_target,
                 endpoint: execution_binding.endpoint(),
@@ -2238,11 +2289,17 @@ impl InferenceScheduler {
                 reasoning_effort: request.reasoning_effort,
                 structured_json_output: matches!(
                     policy_evidence.payload_purpose,
-                    Some(ProviderPayloadPurpose::MainChatWorkSemanticVerification)
+                    Some(
+                        ProviderPayloadPurpose::MainChatWorkGoalContract
+                            | ProviderPayloadPurpose::MainChatWorkSemanticVerification
+                    )
                 ),
                 provider_native_json_mode: matches!(
                     policy_evidence.payload_purpose,
-                    Some(ProviderPayloadPurpose::MainChatWorkSemanticVerification)
+                    Some(
+                        ProviderPayloadPurpose::MainChatWorkGoalContract
+                            | ProviderPayloadPurpose::MainChatWorkSemanticVerification
+                    )
                 ),
                 provider_tools: &request.provider_tools,
                 network_policy: &request.network_policy,
@@ -2333,7 +2390,7 @@ fn non_streaming_ollama_requires_deterministic_output(
         Some(
             ProviderPayloadPurpose::MainChatDirectAnswer
                 | ProviderPayloadPurpose::MainChatConversationStep
-                | ProviderPayloadPurpose::AgentMemoryExtraction
+                | ProviderPayloadPurpose::MainChatWorkGoalContract
                 | ProviderPayloadPurpose::MainChatWorkSemanticVerification
                 | ProviderPayloadPurpose::MainChatInitialWorkDecision
                 | ProviderPayloadPurpose::MainChatPersonalIntelligenceStep
@@ -2349,6 +2406,110 @@ fn non_streaming_ollama_requires_deterministic_output(
         .any(|category| category == crate::web_search::WEB_SEARCH_CONTEXT_CATEGORY)
 }
 
+/// Ollama has JSON-schema structured output but no provider-native function
+/// transport on this path. Project the exact current runtime functions into
+/// one equivalent AgentStep/result schema instead of widening back to a
+/// purpose-wide static union.
+fn ollama_provider_tool_result_schema(
+    provider_tools: &[ProviderToolDefinition],
+    allow_capability_batch: bool,
+) -> Result<serde_json::Value> {
+    if provider_tools.is_empty() {
+        anyhow::bail!("ollama_provider_tool_contract_missing");
+    }
+    let mut top_level_schemas = Vec::new();
+    let mut capability_payloads = Vec::new();
+    for tool in provider_tools {
+        match &tool.binding {
+            ProviderFunctionBinding::Capability { capability_id } => {
+                capability_payloads.push(serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "capabilityId": { "type": "string", "const": capability_id },
+                        "arguments": tool.parameters.clone()
+                    },
+                    "required": ["capabilityId", "arguments"],
+                    "additionalProperties": false
+                }));
+            }
+            ProviderFunctionBinding::AgentStep
+            | ProviderFunctionBinding::WorkPlan
+            | ProviderFunctionBinding::StructuredResult => {
+                top_level_schemas.push(tool.parameters.clone());
+            }
+        }
+    }
+
+    if !capability_payloads.is_empty() {
+        let single_payload = if capability_payloads.len() == 1 {
+            capability_payloads[0].clone()
+        } else {
+            serde_json::json!({ "oneOf": capability_payloads.clone() })
+        };
+        let single_step = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "kind": { "type": "string", "const": "tool_call" },
+                "payload": single_payload
+            },
+            "required": ["kind", "payload"],
+            "additionalProperties": false
+        });
+        let step_schema = if allow_capability_batch {
+            let batch_payload = if capability_payloads.len() == 1 {
+                capability_payloads[0].clone()
+            } else {
+                serde_json::json!({ "oneOf": capability_payloads })
+            };
+            serde_json::json!({
+                "oneOf": [
+                    single_step,
+                    {
+                        "type": "object",
+                        "properties": {
+                            "kind": { "type": "string", "const": "tool_calls" },
+                            "payload": {
+                                "type": "object",
+                                "properties": {
+                                    "calls": {
+                                        "type": "array",
+                                        "minItems": 1,
+                                        "maxItems": crate::work_orchestration::MAX_AGENT_STEP_TOOL_CALLS,
+                                        "items": batch_payload
+                                    }
+                                },
+                                "required": ["calls"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "required": ["kind", "payload"],
+                        "additionalProperties": false
+                    }
+                ]
+            })
+        } else {
+            single_step
+        };
+        top_level_schemas.push(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "schemaVersion": {
+                    "type": "string",
+                    "const": crate::work_orchestration::AGENT_STEP_SCHEMA_VERSION
+                },
+                "step": step_schema
+            },
+            "required": ["schemaVersion", "step"],
+            "additionalProperties": false
+        }));
+    }
+
+    if top_level_schemas.len() == 1 {
+        return Ok(top_level_schemas.remove(0));
+    }
+    Ok(serde_json::json!({ "oneOf": top_level_schemas }))
+}
+
 fn cloud_provider_uses_native_structured_output(
     payload_purpose: Option<ProviderPayloadPurpose>,
 ) -> bool {
@@ -2356,6 +2517,7 @@ fn cloud_provider_uses_native_structured_output(
         payload_purpose,
         Some(
             ProviderPayloadPurpose::MainChatWorkSemanticVerification
+                | ProviderPayloadPurpose::MainChatWorkGoalContract
                 | ProviderPayloadPurpose::MainChatConversationStep
                 | ProviderPayloadPurpose::MainChatWorkPlan
                 | ProviderPayloadPurpose::MainChatInitialWorkDecision
@@ -2366,7 +2528,6 @@ fn cloud_provider_uses_native_structured_output(
                 | ProviderPayloadPurpose::MainChatAgentAnswerOrToolStep
                 | ProviderPayloadPurpose::MainChatAgentArtifactStep
                 | ProviderPayloadPurpose::MainChatAgentFinalStep
-                | ProviderPayloadPurpose::AgentMemoryExtraction
         )
     )
 }
@@ -2375,17 +2536,49 @@ fn cloud_provider_uses_native_structured_output(
 mod tests {
     use super::{
         classify_lifecycle_admission_failure, cloud_provider_uses_native_structured_output,
-        non_streaming_ollama_requires_deterministic_output, InferenceScheduler,
-        PreparedProviderGenerationMismatch, PreparedProviderStreamEvent,
+        non_streaming_ollama_requires_deterministic_output, ollama_provider_tool_result_schema,
+        InferenceScheduler, PreparedProviderGenerationMismatch, PreparedProviderStreamEvent,
         PreparedProviderStreamTerminal, ProviderInvocationProgress,
         ProviderInvocationTerminalBinding, ProviderStartedAttempt,
     };
     use crate::llm::{
         BoundedContextBlock, ChatMessage, ContextManifest, ProviderDataRoute,
-        ProviderInvocationStatus, ProviderLocalOnlyReason, ProviderPayloadPurpose,
-        ProviderPolicyAuthorization, ProviderPolicyReceiptEvidence,
+        ProviderFunctionBinding, ProviderInvocationStatus, ProviderLocalOnlyReason,
+        ProviderPayloadPurpose, ProviderPolicyAuthorization, ProviderPolicyReceiptEvidence,
+        ProviderToolDefinition,
     };
     use futures::StreamExt;
+
+    #[test]
+    fn selected_cloud_model_rebinds_the_executable_runtime_identity() {
+        let scheduler = InferenceScheduler::new(
+            "local-unused".into(),
+            false,
+            "openrouter".into(),
+            "https://openrouter.ai/api/v1".into(),
+            "test-key".into(),
+            "stealth/ox-alpha".into(),
+            "embedding-unused".into(),
+            false,
+        )
+        .with_provider_credential_version(7);
+        let original_generation = scheduler.provider_config_generation().to_string();
+
+        let selected = scheduler
+            .clone()
+            .with_selected_cloud_model("openai/gpt-4.1-mini".into());
+        let replay_selection = scheduler.with_selected_cloud_model("openai/gpt-4.1-mini".into());
+
+        assert_eq!(selected.chat_model, "openai/gpt-4.1-mini");
+        assert!(!selected.prefer_local);
+        assert_ne!(selected.provider_config_generation(), original_generation);
+        assert!(selected.provider_runtime_identity_is_valid());
+        assert_eq!(selected.provider_credential_version(), 7);
+        assert_eq!(
+            selected.provider_config_generation(),
+            replay_selection.provider_config_generation()
+        );
+    }
 
     #[test]
     fn lifecycle_budget_rejection_is_not_reported_as_a_provider_failure() {
@@ -2430,6 +2623,13 @@ mod tests {
             ProviderPayloadPurpose::MainChatWorkSemanticVerification
         )));
         assert!(cloud_provider_uses_native_structured_output(Some(
+            ProviderPayloadPurpose::MainChatWorkGoalContract
+        )));
+        assert!(non_streaming_ollama_requires_deterministic_output(
+            Some(ProviderPayloadPurpose::MainChatWorkGoalContract),
+            &[]
+        ));
+        assert!(cloud_provider_uses_native_structured_output(Some(
             ProviderPayloadPurpose::MainChatConversationStep
         )));
         for purpose in [
@@ -2448,6 +2648,106 @@ mod tests {
                 &[]
             ));
         }
+    }
+
+    #[test]
+    fn ollama_initial_work_decision_uses_the_exact_runtime_result_functions() {
+        let plan_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "schemaVersion": { "type": "string", "const": "openlife.work-plan.v3" }
+            },
+            "required": ["schemaVersion"],
+            "additionalProperties": false
+        });
+        let answer_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "schemaVersion": { "type": "string", "const": "openlife.agent-step.v1" }
+            },
+            "required": ["schemaVersion"],
+            "additionalProperties": false
+        });
+        let plan = ProviderToolDefinition {
+            function_name: "submit_work_plan".into(),
+            binding: ProviderFunctionBinding::WorkPlan,
+            description: "Submit the required plan.".into(),
+            parameters: plan_schema.clone(),
+        };
+        let answer = ProviderToolDefinition {
+            function_name: "submit_work_answer".into(),
+            binding: ProviderFunctionBinding::AgentStep,
+            description: "Submit a direct answer.".into(),
+            parameters: answer_schema.clone(),
+        };
+
+        assert_eq!(
+            ollama_provider_tool_result_schema(&[plan.clone()], false).unwrap(),
+            plan_schema
+        );
+        assert_eq!(
+            ollama_provider_tool_result_schema(&[plan, answer], false).unwrap(),
+            serde_json::json!({ "oneOf": [plan_schema, answer_schema] })
+        );
+    }
+
+    #[test]
+    fn ollama_capability_result_schema_binds_exact_id_and_arguments() {
+        let arguments = serde_json::json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": ["path"],
+            "additionalProperties": false
+        });
+        let tool = ProviderToolDefinition {
+            function_name: "file_read".into(),
+            binding: ProviderFunctionBinding::Capability {
+                capability_id: "file.read".into(),
+            },
+            description: "Read one Project file.".into(),
+            parameters: arguments.clone(),
+        };
+
+        let schema = ollama_provider_tool_result_schema(&[tool], false).unwrap();
+        let payload = &schema["properties"]["step"]["properties"]["payload"];
+        assert_eq!(payload["properties"]["capabilityId"]["const"], "file.read");
+        assert_eq!(payload["properties"]["arguments"], arguments);
+        assert_eq!(
+            payload["properties"]["arguments"]["additionalProperties"],
+            false
+        );
+        assert!(schema.to_string().find("tool_calls").is_none());
+    }
+
+    #[test]
+    fn ollama_structured_result_uses_the_exact_current_run_schema() {
+        let verification_schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "requirementId": { "type": "string", "const": "read-project-file" },
+                "evidenceRefs": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["candidate-output://run/1", "project-file://run/item"]
+                    },
+                    "minItems": 2
+                }
+            },
+            "required": ["requirementId", "evidenceRefs"],
+            "additionalProperties": false
+        });
+        let tool = ProviderToolDefinition {
+            function_name: "submit_work_verification".into(),
+            binding: ProviderFunctionBinding::StructuredResult,
+            description: "Submit one verification result.".into(),
+            parameters: verification_schema.clone(),
+        };
+
+        assert_eq!(
+            ollama_provider_tool_result_schema(&[tool], false).unwrap(),
+            verification_schema
+        );
     }
 
     fn allow_network_policy() -> crate::config::NetworkPolicy {
@@ -2500,6 +2800,7 @@ mod tests {
                     content: current_user_text.into(),
                 }],
                 &[],
+                &[],
             )
             .expect("canonical cloud test payload scope")
     }
@@ -2513,6 +2814,7 @@ mod tests {
                 crate::llm::ProviderPayloadPurpose::FrozenRuntimeEvaluation,
                 current_user_text,
                 messages,
+                &[],
                 &[],
             )
             .expect("local-only fixture payload scope")
@@ -3172,6 +3474,7 @@ mod tests {
                         category: "bounded_test_context".into(),
                         content: "bounded context".into(),
                     }],
+                    &[],
                 )
                 .expect("exact typed cloud payload scope");
         let scheduler = InferenceScheduler::new(
@@ -3290,6 +3593,7 @@ mod tests {
                     content: "message B".into(),
                 }],
                 &[],
+                &[],
             )
             .expect_err("message B cannot be scoped with message A authorization");
         assert!(transfer_error.to_string().contains("subject mismatch"));
@@ -3367,6 +3671,7 @@ mod tests {
                 current_user_text,
                 &messages,
                 std::slice::from_ref(&injected_context),
+                &[],
             )
             .expect_err("an exact provider payload scope must not be rebound");
         assert!(rebound_error.to_string().contains("cannot be rebound"));
@@ -3485,6 +3790,7 @@ mod tests {
                 role: "user".into(),
                 content: "keep this request scoped".into(),
             }],
+            &[],
             &[],
         )
         .expect("typed provider authorization");
@@ -3916,6 +4222,7 @@ mod tests {
         let request = crate::llm::PreparedProviderRequest {
             messages: vec![],
             context_blocks: vec![],
+            images: vec![],
             context_manifest: ContextManifest {
                 request_id: "request-pre-dispatch-rejection".into(),
                 privacy_decision_id: "policy-pre-dispatch-rejection".into(),
@@ -3991,7 +4298,10 @@ mod tests {
 
         assert_eq!(request.messages.len(), 1);
         assert_eq!(request.messages[0].role, "user");
-        assert_eq!(request.messages[0].content, "ping");
+        assert_eq!(
+            request.messages[0].content,
+            crate::work_orchestration::work_compatibility_eval_user_message()
+        );
         assert_eq!(
             request.policy_authorization().authority(),
             crate::llm::ProviderPolicyAuthority::ExplicitProviderProbePolicy

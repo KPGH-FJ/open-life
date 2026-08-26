@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const TASK_RUNTIME_SCHEMA_VERSION: i64 = 26;
+const TASK_RUNTIME_SCHEMA_VERSION: i64 = 28;
 
 const MAX_COMPLETION_LIMITATIONS: usize = 8;
 const MAX_COMPLETION_LIMITATION_ID_CHARS: usize = 128;
@@ -318,6 +318,24 @@ pub struct CanonicalArtifactReviewSubject {
     pub content_digest: String,
     pub expected_target_absent: bool,
     pub expected_target_digest: Option<String>,
+    #[serde(
+        default,
+        rename = "source_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_path: Option<String>,
+    #[serde(
+        default,
+        rename = "target_path",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub target_path: Option<String>,
+    #[serde(
+        default,
+        rename = "source_digest",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_digest: Option<String>,
 }
 
 impl CanonicalArtifactReviewSubject {
@@ -333,7 +351,7 @@ impl CanonicalArtifactReviewSubject {
             || self.artifact_id.len() > 512
             || self.artifact_version == 0
             || self.path.trim().is_empty()
-            || !matches!(self.operation.as_str(), "create" | "overwrite")
+            || !matches!(self.operation.as_str(), "create" | "overwrite" | "move")
             || self.artifact_kind.trim().is_empty()
             || !self.content_digest.starts_with("sha256:")
         {
@@ -343,8 +361,35 @@ impl CanonicalArtifactReviewSubject {
             self.expected_target_absent,
             self.expected_target_digest.as_deref(),
         ) {
-            (true, None) => Ok(()),
-            (false, Some(digest)) if digest.starts_with("sha256:") => Ok(()),
+            (true, None)
+                if self.operation == "move"
+                    && self
+                        .source_path
+                        .as_deref()
+                        .is_some_and(|path| !path.trim().is_empty())
+                    && self.target_path.as_deref() == Some(self.path.as_str())
+                    && self.source_path.as_deref() != self.target_path.as_deref()
+                    && self.source_digest.as_deref() == Some(self.content_digest.as_str()) =>
+            {
+                Ok(())
+            }
+            (true, None)
+                if self.operation == "create"
+                    && self.source_path.is_none()
+                    && self.target_path.is_none()
+                    && self.source_digest.is_none() =>
+            {
+                Ok(())
+            }
+            (false, Some(digest))
+                if self.operation == "overwrite"
+                    && digest.starts_with("sha256:")
+                    && self.source_path.is_none()
+                    && self.target_path.is_none()
+                    && self.source_digest.is_none() =>
+            {
+                Ok(())
+            }
             _ => anyhow::bail!("canonical_artifact_review_precondition_invalid"),
         }
     }
@@ -652,13 +697,23 @@ pub struct CanonicalArtifactUndoRecord {
 pub enum CanonicalArtifactUndoOperation {
     TrashCreated,
     RestoreReplaced,
+    RestoreMoved,
 }
 
 impl CanonicalArtifactUndoOperation {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::TrashCreated => "trash_created",
+            Self::RestoreReplaced => "restore_replaced",
+            Self::RestoreMoved => "restore_moved",
+        }
+    }
+
     fn from_db(value: &str) -> Result<Self> {
         match value {
             "trash_created" => Ok(Self::TrashCreated),
             "restore_replaced" => Ok(Self::RestoreReplaced),
+            "restore_moved" => Ok(Self::RestoreMoved),
             _ => anyhow::bail!("canonical_artifact_undo_operation_invalid:{value}"),
         }
     }
@@ -877,6 +932,11 @@ pub fn artifact_verification_item_id(
             observed_content_digest,
         ],
     )
+}
+
+pub fn artifact_undo_item_id(artifact_id: &str, version: impl std::fmt::Display) -> String {
+    let version = version.to_string();
+    stable_id("item", &["artifact_undo", artifact_id, &version])
 }
 
 pub fn final_result_item_id(task_id: &str, run_id: &str) -> String {
@@ -1286,7 +1346,7 @@ impl CanonicalTaskRuntimeStore {
                 proposal_id TEXT NOT NULL UNIQUE,
                 item_id TEXT NOT NULL UNIQUE,
                 status TEXT NOT NULL CHECK(status IN (
-                    'waiting', 'accepted', 'rejected', 'failed', 'effect_unknown'
+                    'waiting', 'accepted', 'rejected', 'cancelled', 'failed', 'effect_unknown'
                 )),
                 created_at TEXT NOT NULL,
                 resolved_at TEXT,
@@ -1372,7 +1432,7 @@ impl CanonicalTaskRuntimeStore {
                 target_reference TEXT NOT NULL,
                 content_digest TEXT NOT NULL,
                 operation TEXT NOT NULL DEFAULT 'trash_created' CHECK(operation IN (
-                    'trash_created', 'restore_replaced'
+                    'trash_created', 'restore_replaced', 'restore_moved'
                 )),
                 expected_target_digest TEXT,
                 status TEXT NOT NULL CHECK(status IN (
@@ -1394,7 +1454,7 @@ impl CanonicalTaskRuntimeStore {
              CREATE INDEX IF NOT EXISTS idx_canonical_artifacts_task
                 ON canonical_artifacts(task_id, created_at, id);
              INSERT INTO canonical_task_runtime_metadata(key, value)
-             VALUES ('schema_version', '26')
+             VALUES ('schema_version', '28')
              ON CONFLICT(key) DO NOTHING;
              INSERT INTO canonical_task_runtime_metadata(key, value)
              VALUES ('store_identity', 'canonical_task_runtime_store:' || lower(hex(randomblob(16))))
@@ -1454,7 +1514,129 @@ impl CanonicalTaskRuntimeStore {
         if Self::schema_version(&conn)? == 25 {
             Self::migrate_v25_to_v26(&mut conn)?;
         }
+        if Self::schema_version(&conn)? == 26 {
+            Self::migrate_v26_to_v27(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 27 {
+            Self::migrate_v27_to_v28(&mut conn)?;
+        }
         Self::validate_schema(&conn)
+    }
+
+    fn migrate_v27_to_v28(conn: &mut Connection) -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;")?;
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "ALTER TABLE canonical_artifact_review_checkpoints
+                    RENAME TO canonical_artifact_review_checkpoints_v27;
+                 CREATE TABLE canonical_artifact_review_checkpoints (
+                    artifact_id TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK(version > 0),
+                    proposal_id TEXT NOT NULL UNIQUE,
+                    item_id TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'waiting', 'accepted', 'rejected', 'cancelled', 'failed', 'effect_unknown'
+                    )),
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    PRIMARY KEY(artifact_id, version),
+                    FOREIGN KEY(artifact_id, version)
+                        REFERENCES canonical_artifact_versions(artifact_id, version)
+                        ON DELETE RESTRICT,
+                    FOREIGN KEY(item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT
+                 ) WITHOUT ROWID;
+                 INSERT INTO canonical_artifact_review_checkpoints (
+                    artifact_id, version, proposal_id, item_id, status, created_at, resolved_at
+                 )
+                 SELECT artifact_id, version, proposal_id, item_id, status, created_at, resolved_at
+                 FROM canonical_artifact_review_checkpoints_v27;
+                 DROP TABLE canonical_artifact_review_checkpoints_v27;",
+            )?;
+            let changed = tx.execute(
+                "UPDATE canonical_task_runtime_metadata SET value='28'
+                 WHERE key='schema_version' AND value='27'",
+                [],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("canonical_task_runtime_v27_migration_version_conflict");
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        let restore = conn.execute_batch("PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;");
+        migration?;
+        restore?;
+        let violation = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_row([], |_| Ok(()))
+            .optional()?;
+        if violation.is_some() {
+            anyhow::bail!("canonical_task_runtime_v27_migration_foreign_key_violation");
+        }
+        Ok(())
+    }
+
+    fn migrate_v26_to_v27(conn: &mut Connection) -> Result<()> {
+        conn.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;")?;
+        let migration = (|| -> Result<()> {
+            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            tx.execute_batch(
+                "ALTER TABLE canonical_artifact_undo RENAME TO canonical_artifact_undo_v26;
+                 CREATE TABLE canonical_artifact_undo (
+                    artifact_id TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK(version > 0),
+                    proposal_id TEXT NOT NULL UNIQUE,
+                    source_reference TEXT NOT NULL,
+                    target_reference TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
+                    operation TEXT NOT NULL CHECK(operation IN (
+                        'trash_created', 'restore_replaced', 'restore_moved'
+                    )),
+                    expected_target_digest TEXT,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'waiting_review', 'undone', 'failed', 'effect_unknown'
+                    )),
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    PRIMARY KEY(artifact_id, version),
+                    FOREIGN KEY(artifact_id, version)
+                        REFERENCES canonical_artifact_versions(artifact_id, version)
+                        ON DELETE RESTRICT
+                 ) WITHOUT ROWID;
+                 INSERT INTO canonical_artifact_undo (
+                    artifact_id, version, proposal_id, source_reference, target_reference,
+                    content_digest, operation, expected_target_digest, status, created_at,
+                    resolved_at
+                 )
+                 SELECT artifact_id, version, proposal_id, source_reference, target_reference,
+                        content_digest, operation, expected_target_digest, status, created_at,
+                        resolved_at
+                 FROM canonical_artifact_undo_v26;
+                 DROP TABLE canonical_artifact_undo_v26;",
+            )?;
+            let changed = tx.execute(
+                "UPDATE canonical_task_runtime_metadata SET value='27'
+                 WHERE key='schema_version' AND value='26'",
+                [],
+            )?;
+            if changed != 1 {
+                anyhow::bail!("canonical_task_runtime_v26_migration_version_conflict");
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        let restore = conn.execute_batch("PRAGMA legacy_alter_table=OFF; PRAGMA foreign_keys=ON;");
+        migration?;
+        restore?;
+        let violation = conn
+            .prepare("PRAGMA foreign_key_check")?
+            .query_row([], |_| Ok(()))
+            .optional()?;
+        if violation.is_some() {
+            anyhow::bail!("canonical_task_runtime_v26_migration_foreign_key_violation");
+        }
+        Ok(())
     }
 
     fn migrate_v25_to_v26(conn: &mut Connection) -> Result<()> {
@@ -5406,9 +5588,9 @@ impl CanonicalTaskRuntimeStore {
         )?;
         if all_verified {
             tx.execute(
-                "UPDATE canonical_task_attention SET resolved_at = ?3
-                 WHERE task_id = ?1 AND run_id = ?2 AND resolved_at IS NULL",
-                params![task_id, run_id, now],
+                "UPDATE canonical_task_attention SET resolved_at = ?2
+                 WHERE task_id = ?1 AND resolved_at IS NULL",
+                params![task_id, now],
             )?;
         }
         tx.commit()?;
@@ -5718,6 +5900,43 @@ impl CanonicalTaskRuntimeStore {
             params![materialized_item_id, now],
         )?;
         tx.execute(
+            "UPDATE canonical_task_items
+             SET status = 'cancelled',
+                 summary_code = 'artifact_review_cancelled_after_sibling_rejection',
+                 updated_at = ?3
+             WHERE task_id = ?1 AND run_id = ?2
+               AND kind IN ('review_checkpoint','artifact_materialized')
+               AND status = 'waiting'",
+            params![task_id, run_id, now],
+        )?;
+        tx.execute(
+            "UPDATE canonical_artifacts
+             SET status = 'failed', updated_at = ?3
+             WHERE task_id = ?1 AND status = 'waiting_review'
+               AND id IN (
+                   SELECT sibling.artifact_id
+                   FROM canonical_artifact_review_checkpoints sibling
+                   JOIN canonical_task_items source
+                     ON source.id = (
+                         SELECT source_item_id FROM canonical_artifacts
+                         WHERE id = sibling.artifact_id
+                     )
+                   WHERE source.run_id = ?2 AND sibling.status = 'waiting'
+               )",
+            params![task_id, run_id, now],
+        )?;
+        tx.execute(
+            "UPDATE canonical_artifact_review_checkpoints
+             SET status = 'cancelled', resolved_at = ?3
+             WHERE status = 'waiting' AND artifact_id IN (
+                 SELECT artifact.id
+                 FROM canonical_artifacts artifact
+                 JOIN canonical_task_items source ON source.id = artifact.source_item_id
+                 WHERE artifact.task_id = ?1 AND source.run_id = ?2
+             )",
+            params![task_id, run_id, now],
+        )?;
+        tx.execute(
             "UPDATE canonical_tasks SET status = 'blocked', updated_at = ?2
              WHERE id = ?1 AND status != 'blocked'",
             params![task_id, now],
@@ -5738,6 +5957,12 @@ impl CanonicalTaskRuntimeStore {
              ) VALUES(?1,?2,?3,'blocked','artifact_review_rejected',?4,NULL)
              ON CONFLICT(task_id,run_id,kind,reason_code) DO NOTHING",
             params![attention_id, task_id, run_id, now],
+        )?;
+        tx.execute(
+            "UPDATE canonical_task_attention SET resolved_at = ?3
+             WHERE task_id = ?1 AND run_id = ?2
+               AND kind = 'review_required' AND resolved_at IS NULL",
+            params![task_id, run_id, now],
         )?;
         tx.commit()?;
         drop(conn);
@@ -5885,6 +6110,50 @@ impl CanonicalTaskRuntimeStore {
         target_reference: &str,
         content_digest: &str,
     ) -> Result<CanonicalArtifactUndoRecord> {
+        self.bind_artifact_move_undo(
+            artifact_id,
+            proposal_id,
+            source_reference,
+            target_reference,
+            content_digest,
+            CanonicalArtifactUndoOperation::TrashCreated,
+        )
+    }
+
+    pub fn bind_artifact_rename_undo(
+        &self,
+        artifact_id: &str,
+        proposal_id: &str,
+        source_reference: &str,
+        target_reference: &str,
+        content_digest: &str,
+    ) -> Result<CanonicalArtifactUndoRecord> {
+        self.bind_artifact_move_undo(
+            artifact_id,
+            proposal_id,
+            source_reference,
+            target_reference,
+            content_digest,
+            CanonicalArtifactUndoOperation::RestoreMoved,
+        )
+    }
+
+    fn bind_artifact_move_undo(
+        &self,
+        artifact_id: &str,
+        proposal_id: &str,
+        source_reference: &str,
+        target_reference: &str,
+        content_digest: &str,
+        operation: CanonicalArtifactUndoOperation,
+    ) -> Result<CanonicalArtifactUndoRecord> {
+        if !matches!(
+            operation,
+            CanonicalArtifactUndoOperation::TrashCreated
+                | CanonicalArtifactUndoOperation::RestoreMoved
+        ) {
+            anyhow::bail!("canonical_artifact_move_undo_operation_invalid");
+        }
         validate_nonempty("artifact_id", artifact_id, 512)?;
         validate_nonempty("proposal_id", proposal_id, 512)?;
         validate_nonempty("source_reference", source_reference, 4096)?;
@@ -5921,8 +6190,8 @@ impl CanonicalTaskRuntimeStore {
             "INSERT INTO canonical_artifact_undo (
                 artifact_id, version, proposal_id, source_reference, target_reference,
                 content_digest, operation, expected_target_digest, status, created_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'trash_created', NULL,
-                       'waiting_review', ?7)
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL,
+                       'waiting_review', ?8)
              ON CONFLICT(artifact_id, version) DO NOTHING",
             params![
                 artifact_id,
@@ -5931,13 +6200,11 @@ impl CanonicalTaskRuntimeStore {
                 source_reference,
                 target_reference,
                 content_digest,
+                operation.as_str(),
                 now
             ],
         )?;
-        let item_id = stable_id(
-            "item",
-            &["artifact_undo", artifact_id, &artifact.5.to_string()],
-        );
+        let item_id = artifact_undo_item_id(artifact_id, artifact.5);
         let sequence: i64 = tx.query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM canonical_task_items WHERE task_id = ?1",
             [&artifact.3],
@@ -5966,7 +6233,7 @@ impl CanonicalTaskRuntimeStore {
             || existing.source_reference != source_reference
             || existing.target_reference != target_reference
             || existing.content_digest != content_digest
-            || existing.operation != CanonicalArtifactUndoOperation::TrashCreated
+            || existing.operation != operation
             || existing.expected_target_digest.is_some()
         {
             anyhow::bail!("canonical_artifact_undo_identity_conflict");
@@ -6047,10 +6314,7 @@ impl CanonicalTaskRuntimeStore {
                 now,
             ],
         )?;
-        let item_id = stable_id(
-            "item",
-            &["artifact_undo", artifact_id, &version.to_string()],
-        );
+        let item_id = artifact_undo_item_id(artifact_id, version);
         let sequence: i64 = tx.query_row(
             "SELECT COALESCE(MAX(sequence), 0) + 1 FROM canonical_task_items WHERE task_id = ?1",
             [&owner.3],
@@ -6118,10 +6382,7 @@ impl CanonicalTaskRuntimeStore {
         let Some((task_id, run_id, artifact_id, version)) = owner else {
             return Ok(None);
         };
-        let item_id = stable_id(
-            "item",
-            &["artifact_undo", &artifact_id, &version.to_string()],
-        );
+        let item_id = artifact_undo_item_id(&artifact_id, version);
         self.begin_item_attempt(BeginItemAttemptInput {
             attempt_id,
             task_id: &task_id,
@@ -6169,14 +6430,7 @@ impl CanonicalTaskRuntimeStore {
              WHERE proposal_id = ?1 AND status = 'waiting_review'",
             params![proposal_id, now],
         )?;
-        let item_id = stable_id(
-            "item",
-            &[
-                "artifact_undo",
-                &undo.artifact_id,
-                &undo.version.to_string(),
-            ],
-        );
+        let item_id = artifact_undo_item_id(&undo.artifact_id, undo.version);
         let receipt_digest = sha256_text(&format!(
             "{}\0{}\0{}",
             proposal_id, target_reference, observed_content_digest
@@ -6212,6 +6466,28 @@ impl CanonicalTaskRuntimeStore {
             return Ok(None);
         };
         self.load_artifact_undo_version(artifact_id, version)
+    }
+
+    #[cfg(debug_assertions)]
+    #[doc(hidden)]
+    pub fn remove_artifact_undo_checkpoint_for_test(&self, artifact_id: &str) -> Result<()> {
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let version = tx.query_row(
+            "SELECT current_version FROM canonical_artifacts WHERE id = ?1",
+            [artifact_id],
+            |row| row.get::<_, i64>(0),
+        )?;
+        tx.execute(
+            "DELETE FROM canonical_artifact_undo WHERE artifact_id = ?1 AND version = ?2",
+            params![artifact_id, version],
+        )?;
+        tx.execute(
+            "DELETE FROM canonical_task_items WHERE id = ?1",
+            [artifact_undo_item_id(artifact_id, version)],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn load_artifact_undo_version(
@@ -6261,10 +6537,7 @@ impl CanonicalTaskRuntimeStore {
              WHERE proposal_id = ?1 AND status = 'waiting_review'",
             params![proposal_id, status, now],
         )?;
-        let item_id = stable_id(
-            "item",
-            &["artifact_undo", &artifact_id, &version.to_string()],
-        );
+        let item_id = artifact_undo_item_id(&artifact_id, version);
         tx.execute(
             "UPDATE canonical_task_items SET status = ?2, summary_code = ?3, updated_at = ?4
              WHERE id = ?1 AND kind = 'review_checkpoint'
@@ -8240,6 +8513,113 @@ mod tests {
     }
 
     #[test]
+    fn v26_store_migrates_artifact_undo_to_support_reversing_rename() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task-runtime-v26.db");
+        let store = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        {
+            let conn = store.lock_conn().unwrap();
+            conn.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 DROP TABLE canonical_artifact_undo;
+                 CREATE TABLE canonical_artifact_undo (
+                    artifact_id TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK(version > 0),
+                    proposal_id TEXT NOT NULL UNIQUE,
+                    source_reference TEXT NOT NULL,
+                    target_reference TEXT NOT NULL,
+                    content_digest TEXT NOT NULL,
+                    operation TEXT NOT NULL CHECK(operation IN (
+                        'trash_created', 'restore_replaced'
+                    )),
+                    expected_target_digest TEXT,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'waiting_review', 'undone', 'failed', 'effect_unknown'
+                    )),
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    PRIMARY KEY(artifact_id, version),
+                    FOREIGN KEY(artifact_id, version)
+                        REFERENCES canonical_artifact_versions(artifact_id, version)
+                        ON DELETE RESTRICT
+                 ) WITHOUT ROWID;
+                 UPDATE canonical_task_runtime_metadata SET value='26'
+                 WHERE key='schema_version';
+                 PRAGMA foreign_keys=ON;",
+            )
+            .unwrap();
+        }
+        drop(store);
+
+        let reopened = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        let conn = reopened.lock_conn().unwrap();
+        assert_eq!(
+            CanonicalTaskRuntimeStore::schema_version(&conn).unwrap(),
+            TASK_RUNTIME_SCHEMA_VERSION
+        );
+        let table_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='canonical_artifact_undo'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_sql.contains("restore_moved"));
+    }
+
+    #[test]
+    fn v27_store_migrates_artifact_review_checkpoints_to_support_bundle_cancellation() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("task-runtime-v27.db");
+        let store = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        {
+            let conn = store.lock_conn().unwrap();
+            conn.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 DROP TABLE canonical_artifact_review_checkpoints;
+                 CREATE TABLE canonical_artifact_review_checkpoints (
+                    artifact_id TEXT NOT NULL,
+                    version INTEGER NOT NULL CHECK(version > 0),
+                    proposal_id TEXT NOT NULL UNIQUE,
+                    item_id TEXT NOT NULL UNIQUE,
+                    status TEXT NOT NULL CHECK(status IN (
+                        'waiting', 'accepted', 'rejected', 'failed', 'effect_unknown'
+                    )),
+                    created_at TEXT NOT NULL,
+                    resolved_at TEXT,
+                    PRIMARY KEY(artifact_id, version),
+                    FOREIGN KEY(artifact_id, version)
+                        REFERENCES canonical_artifact_versions(artifact_id, version)
+                        ON DELETE RESTRICT,
+                    FOREIGN KEY(item_id) REFERENCES canonical_task_items(id) ON DELETE RESTRICT
+                 ) WITHOUT ROWID;
+                 UPDATE canonical_task_runtime_metadata SET value='27'
+                 WHERE key='schema_version';
+                 PRAGMA foreign_keys=ON;",
+            )
+            .unwrap();
+        }
+        drop(store);
+
+        let reopened = CanonicalTaskRuntimeStore::new(&path).unwrap();
+        let conn = reopened.lock_conn().unwrap();
+        assert_eq!(
+            CanonicalTaskRuntimeStore::schema_version(&conn).unwrap(),
+            TASK_RUNTIME_SCHEMA_VERSION
+        );
+        let table_sql: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type='table' AND name='canonical_artifact_review_checkpoints'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(table_sql.contains("'cancelled'"));
+    }
+
+    #[test]
     fn governed_artifact_undo_is_independent_and_receipt_bound() {
         let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
         let conversation_id = uuid::Uuid::new_v4().to_string();
@@ -8561,6 +8941,167 @@ mod tests {
                 && attention.reason_code == "artifact_review_rejected"
                 && attention.resolved_at.is_none()
         }));
+    }
+
+    #[test]
+    fn rejecting_one_artifact_review_cancels_waiting_sibling_checkpoints() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: "turn-review-bundle-rejected",
+                instruction_digest: &sha256_text("replace two reviewed files"),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+                execution_mode: WorkExecutionMode::ScopedAgent,
+            })
+            .unwrap();
+        let prepared = (0..2)
+            .map(|index| {
+                store
+                    .prepare_general_artifact(GeneralArtifactDraftInput {
+                        task_id: &task_id,
+                        run_id: &run_id,
+                        target_reference: &format!("/safe/bundle-{index}.md"),
+                        content_digest: &sha256_text(&format!("# Bundle {index}")),
+                        media_type: "text/markdown; charset=utf-8",
+                    })
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        for (index, artifact) in prepared.iter().enumerate() {
+            store
+                .bind_artifact_review(&artifact.artifact_id, &format!("proposal-{index}"))
+                .unwrap();
+        }
+
+        store.mark_artifact_review_rejected("proposal-0").unwrap();
+        let snapshot = store.load_task_snapshot(&task_id).unwrap().unwrap();
+        assert_eq!(snapshot.task.status, CanonicalTaskStatus::Blocked);
+        assert!(snapshot.final_result.is_none());
+        let first = snapshot
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.artifact.id == prepared[0].artifact_id)
+            .unwrap();
+        let second = snapshot
+            .artifacts
+            .iter()
+            .find(|artifact| artifact.artifact.id == prepared[1].artifact_id)
+            .unwrap();
+        assert_eq!(first.artifact.status, CanonicalArtifactStatus::Failed);
+        assert_eq!(first.review_checkpoint.as_ref().unwrap().status, "rejected");
+        assert_eq!(second.artifact.status, CanonicalArtifactStatus::Failed);
+        assert_eq!(
+            second.review_checkpoint.as_ref().unwrap().status,
+            "cancelled"
+        );
+        assert!(snapshot.items.iter().any(|item| {
+            item.kind == CanonicalTaskItemKind::ReviewCheckpoint
+                && item.status == CanonicalTaskItemStatus::Cancelled
+                && item.summary_code == "artifact_review_cancelled_after_sibling_rejection"
+        }));
+        assert!(snapshot.attention.iter().any(|attention| {
+            attention.kind == CanonicalAttentionKind::ReviewRequired
+                && attention.resolved_at.is_some()
+        }));
+    }
+
+    #[test]
+    fn reviewed_artifact_retry_completion_resolves_attention_from_the_failed_run() {
+        let store = CanonicalTaskRuntimeStore::new_in_memory().unwrap();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let failed_run_id = uuid::Uuid::new_v4().to_string();
+        store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &failed_run_id,
+                execution_session_id: "turn-artifact-failed-run",
+                instruction_digest: &sha256_text("replace an existing file"),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+                execution_mode: WorkExecutionMode::ScopedAgent,
+            })
+            .unwrap();
+        store
+            .terminalize_general_run(&task_id, &failed_run_id, CanonicalTaskStatus::Blocked)
+            .unwrap();
+        store
+            .record_attention(
+                &task_id,
+                &failed_run_id,
+                CanonicalAttentionKind::Blocked,
+                "work_goal_contract_json_invalid",
+            )
+            .unwrap();
+
+        let retry_run_id = uuid::Uuid::new_v4().to_string();
+        store
+            .begin_general_task_run(BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &retry_run_id,
+                execution_session_id: "turn-artifact-retry-run",
+                instruction_digest: &sha256_text("replace an existing file"),
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+                execution_mode: WorkExecutionMode::ScopedAgent,
+            })
+            .unwrap();
+        let digest = sha256_text("# Replacement");
+        let prepared = store
+            .prepare_general_artifact(GeneralArtifactDraftInput {
+                task_id: &task_id,
+                run_id: &retry_run_id,
+                target_reference: "/safe/retry-replacement.md",
+                content_digest: &digest,
+                media_type: "text/markdown; charset=utf-8",
+            })
+            .unwrap();
+        let proposal_id = "proposal-artifact-retry-complete";
+        store
+            .bind_artifact_review(&prepared.artifact_id, proposal_id)
+            .unwrap();
+        store
+            .defer_general_task_result(DeferGeneralTaskResultInput {
+                task_id: &task_id,
+                run_id: &retry_run_id,
+                conversation_item_id: "conversation-item-artifact-retry",
+                result_digest: &sha256_text("replacement ready"),
+                summary_code: "work_artifact_completed",
+                completion_limitations: &[],
+            })
+            .unwrap();
+        store
+            .begin_artifact_materialization_attempt(
+                proposal_id,
+                &uuid::Uuid::new_v4().to_string(),
+                &sha256_text("materialize retry"),
+            )
+            .unwrap();
+        store
+            .confirm_artifact_materialized(proposal_id, "/safe/retry-replacement.md", &digest)
+            .unwrap();
+
+        let snapshot = store.load_task_snapshot(&task_id).unwrap().unwrap();
+        assert_eq!(snapshot.task.status, CanonicalTaskStatus::Completed);
+        assert!(snapshot
+            .attention
+            .iter()
+            .all(|attention| attention.resolved_at.is_some()));
     }
 
     #[test]
@@ -8967,6 +9508,119 @@ mod tests {
                 .map(|result| result.completion_limitations.as_slice()),
             Some(completion_limitations.as_slice())
         );
+    }
+
+    #[test]
+    fn deferred_artifact_bundle_survives_restart_and_completes_only_after_every_review() {
+        let directory = tempfile::tempdir().unwrap();
+        let db_path = directory.path().join("task-runtime-bundle.db");
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let readme_digest = sha256_text("# Updated README");
+        let notes_digest = sha256_text("Updated notes");
+        let readme_proposal = "proposal-restart-readme";
+        let notes_proposal = "proposal-restart-notes";
+        {
+            let store = CanonicalTaskRuntimeStore::new(&db_path).unwrap();
+            store
+                .begin_general_task_run(BeginGeneralTaskRunInput {
+                    task_id: &task_id,
+                    conversation_id: &conversation_id,
+                    run_id: &run_id,
+                    execution_session_id: "turn-restart-artifact-bundle",
+                    instruction_digest: &sha256_text("update two restart-safe artifacts"),
+                    plan_digest: None,
+                    project_id: None,
+                    project_revision: None,
+                    scope_digest: None,
+                    execution_mode: WorkExecutionMode::ScopedAgent,
+                })
+                .unwrap();
+            let prepared = [
+                ("/safe/README.md", readme_digest.as_str(), readme_proposal),
+                ("/safe/notes.txt", notes_digest.as_str(), notes_proposal),
+            ]
+            .into_iter()
+            .map(|(target, digest, proposal_id)| {
+                let artifact = store
+                    .prepare_general_artifact(GeneralArtifactDraftInput {
+                        task_id: &task_id,
+                        run_id: &run_id,
+                        target_reference: target,
+                        content_digest: digest,
+                        media_type: "text/plain; charset=utf-8",
+                    })
+                    .unwrap();
+                (artifact.artifact_id, proposal_id)
+            })
+            .collect::<Vec<_>>();
+            for (artifact_id, proposal_id) in prepared {
+                store
+                    .bind_artifact_review(&artifact_id, proposal_id)
+                    .unwrap();
+            }
+            store
+                .defer_general_task_result(DeferGeneralTaskResultInput {
+                    task_id: &task_id,
+                    run_id: &run_id,
+                    conversation_item_id: "conversation-item-restart-artifact-bundle",
+                    result_digest: &sha256_text("waiting for both file reviews"),
+                    summary_code: "work_artifact_waiting_review",
+                    completion_limitations: &[],
+                })
+                .unwrap();
+        }
+
+        let reopened = CanonicalTaskRuntimeStore::new(&db_path).unwrap();
+        let waiting = reopened.load_task_snapshot(&task_id).unwrap().unwrap();
+        assert_eq!(waiting.task.status, CanonicalTaskStatus::WaitingReview);
+        assert_eq!(waiting.artifacts.len(), 2);
+        assert!(waiting
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.review_checkpoint.is_some()));
+        assert!(waiting.final_result.is_none());
+
+        reopened
+            .begin_artifact_materialization_attempt(
+                readme_proposal,
+                &uuid::Uuid::new_v4().to_string(),
+                &sha256_text("materialize README after restart"),
+            )
+            .unwrap();
+        reopened
+            .confirm_artifact_materialized(readme_proposal, "/safe/README.md", &readme_digest)
+            .unwrap();
+        let partial = reopened.load_task_snapshot(&task_id).unwrap().unwrap();
+        assert_eq!(partial.task.status, CanonicalTaskStatus::WaitingReview);
+        assert!(partial.final_result.is_none());
+        assert_eq!(
+            partial
+                .artifacts
+                .iter()
+                .filter(|artifact| artifact.artifact.status == CanonicalArtifactStatus::Materialized)
+                .count(),
+            1
+        );
+
+        reopened
+            .begin_artifact_materialization_attempt(
+                notes_proposal,
+                &uuid::Uuid::new_v4().to_string(),
+                &sha256_text("materialize notes after restart"),
+            )
+            .unwrap();
+        reopened
+            .confirm_artifact_materialized(notes_proposal, "/safe/notes.txt", &notes_digest)
+            .unwrap();
+        let completed = reopened.load_task_snapshot(&task_id).unwrap().unwrap();
+        assert_eq!(completed.task.status, CanonicalTaskStatus::Completed);
+        assert!(completed.final_result.is_some());
+        assert!(completed
+            .artifacts
+            .iter()
+            .all(|artifact| artifact.artifact.status == CanonicalArtifactStatus::Materialized));
     }
 
     #[test]

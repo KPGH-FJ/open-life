@@ -40,7 +40,7 @@ export function GlobalActivityView({
   ).length;
 
   return (
-    <details className="ol-global-activity" open={attentionCount > 0}>
+    <details className="ol-global-activity">
       <summary>
         <span className="ol-global-activity__title">
           <Activity size={17} aria-hidden="true" />

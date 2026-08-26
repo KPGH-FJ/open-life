@@ -116,8 +116,8 @@ with the terminal Turn; it does not require a restart and does not make one
 model failure disable another provider or capability surface.
 
 Earlier development programs remain in Git history. ADR 0018 and ADR 0019
-remain the accepted reconstruction and harness contracts. The active
-foundation control-loop plan closes each capability vertically through runtime,
+remain the accepted reconstruction and harness contracts. The active product
+reconstruction plan closes each capability vertically through runtime,
 persistence, read models, product surfaces, recovery, deletion, and required
 evidence before broader Agent capabilities are added.
 
@@ -125,3 +125,10 @@ Repository governance remains small and conventional: at most one active plan,
 normal source tests, normal CI, and concise architecture and decision records.
 OpenLife must not grow a second internal platform for planning or evaluating
 its own development.
+
+The accepted user-facing concepts, shell responsibilities, shared state
+language, Project/Profile contracts, Review behavior, and fixed product
+journeys are defined in
+`docs/architecture/product-experience-contract.md`. That contract refines this
+product definition and ADR 0018; it does not introduce another runtime or
+planning authority.

@@ -1,7 +1,8 @@
 use crate::errors::AppError;
 use base64::{engine::general_purpose, Engine as _};
 use once_cell::sync::Lazy as LazyLock;
-use openlife_core::config::AppConfig;
+use openlife_core::config::{AppConfig, SystemConfig};
+use openlife_core::conversation::{ProviderConnectionRecord, ProviderModelProfileRecord};
 use openlife_core::llm::{
     chat_completions_url, default_base_for_provider, effective_api_key_for_endpoint,
     provider_label, ProviderInvocationReceipt, ProviderInvocationStatus,
@@ -19,6 +20,10 @@ use std::sync::Arc;
 use tauri::{Runtime, State};
 use tauri_plugin_dialog::DialogExt;
 
+use crate::credential_bootstrap::{
+    inspect_provider_connections_credentials, inspect_search_credential_status,
+    ProviderConnectionsCredentialInspection,
+};
 use crate::danger_action_confirmation::{
     require_native_danger_action_confirmation, NativeDangerActionRequest,
 };
@@ -27,9 +32,10 @@ use crate::provider_network_consent::{
 };
 use crate::secret_store::{
     create_mcp_audit_key_material, hydrate_bound_provider_secret, hydrate_or_create_integrity_key,
-    inspect_existing_mcp_audit_keys, inspect_integrity_key_access, stage_config_secrets,
-    IntegrityKeyInspection, McpAuditKeyHydrationInspection, ProfileSecretStore, SecretStore,
-    CANONICAL_TASK_RECEIPT_KEY_REF, MCP_AUDIT_KEY_REF_PREFIX, PROVIDER_KEY_REF, SEARCH_KEY_REF,
+    inspect_existing_mcp_audit_keys, inspect_integrity_key_access, provider_connection_secret_ref,
+    stage_search_config_secret, IntegrityKeyInspection, McpAuditKeyHydrationInspection,
+    ProfileSecretStore, SecretStore, CANONICAL_TASK_RECEIPT_KEY_REF, MCP_AUDIT_KEY_REF_PREFIX,
+    PROVIDER_CONNECTION_KEY_REF_PREFIX,
 };
 use crate::state::{CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{
@@ -219,55 +225,45 @@ fn inspect_required_credential_snapshot(
     ])
 }
 
-fn inspect_provider_credential_status(
-    config: &AppConfig,
-    store: &dyn SecretStore,
-) -> CredentialBootstrapStatus {
-    if config.llm.openai_key_ref.as_deref() != Some(PROVIDER_KEY_REF) {
-        return CredentialBootstrapStatus::MissingExistingData;
-    }
-    match store.get(PROVIDER_KEY_REF) {
-        Ok(Some(encoded)) => match hydrate_bound_provider_secret(config, &encoded) {
-            Ok(_) => CredentialBootstrapStatus::Available,
-            Err(_) => CredentialBootstrapStatus::Invalid,
-        },
-        Ok(None) => CredentialBootstrapStatus::MissingExistingData,
-        Err(_) => CredentialBootstrapStatus::Unavailable,
-    }
-}
-
-fn inspect_search_provider_credential_status(
-    config: &AppConfig,
-    store: &dyn SecretStore,
-) -> CredentialBootstrapStatus {
-    if config.search_reuses_selected_provider_credential() {
-        return inspect_provider_credential_status(config, store);
-    }
-    if matches!(
-        config.effective_search_provider(),
-        Some("duckduckgo" | "searxng")
-    ) {
-        return CredentialBootstrapStatus::Available;
-    }
-    if config.system.search_provider_key_ref.as_deref() != Some(SEARCH_KEY_REF) {
-        return CredentialBootstrapStatus::MissingExistingData;
-    }
-    match store.get(SEARCH_KEY_REF) {
-        Ok(Some(secret)) if !secret.trim().is_empty() => CredentialBootstrapStatus::Available,
-        Ok(Some(_)) => CredentialBootstrapStatus::Invalid,
-        Ok(None) => CredentialBootstrapStatus::MissingExistingData,
-        Err(_) => CredentialBootstrapStatus::Unavailable,
-    }
-}
-
 fn inspect_current_credential_snapshot(
     data_dir: &Path,
     config: &AppConfig,
+    provider_connections: Option<&[ProviderConnectionRecord]>,
+    selected_provider_connection: Option<&ProviderConnectionRecord>,
     store: &dyn SecretStore,
 ) -> CredentialBootstrapSnapshot {
+    let provider_inspection = provider_connections.map_or(
+        ProviderConnectionsCredentialInspection {
+            status: CredentialBootstrapStatus::Unknown,
+            scope_digest: "provider_connection_store_unavailable".into(),
+        },
+        |items| inspect_provider_connections_credentials(items, store),
+    );
     inspect_required_credential_snapshot(data_dir, store)
-        .with_provider_status(inspect_provider_credential_status(config, store))
-        .with_search_provider_status(inspect_search_provider_credential_status(config, store))
+        .with_provider_connections_status(
+            provider_inspection.status,
+            Some(provider_inspection.scope_digest),
+        )
+        .with_search_provider_status(inspect_search_credential_status(
+            config,
+            selected_provider_connection,
+            store,
+        ))
+}
+
+fn selected_provider_connection_from_records<'a>(
+    connections: &'a [ProviderConnectionRecord],
+    profiles: &[ProviderModelProfileRecord],
+    selected_profile_id: Option<&str>,
+) -> Option<&'a ProviderConnectionRecord> {
+    let connection_id = profiles
+        .iter()
+        .find(|profile| Some(profile.profile_id.as_str()) == selected_profile_id)?
+        .connection_id
+        .as_str();
+    connections
+        .iter()
+        .find(|connection| connection.id == connection_id)
 }
 
 fn eligible_credential_purposes(snapshot: &CredentialBootstrapSnapshot) -> Vec<String> {
@@ -455,14 +451,29 @@ fn initialize_required_credentials_after_confirmation(
     expected_snapshot: &CredentialBootstrapSnapshot,
 ) -> Result<CredentialRecoveryReport, AppError> {
     let _process_lock = CredentialRecoveryProcessLock::acquire(data_dir)?;
-    let expected_provider_status = expected_snapshot
+    let expected_provider_connections_status = expected_snapshot
         .purposes
         .iter()
-        .find(|item| item.purpose == "provider_api_key")
+        .find(|item| item.purpose == "provider_connections")
+        .map(|item| item.status)
+        .unwrap_or(CredentialBootstrapStatus::Unknown);
+    let expected_provider_connections_scope = expected_snapshot
+        .purposes
+        .iter()
+        .find(|item| item.purpose == "provider_connections")
+        .and_then(|item| item.scope_digest.clone());
+    let expected_search_status = expected_snapshot
+        .purposes
+        .iter()
+        .find(|item| item.purpose == "search_provider_api_key")
         .map(|item| item.status)
         .unwrap_or(CredentialBootstrapStatus::Unknown);
     let current_snapshot = inspect_required_credential_snapshot(data_dir, store)
-        .with_provider_status(expected_provider_status);
+        .with_provider_connections_status(
+            expected_provider_connections_status,
+            expected_provider_connections_scope,
+        )
+        .with_search_provider_status(expected_search_status);
     if current_snapshot != *expected_snapshot {
         return Err(AppError::permission(
             "credential bootstrap snapshot changed after native confirmation; restart and retry",
@@ -586,6 +597,8 @@ fn recover_unavailable_credential_access_after_confirmation(
     native_confirmed: bool,
     data_dir: &Path,
     config: &AppConfig,
+    provider_connections: Option<&[ProviderConnectionRecord]>,
+    selected_provider_connection: Option<&ProviderConnectionRecord>,
     store: &dyn SecretStore,
     expected_snapshot: &CredentialBootstrapSnapshot,
 ) -> Result<CredentialRecoveryReport, AppError> {
@@ -605,14 +618,34 @@ fn recover_unavailable_credential_access_after_confirmation(
     // This is the deliberately interactive read. It runs only after the
     // product-native confirmation and may let the OS present its own Keychain
     // authorization UI. Secret bytes stay inside the Rust process.
-    let observed = inspect_current_credential_snapshot(data_dir, config, store);
+    let observed = inspect_current_credential_snapshot(
+        data_dir,
+        config,
+        provider_connections,
+        selected_provider_connection,
+        store,
+    );
     let mut report = recovery_report_from_snapshot(expected_snapshot);
     let mut unresolved = Vec::new();
     for purpose in &recoverable {
-        let status = observed
+        let expected_item = expected_snapshot
             .purposes
             .iter()
             .find(|item| item.purpose == *purpose)
+            .expect("recoverable purpose came from the expected snapshot");
+        let observed_item = observed
+            .purposes
+            .iter()
+            .find(|item| item.purpose == *purpose);
+        if expected_item.scope_digest.is_some()
+            && observed_item.and_then(|item| item.scope_digest.as_ref())
+                != expected_item.scope_digest.as_ref()
+        {
+            set_recovery_item_status(&mut report, purpose, "unknown");
+            unresolved.push(format!("{purpose}=scope_changed"));
+            continue;
+        }
+        let status = observed_item
             .map(|item| item.status)
             .unwrap_or(CredentialBootstrapStatus::Unknown);
         if status == CredentialBootstrapStatus::Available {
@@ -641,15 +674,15 @@ fn recover_unavailable_credential_access_after_confirmation(
 /// Mask for sensitive API keys sent to the frontend.
 const KEY_MASK: &str = "***";
 
-fn provider_endpoint_identity(config: &AppConfig) -> Option<String> {
-    let provider = config.llm.provider.trim().to_ascii_lowercase();
+fn provider_endpoint_identity(provider_id: &str, provider_endpoint: &str) -> Option<String> {
+    let provider = provider_id.trim().to_ascii_lowercase();
     if provider.is_empty() {
         return None;
     }
-    let base = if config.llm.openai_base.trim().is_empty() {
+    let base = if provider_endpoint.trim().is_empty() {
         default_base_for_provider(&provider).to_string()
     } else {
-        config.llm.openai_base.trim().to_string()
+        provider_endpoint.trim().to_string()
     };
     let endpoint = chat_completions_url(&provider, &base);
     let parsed = reqwest::Url::parse(&endpoint).ok()?;
@@ -671,21 +704,6 @@ fn provider_endpoint_identity(config: &AppConfig) -> Option<String> {
         "{provider}|{}://{host}:{port}{path}",
         parsed.scheme()
     ))
-}
-
-fn resolve_submitted_provider_api_key(submitted: &AppConfig, current: &AppConfig) -> String {
-    let submitted_key = submitted.llm.openai_key.trim();
-    if !submitted_key.is_empty() && submitted_key != KEY_MASK {
-        return submitted.llm.openai_key.clone();
-    }
-    let identity_unchanged = provider_endpoint_identity(submitted).is_some_and(|identity| {
-        provider_endpoint_identity(current).as_deref() == Some(identity.as_str())
-    });
-    if identity_unchanged {
-        current.llm.openai_key.clone()
-    } else {
-        String::new()
-    }
 }
 
 fn search_provider_identity(config: &AppConfig) -> Option<String> {
@@ -721,20 +739,6 @@ fn resolve_submitted_search_provider_api_key(submitted: &AppConfig, current: &Ap
         current.system.search_provider_key.clone()
     } else {
         String::new()
-    }
-}
-
-fn resolved_provider_credential_version(submitted: &AppConfig, current: &AppConfig) -> u64 {
-    let identity_changed =
-        provider_endpoint_identity(submitted) != provider_endpoint_identity(current);
-    let submitted_key = submitted.llm.openai_key.trim();
-    let explicit_key_changed = !submitted_key.is_empty()
-        && submitted_key != KEY_MASK
-        && submitted_key != current.llm.openai_key;
-    if identity_changed || explicit_key_changed {
-        current.llm.credential_version.saturating_add(1)
-    } else {
-        current.llm.credential_version
     }
 }
 
@@ -803,6 +807,27 @@ pub async fn recover_required_credential_access(
         ));
     }
     let data_dir = app_data_dir();
+    let (provider_connections, selected_provider_connection) =
+        match state.conversation_store.as_ref() {
+            Some(store) => {
+                let store = store.lock().await;
+                let connections = store.list_provider_connections().map_err(AppError::from)?;
+                let profiles = store
+                    .list_provider_model_profiles()
+                    .map_err(AppError::from)?;
+                let selected_profile_id = store
+                    .selected_provider_profile_id(None)
+                    .map_err(AppError::from)?;
+                let selected = selected_provider_connection_from_records(
+                    &connections,
+                    &profiles,
+                    selected_profile_id.as_deref(),
+                )
+                .cloned();
+                (Some(connections), selected)
+            }
+            None => (None, None),
+        };
 
     if !expected_access_recovery_purposes.is_empty() {
         let confirmation_arguments = serde_json::json!({
@@ -823,12 +848,16 @@ pub async fn recover_required_credential_access(
         )
         .await?;
         let config = state.config.lock().await.clone();
+        let connections_for_worker = provider_connections.clone();
+        let selected_connection_for_worker = selected_provider_connection.clone();
         let snapshot_for_worker = expected_snapshot.clone();
         return tauri::async_runtime::spawn_blocking(move || {
             recover_unavailable_credential_access_after_confirmation(
                 true,
                 &data_dir,
                 &config,
+                connections_for_worker.as_deref(),
+                selected_connection_for_worker.as_ref(),
                 &ProfileSecretStore,
                 &snapshot_for_worker,
             )
@@ -841,10 +870,14 @@ pub async fn recover_required_credential_access(
 
     let pre_confirmation_data_dir = data_dir.clone();
     let pre_confirmation_config = state.config.lock().await.clone();
+    let pre_confirmation_connections = provider_connections;
+    let pre_confirmation_selected_connection = selected_provider_connection;
     let pre_confirmation_snapshot = tauri::async_runtime::spawn_blocking(move || {
         inspect_current_credential_snapshot(
             &pre_confirmation_data_dir,
             &pre_confirmation_config,
+            pre_confirmation_connections.as_deref(),
+            pre_confirmation_selected_connection.as_ref(),
             &ProfileSecretStore,
         )
     })
@@ -887,21 +920,38 @@ pub async fn recover_required_credential_access(
     .map_err(|error| AppError::internal(format!("credential recovery worker failed: {error}")))?
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EditableSettingsConfig {
+    pub prefer_local_model: bool,
+    pub local_model: String,
+    #[serde(default)]
+    pub system: SystemConfig,
+}
+
+impl From<&AppConfig> for EditableSettingsConfig {
+    fn from(config: &AppConfig) -> Self {
+        Self {
+            prefer_local_model: config.prefer_local_model,
+            local_model: config.local_model.clone(),
+            system: config.system.clone(),
+        }
+    }
+}
+
 #[tauri::command]
-pub async fn get_config(state: State<'_, Arc<AppState>>) -> Result<AppConfig, AppError> {
+pub async fn get_config(
+    state: State<'_, Arc<AppState>>,
+) -> Result<EditableSettingsConfig, AppError> {
     state
         .persistence_coordinator
         .require_trusted_read("ConfigStore")
         .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
-    let mut cfg = state.config.lock().await.clone();
-    // Sanitize API keys before sending to frontend
-    if !cfg.llm.openai_key.is_empty() {
-        cfg.llm.openai_key = KEY_MASK.to_string();
+    let cfg = state.config.lock().await;
+    let mut editable = EditableSettingsConfig::from(&*cfg);
+    if !editable.system.search_provider_key.is_empty() {
+        editable.system.search_provider_key = KEY_MASK.to_string();
     }
-    if !cfg.system.search_provider_key.is_empty() {
-        cfg.system.search_provider_key = KEY_MASK.to_string();
-    }
-    Ok(cfg)
+    Ok(editable)
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -1015,7 +1065,7 @@ pub async fn select_artifact_output_directory<R: Runtime>(
 
 #[tauri::command]
 pub async fn save_config(
-    mut config: AppConfig,
+    submitted: EditableSettingsConfig,
     state: State<'_, Arc<AppState>>,
 ) -> Result<(), AppError> {
     state
@@ -1023,37 +1073,27 @@ pub async fn save_config(
         .require_effects_allowed()
         .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
     let _config_write_guard = CONFIG_WRITE_COORDINATOR.lock().await;
-    config.normalize_provider_from_base();
     let data_dir = app_data_dir();
     let config_path = data_dir.join("config.yaml");
 
-    // Preserve existing API key if the submitted config has a mask or empty key
     let current_config = {
         let cfg = state.config.lock().await;
         cfg.clone()
     };
+    let mut config = current_config.clone();
+    config.prefer_local_model = submitted.prefer_local_model;
+    config.local_model = submitted.local_model;
+    config.system = submitted.system;
     // Filesystem authority is never accepted from the editable Settings JSON.
     // The native picker owns Artifact destination validation; Project commands
     // and future dedicated read-root commands own their separate scopes.
     preserve_backend_owned_filesystem_scopes(&mut config, &current_config);
-    let provider_identity_unchanged = provider_endpoint_identity(&config).is_some_and(|identity| {
-        provider_endpoint_identity(&current_config).as_deref() == Some(identity.as_str())
-    });
-    config.llm.credential_version = resolved_provider_credential_version(&config, &current_config);
-    config.llm.openai_key = resolve_submitted_provider_api_key(&config, &current_config);
     let search_provider_identity_unchanged =
         search_provider_identity(&config).is_some_and(|identity| {
             search_provider_identity(&current_config).as_deref() == Some(identity.as_str())
         });
     config.system.search_provider_key =
         resolve_submitted_search_provider_api_key(&config, &current_config);
-    if !provider_identity_unchanged {
-        // A secret reference is bound to the provider plus canonical endpoint. A masked
-        // frontend value cannot carry an old credential to a different destination.
-        config.llm.openai_key_ref = None;
-    } else if config.llm.openai_key_ref.is_none() {
-        config.llm.openai_key_ref = current_config.llm.openai_key_ref;
-    }
     if !search_provider_identity_unchanged {
         config.system.search_provider_key_ref = None;
     } else if config.system.search_provider_key_ref.is_none() {
@@ -1061,7 +1101,8 @@ pub async fn save_config(
     }
 
     let secret_store = ProfileSecretStore;
-    let rollback = stage_config_secrets(&mut config, &secret_store).map_err(AppError::from)?;
+    let rollback =
+        stage_search_config_secret(&mut config, &secret_store).map_err(AppError::from)?;
     if let Err(save_error) = config.save(&config_path) {
         return match rollback.rollback(&secret_store) {
             Ok(()) => Err(AppError::from(save_error)),
@@ -1072,6 +1113,481 @@ pub async fn save_config(
     }
     replace_runtime_provider_config(state.inner(), config).await;
     Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConnectionModelViewModel {
+    pub profile_id: String,
+    pub model_id: String,
+    pub display_name: String,
+    pub selected: bool,
+    pub validation_state: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConnectionViewModel {
+    pub id: String,
+    pub provider_id: String,
+    pub display_name: String,
+    pub endpoint: String,
+    pub credential_state: String,
+    pub validation_state: String,
+    pub models: Vec<ProviderConnectionModelViewModel>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConnectionsViewModel {
+    pub connections: Vec<ProviderConnectionViewModel>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveProviderConnectionInput {
+    pub id: Option<String>,
+    pub provider_id: String,
+    pub display_name: String,
+    pub endpoint: String,
+    pub model_id: String,
+    pub credential: Option<String>,
+}
+
+pub(crate) fn provider_connection_config(
+    base: &AppConfig,
+    connection: &ProviderConnectionRecord,
+    model_id: &str,
+    credential: String,
+) -> AppConfig {
+    let mut config = base.clone();
+    config.prefer_local_model = false;
+    config.llm.provider = connection.provider_id.clone();
+    config.llm.openai_base = connection.endpoint.clone();
+    config.llm.chat_model = model_id.to_string();
+    config.llm.openai_key = credential;
+    config.llm.openai_key_ref = connection.credential_reference.clone();
+    config.llm.credential_version = connection.credential_version;
+    config
+}
+
+fn stable_connection_model_profile_id(connection_id: &str, model_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let material = format!("openlife_provider_profile_v2\0{connection_id}\0{model_id}");
+    let digest = format!("{:x}", Sha256::digest(material.as_bytes()));
+    format!("provider-profile:{}", &digest[..24])
+}
+
+pub(crate) fn provider_connection_validation_path(connection_id: &str) -> PathBuf {
+    use sha2::{Digest, Sha256};
+
+    let digest = format!("{:x}", Sha256::digest(connection_id.as_bytes()));
+    app_data_dir()
+        .join("provider-validations")
+        .join(format!("{digest}.json"))
+}
+
+async fn provider_connections_view_model(
+    state: &Arc<AppState>,
+) -> Result<ProviderConnectionsViewModel, AppError> {
+    let store = state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::db("conversation_store_unavailable"))?;
+    let (connections, profiles, selected_profile_id) = {
+        let store = store.lock().await;
+        (
+            store.list_provider_connections().map_err(AppError::from)?,
+            store
+                .list_provider_model_profiles()
+                .map_err(AppError::from)?,
+            store
+                .selected_provider_profile_id(None)
+                .map_err(AppError::from)?,
+        )
+    };
+    let secret_store = ProfileSecretStore;
+    let mut view_connections = Vec::with_capacity(connections.len());
+    for connection in connections
+        .into_iter()
+        .filter(|connection| connection.endpoint_class == "cloud")
+    {
+        let models = profiles
+            .iter()
+            .filter(|profile| profile.connection_id == connection.id)
+            .map(|profile| ProviderConnectionModelViewModel {
+                profile_id: profile.profile_id.clone(),
+                model_id: profile.model_id.clone(),
+                display_name: profile.display_name.clone(),
+                selected: selected_profile_id.as_deref() == Some(profile.profile_id.as_str()),
+                validation_state: profile.validation_state.clone(),
+            })
+            .collect::<Vec<_>>();
+        let credential_state = match connection.credential_reference.as_deref() {
+            None if connection.endpoint_class == "local" => "not_required",
+            None => "missing",
+            Some(reference) => match secret_store.get(reference) {
+                Ok(Some(encoded)) => {
+                    if hydrate_bound_provider_secret(
+                        &connection.provider_id,
+                        &connection.endpoint,
+                        connection.credential_version,
+                        &encoded,
+                    )
+                    .is_ok()
+                    {
+                        "stored"
+                    } else {
+                        "invalid"
+                    }
+                }
+                Ok(None) => "missing",
+                Err(_) => "unavailable",
+            },
+        }
+        .to_string();
+        view_connections.push(ProviderConnectionViewModel {
+            id: connection.id,
+            provider_id: connection.provider_id,
+            display_name: connection.display_name,
+            endpoint: connection.endpoint,
+            credential_state,
+            validation_state: connection.validation_state,
+            models,
+        });
+    }
+    Ok(ProviderConnectionsViewModel {
+        connections: view_connections,
+    })
+}
+
+#[tauri::command]
+pub async fn get_provider_connections(
+    state: State<'_, Arc<AppState>>,
+) -> Result<ProviderConnectionsViewModel, AppError> {
+    provider_connections_view_model(state.inner()).await
+}
+
+#[tauri::command]
+pub async fn save_provider_connection(
+    input: SaveProviderConnectionInput,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ProviderConnectionsViewModel, AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_for_stores(&["ConversationStore"])
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    let provider_id = input.provider_id.trim().to_ascii_lowercase();
+    if !matches!(
+        provider_id.as_str(),
+        "deepseek"
+            | "openai"
+            | "openrouter"
+            | "gemini"
+            | "siliconflow"
+            | "moonshot"
+            | "dashscope"
+            | "zhipu"
+            | "custom"
+    ) {
+        return Err(AppError::external("provider_connection_provider_invalid"));
+    }
+    let endpoint = input.endpoint.trim().trim_end_matches('/').to_string();
+    let model_id = input.model_id.trim().to_string();
+    if model_id.is_empty() || model_id.len() > 512 {
+        return Err(AppError::external("provider_connection_model_invalid"));
+    }
+    if provider_endpoint_identity(&provider_id, &endpoint).is_none() {
+        return Err(AppError::external("provider_connection_endpoint_invalid"));
+    }
+    let connection_id = input.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let store = state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::db("conversation_store_unavailable"))?;
+    let existing = store
+        .lock()
+        .await
+        .get_provider_connection(&connection_id)
+        .map_err(AppError::from)?;
+    let identity_changed = existing.as_ref().is_some_and(|connection| {
+        connection.provider_id != provider_id || connection.endpoint != endpoint
+    });
+    let submitted_credential = input
+        .credential
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty() && *value != KEY_MASK)
+        .map(str::to_string);
+    if (existing.is_none() || identity_changed) && submitted_credential.is_none() {
+        return Err(AppError::external(
+            "provider_connection_credential_required",
+        ));
+    }
+    let existing_credential_reference = existing
+        .as_ref()
+        .and_then(|connection| connection.credential_reference.clone());
+    let credential_reference = existing_credential_reference
+        .as_deref()
+        .filter(|reference| reference.starts_with(PROVIDER_CONNECTION_KEY_REF_PREFIX))
+        .map(str::to_string)
+        .unwrap_or_else(|| provider_connection_secret_ref(&connection_id));
+    let credential_version = match (&existing, &submitted_credential) {
+        (Some(connection), Some(_)) => connection.credential_version.saturating_add(1),
+        (Some(connection), None) => connection.credential_version,
+        (None, Some(_)) => 1,
+        (None, None) => 0,
+    };
+    let existing_profiles = store
+        .lock()
+        .await
+        .list_provider_model_profiles()
+        .map_err(AppError::from)?;
+    let existing_profile = existing_profiles
+        .iter()
+        .find(|profile| profile.connection_id == connection_id && profile.model_id == model_id);
+    let now = chrono::Utc::now();
+    let submitted_display_name = input.display_name.trim();
+    let connection = ProviderConnectionRecord {
+        id: connection_id.clone(),
+        provider_id: provider_id.clone(),
+        display_name: if submitted_display_name.is_empty() {
+            provider_label(&provider_id)
+        } else {
+            submitted_display_name.chars().take(256).collect::<String>()
+        },
+        endpoint,
+        endpoint_class: "cloud".into(),
+        credential_reference: Some(credential_reference.clone()),
+        credential_version,
+        protocol: "openai_compatible_chat_completions".into(),
+        privacy_boundary: "provider_hosted".into(),
+        validation_state: if existing.is_some()
+            && !identity_changed
+            && submitted_credential.is_none()
+            && existing_profile.is_some()
+        {
+            existing
+                .as_ref()
+                .map(|value| value.validation_state.clone())
+                .unwrap_or_else(|| "unverified".into())
+        } else {
+            "unverified".into()
+        },
+        created_at: existing
+            .as_ref()
+            .map(|value| value.created_at)
+            .unwrap_or(now),
+        updated_at: now,
+    };
+    let profile_id = existing_profile
+        .map(|profile| profile.profile_id.clone())
+        .unwrap_or_else(|| stable_connection_model_profile_id(&connection_id, &model_id));
+    let profile = ProviderModelProfileRecord {
+        profile_id,
+        connection_id,
+        model_id: model_id.clone(),
+        display_name: model_id,
+        capability_snapshot_json: "{}".into(),
+        capability_source: "settings_user_configured".into(),
+        validation_state: if existing.is_some()
+            && !identity_changed
+            && submitted_credential.is_none()
+        {
+            existing_profile
+                .map(|profile| profile.validation_state.clone())
+                .unwrap_or_else(|| "unverified".into())
+        } else {
+            "unverified".into()
+        },
+        created_at: now,
+        updated_at: now,
+    };
+    let secret_store = ProfileSecretStore;
+    let encoded_secret_to_write = if let Some(credential) = submitted_credential {
+        Some(
+            crate::secret_store::encode_provider_secret(
+                &connection.provider_id,
+                &connection.endpoint,
+                connection.credential_version,
+                &credential,
+            )
+            .map_err(AppError::from)?,
+        )
+    } else if existing_credential_reference.as_deref() != Some(credential_reference.as_str()) {
+        let source_reference = existing_credential_reference
+            .as_deref()
+            .ok_or_else(|| AppError::external("provider_connection_credential_required"))?;
+        Some(
+            secret_store
+                .get(source_reference)
+                .map_err(AppError::from)?
+                .ok_or_else(|| AppError::external("provider_connection_credential_missing"))?,
+        )
+    } else {
+        None
+    };
+    let previous_secret = if encoded_secret_to_write.is_some() {
+        Some(
+            secret_store
+                .get(&credential_reference)
+                .map_err(AppError::from)?,
+        )
+    } else {
+        None
+    };
+    if let Some(encoded) = encoded_secret_to_write {
+        secret_store
+            .set(&credential_reference, &encoded)
+            .map_err(AppError::from)?;
+    }
+    let persist_result = store
+        .lock()
+        .await
+        .upsert_provider_model_profile(&connection, &profile);
+    if let Err(error) = persist_result {
+        let rollback = match previous_secret {
+            Some(Some(value)) => secret_store.set(&credential_reference, &value),
+            Some(None) => secret_store.delete(&credential_reference),
+            None => Ok(()),
+        };
+        return match rollback {
+            Ok(()) => Err(AppError::from(error)),
+            Err(rollback_error) => Err(AppError::internal(format!(
+                "provider connection save failed: {error}; credential rollback failed: {rollback_error}"
+            ))),
+        };
+    }
+    provider_connections_view_model(state.inner()).await
+}
+
+#[tauri::command]
+pub async fn delete_provider_connection(
+    connection_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<ProviderConnectionsViewModel, AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_for_stores(&["ConversationStore"])
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    let store = state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::db("conversation_store_unavailable"))?;
+    let connection = store
+        .lock()
+        .await
+        .get_provider_connection(&connection_id)
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::external("provider_connection_not_found"))?;
+    let secret_store = ProfileSecretStore;
+    let previous_secret = match connection.credential_reference.as_deref() {
+        Some(reference) if reference.starts_with(PROVIDER_CONNECTION_KEY_REF_PREFIX) => {
+            let previous = secret_store.get(reference).map_err(AppError::from)?;
+            secret_store.delete(reference).map_err(AppError::from)?;
+            previous.map(|value| (reference.to_string(), value))
+        }
+        Some(_) | None => None,
+    };
+    if let Err(error) = store
+        .lock()
+        .await
+        .delete_provider_connection(&connection_id)
+    {
+        if let Some((reference, value)) = previous_secret {
+            secret_store.set(&reference, &value).map_err(|rollback_error| {
+                AppError::internal(format!(
+                    "provider connection delete failed: {error}; credential rollback failed: {rollback_error}"
+                ))
+            })?;
+        }
+        return Err(AppError::from(error));
+    }
+    provider_connections_view_model(state.inner()).await
+}
+
+#[tauri::command]
+pub async fn test_provider_connection(
+    connection_id: String,
+    profile_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<LlmConnectionTestResult, AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_for_stores(&["ConversationStore"])
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "read_only_degraded"))?;
+    let store = state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::db("conversation_store_unavailable"))?;
+    let (connection, profile) = {
+        let store = store.lock().await;
+        let connection = store
+            .get_provider_connection(&connection_id)
+            .map_err(AppError::from)?
+            .ok_or_else(|| AppError::external("provider_connection_not_found"))?;
+        let profile = store
+            .list_provider_model_profiles()
+            .map_err(AppError::from)?
+            .into_iter()
+            .find(|profile| {
+                profile.profile_id == profile_id && profile.connection_id == connection_id
+            })
+            .ok_or_else(|| AppError::external("provider_connection_model_not_found"))?;
+        (connection, profile)
+    };
+    let reference = connection
+        .credential_reference
+        .as_deref()
+        .ok_or_else(|| AppError::external("provider_connection_credential_missing"))?;
+    let encoded = ProfileSecretStore
+        .get(reference)
+        .map_err(AppError::from)?
+        .ok_or_else(|| AppError::external("provider_connection_credential_missing"))?;
+    let base_config = state.config.lock().await.clone();
+    let credential = hydrate_bound_provider_secret(
+        &connection.provider_id,
+        &connection.endpoint,
+        connection.credential_version,
+        &encoded,
+    )
+    .map_err(|_| AppError::external("provider_connection_credential_invalid"))?;
+    let config =
+        provider_connection_config(&base_config, &connection, &profile.model_id, credential);
+    let validation_path = provider_connection_validation_path(&connection_id);
+    if let Some(parent) = validation_path.parent() {
+        std::fs::create_dir_all(parent).map_err(AppError::from)?;
+    }
+    let result = test_provider_connection_config_with_state_and_validation_path(
+        config,
+        state.inner(),
+        &validation_path,
+    )
+    .await?;
+    let validation_state = if result.ok {
+        "ready"
+    } else {
+        result.validation_status.as_str()
+    };
+    let store = store.lock().await;
+    store
+        .update_provider_connection_validation_state(&connection_id, validation_state)
+        .map_err(AppError::from)?;
+    store
+        .update_provider_model_profile_validation_state(&profile_id, validation_state)
+        .map_err(AppError::from)?;
+    if result.ok
+        && store
+            .selected_provider_profile_id(None)
+            .map_err(AppError::from)?
+            .is_none()
+    {
+        store
+            .set_selected_provider_profile(None, &profile_id)
+            .map_err(AppError::from)?;
+    }
+    Ok(result)
 }
 
 #[derive(serde::Serialize)]
@@ -1096,20 +1612,7 @@ pub struct LlmConnectionTestResult {
     pub provider_invocation_receipt: Option<ProviderInvocationReceipt>,
 }
 
-#[tauri::command]
-pub async fn test_llm_connection(
-    config: AppConfig,
-    state: State<'_, Arc<AppState>>,
-) -> Result<LlmConnectionTestResult, AppError> {
-    test_llm_connection_with_state_and_validation_path(
-        config,
-        state.inner(),
-        &crate::provider_validation::provider_validation_path(),
-    )
-    .await
-}
-
-pub(crate) async fn test_llm_connection_with_state_and_validation_path(
+pub(crate) async fn test_provider_connection_config_with_state_and_validation_path(
     mut config: AppConfig,
     state: &Arc<AppState>,
     validation_path: &std::path::Path,
@@ -1121,13 +1624,10 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
     let current_runtime = state.provider_runtime_snapshot().await;
     let current_runtime_coherent = current_runtime.coherent;
     let current_config = current_runtime.config;
-    config.llm.credential_version = resolved_provider_credential_version(&config, &current_config);
-    config.llm.openai_key = resolve_submitted_provider_api_key(&config, &current_config);
-
     if !current_runtime_coherent {
         let record = crate::provider_validation::failed_provider_validation_record(
             &config,
-            "settings_manual_test",
+            "settings_provider_connection_test",
             "provider_runtime_generation_incoherent",
             chrono::Utc::now(),
         );
@@ -1155,7 +1655,7 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
     if api_key.trim().is_empty() {
         let record = crate::provider_validation::failed_provider_validation_record(
             &config,
-            "settings_manual_test",
+            "settings_provider_connection_test",
             "missing_api_key",
             chrono::Utc::now(),
         );
@@ -1184,7 +1684,7 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
     if !backend_network_policy.enabled {
         let record = crate::provider_validation::failed_provider_validation_record(
             &config,
-            "settings_manual_test",
+            "settings_provider_connection_test",
             "network_policy_disabled",
             chrono::Utc::now(),
         );
@@ -1215,7 +1715,7 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
     if model.is_empty() {
         let record = crate::provider_validation::failed_provider_validation_record(
             &config,
-            "settings_manual_test",
+            "settings_provider_connection_test",
             "missing_model",
             chrono::Utc::now(),
         );
@@ -1311,7 +1811,7 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
         Err(_) => {
             let record = crate::provider_validation::failed_provider_validation_record(
                 &config,
-                "settings_manual_test",
+                "settings_provider_connection_test",
                 "provider_probe_pre_dispatch_rejected",
                 chrono::Utc::now(),
             );
@@ -1346,6 +1846,7 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
     let prepared_network_policy = prepared.network_policy.clone();
     let prepared_network_policy_decision = prepared.network_policy_decision.clone();
     let outcome = probe_scheduler.execute_prepared(prepared).await;
+    let response_content = outcome.result.as_ref().ok().cloned();
     let result_has_content = outcome
         .result
         .as_ref()
@@ -1356,7 +1857,7 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
     let mut receipt = None;
     let mut terminal_status = None;
     let mut completed = false;
-    let record = match (observed_receipt.as_ref(), terminal_proof) {
+    let mut record = match (observed_receipt.as_ref(), terminal_proof) {
         (Some(observed), Some(proof)) if proof.receipt() == observed => {
             let candidate_status = proof.receipt().status;
             let candidate_receipt = proof.receipt().clone();
@@ -1372,7 +1873,7 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
             };
             match crate::provider_validation::provider_validation_record_with_terminal_proof(
                 &config,
-                "settings_manual_test",
+                "settings_provider_connection_test",
                 proof,
                 &prepared_provider_config_generation,
                 &prepared_network_policy,
@@ -1391,7 +1892,7 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
                 }
                 Err(_) => crate::provider_validation::failed_provider_validation_record(
                     &config,
-                    "settings_manual_test",
+                    "settings_provider_connection_test",
                     "provider_terminal_proof_invalid",
                     write_observed_at,
                 ),
@@ -1399,28 +1900,42 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
         }
         (Some(_), None) => crate::provider_validation::failed_provider_validation_record(
             &config,
-            "settings_manual_test",
+            "settings_provider_connection_test",
             "provider_terminal_proof_missing",
             write_observed_at,
         ),
         (None, None) => crate::provider_validation::failed_provider_validation_record(
             &config,
-            "settings_manual_test",
+            "settings_provider_connection_test",
             "provider_not_attempted",
             write_observed_at,
         ),
         (None, Some(_)) | (Some(_), Some(_)) => {
             crate::provider_validation::failed_provider_validation_record(
                 &config,
-                "settings_manual_test",
+                "settings_provider_connection_test",
                 "provider_terminal_proof_mismatch",
                 write_observed_at,
             )
         }
     };
+    if completed {
+        let response_content = response_content
+            .as_deref()
+            .ok_or_else(|| AppError::external("provider Work compatibility response missing"))?;
+        crate::provider_validation::attach_work_compatibility_evaluation(
+            &config,
+            &mut record,
+            response_content,
+        )?;
+    }
     crate::provider_validation::save_provider_validation_record_to_path(validation_path, &record)?;
 
     if completed {
+        let work_compatibility_validated = record
+            .work_compatibility
+            .as_ref()
+            .is_some_and(|evidence| evidence.status == "validated");
         let model_note = if model.to_lowercase().contains("reasoner") {
             " 当前选择的是推理模型，首次可见输出可能更慢；试用聊天建议优先使用 deepseek-chat 这类通用聊天模型。"
         } else {
@@ -1429,7 +1944,15 @@ pub(crate) async fn test_llm_connection_with_state_and_validation_path(
         Ok(LlmConnectionTestResult {
             ok: true,
             provider: label,
-            message: format!("连接成功，当前供应商模型可用。{}", model_note),
+            message: format!(
+                "连接成功。{}{}",
+                if work_compatibility_validated {
+                    "Work 结构化协议已通过版本化评测。"
+                } else {
+                    "Work 结构化协议评测未通过；Chat 可用不代表 Work 可用。"
+                },
+                model_note
+            ),
             validation_status: "validated".into(),
             network_policy_decision_id: Some(original_network_policy_decision_id),
             effective_network_policy_decision_id: Some(
@@ -1486,6 +2009,7 @@ mod tests {
         authorize_provider_network_dispatch, NetworkConsentSubmissionScope,
         ProviderNetworkAuthorization,
     };
+    use crate::secret_store::{PROVIDER_KEY_REF, SEARCH_KEY_REF};
     use openlife_core::llm::provider_endpoint_is_official;
     use std::collections::HashMap;
     use std::sync::Mutex;
@@ -1527,6 +2051,25 @@ mod tests {
             submitted.system.additional_read_roots,
             vec!["/authorized/read"]
         );
+    }
+
+    #[test]
+    fn editable_settings_projection_excludes_provider_profile_authority() {
+        let mut current = AppConfig::default();
+        current.llm.provider = "openrouter".into();
+        current.llm.openai_base = "https://openrouter.ai/api/v1".into();
+        current.llm.chat_model = "stealth/ox-alpha".into();
+        current.llm.openai_key = "runtime-only-secret".into();
+        current.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
+        current.llm.credential_version = 7;
+
+        let editable = EditableSettingsConfig::from(&current);
+        let serialized = serde_json::to_value(editable).unwrap();
+
+        assert!(serialized.get("llm").is_none());
+        assert!(!serialized.to_string().contains("openrouter"));
+        assert!(!serialized.to_string().contains("runtime-only-secret"));
+        assert_eq!(serialized["local_model"], current.local_model);
     }
 
     #[test]
@@ -1661,11 +2204,32 @@ mod tests {
             )
             .unwrap();
         let mut config = AppConfig::default();
-        config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
+        let connection_secret_ref = provider_connection_secret_ref("recovery-connection");
+        let now = chrono::Utc::now();
+        let connection = ProviderConnectionRecord {
+            id: "recovery-connection".into(),
+            provider_id: "deepseek".into(),
+            display_name: "DeepSeek".into(),
+            endpoint: "https://api.deepseek.com".into(),
+            endpoint_class: "cloud".into(),
+            credential_reference: Some(connection_secret_ref.clone()),
+            credential_version: 0,
+            protocol: "openai_compatible_chat_completions".into(),
+            privacy_boundary: "provider_hosted".into(),
+            validation_state: "unverified".into(),
+            created_at: now,
+            updated_at: now,
+        };
         store
             .set(
-                PROVIDER_KEY_REF,
-                &crate::secret_store::encode_provider_secret(&config, "sk-recovery-test").unwrap(),
+                &connection_secret_ref,
+                &crate::secret_store::encode_provider_secret(
+                    &connection.provider_id,
+                    &connection.endpoint,
+                    connection.credential_version,
+                    "sk-recovery-test",
+                )
+                .unwrap(),
             )
             .unwrap();
         config.system.search_provider_key_ref = Some(SEARCH_KEY_REF.into());
@@ -1673,17 +2237,25 @@ mod tests {
             .set(SEARCH_KEY_REF, "sk-search-recovery-test")
             .unwrap();
         *store.writes.lock().unwrap() = 0;
+        let provider_scope =
+            inspect_provider_connections_credentials(std::slice::from_ref(&connection), &store)
+                .scope_digest;
 
         let expected = CredentialBootstrapSnapshot::from_statuses([
             CredentialBootstrapStatus::Unavailable,
             CredentialBootstrapStatus::InitializationRequired,
         ])
-        .with_provider_status(CredentialBootstrapStatus::Unavailable)
+        .with_provider_connections_status(
+            CredentialBootstrapStatus::Unavailable,
+            Some(provider_scope),
+        )
         .with_search_provider_status(CredentialBootstrapStatus::Unavailable);
         let report = recover_unavailable_credential_access_after_confirmation(
             true,
             directory.path(),
             &config,
+            Some(std::slice::from_ref(&connection)),
+            None,
             &store,
             &expected,
         )
@@ -1693,7 +2265,7 @@ mod tests {
         assert!(!report.initialization_completed_for_restart);
         for purpose in [
             "canonical_task_receipts",
-            "provider_api_key",
+            "provider_connections",
             "search_provider_api_key",
         ] {
             assert_eq!(
@@ -1724,24 +2296,105 @@ mod tests {
     }
 
     #[test]
-    fn official_deepseek_search_reports_the_selected_provider_credential_status() {
+    fn credential_access_recovery_rejects_changed_provider_connection_scope() {
+        let directory = tempfile::tempdir().unwrap();
         let store = RecoverySecretStore::default();
-        let mut config = AppConfig::default();
-        config.prefer_local_model = false;
-        config.llm.provider = "deepseek".into();
-        config.llm.openai_base = "https://api.deepseek.com".into();
-        config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
-        config.system.search_provider = "deepseek".into();
+        let config = AppConfig::default();
+        let secret_ref = provider_connection_secret_ref("original-connection");
+        let now = chrono::Utc::now();
+        let connection = ProviderConnectionRecord {
+            id: "original-connection".into(),
+            provider_id: "deepseek".into(),
+            display_name: "DeepSeek".into(),
+            endpoint: "https://api.deepseek.com".into(),
+            endpoint_class: "cloud".into(),
+            credential_reference: Some(secret_ref.clone()),
+            credential_version: 0,
+            protocol: "openai_compatible_chat_completions".into(),
+            privacy_boundary: "provider_hosted".into(),
+            validation_state: "unverified".into(),
+            created_at: now,
+            updated_at: now,
+        };
         store
             .set(
-                PROVIDER_KEY_REF,
-                &crate::secret_store::encode_provider_secret(&config, "sk-shared-deepseek")
-                    .unwrap(),
+                &secret_ref,
+                &crate::secret_store::encode_provider_secret(
+                    &connection.provider_id,
+                    &connection.endpoint,
+                    connection.credential_version,
+                    "sk-scope",
+                )
+                .unwrap(),
             )
             .unwrap();
+        *store.writes.lock().unwrap() = 0;
+        let expected_scope =
+            inspect_provider_connections_credentials(std::slice::from_ref(&connection), &store)
+                .scope_digest;
+        let expected = CredentialBootstrapSnapshot::from_statuses([
+            CredentialBootstrapStatus::InitializationRequired,
+            CredentialBootstrapStatus::InitializationRequired,
+        ])
+        .with_provider_connections_status(
+            CredentialBootstrapStatus::Unavailable,
+            Some(expected_scope),
+        );
+        let mut changed_connection = connection;
+        changed_connection.id = "replacement-connection".into();
+
+        let report = recover_unavailable_credential_access_after_confirmation(
+            true,
+            directory.path(),
+            &config,
+            Some(std::slice::from_ref(&changed_connection)),
+            None,
+            &store,
+            &expected,
+        )
+        .unwrap();
+
+        assert!(!report.restart_required);
+        assert_eq!(
+            report
+                .items
+                .iter()
+                .find(|item| item.purpose == "provider_connections")
+                .unwrap()
+                .status,
+            "unknown"
+        );
+        assert!(report
+            .blocked_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("provider_connections=scope_changed")));
+        assert_eq!(*store.writes.lock().unwrap(), 0);
+        assert_eq!(*store.deletes.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn official_deepseek_search_does_not_duplicate_provider_connection_credential_status() {
+        let store = RecoverySecretStore::default();
+        let mut config = AppConfig::default();
+        config.system.search_provider = "deepseek".into();
+        let now = chrono::Utc::now();
+        let selected_connection = ProviderConnectionRecord {
+            id: "selected-deepseek".into(),
+            provider_id: "deepseek".into(),
+            display_name: "DeepSeek".into(),
+            endpoint: "https://api.deepseek.com".into(),
+            endpoint_class: "cloud".into(),
+            credential_reference: Some("profile-secret://selected-deepseek".into()),
+            credential_version: 1,
+            protocol: "openai_compatible_chat_completions".into(),
+            privacy_boundary: "provider_hosted".into(),
+            validation_state: "ready".into(),
+            created_at: now,
+            updated_at: now,
+        };
 
         assert_eq!(
-            inspect_search_provider_credential_status(&config, &store),
+            inspect_search_credential_status(&config, Some(&selected_connection), &store),
             CredentialBootstrapStatus::Available
         );
         assert!(store.get(SEARCH_KEY_REF).unwrap().is_none());
@@ -1811,7 +2464,7 @@ mod tests {
         let arguments = serde_json::json!({
             "eligiblePurposeIds": purposes,
             "affectedCount": purposes.len(),
-            "bootstrapSnapshotVersion": "credential_bootstrap_v1",
+            "bootstrapSnapshotVersion": "credential_bootstrap_v2",
             "bootstrapSnapshotDigest": "a".repeat(64),
         });
 
@@ -2087,30 +2740,6 @@ mod tests {
     }
 
     #[test]
-    fn masked_provider_key_is_bound_to_the_same_provider_endpoint_identity() {
-        let mut current = AppConfig::default();
-        current.llm.provider = "openai".into();
-        current.llm.openai_base = "https://api.openai.com/v1".into();
-        current.llm.openai_key = "sk-current-openai".into();
-
-        let mut same = current.clone();
-        same.llm.openai_key = KEY_MASK.into();
-        assert_eq!(
-            resolve_submitted_provider_api_key(&same, &current),
-            "sk-current-openai"
-        );
-
-        let mut changed_provider = same.clone();
-        changed_provider.llm.provider = "deepseek".into();
-        changed_provider.llm.openai_base = "https://api.deepseek.com".into();
-        assert!(resolve_submitted_provider_api_key(&changed_provider, &current).is_empty());
-
-        let mut changed_endpoint = same;
-        changed_endpoint.llm.openai_base = "https://capture.example/v1".into();
-        assert!(resolve_submitted_provider_api_key(&changed_endpoint, &current).is_empty());
-    }
-
-    #[test]
     fn masked_search_key_is_bound_to_the_same_search_provider_identity() {
         let mut current = AppConfig::default();
         current.system.search_provider = "deepseek".into();
@@ -2153,30 +2782,6 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn provider_credential_version_changes_only_with_secret_identity() {
-        let mut current = AppConfig::default();
-        current.llm.provider = "openai".into();
-        current.llm.openai_base = "https://api.openai.com/v1".into();
-        current.llm.openai_key = "sk-current".into();
-        current.llm.credential_version = 7;
-
-        let mut masked_same = current.clone();
-        masked_same.llm.openai_key = KEY_MASK.into();
-        assert_eq!(
-            resolved_provider_credential_version(&masked_same, &current),
-            7
-        );
-
-        let mut replaced = masked_same.clone();
-        replaced.llm.openai_key = "sk-replaced".into();
-        assert_eq!(resolved_provider_credential_version(&replaced, &current), 8);
-
-        let mut moved = masked_same;
-        moved.llm.openai_base = "https://custom.example/v1".into();
-        assert_eq!(resolved_provider_credential_version(&moved, &current), 8);
-    }
-
     #[tokio::test]
     async fn explicit_provider_probe_uses_scheduler_receipt_and_keeps_loopback_capability() {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2190,7 +2795,14 @@ mod tests {
             let read = socket.read(&mut request).await.unwrap();
             *captured_server.lock().unwrap() =
                 String::from_utf8_lossy(&request[..read]).to_string();
-            let body = r#"{"choices":[{"message":{"content":"pong"}}]}"#;
+            let body = serde_json::json!({
+                "choices": [{
+                    "message": {
+                        "content": r#"{"schemaVersion":"openlife.agent-step.v1","step":{"kind":"final_answer","payload":{"content":"ready","evidenceRefs":[],"artifactRefs":[],"sourceBlocks":[]}}}"#
+                    }
+                }]
+            })
+            .to_string();
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
                 body.len(),
@@ -2213,14 +2825,17 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let validation_path = dir.path().join("provider-validation.json");
 
-        let result =
-            test_llm_connection_with_state_and_validation_path(config, &state, &validation_path)
-                .await
-                .unwrap();
+        let result = test_provider_connection_config_with_state_and_validation_path(
+            config,
+            &state,
+            &validation_path,
+        )
+        .await
+        .unwrap();
         server.await.unwrap();
         assert!(result.ok);
         assert_eq!(result.validation_status, "validated");
-        assert!(result.message.contains("当前供应商模型可用"));
+        assert!(result.message.contains("Work 结构化协议已通过版本化评测"));
         assert!(!result.message.contains("云端模型可用"));
         let receipt = result.provider_invocation_receipt.unwrap();
         assert_eq!(receipt.status, ProviderInvocationStatus::Completed);
@@ -2228,7 +2843,7 @@ mod tests {
         assert_eq!(receipt.model, "gpt-test");
         assert!(!receipt.simulated);
         let request = captured.lock().unwrap().clone();
-        assert!(request.contains(r#""content":"ping""#));
+        assert!(request.contains("OpenLife Work compatibility evaluation v1"));
         let persisted =
             crate::provider_validation::load_provider_validation_record_from_path(&validation_path)
                 .as_record()
@@ -2241,9 +2856,16 @@ mod tests {
                 .map(|receipt| receipt.request_id.as_str()),
             Some(receipt.request_id.as_str())
         );
+        assert_eq!(
+            persisted
+                .work_compatibility
+                .as_ref()
+                .map(|evidence| evidence.status.as_str()),
+            Some("validated")
+        );
         let raw = std::fs::read_to_string(validation_path).unwrap();
-        assert!(!raw.contains("ping"));
-        assert!(!raw.contains("pong"));
+        assert!(!raw.contains("OpenLife Work compatibility evaluation v1"));
+        assert!(!raw.contains(r#""content":"ready""#));
         assert!(!raw.contains("sk-test"));
     }
 
@@ -2275,23 +2897,21 @@ mod tests {
             default_decision: "allow".into(),
             ..Default::default()
         };
-        // Summaries are bound to the effective credential generation and the
-        // backend-owned network policy used by the probe, not to the stale
-        // pre-resolution Settings payload.
+        // Summaries are bound to the exact Connection/Profile credential
+        // generation and backend-owned network policy used by the probe.
         let current_runtime = state.provider_runtime_snapshot().await;
         let mut validation_config = config.clone();
-        validation_config.llm.credential_version =
-            resolved_provider_credential_version(&validation_config, &current_runtime.config);
-        validation_config.llm.openai_key =
-            resolve_submitted_provider_api_key(&validation_config, &current_runtime.config);
         validation_config.system.network_policy = current_runtime.config.system.network_policy;
         let dir = tempfile::tempdir().unwrap();
         let validation_path = dir.path().join("provider-validation.json");
 
-        let result =
-            test_llm_connection_with_state_and_validation_path(config, &state, &validation_path)
-                .await
-                .unwrap();
+        let result = test_provider_connection_config_with_state_and_validation_path(
+            config,
+            &state,
+            &validation_path,
+        )
+        .await
+        .unwrap();
         server.await.unwrap();
         assert!(!result.ok);
         assert_eq!(result.validation_status, "remote_unknown");
@@ -2338,10 +2958,13 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let validation_path = dir.path().join("provider-validation.json");
 
-        let result =
-            test_llm_connection_with_state_and_validation_path(config, &state, &validation_path)
-                .await
-                .unwrap();
+        let result = test_provider_connection_config_with_state_and_validation_path(
+            config,
+            &state,
+            &validation_path,
+        )
+        .await
+        .unwrap();
         assert!(!result.ok);
         assert_eq!(result.validation_status, "consent_required");
         assert!(result.review_proposal_id.is_some());

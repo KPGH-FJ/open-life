@@ -139,6 +139,12 @@ fn work_provider_attempt_summary_code(
 ) -> &'static str {
     if matches!(
         payload_purpose,
+        Some(ProviderPayloadPurpose::MainChatWorkGoalContract)
+    ) {
+        return "work_provider_goal_contract";
+    }
+    if matches!(
+        payload_purpose,
         Some(ProviderPayloadPurpose::MainChatWorkSemanticVerification)
     ) {
         "work_provider_semantic_verification"
@@ -462,6 +468,7 @@ pub(crate) async fn run_canonical_chat(
         return Err("provider_runtime_generation_incoherent".into());
     }
     let reasoning_capability = selected_provider.reasoning_capability.clone();
+    let input_modalities = selected_provider.input_modalities.clone();
     let provider = selected_provider.binding;
 
     let begun = conversation_store
@@ -541,7 +548,8 @@ pub(crate) async fn run_canonical_chat(
         provider_runtime.config.system.network_policy,
     )
     .with_reasoning_effort(provider.reasoning_effort)
-    .with_reasoning_capability(reasoning_capability);
+    .with_reasoning_capability(reasoning_capability)
+    .with_input_modalities(input_modalities);
     let personal_context = crate::personal_intelligence_ports::load_personal_intelligence_context(
         state,
         crate::personal_intelligence_ports::PersonalIntelligenceContextRequest {
@@ -586,6 +594,7 @@ pub(crate) async fn run_canonical_chat(
         provider_authorization: authorization,
         system_prompt: provider_context.system_prompt,
         supplemental_context_blocks: provider_context.blocks,
+        images: Vec::new(),
         context_snapshot_ref: provider_context.context_snapshot_ref,
         raw_life_model_included: false,
         raw_unbounded_memory_included: false,
@@ -649,33 +658,86 @@ pub(crate) async fn run_canonical_chat(
             .map_err(|error| format!("terminalize pre-dispatch Chat failure failed: {error}"))?;
         return Err(code);
     }
-    let provider_output = generation_result
-        .map_err(|failure| failure.blocker_or("chat_generation_failed"))?
-        .content;
-    let agent_step = parse_chat_agent_step(&provider_output)?;
-    let (reply, personal_action_applied) = match agent_step {
-        AgentStep::FinalAnswer(final_answer) => (final_answer.content, false),
-        AgentStep::PersonalIntelligence(action) => {
-            let receipt = crate::personal_intelligence_ports::apply_authorized_personal_intelligence_suggestion(
-                state,
-                crate::personal_intelligence_ports::PersonalIntelligenceSuggestionRequest {
-                    conversation_id: &input.conversation_id,
-                    task_id: None,
-                    run_id: None,
-                    user_text: &current_user.content,
-                    action,
-                    user_message_proof: &begun.user_message_proof,
-                    execution_epoch: &cancellation.execution_epoch(),
-                },
-            )
-            .await
-            .map_err(|error| format!("canonical Chat personal action failed: {error}"))?;
-            let reply =
-                crate::personal_intelligence_ports::personal_intelligence_product_reply(&receipt)
-                    .ok_or_else(|| "canonical_chat_personal_action_not_applied".to_string())?;
-            (reply, true)
+    let provider_output = match generation_result {
+        Ok(generation) => generation.content,
+        Err(failure) => {
+            let code = failure.blocker_or("chat_generation_failed");
+            conversation_store
+                .lock()
+                .await
+                .fail_chat_turn(&input.turn_id, &code)
+                .map_err(|error| {
+                    format!("terminalize failed provider Chat Turn failed: {error}")
+                })?;
+            return Err(code);
         }
-        _ => return Err("canonical_chat_agent_step_not_allowed".into()),
+    };
+    let agent_step = match parse_chat_agent_step(&provider_output) {
+        Ok(step) => step,
+        Err(code) => {
+            conversation_store
+                .lock()
+                .await
+                .fail_chat_turn(&input.turn_id, &code)
+                .map_err(|error| format!("terminalize invalid Chat AgentStep failed: {error}"))?;
+            return Err(code);
+        }
+    };
+    let reply = match agent_step {
+        AgentStep::FinalAnswer(final_answer) => final_answer.content,
+        AgentStep::PersonalIntelligence(action) => {
+            let receipt = match crate::personal_intelligence_ports::apply_authorized_personal_intelligence_suggestion(
+                    state,
+                    crate::personal_intelligence_ports::PersonalIntelligenceSuggestionRequest {
+                        conversation_id: &input.conversation_id,
+                        task_id: None,
+                        run_id: None,
+                        user_text: &current_user.content,
+                        action,
+                        user_message_proof: &begun.user_message_proof,
+                        execution_epoch: &cancellation.execution_epoch(),
+                    },
+                )
+                .await
+            {
+                Ok(receipt) => receipt,
+                Err(error) => {
+                    let code = "canonical_chat_personal_action_failed".to_string();
+                    conversation_store
+                        .lock()
+                        .await
+                        .fail_chat_turn(&input.turn_id, &code)
+                        .map_err(|terminal_error| format!("terminalize failed Chat personal action failed: {terminal_error}"))?;
+                    return Err(format!("canonical Chat personal action failed: {error}"));
+                }
+            };
+            match crate::personal_intelligence_ports::personal_intelligence_product_reply(&receipt)
+            {
+                Some(reply) => reply,
+                None => {
+                    let code = "canonical_chat_personal_action_not_applied".to_string();
+                    conversation_store
+                        .lock()
+                        .await
+                        .fail_chat_turn(&input.turn_id, &code)
+                        .map_err(|error| {
+                            format!("terminalize unapplied Chat personal action failed: {error}")
+                        })?;
+                    return Err(code);
+                }
+            }
+        }
+        _ => {
+            let code = "canonical_chat_agent_step_not_allowed".to_string();
+            conversation_store
+                .lock()
+                .await
+                .fail_chat_turn(&input.turn_id, &code)
+                .map_err(|error| {
+                    format!("terminalize disallowed Chat AgentStep failed: {error}")
+                })?;
+            return Err(code);
+        }
     };
     let reply = (!reply.trim().is_empty()).then_some(reply);
     let Some(reply) = reply else {
@@ -707,15 +769,6 @@ pub(crate) async fn run_canonical_chat(
         .await
         .complete_chat_turn(&input.turn_id, &reply)
         .map_err(|error| format!("complete canonical Chat Turn failed: {error}"))?;
-    if !personal_action_applied {
-        crate::agent_memory_learning::schedule_after_idle(
-            Arc::clone(state),
-            input.conversation_id.clone(),
-            input.turn_id.clone(),
-            current_user.content.clone(),
-            begun.user_message_proof.clone(),
-        );
-    }
     Ok(output_from_result(
         &input,
         reply,
@@ -959,6 +1012,12 @@ mod tests {
     fn semantic_verifier_attempts_have_a_distinct_canonical_budget_identity() {
         assert_eq!(
             work_provider_attempt_summary_code(Some(
+                ProviderPayloadPurpose::MainChatWorkGoalContract
+            )),
+            "work_provider_goal_contract"
+        );
+        assert_eq!(
+            work_provider_attempt_summary_code(Some(
                 ProviderPayloadPurpose::MainChatWorkSemanticVerification
             )),
             "work_provider_semantic_verification"
@@ -1059,6 +1118,55 @@ mod tests {
             !requests[0].contains("\"stream\":true"),
             "private AgentStep JSON must not be streamed into the product transcript"
         );
+    }
+
+    #[tokio::test]
+    async fn provider_failure_after_dispatch_terminalizes_the_chat_turn() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let captured = crate::main_chat_acceptance_test_support::configure_live_provider_eval_state_with_failing_local_http_provider(&state).await;
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .create_conversation(&conversation_id, "Provider failure")
+            .unwrap();
+
+        let error = run_canonical_chat(
+            CanonicalChatInput {
+                turn_id: turn_id.clone(),
+                conversation_id,
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "Return one answer.".into(),
+                }],
+                selected_skill_id: None,
+                provider_profile_id: None,
+                reasoning_effort: None,
+                stream: true,
+            },
+            &state,
+            &mut |_, _| {},
+        )
+        .await
+        .unwrap_err();
+
+        assert!(!error.trim().is_empty());
+        assert!(!captured.lock().unwrap().is_empty());
+        let snapshot = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .get_turn(&turn_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.turn.status, TurnStatus::Failed);
+        assert!(snapshot.turn.error_code.is_some());
     }
 
     #[tokio::test]
@@ -1385,7 +1493,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn implicit_stable_fact_completes_chat_then_schedules_review_only_memory() {
+    async fn implicit_stable_fact_completes_chat_without_creating_memory_or_review() {
         let state = canonical_state(
             r#"{"keep":true,"confidence":0.91,"source_span":"My work timezone is Central European Time."}"#,
         )
@@ -1425,32 +1533,15 @@ mod tests {
         );
         assert!(output.result.model_invoked);
 
-        let proposal = tokio::time::timeout(std::time::Duration::from_secs(4), async {
-            loop {
-                if let Some(proposal) = state
-                    .proposal_store
-                    .as_ref()
-                    .unwrap()
-                    .lock()
-                    .await
-                    .list_all_proposals(10, 0)
-                    .unwrap()
-                    .into_iter()
-                    .find(|proposal| {
-                        proposal.proposal_type == openlife_core::agent::ProposalType::MemoryWrite
-                    })
-                {
-                    break proposal;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-        })
-        .await
-        .expect("idle Memory review proposal");
-        assert_eq!(
-            proposal.status,
-            openlife_core::agent::ProposalStatus::Pending
-        );
+        assert!(state
+            .proposal_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_all_proposals(10, 0)
+            .unwrap()
+            .is_empty());
         assert!(state
             .memory_lifecycle_store
             .as_ref()

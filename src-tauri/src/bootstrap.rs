@@ -1,19 +1,24 @@
 //! Application bootstrap: store initialization and AppState assembly.
 //! Extracted from lib.rs to keep the main entry point focused on Tauri lifecycle.
 
-use crate::credential_bootstrap::initialize_fresh_profile_credentials;
+use crate::credential_bootstrap::{
+    initialize_fresh_profile_credentials, inspect_provider_connections_credentials,
+    inspect_search_credential_status, ProviderConnectionsCredentialInspection,
+};
 use crate::persistence_coordinator::PersistenceCoordinator;
 use crate::secret_store::{
-    hydrate_config_secrets_read_only, inspect_and_hydrate_integrity_key,
+    hydrate_search_config_secret_read_only, inspect_and_hydrate_integrity_key,
     inspect_existing_mcp_audit_keys, selected_secret_store_classification, IntegrityKeyHydration,
-    McpAuditKeyHydrationInspection, ProfileSecretStore, ProviderCredentialHydrationStatus,
-    SecretReader, StartupProfileSecretStore, CANONICAL_TASK_RECEIPT_KEY_REF,
+    McpAuditKeyHydrationInspection, ProfileSecretStore, SecretReader, StartupProfileSecretStore,
+    CANONICAL_TASK_RECEIPT_KEY_REF,
 };
 use crate::state::{AppState, CredentialBootstrapSnapshot, CredentialBootstrapStatus};
 use crate::storage::{load_mcp_audit_keyring_from_path, privacy_policy_path, McpAuditKeyringLoad};
 use openlife_core::agent::{CanonicalTaskReceiptKey, MemoryLifecycleStore, ProposalStore};
 use openlife_core::config::AppConfig;
-use openlife_core::conversation::ConversationStore;
+use openlife_core::conversation::{
+    ConversationStore, ProviderConnectionRecord, ProviderModelProfileRecord,
+};
 use openlife_core::feedback::FeedbackStore;
 use openlife_core::life_model::LifeModelManager;
 use openlife_core::mcp::McpRegistry;
@@ -30,6 +35,113 @@ use tokio::sync::Mutex;
 /// Result of the bootstrap process: assembled application state and startup warnings.
 pub struct BootstrapResult {
     pub state: Arc<AppState>,
+}
+
+fn migrate_legacy_provider_connection(
+    store: &ConversationStore,
+    config: &AppConfig,
+) -> anyhow::Result<bool> {
+    let provider_id = config.llm.provider.trim().to_ascii_lowercase();
+    let model_id = config.llm.chat_model.trim();
+    if config.llm.openai_key_ref.is_none() && !config.llm.openai_key.trim().is_empty() {
+        anyhow::bail!("legacy_provider_plaintext_requires_explicit_settings_migration");
+    }
+    if provider_id.is_empty()
+        || provider_id == "ollama"
+        || model_id.is_empty()
+        || config.llm.openai_key_ref.is_none()
+    {
+        return Ok(false);
+    }
+    let endpoint = if config.llm.openai_base.trim().is_empty() {
+        openlife_core::llm::default_base_for_provider(&provider_id).to_string()
+    } else {
+        config
+            .llm
+            .openai_base
+            .trim()
+            .trim_end_matches('/')
+            .to_string()
+    };
+    let now = chrono::Utc::now();
+    let mut connection = store
+        .list_provider_connections()?
+        .into_iter()
+        .find(|connection| {
+            connection.endpoint_class == "cloud"
+                && connection.provider_id == provider_id
+                && connection.endpoint.trim_end_matches('/') == endpoint
+        })
+        .unwrap_or_else(|| {
+            let connection_id = crate::provider_registry::stable_connection_id(
+                &provider_id,
+                "cloud",
+                &endpoint,
+                config.llm.openai_key_ref.as_deref(),
+            );
+            ProviderConnectionRecord {
+                id: connection_id,
+                provider_id: provider_id.clone(),
+                display_name: openlife_core::llm::provider_label(&provider_id),
+                endpoint: endpoint.clone(),
+                endpoint_class: "cloud".into(),
+                credential_reference: config.llm.openai_key_ref.clone(),
+                credential_version: config.llm.credential_version,
+                protocol: "openai_compatible_chat_completions".into(),
+                privacy_boundary: "provider_hosted".into(),
+                validation_state: "unverified".into(),
+                created_at: now,
+                updated_at: now,
+            }
+        });
+    let credential_binding_added = connection.credential_reference.is_none();
+    if credential_binding_added {
+        connection.credential_reference = config.llm.openai_key_ref.clone();
+        connection.credential_version = config.llm.credential_version;
+        connection.validation_state = "unverified".into();
+    }
+    let mut profile = store
+        .list_provider_model_profiles()?
+        .into_iter()
+        .find(|profile| profile.connection_id == connection.id && profile.model_id == model_id)
+        .unwrap_or_else(|| ProviderModelProfileRecord {
+            profile_id: crate::provider_registry::stable_profile_id(
+                &provider_id,
+                model_id,
+                "cloud",
+                &endpoint,
+            ),
+            connection_id: connection.id.clone(),
+            model_id: model_id.into(),
+            display_name: model_id.into(),
+            capability_snapshot_json: "{}".into(),
+            capability_source: "legacy_config_migration".into(),
+            validation_state: "unverified".into(),
+            created_at: now,
+            updated_at: now,
+        });
+    if credential_binding_added {
+        profile.validation_state = "unverified".into();
+    }
+    store.upsert_provider_model_profile(&connection, &profile)?;
+    Ok(true)
+}
+
+fn retire_legacy_provider_config(config: &mut AppConfig) -> bool {
+    let defaults = openlife_core::config::LlmConfig::default();
+    let changed = config.llm.provider != defaults.provider
+        || config.llm.openai_base != defaults.openai_base
+        || !config.llm.openai_key.is_empty()
+        || config.llm.openai_key_ref.is_some()
+        || config.llm.credential_version != 0
+        || config.llm.chat_model != defaults.chat_model;
+    config.llm.provider = defaults.provider;
+    config.llm.openai_base = defaults.openai_base;
+    config.llm.openai_key.clear();
+    config.llm.openai_key_ref = None;
+    config.llm.credential_version = 0;
+    config.llm.chat_model = defaults.chat_model;
+    changed
 }
 
 fn protected_paths_are_absent(data_dir: &Path, relative_paths: &[&str]) -> std::io::Result<bool> {
@@ -495,13 +607,12 @@ fn bootstrap_with_secret_store(
     } else {
         persistence.register_read_write("ConfigStore");
     }
-    let secret_hydration = hydrate_config_secrets_read_only(&mut config, secret_store);
-    let provider_credential_hydration_status = secret_hydration.provider_credential_status;
+    let secret_hydration = hydrate_search_config_secret_read_only(&mut config, secret_store);
     for capability in &secret_hydration.fail_closed_capabilities {
-        let owner = match capability.as_str() {
-            "provider_credential" => "ProviderCredentialStore",
-            "search_provider_credential" => "SearchProviderCredentialStore",
-            _ => "CredentialStore",
+        let owner = if capability == "search_provider_credential" {
+            "SearchProviderCredentialStore"
+        } else {
+            "CredentialStore"
         };
         persistence.register_unavailable(
             owner,
@@ -601,6 +712,33 @@ fn bootstrap_with_secret_store(
             None
         }
     });
+    if let Some(store) = conversation_store.as_ref() {
+        match migrate_legacy_provider_connection(store, &config) {
+            Ok(true) => {
+                log::info!(
+                    "[startup] migrated the legacy provider config into a persistent connection"
+                );
+                if retire_legacy_provider_config(&mut config) {
+                    if let Err(error) = config.save(&config_path) {
+                        persistence.register_unavailable(
+                            "ConfigStore",
+                            "legacy_provider_config_retirement_failed",
+                            &error.to_string(),
+                        );
+                        startup_warnings.borrow_mut().push(format!(
+                            "Persistent Provider migration completed, but legacy config retirement failed: {error}"
+                        ));
+                    } else {
+                        log::info!("[startup] retired the migrated config.yaml Provider authority");
+                    }
+                }
+            }
+            Ok(false) => {}
+            Err(error) => startup_warnings.borrow_mut().push(format!(
+                "Legacy provider connection migration was not completed: {error}"
+            )),
+        }
+    }
 
     let feedback_db_path = data_dir.join("feedback.db");
     let feedback_store = init_store(
@@ -1045,20 +1183,66 @@ fn bootstrap_with_secret_store(
         }
     };
 
-    let provider_credential_status = match provider_credential_hydration_status {
-        ProviderCredentialHydrationStatus::NotReferenced
-        | ProviderCredentialHydrationStatus::Missing => {
-            CredentialBootstrapStatus::MissingExistingData
-        }
-        ProviderCredentialHydrationStatus::Available => CredentialBootstrapStatus::Available,
-        ProviderCredentialHydrationStatus::Invalid => CredentialBootstrapStatus::Invalid,
-        ProviderCredentialHydrationStatus::Unavailable => CredentialBootstrapStatus::Unavailable,
-    };
+    let (provider_connections_credential, selected_provider_connection) =
+        match conversation_store.as_ref() {
+            Some(store) => match (
+                store.list_provider_connections(),
+                store.list_provider_model_profiles(),
+                store.selected_provider_profile_id(None),
+            ) {
+                (Ok(connections), Ok(profiles), Ok(selected_profile_id)) => {
+                    let selected_connection = selected_profile_id
+                        .as_deref()
+                        .and_then(|selected| {
+                            profiles
+                                .iter()
+                                .find(|profile| profile.profile_id == selected)
+                        })
+                        .and_then(|profile| {
+                            connections
+                                .iter()
+                                .find(|connection| connection.id == profile.connection_id)
+                        })
+                        .cloned();
+                    (
+                        inspect_provider_connections_credentials(&connections, secret_store),
+                        selected_connection,
+                    )
+                }
+                (Err(error), _, _) | (_, Err(error), _) | (_, _, Err(error)) => {
+                    startup_warnings.borrow_mut().push(format!(
+                        "Provider Connection credential status is unknown: {error}"
+                    ));
+                    (
+                        ProviderConnectionsCredentialInspection {
+                            status: CredentialBootstrapStatus::Unknown,
+                            scope_digest: "provider_connection_store_unavailable".into(),
+                        },
+                        None,
+                    )
+                }
+            },
+            None => (
+                ProviderConnectionsCredentialInspection {
+                    status: CredentialBootstrapStatus::Unknown,
+                    scope_digest: "provider_connection_store_unavailable".into(),
+                },
+                None,
+            ),
+        };
     let credential_bootstrap_snapshot = CredentialBootstrapSnapshot::from_statuses([
         canonical_task_credential_status,
         mcp_audit_credential_status,
     ])
-    .with_provider_status(provider_credential_status);
+    .with_provider_connections_status(
+        provider_connections_credential.status,
+        Some(provider_connections_credential.scope_digest),
+    )
+    .with_search_provider_status(inspect_search_credential_status(
+        &config,
+        selected_provider_connection.as_ref(),
+        secret_store,
+    ));
     let app_state = Arc::new(AppState {
         persistence_coordinator: Arc::clone(&persistence),
         config: Arc::new(Mutex::new(config)),
@@ -1090,6 +1274,8 @@ fn bootstrap_with_secret_store(
         #[cfg(test)]
         work_initial_decision_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         #[cfg(test)]
+        work_goal_contract_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+        #[cfg(test)]
         work_steering_replan_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         #[cfg(test)]
         work_agent_step_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -1099,4 +1285,94 @@ fn bootstrap_with_secret_store(
     });
 
     BootstrapResult { state: app_state }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legacy_cloud_connection_migrates_even_when_a_local_profile_already_exists() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let now = chrono::Utc::now();
+        let local_connection = ProviderConnectionRecord {
+            id: "local-connection".into(),
+            provider_id: "ollama".into(),
+            display_name: "Ollama".into(),
+            endpoint: "local://ollama".into(),
+            endpoint_class: "local".into(),
+            credential_reference: None,
+            credential_version: 0,
+            protocol: "ollama_chat".into(),
+            privacy_boundary: "local_only".into(),
+            validation_state: "ready".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        let local_profile = ProviderModelProfileRecord {
+            profile_id: "local-profile".into(),
+            connection_id: local_connection.id.clone(),
+            model_id: "llama3.1:latest".into(),
+            display_name: "llama3.1:latest".into(),
+            capability_snapshot_json: "{}".into(),
+            capability_source: "adapter_default".into(),
+            validation_state: "ready".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        store
+            .upsert_provider_model_profile(&local_connection, &local_profile)
+            .unwrap();
+        let mut config = AppConfig::default();
+        config.llm.provider = "openrouter".into();
+        config.llm.openai_base = "https://openrouter.ai/api/v1".into();
+        config.llm.chat_model = "stealth/ox-alpha".into();
+        config.llm.openai_key_ref = Some(crate::secret_store::PROVIDER_KEY_REF.into());
+        config.llm.credential_version = 3;
+
+        assert!(migrate_legacy_provider_connection(&store, &config).unwrap());
+        assert_eq!(store.list_provider_connections().unwrap().len(), 2);
+        assert!(migrate_legacy_provider_connection(&store, &config).unwrap());
+        assert_eq!(store.list_provider_connections().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn legacy_provider_retirement_preserves_embedding_preferences() {
+        let mut config = AppConfig::default();
+        config.llm.provider = "openrouter".into();
+        config.llm.openai_base = "https://openrouter.ai/api/v1".into();
+        config.llm.chat_model = "stealth/ox-alpha".into();
+        config.llm.openai_key_ref = Some(crate::secret_store::PROVIDER_KEY_REF.into());
+        config.llm.credential_version = 3;
+        config.llm.embedding_model = "custom-embedding-model".into();
+        config.llm.embedding_enabled = false;
+
+        assert!(retire_legacy_provider_config(&mut config));
+        assert_eq!(config.llm.provider, "openai");
+        assert_eq!(config.llm.openai_base, "https://api.openai.com/v1");
+        assert_eq!(config.llm.chat_model, "gpt-4o-mini");
+        assert!(config.llm.openai_key_ref.is_none());
+        assert_eq!(config.llm.credential_version, 0);
+        assert_eq!(config.llm.embedding_model, "custom-embedding-model");
+        assert!(!config.llm.embedding_enabled);
+    }
+
+    #[test]
+    fn legacy_provider_plaintext_is_not_deleted_without_safe_migration() {
+        let store = ConversationStore::new_in_memory().unwrap();
+        let mut config = AppConfig::default();
+        config.llm.provider = "openrouter".into();
+        config.llm.openai_base = "https://openrouter.ai/api/v1".into();
+        config.llm.chat_model = "stealth/ox-alpha".into();
+        config.llm.openai_key = "legacy-plaintext".into();
+
+        assert_eq!(
+            migrate_legacy_provider_connection(&store, &config)
+                .unwrap_err()
+                .to_string(),
+            "legacy_provider_plaintext_requires_explicit_settings_migration"
+        );
+        assert!(store.list_provider_connections().unwrap().is_empty());
+        assert_eq!(config.llm.openai_key, "legacy-plaintext");
+    }
 }

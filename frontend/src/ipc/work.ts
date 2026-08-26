@@ -92,3 +92,19 @@ export async function requestArtifactUndo(artifactId: string): Promise<{
 }> {
   return safeInvoke("request_artifact_undo", { artifactId });
 }
+
+export async function requestTaskArtifactUndo(taskId: string): Promise<{
+  taskId: string;
+  status: "waiting_review" | "partial_waiting_review";
+  proposals: Array<{
+    artifactId: string;
+    proposalId: string;
+    status: "waiting_review";
+  }>;
+  failures: Array<{
+    artifactId: string;
+    reasonCode: string;
+  }>;
+}> {
+  return safeInvoke("request_task_artifact_undo", { taskId });
+}

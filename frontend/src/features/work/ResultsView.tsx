@@ -152,8 +152,12 @@ function reasonLabel(reason: string): string {
     artifact_delivery_failed: "结果交付失败",
     artifact_waiting_materialization: "结果尚未写入目标位置",
     artifact_content_digest_drift: "目标内容与已核验版本不一致",
+    artifact_target_precondition_changed: "审核后目标文件已变化；OpenLife 没有覆盖用户的新内容",
     artifact_materialized_reference_missing: "结果位置缺少确认依据",
     artifact_preview_source_unavailable: "结果预览来源不可用",
+    artifact_undone: "该版本已按用户请求撤销；这里保留撤销前已核验的历史记录",
+    artifact_undo_confirmation_incomplete: "撤销记录缺少完整的执行回执，需要人工核对",
+    artifact_undo_prior_verification_missing: "撤销前版本缺少完整的物化核验依据",
     artifact_undo_pending_or_failed: "撤销仍在等待决定或执行失败",
     artifact_undo_unavailable_without_original_bytes: "缺少可恢复的原始内容",
     artifact_undo_requires_verified_materialization: "结果核验后才能撤销",
@@ -194,6 +198,23 @@ function artifactTypeLabel(mediaType: string): string {
   return normalized || "任务产物";
 }
 
+function artifactPreviewIsExtractedText(mediaType: string): boolean {
+  const normalized = mediaType.split(";")[0]?.trim().toLocaleLowerCase();
+  return [
+    "application/pdf",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  ].includes(normalized);
+}
+
+function artifactPreviewLabel(mediaType: string, historical: boolean): string {
+  if (artifactPreviewIsExtractedText(mediaType)) {
+    return historical ? "历史版本提取内容" : "提取内容";
+  }
+  return historical ? "历史版本预览" : "预览";
+}
+
 function artifactStatusLabel(status: TaskViewModelItem["artifacts"][number]["status"]): string {
   if (status === "materialized") return "已物化";
   if (status === "waiting_review") return "等待审核";
@@ -216,6 +237,7 @@ function artifactChangeLabel(
 ): string {
   if (kind === "create") return "创建文件";
   if (kind === "replace") return "替换文件";
+  if (kind === "rename") return "重命名文件";
   return "变更范围未知";
 }
 
@@ -311,16 +333,24 @@ function taskItemSummary(summaryCode: string): string {
   const toolLabel =
     tool === "document.read"
       ? "本地文档"
-      : tool === "web.search"
-        ? "Web 搜索"
-        : tool === "web.fetch"
-          ? "网页读取"
-          : tool === "mcp.read_only"
-            ? "MCP 只读工具"
-            : tool;
+      : tool === "folder.list"
+        ? "Project 目录"
+        : tool === "file.search"
+          ? "Project 文件搜索"
+          : tool === "file.read"
+            ? "Project 文件"
+            : tool === "web.search"
+              ? "Web 搜索"
+              : tool === "web.fetch"
+                ? "网页读取"
+                : tool === "mcp.read_only"
+                  ? "MCP 只读工具"
+                  : tool;
   if (summaryCode.startsWith("work_tool_call:") && toolLabel) return `调用 ${toolLabel}`;
   if (summaryCode.startsWith("work_tool_observation:") && toolLabel)
     return `已取得 ${toolLabel} 的结果`;
+  if (summaryCode === "legacy_work_personal_intelligence_unproven")
+    return "历史 Work 个人智能路径已停用，不能作为任务完成证据";
   if (summaryCode === "work_selected_skill_context_applied") return "已应用所选 Skill 的指令";
   if (summaryCode === "work_provider_generation") return "模型正在生成结果";
   if (summaryCode === "work_provider_generation_completed") return "模型结果已经生成";
@@ -390,6 +420,13 @@ function taskControlFeedback(state: TaskControlDispatchState) {
       tone: "error" as const,
     };
   }
+  if (
+    state.refreshedTask.lifecycleStatus === "completed" &&
+    state.refreshedTask.terminalDeliveryStatus === "delivered" &&
+    state.refreshedTask.finalDeliveryEvidencePresent
+  ) {
+    return null;
+  }
   return {
     title: state.control.kind === "stop_run" ? "当前运行已停止" : "任务状态已更新",
     body:
@@ -413,6 +450,7 @@ export function ResultsView({
   onConfirmTaskControl,
   onCancelTaskControlConfirmation,
   onRequestArtifactUndo,
+  onRequestTaskArtifactUndo,
   onReviseArtifact,
   onOpenArtifact,
   onExportArtifact,
@@ -432,6 +470,7 @@ export function ResultsView({
   onConfirmTaskControl: () => void;
   onCancelTaskControlConfirmation: () => void;
   onRequestArtifactUndo: (artifactId: string) => Promise<void>;
+  onRequestTaskArtifactUndo: (taskId: string) => Promise<void>;
   onReviseArtifact: (
     taskId: string,
     artifactId: string,
@@ -447,6 +486,8 @@ export function ResultsView({
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<TaskFilter>("all");
   const [undoingArtifactId, setUndoingArtifactId] = useState<string | null>(null);
+  const [undoingTaskId, setUndoingTaskId] = useState<string | null>(null);
+  const [taskUndoFailure, setTaskUndoFailure] = useState<unknown>(null);
   const [revisingArtifactId, setRevisingArtifactId] = useState<string | null>(null);
   const [revisionDraft, setRevisionDraft] = useState<{
     artifactId: string;
@@ -635,13 +676,17 @@ export function ResultsView({
       )}
 
       {listAvailable && (
-        <section className="ol-workbench-result-section" aria-labelledby="tasks-plan-title">
-          <div className="ol-workbench-result-section-heading">
+        <details
+          className="ol-workbench-result-section ol-workbench-result-disclosure"
+          aria-labelledby="tasks-plan-title"
+          open={!embedded ? true : undefined}
+        >
+          <summary className="ol-workbench-result-section-heading">
             <div>
               <span>完成标准</span>
               <h3 id="tasks-plan-title">{selectedTask ? "计划与完成标准" : "选择任务查看计划"}</h3>
             </div>
-          </div>
+          </summary>
           {selectedTask?.workPlan ? (
             <div className="ol-work-contract" data-testid="canonical-work-contract">
               <div className="ol-work-contract__completion">
@@ -677,19 +722,30 @@ export function ResultsView({
                 : "选择一项工作查看计划与完成标准。"}
             </p>
           )}
-        </section>
+        </details>
       )}
 
       {listAvailable && (
-        <section className="ol-workbench-result-section" aria-labelledby="tasks-progress-title">
-          <div className="ol-workbench-result-section-heading">
+        <details
+          className="ol-workbench-result-section ol-workbench-result-disclosure"
+          aria-labelledby="tasks-progress-title"
+          open={
+            !embedded ||
+            selectedTask?.lifecycleStatus === "running" ||
+            selectedTask?.lifecycleStatus === "waiting_review" ||
+            selectedTask?.lifecycleStatus === "waiting_permission"
+              ? true
+              : undefined
+          }
+        >
+          <summary className="ol-workbench-result-section-heading">
             <div>
               <span>进度</span>
               <h3 id="tasks-progress-title">
                 {selectedTask ? selectedTask.title : "选择任务查看执行过程"}
               </h3>
             </div>
-          </div>
+          </summary>
           {selectedTask && (selectedTask.steerings?.length ?? 0) > 0 && (
             <ol className="ol-task-item-timeline" data-testid="canonical-task-steerings">
               {selectedTask.steerings?.map(steering => (
@@ -739,7 +795,7 @@ export function ResultsView({
               {selectedTask ? "这项工作还没有可显示的执行记录。" : "选择一项工作查看执行进度。"}
             </p>
           )}
-        </section>
+        </details>
       )}
 
       {listAvailable && (
@@ -751,8 +807,35 @@ export function ResultsView({
                 {selectedTask ? selectedTask.title : "选择任务查看产物"}
               </h3>
             </div>
+            {selectedTask &&
+              selectedTask.artifacts.filter(artifact => artifact.undo.available).length > 1 && (
+                <FoundationActionButton
+                  onClick={() => {
+                    setTaskUndoFailure(null);
+                    setUndoingTaskId(selectedTask.canonicalTaskId);
+                    void onRequestTaskArtifactUndo(selectedTask.canonicalTaskId)
+                      .catch(error => {
+                        setTaskUndoFailure(error);
+                        onAnnounce("批量撤销申请没有完整创建；现有产物状态已重新读取。");
+                        onRefresh();
+                      })
+                      .finally(() => setUndoingTaskId(null));
+                  }}
+                  label="撤销全部修改"
+                  icon={<RotateCcw aria-hidden="true" />}
+                  loading={undoingTaskId === selectedTask.canonicalTaskId}
+                  loadingLabel="正在创建逐文件撤销审核…"
+                />
+              )}
           </div>
           {selectedTask && <CompletionLimitations task={selectedTask} />}
+          {taskUndoFailure !== null && (
+            <FoundationNotice title="批量撤销申请未完成" tone="error" live>
+              <p>
+                {productErrorMessage(taskUndoFailure, "现有产物保持原状态，请逐项检查撤销入口。")}
+              </p>
+            </FoundationNotice>
+          )}
           {selectedTask && selectedTask.artifacts.length > 0 ? (
             <div className="ol-task-result-grid" data-testid="canonical-task-artifacts">
               {selectedTask.artifacts.map(artifact => (
@@ -765,22 +848,29 @@ export function ResultsView({
                       </h4>
                     </div>
                     <FoundationStatusLabel
-                      label={artifactStatusLabel(artifact.status)}
+                      label={
+                        artifact.undo.status === "undone"
+                          ? "已撤销"
+                          : artifactStatusLabel(artifact.status)
+                      }
                       status={
-                        artifact.status === "materialized" &&
-                        artifact.verification.status === "verified"
+                        artifact.undo.status === "undone"
                           ? "success"
-                          : artifact.status === "failed" ||
-                              artifact.verification.status === "failed"
-                            ? "error"
-                            : artifact.status === "effect_unknown" ||
-                                artifact.verification.status === "unknown"
-                              ? "unknown"
-                              : "waiting"
+                          : artifact.status === "materialized" &&
+                              artifact.verification.status === "verified"
+                            ? "success"
+                            : artifact.status === "failed" ||
+                                artifact.verification.status === "failed"
+                              ? "error"
+                              : artifact.status === "effect_unknown" ||
+                                  artifact.verification.status === "unknown"
+                                ? "unknown"
+                                : "waiting"
                       }
                       verified={
-                        artifact.status === "materialized" &&
-                        artifact.verification.status === "verified"
+                        artifact.undo.status === "undone" ||
+                        (artifact.status === "materialized" &&
+                          artifact.verification.status === "verified")
                       }
                     />
                   </header>
@@ -799,86 +889,48 @@ export function ResultsView({
                       </p>
                     </FoundationNotice>
                   )}
-
-                  <section className="ol-task-result-card__section" aria-label="Provenance">
-                    <span>来源与版本</span>
-                    <strong>
-                      当前 v{artifact.version}
-                      {artifact.previousVersion
-                        ? ` · 基于 v${artifact.previousVersion}`
-                        : " · 初始版本"}
-                    </strong>
-                    {artifact.sourceRunProvenance ? (
-                      <p>{provenanceLabel(artifact.sourceRunProvenance)}</p>
-                    ) : (
-                      <p>本版本的 Run / 模型 provenance 当前不可用，不使用当前设置代替。</p>
-                    )}
-                    {artifact.sourceResourceRefs.length > 0 ? (
-                      <ul aria-label="本版本绑定的本地资源">
-                        {artifact.sourceResourceRefs.map(resource => (
-                          <li key={resource.id}>{resource.label}</li>
-                        ))}
-                      </ul>
-                    ) : (
-                      <small>本版本没有投影已绑定的本地资源。</small>
-                    )}
-                  </section>
-
-                  <section className="ol-task-result-card__section" aria-label="Changes">
-                    <span>变更</span>
-                    <strong>{artifactChangeLabel(artifact.change.kind)}</strong>
-                    <p>{artifact.change.targetReference ?? "结果位置尚未确认。"}</p>
-                    {artifact.change.expectedPriorDigest && (
-                      <small>替换基线：{artifact.change.expectedPriorDigest}</small>
-                    )}
-                  </section>
+                  <p className="ol-task-result-card__location">
+                    {artifact.undo.status === "undone" ? "原写入位置：" : ""}
+                    {artifact.change.targetReference ?? "结果位置尚未确认。"}
+                    {artifact.undo.status === "undone" ? "（已撤销）" : ""}
+                  </p>
 
                   <section className="ol-task-result-card__section" aria-label="Preview">
-                    <span>预览</span>
+                    <span>
+                      {artifactPreviewLabel(artifact.mediaType, artifact.undo.status === "undone")}
+                    </span>
                     {artifact.preview.content ? (
                       <pre>{artifact.preview.content}</pre>
                     ) : (
-                      <p>预览不可用：{reasonLabel(artifact.preview.reasonCode ?? "来源未确认")}</p>
+                      <p>
+                        {artifact.undo.status === "undone"
+                          ? artifactPreviewIsExtractedText(artifact.mediaType)
+                            ? "历史版本内容提取不可用："
+                            : "历史版本预览不可用："
+                          : artifactPreviewIsExtractedText(artifact.mediaType)
+                            ? "内容提取不可用："
+                            : "预览不可用："}
+                        {reasonLabel(artifact.preview.reasonCode ?? "来源未确认")}
+                      </p>
                     )}
                     {artifact.preview.status === "truncated" && <small>这里只显示部分预览。</small>}
-                  </section>
-
-                  <section className="ol-task-result-card__section" aria-label="Verification">
-                    <span>文件完整性</span>
-                    <FoundationStatusLabel
-                      label={artifactVerificationLabel(artifact.verification.status)}
-                      status={
-                        artifact.verification.status === "verified"
-                          ? "success"
-                          : artifact.verification.status === "failed"
-                            ? "error"
-                            : artifact.verification.status === "unknown"
-                              ? "unknown"
-                              : "waiting"
-                      }
-                      verified={artifact.verification.status === "verified"}
-                    />
-                    <details className="ol-task-result-card__technical">
-                      <summary>查看技术核验信息</summary>
-                      <dl>
-                        <div>
-                          <dt>期望摘要</dt>
-                          <dd>{artifact.verification.expectedContentDigest}</dd>
-                        </div>
-                        <div>
-                          <dt>实测摘要</dt>
-                          <dd>{artifact.verification.observedContentDigest ?? "尚未观测"}</dd>
-                        </div>
-                      </dl>
-                    </details>
-                    {artifact.verification.reasonCode && (
-                      <small>{reasonLabel(artifact.verification.reasonCode)}</small>
+                    {artifact.undo.status === "undone" && (
+                      <small>这是撤销前已核验版本的历史预览，不代表目标位置的当前内容。</small>
                     )}
                   </section>
+
                   <section className="ol-task-result-card__section" aria-label="File">
                     <span>文件</span>
-                    {artifact.status === "materialized" &&
-                    artifact.verification.status === "verified" ? (
+                    {artifact.undo.status === "undone" ? (
+                      <p>
+                        {artifact.undo.operation === "restore_replaced"
+                          ? "原产物已撤销；目标位置已恢复为替换前的内容。"
+                          : artifact.undo.operation === "restore_moved"
+                            ? "原产物已撤销；文件已恢复为重命名前的名称。"
+                            : "原产物已撤销；OpenLife 新建的文件已移入安全回收位置。"}
+                      </p>
+                    ) : artifact.status === "materialized" &&
+                      artifact.verification.status === "verified" ? (
                       <div className="ol-task-result-card__actions">
                         <FoundationActionButton
                           onClick={() => {
@@ -1019,43 +1071,128 @@ export function ResultsView({
                     )}
                     <small>新指令会创建绑定当前版本的新 Run；原版本和历史结果不会被删除。</small>
                   </section>
-                  <section className="ol-task-result-card__section" aria-label="Undo">
-                    <span>撤销</span>
-                    {artifact.undo.available ? (
-                      <FoundationActionButton
-                        onClick={() => {
-                          setArtifactActionFailure(null);
-                          setUndoingArtifactId(artifact.artifactId);
-                          void onRequestArtifactUndo(artifact.artifactId)
-                            .catch(error => {
-                              setArtifactActionFailure({
-                                artifactId: artifact.artifactId,
-                                action: "undo",
-                                error,
-                              });
-                              onAnnounce("撤销申请没有创建；产物仍保持原状态。");
-                            })
-                            .finally(() => setUndoingArtifactId(null));
-                        }}
-                        label="申请撤销此产物"
-                        icon={<RotateCcw aria-hidden="true" />}
-                        loading={undoingArtifactId === artifact.artifactId}
-                        loadingLabel="正在创建撤销审核…"
-                      />
-                    ) : artifact.undo.proposalRef ? (
-                      <p>
-                        {artifact.undo.status === "undone"
-                          ? artifact.undo.operation === "restore_replaced"
-                            ? "已撤销，替换前的原始内容已恢复并核验。"
-                            : "已撤销，OpenLife 新建的文件已移入安全回收位置。"
-                          : "撤销正在等待审核或 reconciliation。"}
-                      </p>
-                    ) : (
-                      <p>
-                        不可撤销：{reasonLabel(artifact.undo.reasonCode ?? "缺少可验证恢复依据")}
-                      </p>
-                    )}
-                  </section>
+                  <details className="ol-task-result-card__details">
+                    <summary>来源、完整性与恢复</summary>
+                    <div className="ol-task-result-card__details-body">
+                      <section className="ol-task-result-card__section" aria-label="Provenance">
+                        <span>来源与版本</span>
+                        <strong>
+                          当前 v{artifact.version}
+                          {artifact.previousVersion
+                            ? ` · 基于 v${artifact.previousVersion}`
+                            : " · 初始版本"}
+                        </strong>
+                        {artifact.sourceRunProvenance ? (
+                          <p>{provenanceLabel(artifact.sourceRunProvenance)}</p>
+                        ) : (
+                          <p>本版本的 Run / 模型来源当前不可用，不使用当前设置代替。</p>
+                        )}
+                        {artifact.sourceResourceRefs.length > 0 ? (
+                          <ul aria-label="本版本绑定的本地资源">
+                            {artifact.sourceResourceRefs.map(resource => (
+                              <li key={resource.id}>{resource.label}</li>
+                            ))}
+                          </ul>
+                        ) : (
+                          <small>本版本没有投影已绑定的本地资源。</small>
+                        )}
+                      </section>
+
+                      <section className="ol-task-result-card__section" aria-label="Changes">
+                        <span>变更</span>
+                        <strong>{artifactChangeLabel(artifact.change.kind)}</strong>
+                        {artifact.change.expectedPriorDigest && (
+                          <small>替换基线：{artifact.change.expectedPriorDigest}</small>
+                        )}
+                      </section>
+
+                      <section className="ol-task-result-card__section" aria-label="Verification">
+                        <span>
+                          {artifact.undo.status === "undone" ? "历史物化与撤销" : "文件完整性"}
+                        </span>
+                        <FoundationStatusLabel
+                          label={
+                            artifact.undo.status === "undone"
+                              ? "撤销已核验"
+                              : artifactVerificationLabel(artifact.verification.status)
+                          }
+                          status={
+                            artifact.undo.status === "undone"
+                              ? "success"
+                              : artifact.verification.status === "verified"
+                                ? "success"
+                                : artifact.verification.status === "failed"
+                                  ? "error"
+                                  : artifact.verification.status === "unknown"
+                                    ? "unknown"
+                                    : "waiting"
+                          }
+                          verified={
+                            artifact.undo.status === "undone" ||
+                            artifact.verification.status === "verified"
+                          }
+                        />
+                        <dl>
+                          <div>
+                            <dt>
+                              {artifact.undo.status === "undone" ? "撤销前产物摘要" : "期望摘要"}
+                            </dt>
+                            <dd>{artifact.verification.expectedContentDigest}</dd>
+                          </div>
+                          <div>
+                            <dt>
+                              {artifact.undo.status === "undone" ? "撤销前实测摘要" : "实测摘要"}
+                            </dt>
+                            <dd>{artifact.verification.observedContentDigest ?? "尚未观测"}</dd>
+                          </div>
+                        </dl>
+                        {artifact.verification.reasonCode && (
+                          <small>{reasonLabel(artifact.verification.reasonCode)}</small>
+                        )}
+                      </section>
+
+                      <section className="ol-task-result-card__section" aria-label="Undo">
+                        <span>撤销</span>
+                        {artifact.undo.available ? (
+                          <FoundationActionButton
+                            onClick={() => {
+                              setArtifactActionFailure(null);
+                              setUndoingArtifactId(artifact.artifactId);
+                              void onRequestArtifactUndo(artifact.artifactId)
+                                .catch(error => {
+                                  setArtifactActionFailure({
+                                    artifactId: artifact.artifactId,
+                                    action: "undo",
+                                    error,
+                                  });
+                                  onAnnounce("撤销申请没有创建；产物仍保持原状态。");
+                                })
+                                .finally(() => setUndoingArtifactId(null));
+                            }}
+                            label="申请撤销此产物"
+                            icon={<RotateCcw aria-hidden="true" />}
+                            loading={undoingArtifactId === artifact.artifactId}
+                            loadingLabel="正在创建撤销审核…"
+                          />
+                        ) : artifact.undo.proposalRef ? (
+                          <p>
+                            {artifact.undo.status === "undone"
+                              ? artifact.undo.operation === "restore_replaced"
+                                ? "已撤销，替换前的原始内容已恢复并核验。"
+                                : artifact.undo.operation === "restore_moved"
+                                  ? "已撤销，重命名前的原名称已恢复并核验。"
+                                  : "已撤销，OpenLife 新建的文件已移入安全回收位置。"
+                              : "撤销正在等待审核或 reconciliation。"}
+                          </p>
+                        ) : (
+                          <p>
+                            不可撤销：
+                            {reasonLabel(artifact.undo.reasonCode ?? "缺少可验证恢复依据")}
+                          </p>
+                        )}
+                      </section>
+                    </div>
+                  </details>
                 </article>
               ))}
             </div>

@@ -5,24 +5,29 @@ import {
   type CredentialRecoveryReport,
   type LifeSafeModeProjection,
   type LlmConnectionTestResult,
+  type ProviderConnectionsViewModel,
   type ProviderPrivacyBoundarySummary,
   type ProductDiagnosticsViewModel,
   type ReviewItem,
+  type SaveProviderConnectionInput,
   type ToolPermissionViewModel,
   type ViewModelEnvelope,
 } from "@/tauri";
 import { getReviewCenterViewModel } from "@/ipc/review";
 import {
+  deleteProviderConnection,
   getConfig,
   getLifeStateProjection,
   getProductDiagnosticsViewModel,
+  getProviderConnections,
   getProviderPrivacyBoundarySummary,
   getToolPermissionViewModel,
   recoverRequiredCredentialAccess,
   revokeToolPermission,
   saveConfig,
+  saveProviderConnection,
   selectArtifactOutputDirectory,
-  testLlmConnection,
+  testProviderConnection as testSavedProviderConnectionIpc,
 } from "@/ipc/settings";
 import { productErrorCode as errorText } from "@/shared/productError";
 import { buildReadModelErrorEnvelope } from "@/shared/readModelEnvelope";
@@ -56,11 +61,29 @@ export type SettingsConnectionTestOutcome = {
   reviewResolutionMessage?: string;
 };
 
+export type ProviderConnectionDataSource = {
+  loadProviderConnections(): Promise<ProviderConnectionsViewModel>;
+  saveProviderConnection(input: SaveProviderConnectionInput): Promise<ProviderConnectionsViewModel>;
+  deleteProviderConnection(connectionId: string): Promise<ProviderConnectionsViewModel>;
+  testSavedProviderConnection(
+    connectionId: string,
+    profileId: string
+  ): Promise<SettingsConnectionTestOutcome>;
+};
+
 export interface SettingsDataSource {
   loadSettings(): Promise<SettingsSnapshot>;
   initializeRequiredCredentials?(): Promise<CredentialRecoveryReport>;
-  testProviderConnection(config: AppConfig): Promise<SettingsConnectionTestOutcome>;
   saveSettings(config: AppConfig): Promise<void>;
+  loadProviderConnections?(): Promise<ProviderConnectionsViewModel>;
+  saveProviderConnection?(
+    input: SaveProviderConnectionInput
+  ): Promise<ProviderConnectionsViewModel>;
+  deleteProviderConnection?(connectionId: string): Promise<ProviderConnectionsViewModel>;
+  testSavedProviderConnection?(
+    connectionId: string,
+    profileId: string
+  ): Promise<SettingsConnectionTestOutcome>;
   selectArtifactOutputDirectory?(): Promise<ArtifactOutputDirectorySelection>;
   revokeToolPermission?(permissionId: string): Promise<void>;
 }
@@ -202,16 +225,17 @@ async function resolveReviewItem(
   }
 }
 
-async function testProviderConnection(config: AppConfig): Promise<SettingsConnectionTestOutcome> {
-  const result = await testLlmConnection(config);
-  return { result, ...(await resolveReviewItem(result)) };
-}
-
 export const tauriSettingsDataSource: SettingsDataSource = {
   loadSettings,
   initializeRequiredCredentials: recoverRequiredCredentialAccess,
-  testProviderConnection,
   saveSettings: saveConfig,
+  loadProviderConnections: getProviderConnections,
+  saveProviderConnection,
+  deleteProviderConnection,
+  async testSavedProviderConnection(connectionId, profileId) {
+    const result = await testSavedProviderConnectionIpc(connectionId, profileId);
+    return { result, ...(await resolveReviewItem(result)) };
+  },
   selectArtifactOutputDirectory,
   revokeToolPermission,
 };

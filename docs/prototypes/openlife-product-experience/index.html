@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light" />
+    <title>OpenLife 产品体验原型</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#thread">跳到对话</a>
+
+    <button
+      class="prototype-trigger"
+      id="toggle-prototype-controls"
+      type="button"
+      aria-expanded="false"
+      aria-controls="prototype-controls"
+    >
+      Prototype
+    </button>
+
+    <section class="prototype-controls" id="prototype-controls" aria-label="原型旅程控制" hidden>
+      <div class="prototype-controls-header">
+        <div>
+          <strong>体验走查</strong>
+          <p>模拟数据，不连接真实文件、模型或凭据。</p>
+        </div>
+        <button class="text-button" id="close-prototype-controls" type="button">关闭</button>
+      </div>
+      <label>
+        <span>旅程</span>
+        <select id="journey-select"></select>
+      </label>
+      <div class="prototype-state-copy" aria-live="polite">
+        <span id="journey-counter"></span>
+        <strong id="state-title"></strong>
+      </div>
+      <div class="prototype-step-actions">
+        <button class="secondary-button compact" id="previous-state" type="button">上一步</button>
+        <button class="primary-button compact" id="next-state" type="button">下一步</button>
+      </div>
+    </section>
+
+    <div class="app-shell" id="app-shell">
+      <aside class="sidebar" aria-label="OpenLife 主导航">
+        <div class="brand-row"><strong>OpenLife</strong></div>
+
+        <div class="sidebar-primary-actions">
+          <button class="primary-button full" id="new-chat-button" type="button" data-journey="chat">新对话</button>
+        </div>
+
+        <nav class="sidebar-sections" id="sidebar-sections">
+          <section>
+            <div class="section-heading">
+              <span>Projects</span>
+              <button class="icon-text-button" type="button" data-open-folder>打开文件夹</button>
+            </div>
+            <div id="project-list" class="nav-list"></div>
+          </section>
+
+          <section>
+            <div class="section-heading">
+              <span>Recents</span>
+              <button class="icon-text-button" type="button" data-journey="history">搜索</button>
+            </div>
+            <div id="conversation-list" class="nav-list"></div>
+          </section>
+        </nav>
+
+        <button class="account-button" id="settings-button" type="button">
+          <span class="account-avatar" aria-hidden="true">TW</span>
+          <span>设置</span>
+        </button>
+      </aside>
+
+      <main class="workspace" id="workspace">
+        <header class="context-bar">
+          <div class="context-heading">
+            <button class="sidebar-toggle" id="sidebar-toggle" type="button" aria-label="打开导航">导航</button>
+            <div>
+              <span class="visually-hidden" id="context-eyebrow"></span>
+              <h1 id="context-title"></h1>
+            </div>
+          </div>
+          <div class="context-actions">
+            <span class="visually-hidden" id="context-status" aria-live="polite"></span>
+            <button class="secondary-button compact" id="inspector-toggle" type="button" aria-expanded="false">
+              详情
+            </button>
+          </div>
+        </header>
+
+        <section class="thread" id="thread" aria-label="对话内容" tabindex="-1">
+          <div class="thread-inner">
+            <div class="thread-intro" id="thread-intro"></div>
+            <div class="message-list" id="message-list"></div>
+            <div class="work-progress" id="work-progress"></div>
+            <div class="inline-decision" id="inline-decision"></div>
+            <div class="result-card" id="result-card"></div>
+          </div>
+        </section>
+
+        <section class="composer-wrap" aria-label="消息编辑器">
+          <div class="composer" id="composer">
+            <div class="resource-chips" id="resource-chips" aria-label="当前资源范围"></div>
+            <label class="visually-hidden" for="composer-input">告诉 OpenLife 你想完成什么</label>
+            <textarea id="composer-input" rows="3" aria-label="告诉 OpenLife 你想完成什么"></textarea>
+            <div class="composer-footer">
+              <div class="composer-tools">
+                <button class="attach-button" id="attach-button" type="button" aria-haspopup="dialog">添加</button>
+                <div class="mode-switch" role="group" aria-label="对话模式">
+                  <button type="button" id="mode-chat" data-mode="Chat">Chat</button>
+                  <button type="button" id="mode-work" data-mode="Work">Work</button>
+                </div>
+              </div>
+              <div class="composer-actions">
+                <button class="profile-button" id="profile-button" type="button"></button>
+                <button class="primary-button" id="send-button" type="button">发送</button>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+
+      <aside class="inspector" id="inspector" aria-label="上下文详情" aria-hidden="true">
+        <header>
+          <div>
+            <span id="inspector-eyebrow"></span>
+            <h2 id="inspector-title"></h2>
+          </div>
+          <button class="secondary-button compact" id="inspector-close" type="button">关闭</button>
+        </header>
+        <div class="inspector-body" id="inspector-body"></div>
+      </aside>
+    </div>
+
+    <div class="scrim" id="scrim" hidden></div>
+
+    <dialog class="surface-dialog model-dialog" id="model-picker" aria-labelledby="model-picker-title">
+      <div class="dialog-header">
+        <div>
+          <span>本轮配置</span>
+          <h2 id="model-picker-title">选择模型</h2>
+        </div>
+        <button class="text-button" id="model-picker-close" type="button">关闭</button>
+      </div>
+      <div class="dialog-body model-picker-layout">
+        <section>
+          <h3>Profiles</h3>
+          <div class="picker-list" id="profile-options" role="listbox" aria-label="Profiles"></div>
+        </section>
+        <section class="model-settings">
+          <label for="model-select">Model</label>
+          <select id="model-select"></select>
+          <fieldset>
+            <legend>Reasoning</legend>
+            <div class="reasoning-options" id="reasoning-options">
+              <button type="button" data-reasoning="低">低</button>
+              <button type="button" data-reasoning="中">中</button>
+              <button type="button" data-reasoning="高">高</button>
+            </div>
+          </fieldset>
+          <div class="picker-summary" id="profile-summary" aria-live="polite"></div>
+        </section>
+      </div>
+      <div class="dialog-footer">
+        <button class="text-button" id="manage-profiles" type="button">管理 Profiles</button>
+        <div>
+          <button class="secondary-button" id="model-picker-cancel" type="button">取消</button>
+          <button class="primary-button" id="use-model" type="button">用于本轮</button>
+        </div>
+      </div>
+    </dialog>
+
+    <dialog class="surface-dialog folder-dialog" id="folder-picker" aria-labelledby="folder-picker-title">
+      <div class="dialog-header">
+        <div>
+          <span>Project</span>
+          <h2 id="folder-picker-title">打开文件夹</h2>
+        </div>
+        <button class="text-button" id="folder-picker-close" type="button">关闭</button>
+      </div>
+      <div class="dialog-body">
+        <p class="dialog-intro">选择最近使用的目录，或交给系统文件选择器。</p>
+        <div class="picker-list folder-options" id="folder-options" role="listbox" aria-label="最近文件夹"></div>
+        <button class="secondary-button full browse-folder" id="browse-folder" type="button">选择其他文件夹…</button>
+        <div class="folder-notice" id="folder-notice" aria-live="polite"></div>
+      </div>
+      <div class="dialog-footer">
+        <button class="secondary-button" id="folder-picker-cancel" type="button">取消</button>
+        <button class="primary-button" id="open-selected-folder" type="button">打开 Project</button>
+      </div>
+    </dialog>
+
+    <dialog class="surface-dialog profile-manager-dialog" id="profile-manager" aria-labelledby="profile-manager-title">
+      <div class="dialog-header">
+        <div>
+          <span>Settings</span>
+          <h2 id="profile-manager-title">Profiles</h2>
+        </div>
+        <button class="text-button" id="profile-manager-close" type="button">关闭</button>
+      </div>
+      <div class="dialog-body profile-manager-body">
+        <p class="dialog-intro">管理 Provider、endpoint、凭据引用、模型发现与能力验证。</p>
+        <div class="profile-manager-list" id="profile-manager-list"></div>
+        <button class="secondary-button" id="add-profile" type="button">添加 Profile…</button>
+        <section class="profile-form" id="profile-form" hidden>
+          <div class="profile-form-grid">
+            <label>
+              <span>Provider</span>
+              <select id="provider-type">
+                <option value="openai-compatible">OpenAI Compatible</option>
+                <option value="anthropic-compatible">Anthropic Compatible</option>
+                <option value="ollama">Ollama</option>
+              </select>
+            </label>
+            <label>
+              <span>Profile name</span>
+              <input id="profile-name" value="Team Gateway" />
+            </label>
+            <label class="profile-form-wide">
+              <span>Endpoint</span>
+              <input id="profile-endpoint" value="https://gateway.example.com/v1" />
+            </label>
+            <label class="profile-form-wide">
+              <span>Credential</span>
+              <input id="profile-credential" type="password" value="prototype-key" />
+              <small>只保存到系统安全存储；原型不会读取或发送此值。</small>
+            </label>
+          </div>
+          <div class="profile-validation" id="profile-validation" aria-live="polite">尚未验证</div>
+          <button class="primary-button" id="verify-profile" type="button">发现模型并验证</button>
+        </section>
+      </div>
+    </dialog>
+
+    <dialog class="surface-dialog resource-dialog" id="resource-picker" aria-labelledby="resource-picker-title">
+      <div class="dialog-header">
+        <div>
+          <span>本轮上下文</span>
+          <h2 id="resource-picker-title">添加资源</h2>
+        </div>
+        <button class="text-button" id="resource-picker-close" type="button">关闭</button>
+      </div>
+      <div class="dialog-body resource-picker-body">
+        <button class="picker-row resource-choice" id="add-local-file" type="button">
+          <span class="picker-row-copy"><strong>添加文件…</strong><small>仅用于当前 Conversation，默认只读</small></span>
+        </button>
+        <button class="picker-row resource-choice" id="add-project-folder" type="button">
+          <span class="picker-row-copy"><strong>打开文件夹作为 Project…</strong><small>授予明确目录范围</small></span>
+        </button>
+        <div class="resource-url-field">
+          <label for="resource-url">公开 URL</label>
+          <span class="resource-url-row">
+            <input id="resource-url" type="url" value="https://example.org/report" />
+            <button class="secondary-button" id="add-resource-url" type="button">添加 URL</button>
+          </span>
+        </div>
+        <div class="folder-notice" id="resource-notice" aria-live="polite">不会在未确认时扩大到其他文件或网站。</div>
+      </div>
+    </dialog>
+
+    <script src="fixtures.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

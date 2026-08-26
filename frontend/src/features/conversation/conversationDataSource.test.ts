@@ -18,6 +18,8 @@ const mocks = vi.hoisted(() => ({
   restoreChatSession: vi.fn(),
   deleteProject: vi.fn(),
   assignConversationProject: vi.fn(),
+  selectConversation: vi.fn(),
+  selectProviderProfile: vi.fn(),
   selectNewConversationProject: vi.fn(),
   setConversationMemoryMode: vi.fn(),
   pickAndImportResources: vi.fn(),
@@ -52,6 +54,8 @@ vi.mock("@/ipc/conversation", () => ({
   restoreChatSession: mocks.restoreChatSession,
   deleteProject: mocks.deleteProject,
   assignConversationProject: mocks.assignConversationProject,
+  selectConversation: mocks.selectConversation,
+  selectProviderProfile: mocks.selectProviderProfile,
   selectNewConversationProject: mocks.selectNewConversationProject,
   setConversationMemoryMode: mocks.setConversationMemoryMode,
   deleteChatSession: vi.fn(),
@@ -87,6 +91,8 @@ describe("Conversation Tauri stream adapter", () => {
     mocks.restoreChatSession.mockReset();
     mocks.deleteProject.mockReset();
     mocks.assignConversationProject.mockReset();
+    mocks.selectConversation.mockReset();
+    mocks.selectProviderProfile.mockReset();
     mocks.selectNewConversationProject.mockReset();
     mocks.setConversationMemoryMode.mockReset();
     mocks.pickAndImportResources.mockReset();

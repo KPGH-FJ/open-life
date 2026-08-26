@@ -110,6 +110,252 @@ describe("Workspace route", () => {
     expect(screen.queryByText("任务已完成")).not.toBeInTheDocument();
   });
 
+  it("keeps the just-completed Work selected after its final inline review", async () => {
+    const user = userEvent.setup();
+    const fixture = workbenchFixtureDataSource("fixture-ready");
+    let resolved = false;
+    const dataSource = {
+      ...fixture,
+      dispatchReviewAction: vi.fn(async () => {
+        resolved = true;
+      }),
+      load: async () => {
+        const snapshot = await fixture.load();
+        const templateTask = snapshot.tasksEnvelope.data!.items[0];
+        const templateReview = snapshot.reviewEnvelope.data!.items[0];
+        const currentTask = {
+          ...templateTask,
+          canonicalTaskId: "task-current-review",
+          title: "本次多文件修改",
+          lifecycleStatus: resolved ? ("completed" as const) : templateTask.lifecycleStatus,
+          terminalDeliveryStatus: resolved
+            ? ("delivered" as const)
+            : templateTask.terminalDeliveryStatus,
+          finalDeliveryEvidencePresent: resolved,
+          pendingReviewItemRefs: resolved ? [] : templateTask.pendingReviewItemRefs,
+          latestResultPreview: {
+            ...templateTask.latestResultPreview!,
+            status: resolved ? ("delivered" as const) : templateTask.latestResultPreview!.status,
+            label: resolved ? "已完成并核验" : templateTask.latestResultPreview!.label,
+            preview: resolved
+              ? "本次多文件修改已完成。"
+              : templateTask.latestResultPreview!.preview,
+          },
+        };
+        const oldBlockedTask = {
+          ...templateTask,
+          canonicalTaskId: "task-old-blocked",
+          title: "旧失败任务",
+          lifecycleStatus: "blocked" as const,
+          terminalDeliveryStatus: "blocked" as const,
+          finalDeliveryEvidencePresent: false,
+          pendingReviewItemRefs: [],
+          latestResultPreview: {
+            ...templateTask.latestResultPreview!,
+            status: "blocked" as const,
+            label: "旧任务已阻断",
+            preview: "旧失败任务不应替换刚完成任务的详情。",
+          },
+          updatedAt: "2026-07-19T09:30:00.000Z",
+        };
+        const reviewItem = resolved
+          ? {
+              ...templateReview,
+              status: "approved" as const,
+              materializationStatus: "applied" as const,
+            }
+          : templateReview;
+        return {
+          ...snapshot,
+          tasksEnvelope: {
+            ...snapshot.tasksEnvelope,
+            data: {
+              ...snapshot.tasksEnvelope.data!,
+              items: [currentTask, oldBlockedTask],
+            },
+          },
+          reviewEnvelope: {
+            ...snapshot.reviewEnvelope,
+            data: { ...snapshot.reviewEnvelope.data!, items: [reviewItem] },
+          },
+        };
+      },
+    };
+
+    render(
+      <ProductWorkbench
+        workbenchDataSource={dataSource}
+        conversationDataSource={dataSource}
+        initialSurface="workspace"
+      />
+    );
+
+    await user.click(await screen.findByRole("button", { name: "仅允许本次" }));
+    await user.click(screen.getByRole("button", { name: "确认仅允许本次" }));
+
+    expect(await screen.findByText("本次多文件修改已完成。")).toBeInTheDocument();
+    expect(screen.queryByText("旧失败任务不应替换刚完成任务的详情。")).not.toBeInTheDocument();
+  });
+
+  it("defaults to the latest completed Work instead of an older blocked history item", async () => {
+    const fixture = workbenchFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      load: async () => {
+        const snapshot = await fixture.load();
+        const templateTask = snapshot.tasksEnvelope.data!.items[0];
+        return {
+          ...snapshot,
+          tasksEnvelope: {
+            ...snapshot.tasksEnvelope,
+            data: {
+              ...snapshot.tasksEnvelope.data!,
+              items: [
+                {
+                  ...templateTask,
+                  canonicalTaskId: "task-latest-completed",
+                  title: "最新多文件修改",
+                  lifecycleStatus: "completed" as const,
+                  terminalDeliveryStatus: "delivered" as const,
+                  finalDeliveryEvidencePresent: true,
+                  pendingReviewItemRefs: [],
+                  latestResultPreview: {
+                    ...templateTask.latestResultPreview!,
+                    status: "delivered" as const,
+                    label: "已完成并核验",
+                    preview: "最新多文件修改已完成。",
+                  },
+                },
+                {
+                  ...templateTask,
+                  canonicalTaskId: "task-older-blocked",
+                  title: "更旧的失败任务",
+                  lifecycleStatus: "blocked" as const,
+                  terminalDeliveryStatus: "blocked" as const,
+                  finalDeliveryEvidencePresent: false,
+                  pendingReviewItemRefs: [],
+                  latestResultPreview: {
+                    ...templateTask.latestResultPreview!,
+                    status: "blocked" as const,
+                    label: "旧任务已阻断",
+                    preview: "更旧失败不应成为默认详情。",
+                  },
+                },
+              ],
+            },
+          },
+          reviewEnvelope: {
+            ...snapshot.reviewEnvelope,
+            data: { ...snapshot.reviewEnvelope.data!, items: [] },
+          },
+        };
+      },
+    };
+
+    render(
+      <ProductWorkbench
+        workbenchDataSource={dataSource}
+        conversationDataSource={dataSource}
+        initialSurface="workspace"
+      />
+    );
+
+    expect(await screen.findByText("最新多文件修改已完成。")).toBeInTheDocument();
+    expect(screen.queryByText("更旧失败不应成为默认详情。")).not.toBeInTheDocument();
+  });
+
+  it("lets users inspect every pending file diff from the inline Work checkpoint", async () => {
+    const user = userEvent.setup();
+    const fixture = workbenchFixtureDataSource("fixture-ready");
+    const dataSource = {
+      ...fixture,
+      load: async () => {
+        const snapshot = await fixture.load();
+        const template = snapshot.reviewEnvelope.data!.items[0];
+        const fileReview = (id: string, fileName: string, diff: string): ReviewItem => ({
+          ...template,
+          id,
+          type: "external_write_action",
+          source: { ...template.source, proposalId: id },
+          decisionContext: {
+            ...template.decisionContext,
+            reviewItemId: id,
+            title: "确认文件修改",
+            summary: `核对 ${fileName} 的精确文本变更后再决定是否写入。`,
+            permission: undefined,
+            after: {
+              ...template.decisionContext.after,
+              summary: `建议版本 · ${fileName}`,
+              detail: diff,
+            },
+          },
+          allowedActions: template.allowedActions.map(action => ({
+            ...action,
+            id: `${id}:${action.kind}`,
+            targetReviewItemId: id,
+          })),
+        });
+        const readme = fileReview(
+          "review-readme",
+          "README.md",
+          "--- 当前文件\n+++ 建议版本\n-# Existing README\n+# Updated README"
+        );
+        const notes = fileReview(
+          "review-notes",
+          "notes.txt",
+          "--- 当前文件\n+++ 建议版本\n-Existing notes\n+Updated notes"
+        );
+        return {
+          ...snapshot,
+          tasksEnvelope: {
+            ...snapshot.tasksEnvelope,
+            data: {
+              ...snapshot.tasksEnvelope.data!,
+              items: snapshot.tasksEnvelope.data!.items.map(task => ({
+                ...task,
+                pendingReviewItemRefs: [
+                  { id: readme.id, kind: "review_item" as const, label: "README.md" },
+                  { id: notes.id, kind: "review_item" as const, label: "notes.txt" },
+                ],
+              })),
+            },
+          },
+          reviewEnvelope: {
+            ...snapshot.reviewEnvelope,
+            data: { ...snapshot.reviewEnvelope.data!, items: [readme, notes] },
+          },
+        };
+      },
+    };
+
+    render(
+      <ProductWorkbench
+        workbenchDataSource={dataSource}
+        conversationDataSource={dataSource}
+        initialSurface="workspace"
+      />
+    );
+
+    expect(await screen.findByText("2 项修改，逐项确认")).toBeInTheDocument();
+    const reviewDetail = screen
+      .getByRole("heading", { name: "确认文件修改", level: 2 })
+      .closest("article");
+    expect(reviewDetail).not.toBeNull();
+    expect(
+      within(reviewDetail!).getByText("核对 README.md 的精确文本变更后再决定是否写入。")
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", {
+        name: "查看第 2 项：核对 notes.txt 的精确文本变更后再决定是否写入。",
+      })
+    );
+    expect(
+      within(reviewDetail!).getByText("核对 notes.txt 的精确文本变更后再决定是否写入。")
+    ).toBeInTheDocument();
+    await user.click(screen.getByText("查看精确变更"));
+    expect(screen.getByText(/-Existing notes\s+\+Updated notes/)).toBeInTheDocument();
+  });
+
   it("keeps approval disabled when the backend permission scope is incomplete", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchFixtureDataSource("fixture-incomplete-permission");

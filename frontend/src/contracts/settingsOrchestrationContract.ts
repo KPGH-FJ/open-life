@@ -1,36 +1,18 @@
 import type { ProviderPrivacyBoundarySummary } from "../tauri";
 
-export type SettingsConnectionTestResult = {
-  ok: boolean;
-  message: string;
-};
-
 export type SettingsOrchestrationState = {
-  phase:
-    | "idle"
-    | "dirty"
-    | "testing"
-    | "tested"
-    | "saving"
-    | "refreshing_boundary"
-    | "ready"
-    | "unknown"
-    | "failed";
+  phase: "idle" | "dirty" | "saving" | "refreshing_boundary" | "ready" | "unknown" | "failed";
   draftRevision: number;
   savedRevision: number | null;
-  testResult: SettingsConnectionTestResult | null;
   providerBoundary: ProviderPrivacyBoundarySummary | null;
   boundaryAppliesToSavedRevision: boolean;
-  failureStage: "test" | "save" | "boundary_refresh" | null;
+  failureStage: "save" | "boundary_refresh" | null;
   errorCode: string | null;
 };
 
 export type SettingsOrchestrationEvent =
   | { type: "reset" }
   | { type: "edit" }
-  | { type: "test_requested" }
-  | { type: "test_succeeded"; result: SettingsConnectionTestResult }
-  | { type: "test_failed"; errorCode: string }
   | { type: "save_requested" }
   | { type: "save_succeeded" }
   | { type: "save_failed"; errorCode: string }
@@ -42,25 +24,11 @@ export const initialSettingsOrchestrationState: SettingsOrchestrationState = {
   phase: "idle",
   draftRevision: 0,
   savedRevision: 0,
-  testResult: null,
   providerBoundary: null,
   boundaryAppliesToSavedRevision: false,
   failureStage: null,
   errorCode: null,
 };
-
-function savedPhaseAfterTest(
-  state: SettingsOrchestrationState
-): Extract<SettingsOrchestrationState["phase"], "idle" | "ready" | "unknown"> {
-  if (!state.boundaryAppliesToSavedRevision) return "idle";
-  const boundary = state.providerBoundary;
-  const boundaryKnown =
-    boundary !== null &&
-    boundary.routeType !== "unknown" &&
-    boundary.externalTransmission !== "unknown" &&
-    boundary.risk !== "unknown";
-  return boundaryKnown ? "ready" : "unknown";
-}
 
 export function settingsOrchestrationReducer(
   state: SettingsOrchestrationState,
@@ -74,33 +42,12 @@ export function settingsOrchestrationReducer(
       ...state,
       phase: "dirty",
       draftRevision: state.draftRevision + 1,
-      testResult: null,
       failureStage: null,
       errorCode: null,
     };
   }
 
-  if (event.type === "test_requested") {
-    return { ...state, phase: "testing", testResult: null, failureStage: null, errorCode: null };
-  }
-  if (state.phase === "testing" && event.type === "test_succeeded") {
-    const draftIsSaved = state.savedRevision === state.draftRevision;
-    return {
-      ...state,
-      phase: draftIsSaved ? savedPhaseAfterTest(state) : "tested",
-      testResult: event.result,
-    };
-  }
-  if (state.phase === "testing" && event.type === "test_failed") {
-    return {
-      ...state,
-      phase: "failed",
-      failureStage: "test",
-      errorCode: event.errorCode,
-    };
-  }
-
-  if (event.type === "save_requested" && ["dirty", "tested"].includes(state.phase)) {
+  if (event.type === "save_requested" && state.phase === "dirty") {
     return { ...state, phase: "saving", failureStage: null, errorCode: null };
   }
   if (state.phase === "saving" && event.type === "save_succeeded") {

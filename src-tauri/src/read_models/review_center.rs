@@ -1,12 +1,18 @@
 use crate::state::AppState;
 use openlife_core::agent::{
-    build_review_center_view_model, AgentProposal, MemoryLifecycleStatus,
-    MemoryMaterializationStatus, ProposalStatus, ProposalType, ReviewCenterBuildInput,
-    ReviewCenterViewModel, ReviewItemArtifactEvidence, ReviewItemMaterializationStatus,
+    build_review_center_view_model, build_review_decision_context, AgentProposal,
+    EvidenceSensitivity, MemoryLifecycleStatus, MemoryMaterializationStatus, ProposalStatus,
+    ProposalType, ReviewCenterBuildInput, ReviewCenterViewModel, ReviewItemArtifactEvidence,
+    ReviewItemMaterializationStatus, ReviewReadableValue, ReviewReadableValueKind,
     ViewModelEnvelope, ViewModelStatus, ViewModelWarning, ViewModelWarningSeverity,
 };
-use openlife_core::task_runtime::CanonicalArtifactEffectState;
+use openlife_core::task_runtime::{
+    CanonicalArtifactEffectState, CanonicalArtifactReviewSubject, CanonicalArtifactUndoOperation,
+    CanonicalTaskRuntimeStore,
+};
+use similar::TextDiff;
 use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::Arc;
 use tauri::State;
 
@@ -40,6 +46,8 @@ pub(crate) async fn get_review_center_view_model_with_state(
     let (canonical_artifact_evidence, mut canonical_artifact_warnings) =
         canonical_artifact_evidence_overrides(state, &proposals).await;
     let artifact_evidence = canonical_artifact_evidence;
+    let (decision_context_overrides, mut artifact_diff_warnings) =
+        canonical_artifact_decision_context_overrides(state, &proposals).await;
     let config = state.config.lock().await;
     let safe_paths = config
         .system
@@ -57,6 +65,7 @@ pub(crate) async fn get_review_center_view_model_with_state(
     materialization_overrides.extend(dispatch_materialization_overrides);
     warnings.append(&mut dispatch_warnings);
     warnings.append(&mut canonical_artifact_warnings);
+    warnings.append(&mut artifact_diff_warnings);
     warnings.append(&mut safe_path_warnings);
     // Review availability is owned by the exact Proposal/Artifact capability
     // being reviewed. Unrelated startup warnings (including retired execution
@@ -70,6 +79,7 @@ pub(crate) async fn get_review_center_view_model_with_state(
         safe_path_overrides,
         materialization_overrides,
         artifact_evidence,
+        decision_context_overrides,
     });
 
     let status = if model.items.is_empty() {
@@ -81,6 +91,478 @@ pub(crate) async fn get_review_center_view_model_with_state(
     envelope.last_updated_at = Some(chrono::Utc::now().to_rfc3339());
     envelope.warnings.append(&mut warnings);
     Ok(envelope)
+}
+
+const REVIEW_TEXT_DIFF_MAX_BYTES: u64 = 1024 * 1024;
+const REVIEW_TEXT_DIFF_MAX_CHARS: usize = 12_000;
+
+async fn canonical_artifact_decision_context_overrides(
+    state: &Arc<AppState>,
+    proposals: &[AgentProposal],
+) -> (
+    BTreeMap<String, openlife_core::agent::ReviewDecisionContext>,
+    Vec<ViewModelWarning>,
+) {
+    let Some(store) = state.canonical_task_runtime_store.as_ref() else {
+        return (BTreeMap::new(), Vec::new());
+    };
+    let store = store.lock().await;
+    let database_path = store.db_path().map(Path::to_path_buf);
+    let mut overrides = BTreeMap::new();
+    let mut warnings = Vec::new();
+
+    for proposal in proposals
+        .iter()
+        .filter(|proposal| proposal.proposal_type == ProposalType::ExternalWriteAction)
+    {
+        if proposal.after.get("undoOfArtifactId").is_some() {
+            match canonical_artifact_undo_decision_context(
+                &store,
+                database_path.as_deref(),
+                proposal,
+            ) {
+                Ok(context) => {
+                    overrides.insert(proposal.id.clone(), context);
+                }
+                Err(error) => warnings.push(warning(
+                    "canonical_artifact_undo_diff_unavailable",
+                    format!(
+                        "Artifact Undo preview is unavailable for proposal {}: {error}",
+                        proposal.id
+                    ),
+                )),
+            }
+            continue;
+        }
+        let Ok(subject) =
+            serde_json::from_value::<CanonicalArtifactReviewSubject>(proposal.after.clone())
+        else {
+            continue;
+        };
+        if subject.validate().is_err() {
+            continue;
+        }
+        let projection = (|| -> Result<_, String> {
+            let version = store
+                .load_artifact_version(&subject.artifact_id, subject.artifact_version)
+                .map_err(|error| error.to_string())?
+                .ok_or_else(|| "canonical_artifact_version_missing".to_string())?;
+            if version.content_digest != subject.content_digest
+                || version.target_reference.as_deref() != Some(subject.path.as_str())
+            {
+                return Err("canonical_artifact_review_projection_identity_mismatch".into());
+            }
+            if subject.operation == "move" {
+                let source = subject
+                    .source_path
+                    .as_deref()
+                    .ok_or_else(|| "canonical_artifact_move_source_missing".to_string())?;
+                let target = subject
+                    .target_path
+                    .as_deref()
+                    .ok_or_else(|| "canonical_artifact_move_target_missing".to_string())?;
+                let mut context = build_review_decision_context(proposal, &[]);
+                context.title = "确认重命名文件".into();
+                context.summary = format!(
+                    "核对 {} 将重命名为 {}，文件内容保持不变。",
+                    Path::new(source)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(source),
+                    Path::new(target)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or(target)
+                );
+                context.before = Some(ReviewReadableValue {
+                    kind: ReviewReadableValueKind::Text,
+                    summary: format!("当前名称 · {}", source),
+                    detail: None,
+                    sensitivity: EvidenceSensitivity::LocalPrivate,
+                    truncated: false,
+                });
+                context.after = ReviewReadableValue {
+                    kind: ReviewReadableValueKind::Text,
+                    summary: format!("新名称 · {}", target),
+                    detail: Some(format!("文件内容摘要保持为 {}", subject.content_digest)),
+                    sensitivity: EvidenceSensitivity::LocalPrivate,
+                    truncated: false,
+                };
+                return Ok(context);
+            }
+            if !is_text_review_media_type(&subject) {
+                return Err("canonical_artifact_review_diff_unsupported_media_type".into());
+            }
+            let draft_reference = version
+                .draft_reference
+                .as_deref()
+                .ok_or_else(|| "canonical_artifact_draft_reference_missing".to_string())?;
+            let proposed = read_owned_review_text(
+                database_path.as_deref(),
+                "artifact-drafts",
+                draft_reference,
+                &version.content_digest,
+            )?;
+            let current = if subject.expected_target_absent {
+                String::new()
+            } else {
+                let snapshot = store
+                    .load_artifact_pre_change_snapshot(
+                        &subject.artifact_id,
+                        subject.artifact_version,
+                    )
+                    .map_err(|error| error.to_string())?
+                    .ok_or_else(|| "canonical_artifact_pre_change_snapshot_missing".to_string())?;
+                if subject.expected_target_digest.as_deref()
+                    != Some(snapshot.content_digest.as_str())
+                {
+                    return Err("canonical_artifact_pre_change_digest_mismatch".into());
+                }
+                read_owned_review_text(
+                    database_path.as_deref(),
+                    "artifact-pre-change",
+                    &snapshot.snapshot_reference,
+                    &snapshot.content_digest,
+                )?
+            };
+            let (diff, truncated) = bounded_unified_text_diff(&current, &proposed);
+            let mut context = build_review_decision_context(proposal, &[]);
+            context.title = if subject.expected_target_absent {
+                "确认创建文件".into()
+            } else {
+                "确认文件修改".into()
+            };
+            context.summary = format!(
+                "核对 {} 的精确文本变更后再决定是否写入。",
+                Path::new(&subject.path)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(subject.path.as_str())
+            );
+            context.before = Some(ReviewReadableValue {
+                kind: ReviewReadableValueKind::Text,
+                summary: if subject.expected_target_absent {
+                    "文件当前不存在".into()
+                } else {
+                    format!(
+                        "当前文件 · {}",
+                        subject
+                            .expected_target_digest
+                            .as_deref()
+                            .unwrap_or("摘要未知")
+                    )
+                },
+                detail: None,
+                sensitivity: EvidenceSensitivity::LocalPrivate,
+                truncated: false,
+            });
+            context.after = ReviewReadableValue {
+                kind: ReviewReadableValueKind::Text,
+                summary: format!("建议版本 · {}", subject.content_digest),
+                detail: Some(diff),
+                sensitivity: EvidenceSensitivity::LocalPrivate,
+                truncated,
+            };
+            Ok(context)
+        })();
+        match projection {
+            Ok(context) => {
+                overrides.insert(proposal.id.clone(), context);
+            }
+            Err(error) if error == "canonical_artifact_review_diff_unsupported_media_type" => {}
+            Err(error) => warnings.push(warning(
+                "canonical_artifact_review_diff_unavailable",
+                format!(
+                    "Artifact text diff is unavailable for proposal {}: {error}",
+                    proposal.id
+                ),
+            )),
+        }
+    }
+    (overrides, warnings)
+}
+
+fn canonical_artifact_undo_decision_context(
+    store: &CanonicalTaskRuntimeStore,
+    database_path: Option<&Path>,
+    proposal: &AgentProposal,
+) -> Result<openlife_core::agent::ReviewDecisionContext, String> {
+    let artifact_id = proposal
+        .after
+        .get("undoOfArtifactId")
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| "canonical_artifact_undo_identity_missing".to_string())?;
+    let version = proposal
+        .after
+        .get("artifactVersion")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| "canonical_artifact_undo_version_missing".to_string())?;
+    let undo = store
+        .load_artifact_undo_version(artifact_id, version)
+        .map_err(|error| error.to_string())?
+        .filter(|undo| undo.proposal_id == proposal.id)
+        .ok_or_else(|| "canonical_artifact_undo_checkpoint_missing".to_string())?;
+    let artifact = store
+        .load_artifact(artifact_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_artifact_missing".to_string())?;
+    let artifact_version = store
+        .load_artifact_version(artifact_id, version)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_artifact_version_missing".to_string())?;
+    if artifact.current_version != version
+        || proposal.run_id.as_deref()
+            != proposal
+                .after
+                .get("sourceRunId")
+                .and_then(serde_json::Value::as_str)
+        || proposal.source_detail.as_deref()
+            != proposal
+                .after
+                .get("canonicalTaskId")
+                .and_then(serde_json::Value::as_str)
+    {
+        return Err("canonical_artifact_undo_origin_mismatch".into());
+    }
+    let mut context = build_review_decision_context(proposal, &[]);
+    match undo.operation {
+        CanonicalArtifactUndoOperation::RestoreReplaced => {
+            let expected_target_digest = proposal
+                .after
+                .get("expected_target_digest")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "canonical_artifact_undo_target_digest_missing".to_string())?;
+            let restore_digest = proposal
+                .after
+                .get("restore_digest")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "canonical_artifact_undo_restore_digest_missing".to_string())?;
+            let target = proposal
+                .after
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "canonical_artifact_undo_target_missing".to_string())?;
+            let snapshot = proposal
+                .after
+                .get("snapshot_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "canonical_artifact_undo_snapshot_missing".to_string())?;
+            if expected_target_digest != artifact.content_digest
+                || restore_digest != undo.content_digest
+                || proposal
+                    .after
+                    .get("contentDigest")
+                    .and_then(serde_json::Value::as_str)
+                    != Some(restore_digest)
+                || target != undo.target_reference
+                || snapshot != undo.source_reference
+                || artifact_version.target_reference.as_deref() != Some(target)
+            {
+                return Err("canonical_artifact_undo_projection_identity_mismatch".into());
+            }
+            let (detail, truncated) = if is_text_review_media_type_name(&artifact.media_type) {
+                let current = read_owned_review_text(
+                    database_path,
+                    "artifact-drafts",
+                    artifact_version
+                        .draft_reference
+                        .as_deref()
+                        .ok_or_else(|| "canonical_artifact_draft_reference_missing".to_string())?,
+                    expected_target_digest,
+                )?;
+                let restored = read_owned_review_text(
+                    database_path,
+                    "artifact-pre-change",
+                    snapshot,
+                    restore_digest,
+                )?;
+                let (diff, truncated) = bounded_unified_text_diff(&current, &restored);
+                (Some(diff), truncated)
+            } else {
+                (None, false)
+            };
+            context.title = "确认撤销文件修改".into();
+            context.summary = format!(
+                "核对 {} 将恢复到修改前版本后再决定。",
+                Path::new(target)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(target)
+            );
+            context.before = Some(ReviewReadableValue {
+                kind: ReviewReadableValueKind::Text,
+                summary: format!("当前版本 · {expected_target_digest}"),
+                detail: None,
+                sensitivity: EvidenceSensitivity::LocalPrivate,
+                truncated: false,
+            });
+            context.after = ReviewReadableValue {
+                kind: ReviewReadableValueKind::Text,
+                summary: format!("恢复版本 · {restore_digest}"),
+                detail,
+                sensitivity: EvidenceSensitivity::LocalPrivate,
+                truncated,
+            };
+        }
+        CanonicalArtifactUndoOperation::TrashCreated => {
+            let source = proposal
+                .after
+                .get("source_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "canonical_artifact_undo_source_missing".to_string())?;
+            let digest = proposal
+                .after
+                .get("source_digest")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "canonical_artifact_undo_source_digest_missing".to_string())?;
+            if source != undo.source_reference || digest != undo.content_digest {
+                return Err("canonical_artifact_undo_projection_identity_mismatch".into());
+            }
+            context.title = "确认撤销已创建文件".into();
+            context.summary = format!(
+                "确认将 {} 移到 OpenLife 的可恢复位置。",
+                Path::new(source)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(source)
+            );
+            context.before = Some(ReviewReadableValue {
+                kind: ReviewReadableValueKind::Text,
+                summary: format!("当前文件 · {digest}"),
+                detail: None,
+                sensitivity: EvidenceSensitivity::LocalPrivate,
+                truncated: false,
+            });
+            context.after = ReviewReadableValue {
+                kind: ReviewReadableValueKind::Text,
+                summary: "移到 OpenLife 可恢复位置".into(),
+                detail: None,
+                sensitivity: EvidenceSensitivity::LocalPrivate,
+                truncated: false,
+            };
+        }
+        CanonicalArtifactUndoOperation::RestoreMoved => {
+            let source = proposal
+                .after
+                .get("source_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "canonical_artifact_undo_source_missing".to_string())?;
+            let target = proposal
+                .after
+                .get("target_path")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "canonical_artifact_undo_target_missing".to_string())?;
+            let digest = proposal
+                .after
+                .get("source_digest")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| "canonical_artifact_undo_source_digest_missing".to_string())?;
+            if source != undo.source_reference
+                || target != undo.target_reference
+                || digest != undo.content_digest
+                || artifact_version.materialized_reference.as_deref() != Some(source)
+            {
+                return Err("canonical_artifact_undo_projection_identity_mismatch".into());
+            }
+            context.title = "确认撤销文件重命名".into();
+            context.summary = format!(
+                "确认将 {} 恢复为原名称 {}，文件内容保持不变。",
+                Path::new(source)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(source),
+                Path::new(target)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or(target)
+            );
+            context.before = Some(ReviewReadableValue {
+                kind: ReviewReadableValueKind::Text,
+                summary: format!("当前名称 · {source}"),
+                detail: None,
+                sensitivity: EvidenceSensitivity::LocalPrivate,
+                truncated: false,
+            });
+            context.after = ReviewReadableValue {
+                kind: ReviewReadableValueKind::Text,
+                summary: format!("恢复名称 · {target}"),
+                detail: Some(format!("文件内容摘要保持为 {digest}")),
+                sensitivity: EvidenceSensitivity::LocalPrivate,
+                truncated: false,
+            };
+        }
+    }
+    Ok(context)
+}
+
+fn is_text_review_media_type(subject: &CanonicalArtifactReviewSubject) -> bool {
+    matches!(
+        subject.artifact_kind.as_str(),
+        "markdown" | "html" | "json" | "yaml" | "csv" | "text"
+    )
+}
+
+fn is_text_review_media_type_name(media_type: &str) -> bool {
+    media_type.starts_with("text/")
+        || matches!(
+            media_type.split(';').next().unwrap_or(media_type),
+            "application/json" | "application/yaml" | "application/x-yaml"
+        )
+}
+
+fn read_owned_review_text(
+    database_path: Option<&Path>,
+    storage_directory: &str,
+    reference: &str,
+    expected_digest: &str,
+) -> Result<String, String> {
+    let path = Path::new(reference);
+    let metadata = std::fs::symlink_metadata(path)
+        .map_err(|_| "canonical_artifact_review_source_missing".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("canonical_artifact_review_source_type_invalid".into());
+    }
+    if metadata.len() > REVIEW_TEXT_DIFF_MAX_BYTES {
+        return Err("canonical_artifact_review_source_too_large".into());
+    }
+    if let Some(parent) = database_path.and_then(Path::parent) {
+        let root = parent
+            .join(storage_directory)
+            .canonicalize()
+            .map_err(|_| "canonical_artifact_review_source_root_unavailable".to_string())?;
+        let canonical = path
+            .canonicalize()
+            .map_err(|_| "canonical_artifact_review_source_missing".to_string())?;
+        if !canonical.starts_with(root) {
+            return Err("canonical_artifact_review_source_outside_store".into());
+        }
+    } else if !cfg!(test) {
+        return Err("canonical_artifact_review_source_root_unavailable".into());
+    }
+    let bytes = std::fs::read(path)
+        .map_err(|_| "canonical_artifact_review_source_read_failed".to_string())?;
+    if crate::artifact_materializer::artifact_content_digest(&bytes) != expected_digest {
+        return Err("canonical_artifact_review_source_digest_mismatch".into());
+    }
+    String::from_utf8(bytes).map_err(|_| "canonical_artifact_review_source_not_utf8".to_string())
+}
+
+fn bounded_unified_text_diff(current: &str, proposed: &str) -> (String, bool) {
+    let diff = TextDiff::from_lines(current, proposed)
+        .unified_diff()
+        .context_radius(3)
+        .header("当前文件", "建议版本")
+        .to_string();
+    let count = diff.chars().count();
+    if count <= REVIEW_TEXT_DIFF_MAX_CHARS {
+        return (diff, false);
+    }
+    let mut bounded = diff
+        .chars()
+        .take(REVIEW_TEXT_DIFF_MAX_CHARS)
+        .collect::<String>();
+    bounded.push_str("\n… diff 已截断；批准仍绑定完整内容摘要。\n");
+    (bounded, true)
 }
 
 async fn canonical_artifact_safe_path_overrides(
@@ -317,7 +799,10 @@ fn warning(code: impl Into<String>, message: impl Into<String>) -> ViewModelWarn
 
 #[cfg(test)]
 mod tests {
-    use super::{action_materialization_status, dispatch_materialization_overrides};
+    use super::{
+        action_materialization_status, bounded_unified_text_diff,
+        dispatch_materialization_overrides, REVIEW_TEXT_DIFF_MAX_CHARS,
+    };
     use openlife_core::agent::{
         AgentProposal, ProposalSource, ProposalStatus, ProposalStore, ProposalType,
         ReviewItemMaterializationStatus, RiskLevel,
@@ -340,6 +825,33 @@ mod tests {
             RiskLevel::Medium,
             ProposalSource::Manual,
         )
+    }
+
+    #[test]
+    fn review_text_diff_is_exact_and_bounded() {
+        let (diff, truncated) = bounded_unified_text_diff(
+            "# 标题\n\n保留这一段。\n\n旧结论。\n",
+            "# 新标题\n\n保留这一段。\n\n短结论。\n",
+        );
+        assert!(!truncated);
+        assert!(diff.contains("--- 当前文件"));
+        assert!(diff.contains("+++ 建议版本"));
+        assert!(diff.contains("-# 标题"));
+        assert!(diff.contains("+# 新标题"));
+        assert!(diff.contains(" 保留这一段。"));
+        assert!(diff.contains("-旧结论。"));
+        assert!(diff.contains("+短结论。"));
+
+        let current = (0..(REVIEW_TEXT_DIFF_MAX_CHARS + 100))
+            .map(|index| format!("旧行 {index}\n"))
+            .collect::<String>();
+        let proposed = (0..(REVIEW_TEXT_DIFF_MAX_CHARS + 100))
+            .map(|index| format!("新行 {index}\n"))
+            .collect::<String>();
+        let (bounded, truncated) = bounded_unified_text_diff(&current, &proposed);
+        assert!(truncated);
+        assert!(bounded.chars().count() < REVIEW_TEXT_DIFF_MAX_CHARS + 100);
+        assert!(bounded.contains("diff 已截断"));
     }
 
     #[test]

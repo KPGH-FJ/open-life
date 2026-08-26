@@ -38,6 +38,31 @@ pub(crate) fn resolve_workspace_file_relative_target(
     Ok((label, candidate.to_string_lossy().to_string()))
 }
 
+pub(crate) fn resolve_workspace_directory_relative_target(
+    workspace_root: &Path,
+    relative: &str,
+) -> Result<(String, String), String> {
+    let workspace = workspace_root
+        .canonicalize()
+        .map_err(|err| format!("project workspace canonicalization failed: {err}"))?;
+    if !workspace.is_dir() {
+        return Err("project workspace root is not a directory".into());
+    }
+    let normalized = relative.trim();
+    if normalized.is_empty() || normalized == "." {
+        return Ok((".".into(), workspace.to_string_lossy().into_owned()));
+    }
+    let safe_relative = validate_relative_workspace_path(normalized)?;
+    let candidate = workspace.join(&safe_relative);
+    if !candidate.starts_with(&workspace) {
+        return Err("folder list outside workspace is blocked".into());
+    }
+    Ok((
+        safe_relative.to_string_lossy().replace('\\', "/"),
+        candidate.to_string_lossy().into_owned(),
+    ))
+}
+
 pub(crate) fn resolve_workspace_root() -> Result<PathBuf, String> {
     let cwd =
         std::env::current_dir().map_err(|err| format!("workspace path unavailable: {err}"))?;
@@ -191,6 +216,14 @@ mod tests {
             project.path().canonicalize().unwrap(),
             unrelated.path().canonicalize().unwrap()
         );
+    }
+
+    #[test]
+    fn directory_target_supports_root_and_blocks_traversal() {
+        let project = tempfile::tempdir().unwrap();
+        let (_, root) = resolve_workspace_directory_relative_target(project.path(), ".").unwrap();
+        assert_eq!(PathBuf::from(root), project.path().canonicalize().unwrap());
+        assert!(resolve_workspace_directory_relative_target(project.path(), "../outside").is_err());
     }
 
     #[test]

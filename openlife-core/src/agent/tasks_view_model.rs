@@ -306,6 +306,7 @@ pub struct TaskArtifactRevisionViewModel {
 pub enum TaskArtifactChangeKind {
     Create,
     Replace,
+    Rename,
     Unknown,
 }
 

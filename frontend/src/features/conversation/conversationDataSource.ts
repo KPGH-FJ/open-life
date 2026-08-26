@@ -20,6 +20,8 @@ import {
   removeProjectReadRoot,
   restoreChatSession,
   restoreProject,
+  selectConversation,
+  selectProviderProfile,
   selectMainChatSkill,
   selectNewConversationProject,
   setConversationMemoryMode,
@@ -60,6 +62,8 @@ export type NewConversationAdmission = {
 
 export interface ConversationDataSource {
   loadConversation(conversationId?: string): Promise<ConversationViewModel>;
+  selectConversation?(conversationId: string): Promise<void>;
+  selectProviderProfile?(conversationId: string | null, profileId: string): Promise<void>;
   createSession(
     sessionId: string,
     title: string,
@@ -162,6 +166,8 @@ async function streamTurn(
 
 export const tauriConversationDataSource: ConversationDataSource = {
   loadConversation: getConversationViewModel,
+  selectConversation,
+  selectProviderProfile,
   createSession: createChatSession,
   createProject: createProjectFromDirectory,
   bindProjectDirectory,

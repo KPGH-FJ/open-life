@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
 
-const SCHEMA_VERSION: i64 = 8;
+const SCHEMA_VERSION: i64 = 11;
 const MAX_PROJECT_ADDITIONAL_READ_ROOTS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -58,6 +58,43 @@ pub struct ProjectReadRoot {
     pub id: String,
     pub name: String,
     pub path: String,
+}
+
+/// A non-secret, persistent provider connection identity. Credentials remain
+/// in the platform secret store; this record only binds their opaque reference
+/// and version to the endpoint the runtime is allowed to use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderConnectionRecord {
+    pub id: String,
+    pub provider_id: String,
+    pub display_name: String,
+    pub endpoint: String,
+    pub endpoint_class: String,
+    pub credential_reference: Option<String>,
+    pub credential_version: u64,
+    pub protocol: String,
+    pub privacy_boundary: String,
+    pub validation_state: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// A user-retained model choice under one exact provider connection. The
+/// capability JSON is a bounded provider-authored snapshot, never entitlement
+/// or successful-invocation evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderModelProfileRecord {
+    pub profile_id: String,
+    pub connection_id: String,
+    pub model_id: String,
+    pub display_name: String,
+    pub capability_snapshot_json: String,
+    pub capability_source: String,
+    pub validation_state: String,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -394,6 +431,8 @@ impl ConversationStore {
                 "conversations",
                 "conversation_turns",
                 "conversation_items",
+                "provider_connections",
+                "provider_model_profiles",
             ],
         )?;
         Self::validate_schema(&conn)?;
@@ -431,15 +470,6 @@ impl ConversationStore {
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
              );
-             CREATE TABLE IF NOT EXISTS workspace_context_state (
-                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
-                new_conversation_project_id TEXT,
-                updated_at TEXT NOT NULL,
-                FOREIGN KEY(new_conversation_project_id) REFERENCES projects(id)
-                    ON DELETE SET NULL
-             );
-             INSERT INTO workspace_context_state(singleton,new_conversation_project_id,updated_at)
-             VALUES(1,NULL,'1970-01-01T00:00:00Z') ON CONFLICT(singleton) DO NOTHING;
              CREATE TABLE IF NOT EXISTS project_read_roots (
                 id TEXT PRIMARY KEY,
                 project_id TEXT NOT NULL,
@@ -456,6 +486,7 @@ impl ConversationStore {
                 title TEXT NOT NULL,
                 project_id TEXT,
                 selected_skill_id TEXT,
+                selected_provider_profile_id TEXT,
                 memory_mode TEXT NOT NULL DEFAULT 'use_and_learn' CHECK(memory_mode IN (
                     'use_and_learn','use_only','off'
                 )),
@@ -464,6 +495,52 @@ impl ConversationStore {
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT
              );
+             CREATE TABLE IF NOT EXISTS provider_connections (
+                id TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                endpoint_class TEXT NOT NULL CHECK(endpoint_class IN ('local','cloud')),
+                credential_reference TEXT,
+                credential_version INTEGER NOT NULL CHECK(credential_version >= 0),
+                protocol TEXT NOT NULL,
+                privacy_boundary TEXT NOT NULL,
+                validation_state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS provider_model_profiles (
+                profile_id TEXT PRIMARY KEY,
+                connection_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                capability_snapshot_json TEXT NOT NULL,
+                capability_source TEXT NOT NULL,
+                validation_state TEXT NOT NULL DEFAULT 'unverified',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(connection_id,model_id),
+                FOREIGN KEY(connection_id) REFERENCES provider_connections(id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_provider_model_profiles_connection
+                ON provider_model_profiles(connection_id,updated_at DESC,profile_id);
+             CREATE TABLE IF NOT EXISTS workspace_context_state (
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                new_conversation_project_id TEXT,
+                selected_conversation_id TEXT,
+                selected_provider_profile_id TEXT,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(new_conversation_project_id) REFERENCES projects(id)
+                    ON DELETE SET NULL,
+                FOREIGN KEY(selected_conversation_id) REFERENCES conversations(id)
+                    ON DELETE SET NULL,
+                FOREIGN KEY(selected_provider_profile_id) REFERENCES provider_model_profiles(profile_id)
+                    ON DELETE SET NULL
+             );
+             INSERT INTO workspace_context_state(
+                singleton,new_conversation_project_id,updated_at
+             ) VALUES(1,NULL,'1970-01-01T00:00:00Z')
+             ON CONFLICT(singleton) DO NOTHING;
              CREATE TABLE IF NOT EXISTS conversation_turns (
                 id TEXT PRIMARY KEY,
                 conversation_id TEXT NOT NULL,
@@ -511,7 +588,7 @@ impl ConversationStore {
              CREATE INDEX IF NOT EXISTS idx_conversation_items_turn
                 ON conversation_items(turn_id, sequence);
              INSERT INTO conversation_store_metadata(key,value)
-             VALUES('schema_version','8') ON CONFLICT(key) DO NOTHING;",
+             VALUES('schema_version','11') ON CONFLICT(key) DO NOTHING;",
         )?;
         if Self::schema_version(&conn)? == 1 {
             Self::migrate_v1_to_v2(&mut conn)?;
@@ -533,6 +610,15 @@ impl ConversationStore {
         }
         if Self::schema_version(&conn)? == 7 {
             Self::migrate_v7_to_v8(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 8 {
+            Self::migrate_v8_to_v9(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 9 {
+            Self::migrate_v9_to_v10(&mut conn)?;
+        }
+        if Self::schema_version(&conn)? == 10 {
+            Self::migrate_v10_to_v11(&mut conn)?;
         }
         Self::validate_schema(&conn)
     }
@@ -797,6 +883,111 @@ impl ConversationStore {
         Ok(())
     }
 
+    fn migrate_v8_to_v9(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "workspace_context_state",
+            "selected_conversation_id",
+            "TEXT REFERENCES conversations(id) ON DELETE SET NULL",
+        )?;
+        let changed = tx.execute(
+            "UPDATE conversation_store_metadata SET value='9'
+             WHERE key='schema_version' AND value='8'",
+            [],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("conversation_store_v8_migration_version_conflict");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn migrate_v9_to_v10(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS provider_connections (
+                id TEXT PRIMARY KEY,
+                provider_id TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                endpoint TEXT NOT NULL,
+                endpoint_class TEXT NOT NULL CHECK(endpoint_class IN ('local','cloud')),
+                credential_reference TEXT,
+                credential_version INTEGER NOT NULL CHECK(credential_version >= 0),
+                protocol TEXT NOT NULL,
+                privacy_boundary TEXT NOT NULL,
+                validation_state TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS provider_model_profiles (
+                profile_id TEXT PRIMARY KEY,
+                connection_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                display_name TEXT NOT NULL,
+                capability_snapshot_json TEXT NOT NULL,
+                capability_source TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                UNIQUE(connection_id,model_id),
+                FOREIGN KEY(connection_id) REFERENCES provider_connections(id) ON DELETE CASCADE
+             );
+             CREATE INDEX IF NOT EXISTS idx_provider_model_profiles_connection
+                ON provider_model_profiles(connection_id,updated_at DESC,profile_id);",
+        )?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "workspace_context_state",
+            "selected_provider_profile_id",
+            "TEXT REFERENCES provider_model_profiles(profile_id) ON DELETE SET NULL",
+        )?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "conversations",
+            "selected_provider_profile_id",
+            "TEXT",
+        )?;
+        let changed = tx.execute(
+            "UPDATE conversation_store_metadata SET value='10'
+             WHERE key='schema_version' AND value='9'",
+            [],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("conversation_store_v9_migration_version_conflict");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
+    fn migrate_v10_to_v11(conn: &mut Connection) -> Result<()> {
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        crate::sqlite_migration::ensure_column(
+            &tx,
+            "provider_model_profiles",
+            "validation_state",
+            "TEXT NOT NULL DEFAULT 'unverified'",
+        )?;
+        tx.execute(
+            "UPDATE provider_model_profiles
+             SET validation_state=COALESCE((
+                SELECT provider_connections.validation_state
+                FROM provider_connections
+                WHERE provider_connections.id=provider_model_profiles.connection_id
+             ),'unverified')",
+            [],
+        )?;
+        let changed = tx.execute(
+            "UPDATE conversation_store_metadata SET value='11'
+             WHERE key='schema_version' AND value='10'",
+            [],
+        )?;
+        if changed != 1 {
+            anyhow::bail!("conversation_store_v10_migration_version_conflict");
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     fn validate_schema(conn: &Connection) -> Result<()> {
         let version = Self::schema_version(conn)?;
         if version != SCHEMA_VERSION {
@@ -828,12 +1019,16 @@ impl ConversationStore {
             validate_label("selected_skill_id", skill_id, 256)?;
         }
         let now = Utc::now();
-        let conn = self.lock_conn()?;
-        let changed = conn.execute(
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             "INSERT INTO conversations(
-                id,title,project_id,selected_skill_id,memory_mode,status,created_at,updated_at
+                id,title,project_id,selected_skill_id,selected_provider_profile_id,
+                memory_mode,status,created_at,updated_at
              )
-             SELECT ?1,?2,?3,?4,?5,'active',?6,?6
+             SELECT ?1,?2,?3,?4,
+                    (SELECT selected_provider_profile_id FROM workspace_context_state WHERE singleton=1),
+                    ?5,'active',?6,?6
              WHERE ?3 IS NULL OR EXISTS(
                 SELECT 1 FROM projects WHERE id=?3 AND status='active'
              )",
@@ -847,6 +1042,13 @@ impl ConversationStore {
             ],
         )?;
         require_one(changed, "conversation_admission_project_unavailable")?;
+        let selected = tx.execute(
+            "UPDATE workspace_context_state
+             SET selected_conversation_id=?1,updated_at=?2 WHERE singleton=1",
+            params![input.id, now.to_rfc3339()],
+        )?;
+        require_one(selected, "workspace_context_state_missing")?;
+        tx.commit()?;
         drop(conn);
         self.get_conversation(input.id)?
             .context("conversation_create_missing")
@@ -927,6 +1129,303 @@ impl ConversationStore {
             params![project_id, Utc::now().to_rfc3339()],
         )?;
         require_one(changed, "workspace_project_selection_unavailable")
+    }
+
+    pub fn selected_conversation_id(&self) -> Result<Option<String>> {
+        self.lock_conn()?
+            .query_row(
+                "SELECT selected_conversation_id FROM workspace_context_state
+                 WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?
+            .context("workspace_context_state_missing")
+    }
+
+    pub fn set_selected_conversation(&self, conversation_id: &str) -> Result<()> {
+        validate_uuid("conversation_id", conversation_id)?;
+        let changed = self.lock_conn()?.execute(
+            "UPDATE workspace_context_state
+             SET selected_conversation_id=?1,updated_at=?2
+             WHERE singleton=1 AND EXISTS(
+                SELECT 1 FROM conversations WHERE id=?1 AND status='active'
+             )",
+            params![conversation_id, Utc::now().to_rfc3339()],
+        )?;
+        require_one(changed, "conversation_selection_unavailable")
+    }
+
+    pub fn upsert_provider_model_profile(
+        &self,
+        connection: &ProviderConnectionRecord,
+        profile: &ProviderModelProfileRecord,
+    ) -> Result<()> {
+        validate_label("provider_connection_id", &connection.id, 256)?;
+        validate_label("provider_id", &connection.provider_id, 128)?;
+        validate_label("provider_display_name", &connection.display_name, 256)?;
+        validate_label("provider_endpoint", &connection.endpoint, 2048)?;
+        if !matches!(connection.endpoint_class.as_str(), "local" | "cloud") {
+            anyhow::bail!("provider_endpoint_class_invalid");
+        }
+        if let Some(reference) = connection.credential_reference.as_deref() {
+            validate_label("provider_credential_reference", reference, 512)?;
+        }
+        validate_label("provider_protocol", &connection.protocol, 128)?;
+        validate_label(
+            "provider_privacy_boundary",
+            &connection.privacy_boundary,
+            128,
+        )?;
+        validate_label(
+            "provider_validation_state",
+            &connection.validation_state,
+            128,
+        )?;
+        validate_label("provider_profile_id", &profile.profile_id, 256)?;
+        validate_label("provider_model_id", &profile.model_id, 512)?;
+        validate_label("provider_model_display_name", &profile.display_name, 512)?;
+        validate_label(
+            "provider_capability_source",
+            &profile.capability_source,
+            128,
+        )?;
+        validate_label(
+            "provider_profile_validation_state",
+            &profile.validation_state,
+            128,
+        )?;
+        if profile.connection_id != connection.id {
+            anyhow::bail!("provider_profile_connection_mismatch");
+        }
+        if profile.capability_snapshot_json.len() > 32 * 1024
+            || !serde_json::from_str::<serde_json::Value>(&profile.capability_snapshot_json)
+                .is_ok_and(|value| value.is_object())
+        {
+            anyhow::bail!("provider_capability_snapshot_invalid");
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO provider_connections(
+                id,provider_id,display_name,endpoint,endpoint_class,credential_reference,
+                credential_version,protocol,privacy_boundary,validation_state,created_at,updated_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?11)
+             ON CONFLICT(id) DO UPDATE SET
+                provider_id=excluded.provider_id,
+                display_name=excluded.display_name,
+                endpoint=excluded.endpoint,
+                endpoint_class=excluded.endpoint_class,
+                credential_reference=excluded.credential_reference,
+                credential_version=excluded.credential_version,
+                protocol=excluded.protocol,
+                privacy_boundary=excluded.privacy_boundary,
+                validation_state=excluded.validation_state,
+                updated_at=excluded.updated_at",
+            params![
+                connection.id,
+                connection.provider_id,
+                connection.display_name,
+                connection.endpoint,
+                connection.endpoint_class,
+                connection.credential_reference,
+                i64::try_from(connection.credential_version)?,
+                connection.protocol,
+                connection.privacy_boundary,
+                connection.validation_state,
+                now,
+            ],
+        )?;
+        tx.execute(
+            "INSERT INTO provider_model_profiles(
+                profile_id,connection_id,model_id,display_name,capability_snapshot_json,
+                capability_source,validation_state,created_at,updated_at
+             ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?8)
+             ON CONFLICT(profile_id) DO UPDATE SET
+                connection_id=excluded.connection_id,
+                model_id=excluded.model_id,
+                display_name=excluded.display_name,
+                capability_snapshot_json=excluded.capability_snapshot_json,
+                capability_source=excluded.capability_source,
+                validation_state=excluded.validation_state,
+                updated_at=excluded.updated_at",
+            params![
+                profile.profile_id,
+                profile.connection_id,
+                profile.model_id,
+                profile.display_name,
+                profile.capability_snapshot_json,
+                profile.capability_source,
+                profile.validation_state,
+                now,
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn list_provider_connections(&self) -> Result<Vec<ProviderConnectionRecord>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare(
+            "SELECT id,provider_id,display_name,endpoint,endpoint_class,credential_reference,
+                    credential_version,protocol,privacy_boundary,validation_state,created_at,updated_at
+             FROM provider_connections ORDER BY updated_at DESC,id",
+        )?;
+        let rows = statement
+            .query_map([], provider_connection_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(anyhow::Error::from)?;
+        Ok(rows)
+    }
+
+    pub fn get_provider_connection(
+        &self,
+        connection_id: &str,
+    ) -> Result<Option<ProviderConnectionRecord>> {
+        validate_label("provider_connection_id", connection_id, 256)?;
+        self.lock_conn()?
+            .query_row(
+                "SELECT id,provider_id,display_name,endpoint,endpoint_class,credential_reference,
+                        credential_version,protocol,privacy_boundary,validation_state,created_at,updated_at
+                 FROM provider_connections WHERE id=?1",
+                [connection_id],
+                provider_connection_from_row,
+            )
+            .optional()
+            .map_err(anyhow::Error::from)
+    }
+
+    pub fn list_provider_model_profiles(&self) -> Result<Vec<ProviderModelProfileRecord>> {
+        let conn = self.lock_conn()?;
+        let mut statement = conn.prepare(
+            "SELECT profile_id,connection_id,model_id,display_name,capability_snapshot_json,
+                    capability_source,validation_state,created_at,updated_at
+             FROM provider_model_profiles ORDER BY updated_at DESC,profile_id",
+        )?;
+        let rows = statement
+            .query_map([], provider_model_profile_from_row)?
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(anyhow::Error::from)?;
+        Ok(rows)
+    }
+
+    pub fn update_provider_connection_validation_state(
+        &self,
+        connection_id: &str,
+        validation_state: &str,
+    ) -> Result<()> {
+        validate_label("provider_connection_id", connection_id, 256)?;
+        validate_label("provider_validation_state", validation_state, 128)?;
+        let changed = self.lock_conn()?.execute(
+            "UPDATE provider_connections SET validation_state=?2,updated_at=?3 WHERE id=?1",
+            params![connection_id, validation_state, Utc::now().to_rfc3339()],
+        )?;
+        require_one(changed, "provider_connection_not_found")
+    }
+
+    pub fn update_provider_model_profile_validation_state(
+        &self,
+        profile_id: &str,
+        validation_state: &str,
+    ) -> Result<()> {
+        validate_label("provider_profile_id", profile_id, 256)?;
+        validate_label("provider_profile_validation_state", validation_state, 128)?;
+        let changed = self.lock_conn()?.execute(
+            "UPDATE provider_model_profiles SET validation_state=?2,updated_at=?3
+             WHERE profile_id=?1",
+            params![profile_id, validation_state, Utc::now().to_rfc3339()],
+        )?;
+        require_one(changed, "provider_profile_not_found")
+    }
+
+    pub fn delete_provider_connection(&self, connection_id: &str) -> Result<()> {
+        validate_label("provider_connection_id", connection_id, 256)?;
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute(
+            "UPDATE workspace_context_state SET selected_provider_profile_id=NULL,updated_at=?2
+             WHERE singleton=1 AND selected_provider_profile_id IN (
+                SELECT profile_id FROM provider_model_profiles WHERE connection_id=?1
+             )",
+            params![connection_id, Utc::now().to_rfc3339()],
+        )?;
+        tx.execute(
+            "UPDATE conversations SET selected_provider_profile_id=NULL,updated_at=?2
+             WHERE selected_provider_profile_id IN (
+                SELECT profile_id FROM provider_model_profiles WHERE connection_id=?1
+             )",
+            params![connection_id, Utc::now().to_rfc3339()],
+        )?;
+        let changed = tx.execute(
+            "DELETE FROM provider_connections WHERE id=?1",
+            [connection_id],
+        )?;
+        require_one(changed, "provider_connection_not_found")?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn selected_provider_profile_id(
+        &self,
+        conversation_id: Option<&str>,
+    ) -> Result<Option<String>> {
+        let conn = self.lock_conn()?;
+        match conversation_id {
+            Some(conversation_id) => {
+                validate_uuid("conversation_id", conversation_id)?;
+                conn.query_row(
+                    "SELECT selected_provider_profile_id FROM conversations WHERE id=?1",
+                    [conversation_id],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .context("conversation_not_found")
+            }
+            None => conn
+                .query_row(
+                    "SELECT selected_provider_profile_id FROM workspace_context_state
+                     WHERE singleton=1",
+                    [],
+                    |row| row.get(0),
+                )
+                .optional()?
+                .context("workspace_context_state_missing"),
+        }
+    }
+
+    pub fn set_selected_provider_profile(
+        &self,
+        conversation_id: Option<&str>,
+        profile_id: &str,
+    ) -> Result<()> {
+        validate_label("provider_profile_id", profile_id, 256)?;
+        if let Some(conversation_id) = conversation_id {
+            validate_uuid("conversation_id", conversation_id)?;
+        }
+        let conn = self.lock_conn()?;
+        let changed = match conversation_id {
+            Some(conversation_id) => conn.execute(
+                "UPDATE conversations
+                 SET selected_provider_profile_id=?2,updated_at=?3
+                 WHERE id=?1 AND status='active' AND EXISTS(
+                    SELECT 1 FROM provider_model_profiles WHERE profile_id=?2
+                 ) AND NOT EXISTS(
+                    SELECT 1 FROM conversation_turns
+                    WHERE conversation_id=?1 AND status='running'
+                 )",
+                params![conversation_id, profile_id, Utc::now().to_rfc3339()],
+            )?,
+            None => conn.execute(
+                "UPDATE workspace_context_state
+                 SET selected_provider_profile_id=?1,updated_at=?2
+                 WHERE singleton=1 AND EXISTS(
+                    SELECT 1 FROM provider_model_profiles WHERE profile_id=?1
+                 )",
+                params![profile_id, Utc::now().to_rfc3339()],
+            )?,
+        };
+        require_one(changed, "provider_profile_selection_unavailable")
     }
 
     pub fn get_project(&self, id: &str) -> Result<Option<ProjectRecord>> {
@@ -1320,7 +1819,9 @@ impl ConversationStore {
 
     pub fn archive_conversation(&self, id: &str) -> Result<()> {
         validate_uuid("conversation_id", id)?;
-        let changed = self.lock_conn()?.execute(
+        let mut conn = self.lock_conn()?;
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             "UPDATE conversations SET status='archived',updated_at=?2
              WHERE id=?1 AND status='active'
                AND NOT EXISTS(
@@ -1329,7 +1830,15 @@ impl ConversationStore {
                )",
             params![id, Utc::now().to_rfc3339()],
         )?;
-        require_one(changed, "conversation_archive_not_eligible")
+        require_one(changed, "conversation_archive_not_eligible")?;
+        tx.execute(
+            "UPDATE workspace_context_state
+             SET selected_conversation_id=NULL,updated_at=?2
+             WHERE singleton=1 AND selected_conversation_id=?1",
+            params![id, Utc::now().to_rfc3339()],
+        )?;
+        tx.commit()?;
+        Ok(())
     }
 
     pub fn restore_conversation(&self, id: &str) -> Result<()> {
@@ -2000,6 +2509,44 @@ fn project_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ProjectRecord> 
     })
 }
 
+fn provider_connection_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ProviderConnectionRecord> {
+    let credential_version = u64::try_from(row.get::<_, i64>(6)?).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(6, rusqlite::types::Type::Integer, error.into())
+    })?;
+    Ok(ProviderConnectionRecord {
+        id: row.get(0)?,
+        provider_id: row.get(1)?,
+        display_name: row.get(2)?,
+        endpoint: row.get(3)?,
+        endpoint_class: row.get(4)?,
+        credential_reference: row.get(5)?,
+        credential_version,
+        protocol: row.get(7)?,
+        privacy_boundary: row.get(8)?,
+        validation_state: row.get(9)?,
+        created_at: parse_time(row.get(10)?)?,
+        updated_at: parse_time(row.get(11)?)?,
+    })
+}
+
+fn provider_model_profile_from_row(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<ProviderModelProfileRecord> {
+    Ok(ProviderModelProfileRecord {
+        profile_id: row.get(0)?,
+        connection_id: row.get(1)?,
+        model_id: row.get(2)?,
+        display_name: row.get(3)?,
+        capability_snapshot_json: row.get(4)?,
+        capability_source: row.get(5)?,
+        validation_state: row.get(6)?,
+        created_at: parse_time(row.get(7)?)?,
+        updated_at: parse_time(row.get(8)?)?,
+    })
+}
+
 fn project_read_roots(conn: &Connection, project_id: &str) -> Result<Vec<ProjectReadRoot>> {
     let mut statement = conn.prepare(
         "SELECT id,name,path FROM project_read_roots
@@ -2130,7 +2677,7 @@ mod tests {
         let reopened = ConversationStore::new(&path).unwrap();
         assert_eq!(
             ConversationStore::schema_version(&reopened.lock_conn().unwrap()).unwrap(),
-            8
+            SCHEMA_VERSION
         );
         let conn = reopened.lock_conn().unwrap();
         let mut statement = conn
@@ -2142,6 +2689,92 @@ mod tests {
             .collect::<std::result::Result<Vec<_>, _>>()
             .unwrap();
         assert!(columns.iter().any(|column| column == "reasoning_effort"));
+    }
+
+    #[test]
+    fn v9_store_migrates_provider_profile_entities() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conversation-v9.db");
+        let store = ConversationStore::new(&path).unwrap();
+        {
+            let conn = store.lock_conn().unwrap();
+            conn.execute_batch(
+                "PRAGMA foreign_keys=OFF;
+                 DROP TABLE provider_model_profiles;
+                 DROP TABLE provider_connections;
+                 UPDATE conversation_store_metadata SET value='9' WHERE key='schema_version';
+                 PRAGMA foreign_keys=ON;",
+            )
+            .unwrap();
+        }
+        drop(store);
+
+        let reopened = ConversationStore::new(&path).unwrap();
+        assert_eq!(
+            ConversationStore::schema_version(&reopened.lock_conn().unwrap()).unwrap(),
+            SCHEMA_VERSION
+        );
+        assert!(reopened.list_provider_connections().unwrap().is_empty());
+        assert!(reopened.list_provider_model_profiles().unwrap().is_empty());
+    }
+
+    #[test]
+    fn v10_store_migrates_per_model_validation_state() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conversation-v10.db");
+        let store = ConversationStore::new(&path).unwrap();
+        {
+            let conn = store.lock_conn().unwrap();
+            conn.execute(
+                "INSERT INTO provider_connections VALUES(
+                    'connection-v10','openrouter','OpenRouter','https://openrouter.ai/api/v1',
+                    'cloud',NULL,1,'openai_compatible_chat_completions','provider_hosted',
+                    'ready','2026-01-01T00:00:00Z','2026-01-01T00:00:00Z'
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO provider_model_profiles VALUES(
+                    'profile-v10','connection-v10','model-v10','Model v10','{}',
+                    'settings_user_configured','ready','2026-01-01T00:00:00Z',
+                    '2026-01-01T00:00:00Z'
+                )",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "ALTER TABLE provider_model_profiles DROP COLUMN validation_state",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "UPDATE conversation_store_metadata SET value='10' WHERE key='schema_version'",
+                [],
+            )
+            .unwrap();
+        }
+        drop(store);
+
+        let reopened = ConversationStore::new(&path).unwrap();
+        assert_eq!(
+            ConversationStore::schema_version(&reopened.lock_conn().unwrap()).unwrap(),
+            SCHEMA_VERSION
+        );
+        let conn = reopened.lock_conn().unwrap();
+        let columns = conn
+            .prepare("PRAGMA table_info(provider_model_profiles)")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert!(columns.iter().any(|column| column == "validation_state"));
+        drop(conn);
+        assert_eq!(
+            reopened.list_provider_model_profiles().unwrap()[0].validation_state,
+            "ready"
+        );
     }
 
     #[test]
@@ -2334,6 +2967,79 @@ mod tests {
         );
         assert_eq!(
             ConversationStore::schema_version(&store.lock_conn().unwrap()).unwrap(),
+            SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn v8_store_adds_durable_selected_conversation_without_losing_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("conversation-v8.db");
+        let conversation_id = id();
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE conversation_store_metadata (
+                    key TEXT PRIMARY KEY, value TEXT NOT NULL
+                 ) WITHOUT ROWID;
+                 INSERT INTO conversation_store_metadata VALUES('schema_version','8');
+                 CREATE TABLE projects (
+                    id TEXT PRIMARY KEY,
+                    name TEXT NOT NULL,
+                    workspace_root TEXT,
+                    revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
+                    status TEXT NOT NULL DEFAULT 'active'
+                        CHECK(status IN ('active','archived')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                 );
+                 CREATE TABLE conversations (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    project_id TEXT,
+                    selected_skill_id TEXT,
+                    memory_mode TEXT NOT NULL DEFAULT 'use_and_learn' CHECK(memory_mode IN (
+                        'use_and_learn','use_only','off'
+                    )),
+                    status TEXT NOT NULL CHECK(status IN ('active','archived')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT
+                 );
+                 CREATE TABLE workspace_context_state (
+                    singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+                    new_conversation_project_id TEXT,
+                    updated_at TEXT NOT NULL,
+                    FOREIGN KEY(new_conversation_project_id) REFERENCES projects(id)
+                        ON DELETE SET NULL
+                 );
+                 INSERT INTO workspace_context_state VALUES(
+                    1,NULL,'1970-01-01T00:00:00Z'
+                 );",
+            )
+            .unwrap();
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                "INSERT INTO conversations(
+                    id,title,project_id,selected_skill_id,memory_mode,status,created_at,updated_at
+                 ) VALUES(?1,'Persisted',NULL,NULL,'use_and_learn','active',?2,?2)",
+                params![conversation_id, now],
+            )
+            .unwrap();
+        }
+
+        let store = ConversationStore::new(&path).unwrap();
+        assert!(store.get_conversation(&conversation_id).unwrap().is_some());
+        assert!(store.selected_conversation_id().unwrap().is_none());
+        store.set_selected_conversation(&conversation_id).unwrap();
+        drop(store);
+        let reopened = ConversationStore::new(&path).unwrap();
+        assert_eq!(
+            reopened.selected_conversation_id().unwrap().as_deref(),
+            Some(conversation_id.as_str())
+        );
+        assert_eq!(
+            ConversationStore::schema_version(&reopened.lock_conn().unwrap()).unwrap(),
             SCHEMA_VERSION
         );
     }
@@ -2873,6 +3579,113 @@ mod tests {
         );
         store.set_new_conversation_project(None).unwrap();
         assert!(store.new_conversation_project_id().unwrap().is_none());
+    }
+
+    #[test]
+    fn selected_conversation_persists_across_reopen_and_archive_clears_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("conversation-selection.sqlite3");
+        let first_id = id();
+        let second_id = id();
+        {
+            let store = ConversationStore::new(&database).unwrap();
+            store.create_conversation(&first_id, "First").unwrap();
+            store.create_conversation(&second_id, "Second").unwrap();
+            assert_eq!(
+                store.selected_conversation_id().unwrap().as_deref(),
+                Some(second_id.as_str())
+            );
+            store.set_selected_conversation(&first_id).unwrap();
+        }
+
+        let reopened = ConversationStore::new(&database).unwrap();
+        assert_eq!(
+            reopened.selected_conversation_id().unwrap().as_deref(),
+            Some(first_id.as_str())
+        );
+        reopened.archive_conversation(&first_id).unwrap();
+        assert!(reopened.selected_conversation_id().unwrap().is_none());
+    }
+
+    #[test]
+    fn provider_model_profile_is_a_persistent_entity_and_selection() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("provider-profiles.sqlite3");
+        let now = Utc::now();
+        let connection = ProviderConnectionRecord {
+            id: "provider-connection:openrouter".into(),
+            provider_id: "openrouter".into(),
+            display_name: "OpenRouter".into(),
+            endpoint: "https://openrouter.ai/api/v1".into(),
+            endpoint_class: "cloud".into(),
+            credential_reference: Some("profile-secret:provider".into()),
+            credential_version: 3,
+            protocol: "openai_compatible_chat_completions".into(),
+            privacy_boundary: "provider_hosted".into(),
+            validation_state: "validated".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        let profile = ProviderModelProfileRecord {
+            profile_id: "provider-profile:ox-alpha".into(),
+            connection_id: connection.id.clone(),
+            model_id: "stealth/ox-alpha".into(),
+            display_name: "Ox Alpha".into(),
+            capability_snapshot_json: serde_json::json!({
+                "inputModalities": ["text", "image"],
+                "typedTools": true
+            })
+            .to_string(),
+            capability_source: "provider_discovery".into(),
+            validation_state: "ready".into(),
+            created_at: now,
+            updated_at: now,
+        };
+        {
+            let store = ConversationStore::new(&database).unwrap();
+            store
+                .upsert_provider_model_profile(&connection, &profile)
+                .unwrap();
+            store
+                .set_selected_provider_profile(None, &profile.profile_id)
+                .unwrap();
+        }
+
+        let reopened = ConversationStore::new(&database).unwrap();
+        let stored_connection = reopened.list_provider_connections().unwrap().remove(0);
+        assert_eq!(stored_connection.id, connection.id);
+        assert_eq!(
+            stored_connection.credential_reference,
+            connection.credential_reference
+        );
+        let stored_profile = reopened.list_provider_model_profiles().unwrap().remove(0);
+        assert_eq!(stored_profile.profile_id, profile.profile_id);
+        assert_eq!(stored_profile.model_id, profile.model_id);
+        assert_eq!(
+            reopened
+                .selected_provider_profile_id(None)
+                .unwrap()
+                .as_deref(),
+            Some("provider-profile:ox-alpha")
+        );
+        let conversation_id = id();
+        reopened
+            .create_conversation(&conversation_id, "Bound profile")
+            .unwrap();
+        reopened
+            .set_selected_provider_profile(Some(&conversation_id), &profile.profile_id)
+            .unwrap();
+        reopened.delete_provider_connection(&connection.id).unwrap();
+        assert!(reopened.list_provider_connections().unwrap().is_empty());
+        assert!(reopened.list_provider_model_profiles().unwrap().is_empty());
+        assert!(reopened
+            .selected_provider_profile_id(None)
+            .unwrap()
+            .is_none());
+        assert!(reopened
+            .selected_provider_profile_id(Some(&conversation_id))
+            .unwrap()
+            .is_none());
     }
 
     #[test]

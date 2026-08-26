@@ -105,6 +105,8 @@ export type WorkspaceTurnState =
       sessionId: string;
       status: MainChatTurnStatus;
       blockers: string[];
+      taskId?: string;
+      runId?: string;
       lifeModelInfluence?: MainChatLifeModelProductReceipt;
     }
   | { phase: "failed"; stage: "create" | "send" | "refresh"; reason: string };
@@ -223,7 +225,7 @@ export type ConversationController = {
   deleteProject: (projectId: string, expectedRevision: number) => Promise<boolean>;
   assignProject: (projectId: string | null) => Promise<boolean>;
   setMemoryMode: (mode: ConversationMemoryMode) => Promise<boolean>;
-  selectProviderProfile: (profileId: string) => boolean;
+  selectProviderProfile: (profileId: string) => Promise<boolean>;
   selectReasoningEffort: (effort: ReasoningEffort | null) => boolean;
   setDraft: (value: string) => void;
   setMode: (mode: ConversationMode) => void;
@@ -247,7 +249,8 @@ export function useConversationController(
   announce: Announce,
   onAfterTurn: (conversationId: string) => Promise<void>,
   preferredSessionId?: string | null,
-  stopRunningWork?: (taskId: string, runId: string) => Promise<void>
+  stopRunningWork?: (taskId: string, runId: string) => Promise<void>,
+  onAfterProjectScopeChange?: (conversationId: string | null) => Promise<void>
 ): ConversationController {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [archivedSessions, setArchivedSessions] = useState<ChatSession[]>([]);
@@ -431,6 +434,8 @@ export function useConversationController(
           sessionId,
           status: canonical.latestTurn.status,
           blockers: canonical.latestTurn.errorCode ? [canonical.latestTurn.errorCode] : [],
+          taskId: canonical.latestTurn.taskId ?? undefined,
+          runId: canonical.latestTurn.runId ?? undefined,
         });
       } else {
         setTurnState({ phase: "idle" });
@@ -486,6 +491,8 @@ export function useConversationController(
                     sessionId: nextSessionId,
                     status: turn.status,
                     blockers: turn.errorCode ? [turn.errorCode] : [],
+                    taskId: turn.taskId ?? undefined,
+                    runId: turn.runId ?? undefined,
                   }
           );
         } else {
@@ -651,7 +658,11 @@ export function useConversationController(
       setTurnState({ phase: "idle" });
       setStreamingReply("");
       setActiveTaskId(null);
-      void loadHistory(sessionId, requestId)
+      const persistSelection = dataSource?.selectConversation
+        ? dataSource.selectConversation(sessionId)
+        : Promise.resolve();
+      void persistSelection
+        .then(() => loadHistory(sessionId, requestId))
         .then(() => {
           if (requestId === requestRef.current) setLoadStatus("ready");
         })
@@ -662,7 +673,16 @@ export function useConversationController(
           setMessages([]);
         });
     },
-    [announce, busy, loadHistory, mode, pendingResources.length, selectedSessionId, turnState.phase]
+    [
+      announce,
+      busy,
+      dataSource,
+      loadHistory,
+      mode,
+      pendingResources.length,
+      selectedSessionId,
+      turnState.phase,
+    ]
   );
 
   const startNewConversation = useCallback(() => {
@@ -979,6 +999,8 @@ export function useConversationController(
           sessionId,
           status,
           blockers: result.blockers ?? [],
+          taskId: refreshedConversation.latestTurn?.taskId ?? result.task_id ?? undefined,
+          runId: refreshedConversation.latestTurn?.runId ?? result.run_id ?? undefined,
           lifeModelInfluence: result.life_model_influence,
         });
         await onAfterTurn(sessionId);
@@ -1037,6 +1059,22 @@ export function useConversationController(
               setMessages(refreshedConversation.messages);
               setProvider(providerStateFromConversation(refreshedConversation));
               setWorkStatus(refreshedConversation.workStatus);
+              const terminalTurn = refreshedConversation.latestTurn;
+              if (
+                terminalTurn &&
+                (terminalTurn.status === "failed" ||
+                  terminalTurn.status === "cancelled" ||
+                  terminalTurn.status === "interrupted")
+              ) {
+                setTurnState({
+                  phase: "resolved",
+                  sessionId,
+                  status: terminalTurn.status,
+                  blockers: terminalTurn.errorCode ? [terminalTurn.errorCode] : [],
+                  taskId: terminalTurn.taskId ?? undefined,
+                  runId: terminalTurn.runId ?? undefined,
+                });
+              }
             }
           }
         } catch {
@@ -1250,6 +1288,9 @@ export function useConversationController(
   const createProject = useCallback(
     async (name: string): Promise<boolean> => {
       const normalized = name.replace(/\s+/g, " ").trim();
+      const draftProviderProfileId = provider.selectedProfileId;
+      const draftReasoningEffort = provider.selectedReasoningEffort;
+      const draftMemoryMode = memoryMode;
       if (!dataSource?.createProject || busy) {
         announce("当前不能创建 Project。");
         return false;
@@ -1268,12 +1309,40 @@ export function useConversationController(
           await dataSource.assignProject(selectedSessionId, project.id);
         }
         if (!(await reload())) throw new Error("project_refresh_failed_after_create");
-        if (!selectedSessionId) setSelectedProjectId(project.id);
+        if (!selectedSessionId) {
+          explicitConversationChoiceRef.current = true;
+          requestRef.current += 1;
+          setSelectedSessionId(null);
+          setMessages([]);
+          setTurnState({ phase: "idle" });
+          setStreamingReply("");
+          setActiveTaskId(null);
+          setSelectedProjectId(project.id);
+          setMemoryModeState(draftMemoryMode);
+          setProvider(current => {
+            const selected = current.profiles.find(
+              profile => profile.profileId === draftProviderProfileId
+            );
+            if (!selected || selected.availability !== "ready") return current;
+            return {
+              ...current,
+              status: "ready",
+              selectedProfileId: selected.profileId,
+              selectedReasoningEffort:
+                draftReasoningEffort === null ||
+                selected.supportedReasoningEfforts.includes(draftReasoningEffort)
+                  ? draftReasoningEffort
+                  : null,
+              errorCode: null,
+            };
+          });
+        }
+        setModeState("work");
         setSessionMutation({ phase: "idle" });
         announce(
           selectedSessionId
-            ? "Project 文件夹已创建并绑定到当前对话。"
-            : "Project 文件夹已创建，将绑定到新对话。"
+            ? "Project 文件夹已创建并绑定到当前对话；运行方式已切换为 Work。"
+            : "Project 文件夹已选择；新的 Work 对话会在首次发送时创建。"
         );
         return true;
       } catch (error) {
@@ -1282,11 +1351,24 @@ export function useConversationController(
         return false;
       }
     },
-    [announce, busy, dataSource, reload, selectedSessionId]
+    [
+      announce,
+      busy,
+      dataSource,
+      memoryMode,
+      provider.selectedProfileId,
+      provider.selectedReasoningEffort,
+      reload,
+      selectedSessionId,
+    ]
   );
 
   const bindProjectDirectory = useCallback(
     async (projectId: string, expectedRevision: number): Promise<boolean> => {
+      const preserveNewConversationDraft = selectedSessionId === null;
+      const draftProviderProfileId = provider.selectedProfileId;
+      const draftReasoningEffort = provider.selectedReasoningEffort;
+      const draftMemoryMode = memoryMode;
       if (!dataSource?.bindProjectDirectory || busy) {
         announce("当前不能改变 Project 文件夹。");
         return false;
@@ -1301,6 +1383,36 @@ export function useConversationController(
         }
         if (!result.project?.workspaceRoot) throw new Error("project_workspace_root_missing");
         if (!(await reload())) throw new Error("project_refresh_failed_after_directory_binding");
+        await onAfterProjectScopeChange?.(selectedSessionId);
+        if (preserveNewConversationDraft) {
+          explicitConversationChoiceRef.current = true;
+          requestRef.current += 1;
+          setSelectedSessionId(null);
+          setMessages([]);
+          setTurnState({ phase: "idle" });
+          setStreamingReply("");
+          setActiveTaskId(null);
+          setSelectedProjectId(projectId);
+          setMemoryModeState(draftMemoryMode);
+          setProvider(current => {
+            const selected = current.profiles.find(
+              profile => profile.profileId === draftProviderProfileId
+            );
+            if (!selected || selected.availability !== "ready") return current;
+            return {
+              ...current,
+              status: "ready",
+              selectedProfileId: selected.profileId,
+              selectedReasoningEffort:
+                draftReasoningEffort === null ||
+                selected.supportedReasoningEfforts.includes(draftReasoningEffort)
+                  ? draftReasoningEffort
+                  : null,
+              errorCode: null,
+            };
+          });
+        }
+        setModeState("work");
         setSessionMutation({ phase: "idle" });
         announce("Project 文件夹范围已更新并由系统重新读取确认。");
         return true;
@@ -1310,7 +1422,17 @@ export function useConversationController(
         return false;
       }
     },
-    [announce, busy, dataSource, reload]
+    [
+      announce,
+      busy,
+      dataSource,
+      memoryMode,
+      provider.selectedProfileId,
+      provider.selectedReasoningEffort,
+      reload,
+      onAfterProjectScopeChange,
+      selectedSessionId,
+    ]
   );
 
   const addProjectReadRoot = useCallback(
@@ -1329,6 +1451,7 @@ export function useConversationController(
         }
         if (!result.project) throw new Error("project_read_root_missing");
         if (!(await reload())) throw new Error("project_refresh_failed_after_read_root_add");
+        await onAfterProjectScopeChange?.(selectedSessionId);
         setSessionMutation({ phase: "idle" });
         announce("读取文件夹已加入 Project 范围；它不会获得文件写入权限。");
         return true;
@@ -1338,7 +1461,7 @@ export function useConversationController(
         return false;
       }
     },
-    [announce, busy, dataSource, reload]
+    [announce, busy, dataSource, onAfterProjectScopeChange, reload, selectedSessionId]
   );
 
   const removeProjectReadRoot = useCallback(
@@ -1351,6 +1474,7 @@ export function useConversationController(
       try {
         await dataSource.removeProjectReadRoot(projectId, rootId, expectedRevision);
         if (!(await reload())) throw new Error("project_refresh_failed_after_read_root_remove");
+        await onAfterProjectScopeChange?.(selectedSessionId);
         setSessionMutation({ phase: "idle" });
         announce("读取范围已移除；本地文件夹和文件没有被删除。");
         return true;
@@ -1360,7 +1484,7 @@ export function useConversationController(
         return false;
       }
     },
-    [announce, busy, dataSource, reload]
+    [announce, busy, dataSource, onAfterProjectScopeChange, reload, selectedSessionId]
   );
 
   const mutateProject = useCallback(
@@ -1511,11 +1635,21 @@ export function useConversationController(
   );
 
   const selectProviderProfile = useCallback(
-    (profileId: string): boolean => {
+    async (profileId: string): Promise<boolean> => {
       if (busy) return false;
       const selected = provider.profiles.find(profile => profile.profileId === profileId);
       if (!selected || selected.availability !== "ready") {
         announce("这个模型当前不可用，未改变本轮模型。");
+        return false;
+      }
+      if (!dataSource?.selectProviderProfile) {
+        announce("当前不能保存这次模型选择。");
+        return false;
+      }
+      try {
+        await dataSource.selectProviderProfile(selectedSessionId, selected.profileId);
+      } catch (error) {
+        announce(`模型选择未保存：${errorText(error)}`);
         return false;
       }
       setProvider(current => ({
@@ -1528,7 +1662,7 @@ export function useConversationController(
       announce(`本轮将使用 ${selected.providerId} · ${selected.modelId}。`);
       return true;
     },
-    [announce, busy, provider.profiles]
+    [announce, busy, dataSource, provider.profiles, selectedSessionId]
   );
 
   const selectReasoningEffort = useCallback(

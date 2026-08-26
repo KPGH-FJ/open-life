@@ -6,9 +6,9 @@
 use async_trait::async_trait;
 use openlife_core::conversation::ConversationUserMessageProof;
 use openlife_core::llm::{
-    BoundedContextBlock, ChatMessage, ProviderDataRoute, ProviderInvocationReceipt,
-    ProviderPayloadPurpose, ProviderPolicyAuthorization, ProviderPolicyReceiptEvidence,
-    ProviderToolDefinition,
+    BoundedContextBlock, BoundedProviderImage, ChatMessage, ProviderDataRoute,
+    ProviderInvocationReceipt, ProviderPayloadPurpose, ProviderPolicyAuthorization,
+    ProviderPolicyReceiptEvidence, ProviderToolDefinition,
 };
 use serde::{Deserialize, Serialize};
 
@@ -55,6 +55,9 @@ pub struct ProviderModelRequest {
     pub provider_authorization: ProviderAuthorization,
     pub system_prompt: String,
     pub supplemental_context_blocks: Vec<BoundedContextBlock>,
+    /// Exact governed Project images for this provider turn. The bytes are
+    /// transient and already bound to a successful `file.read` observation.
+    pub images: Vec<BoundedProviderImage>,
     pub context_snapshot_ref: String,
     pub raw_life_model_included: bool,
     pub raw_unbounded_memory_included: bool,

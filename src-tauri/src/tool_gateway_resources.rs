@@ -54,25 +54,113 @@ struct CapturedToolRuntimeConfig {
     search_provider: openlife_core::agent::action_executor::helpers::SearchProviderConfig,
 }
 
-async fn capture_tool_runtime_config(state: &Arc<AppState>) -> CapturedToolRuntimeConfig {
+fn selected_route_hosted_search_provider(
+    configured_search_provider: &str,
+    selected_provider: &str,
+    selected_endpoint: &str,
+) -> Option<&'static str> {
+    let selected_provider = selected_provider.trim().to_ascii_lowercase();
+    let configured = configured_search_provider.trim().to_ascii_lowercase();
+    if configured != "auto" && configured != selected_provider {
+        return None;
+    }
+    let url = reqwest::Url::parse(selected_endpoint.trim()).ok()?;
+    let normalized_path = url.path().trim_end_matches('/');
+    let official_origin = url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none();
+    match selected_provider.as_str() {
+        "deepseek"
+            if official_origin
+                && url.host_str() == Some("api.deepseek.com")
+                && matches!(normalized_path, "" | "/v1") =>
+        {
+            Some("deepseek")
+        }
+        "openrouter"
+            if official_origin
+                && url.host_str() == Some("openrouter.ai")
+                && normalized_path == "/api/v1" =>
+        {
+            Some("openrouter")
+        }
+        _ => None,
+    }
+}
+
+fn bind_search_to_selected_provider_route(
+    search_provider: &mut openlife_core::agent::action_executor::helpers::SearchProviderConfig,
+    configured_search_provider: &str,
+    selected_provider: &str,
+    selected_endpoint: &str,
+    selected_api_key: String,
+    selected_model: &str,
+) -> bool {
+    let Some(provider) = selected_route_hosted_search_provider(
+        configured_search_provider,
+        selected_provider,
+        selected_endpoint,
+    ) else {
+        return false;
+    };
+    search_provider.provider = provider.into();
+    search_provider.api_key = selected_api_key;
+    search_provider.model = selected_model.to_string();
+    true
+}
+
+async fn capture_tool_runtime_config(
+    state: &Arc<AppState>,
+    provider_profile_id: Option<&str>,
+) -> CapturedToolRuntimeConfig {
     let config = state.config.lock().await;
     let mut search_provider =
         openlife_core::agent::action_executor::helpers::SearchProviderConfig::from_system_config(
             &config.system,
         );
-    search_provider.provider = config
-        .effective_search_provider()
-        .unwrap_or("unavailable")
-        .to_string();
+    let configured_search_provider = config.system.search_provider.clone();
+    let additional_read_roots = config.system.additional_read_roots.clone();
+    let network_policy = config.system.network_policy.clone();
+    drop(config);
     if search_provider.api_key.trim().is_empty()
-        && config.search_reuses_selected_provider_credential()
+        && matches!(
+            configured_search_provider
+                .trim()
+                .to_ascii_lowercase()
+                .as_str(),
+            "auto" | "deepseek" | "openrouter"
+        )
     {
-        search_provider.api_key = config.llm.openai_key.clone();
-        search_provider.model = config.llm.chat_model.clone();
+        if let Ok(selected) =
+            crate::provider_registry::resolve_provider_profile(provider_profile_id, None, state)
+                .await
+        {
+            if !bind_search_to_selected_provider_route(
+                &mut search_provider,
+                &configured_search_provider,
+                &selected.scheduler.provider,
+                &selected.scheduler.openai_base,
+                selected.scheduler.effective_api_key(),
+                &selected.scheduler.chat_model,
+            ) {
+                search_provider.provider = "unavailable".into();
+                search_provider.model.clear();
+            }
+        } else {
+            search_provider.provider = "unavailable".into();
+            search_provider.model.clear();
+        }
+    } else if configured_search_provider.eq_ignore_ascii_case("auto") {
+        search_provider.provider = "unavailable".into();
+    } else {
+        search_provider.provider = configured_search_provider;
     }
     CapturedToolRuntimeConfig {
-        additional_read_roots: config.system.additional_read_roots.clone(),
-        network_policy: config.system.network_policy.clone(),
+        additional_read_roots,
+        network_policy,
         search_provider,
     }
 }
@@ -97,8 +185,9 @@ async fn capture_shared_after_config(
 
 async fn capture_governed(
     state: &Arc<AppState>,
+    provider_profile_id: Option<&str>,
 ) -> (GovernedToolGatewayResources, CapturedToolRuntimeConfig) {
-    let config = capture_tool_runtime_config(state).await;
+    let config = capture_tool_runtime_config(state, provider_profile_id).await;
     let shared = capture_shared_after_config(state, config.additional_read_roots.clone()).await;
     (
         GovernedToolGatewayResources {
@@ -112,8 +201,9 @@ async fn capture_governed(
 
 pub(crate) async fn snapshot_tool_gateway_resources_for_main_chat_read(
     state: &Arc<AppState>,
+    provider_profile_id: Option<&str>,
 ) -> Result<MainChatReadToolGatewayResources, String> {
-    let (governed, _) = capture_governed(state).await;
+    let (governed, _) = capture_governed(state, provider_profile_id).await;
     Ok(MainChatReadToolGatewayResources { governed })
 }
 
@@ -129,7 +219,7 @@ mod tests {
         brave.system.search_provider_key = "brave-test-key".into();
         state.replace_provider_runtime_config(brave).await;
 
-        let (first, _) = capture_governed(&state).await;
+        let (first, _) = capture_governed(&state, None).await;
         assert_eq!(first.search_provider.provider, "brave");
         assert_eq!(first.search_provider.api_key, "brave-test-key");
 
@@ -139,7 +229,7 @@ mod tests {
         searxng.system.searxng_url = "https://search.example.test".into();
         state.replace_provider_runtime_config(searxng).await;
 
-        let (second, _) = capture_governed(&state).await;
+        let (second, _) = capture_governed(&state, None).await;
         assert_eq!(second.search_provider.provider, "searxng");
         assert_eq!(
             second.search_provider.searxng_url,
@@ -173,7 +263,7 @@ mod tests {
             .into_owned()];
         state.replace_provider_runtime_config(config).await;
 
-        let (captured, _) = capture_governed(&state).await;
+        let (captured, _) = capture_governed(&state, None).await;
         let canonical_artifact_root = artifact_root
             .path()
             .canonicalize()
@@ -194,41 +284,36 @@ mod tests {
 
     #[tokio::test]
     async fn official_deepseek_search_reuses_the_selected_model_credential_without_duplication() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let mut config = state.config.lock().await.clone();
-        config.prefer_local_model = false;
-        config.llm.provider = "deepseek".into();
-        config.llm.openai_base = "https://api.deepseek.com".into();
-        config.llm.openai_key = "shared-deepseek-test-key".into();
-        config.system.search_provider = "deepseek".into();
-        config.system.search_provider_key.clear();
-        state.replace_provider_runtime_config(config).await;
-
-        let (captured, _) = capture_governed(&state).await;
-        assert_eq!(captured.search_provider.provider, "deepseek");
-        assert_eq!(captured.search_provider.api_key, "shared-deepseek-test-key");
+        let mut search =
+            openlife_core::agent::action_executor::helpers::SearchProviderConfig::default();
+        assert!(bind_search_to_selected_provider_route(
+            &mut search,
+            "deepseek",
+            "deepseek",
+            "https://api.deepseek.com",
+            "shared-deepseek-test-key".into(),
+            "deepseek-chat",
+        ));
+        assert_eq!(search.provider, "deepseek");
+        assert_eq!(search.api_key, "shared-deepseek-test-key");
+        assert_eq!(search.model, "deepseek-chat");
     }
 
     #[tokio::test]
     async fn automatic_openrouter_search_reuses_the_exact_selected_route() {
-        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
-        let mut config = state.config.lock().await.clone();
-        config.prefer_local_model = false;
-        config.llm.provider = "openrouter".into();
-        config.llm.openai_base = "https://openrouter.ai/api/v1".into();
-        config.llm.chat_model = "openrouter/test-model".into();
-        config.llm.openai_key = "shared-openrouter-test-key".into();
-        config.system.search_provider = "auto".into();
-        config.system.search_provider_key.clear();
-        state.replace_provider_runtime_config(config).await;
-
-        let (captured, _) = capture_governed(&state).await;
-        assert_eq!(captured.search_provider.provider, "openrouter");
-        assert_eq!(captured.search_provider.model, "openrouter/test-model");
-        assert_eq!(
-            captured.search_provider.api_key,
-            "shared-openrouter-test-key"
-        );
+        let mut search =
+            openlife_core::agent::action_executor::helpers::SearchProviderConfig::default();
+        assert!(bind_search_to_selected_provider_route(
+            &mut search,
+            "auto",
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            "shared-openrouter-test-key".into(),
+            "openrouter/test-model",
+        ));
+        assert_eq!(search.provider, "openrouter");
+        assert_eq!(search.model, "openrouter/test-model");
+        assert_eq!(search.api_key, "shared-openrouter-test-key");
     }
 
     #[tokio::test]
@@ -243,7 +328,7 @@ mod tests {
         config.system.search_provider = "auto".into();
         state.replace_provider_runtime_config(config).await;
 
-        let (captured, _) = capture_governed(&state).await;
+        let (captured, _) = capture_governed(&state, None).await;
         assert_eq!(captured.search_provider.provider, "unavailable");
         assert!(captured.search_provider.api_key.is_empty());
         assert!(captured.search_provider.model.is_empty());

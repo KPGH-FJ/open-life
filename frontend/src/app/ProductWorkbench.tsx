@@ -316,7 +316,13 @@ export function ProductWorkbench({
   const announceSettings = useCallback((message: string) => {
     if (modeRef.current === "settings") setAnnouncement(message);
   }, []);
-  const workbench = useWorkbenchController(workbenchDataSource, setAnnouncement);
+  const refreshWorkbenchDependentsRef = useRef<() => Promise<void>>(async () => undefined);
+  const refreshWorkbenchDependents = useCallback(() => refreshWorkbenchDependentsRef.current(), []);
+  const workbench = useWorkbenchController(
+    workbenchDataSource,
+    setAnnouncement,
+    refreshWorkbenchDependents
+  );
   const selectedConversationIdRef = useRef<string | null>(null);
   const refreshWorkbenchAfterTurn = useCallback(
     async (completedConversationId: string) => {
@@ -330,13 +336,33 @@ export function ProductWorkbench({
     },
     [workbench.load, workbenchDataSource]
   );
+  const refreshWorkbenchAfterProjectScopeChange = useCallback(
+    async (conversationId: string | null) => {
+      if (!workbenchDataSource) return;
+      setSelectedTask(null);
+      const refreshed = await workbench.load(false, conversationId ?? "");
+      if (
+        !["ready", "empty"].includes(refreshed.workspaceEnvelope.status) ||
+        !["ready", "empty"].includes(refreshed.tasksEnvelope.status)
+      ) {
+        throw new Error("project_scope_workbench_refresh_unconfirmed");
+      }
+    },
+    [workbench.load, workbenchDataSource]
+  );
   const conversation = useConversationController(
     conversationDataSource,
     setAnnouncement,
     refreshWorkbenchAfterTurn,
     null,
-    workbench.stopRunningTask
+    workbench.stopRunningTask,
+    refreshWorkbenchAfterProjectScopeChange
   );
+  refreshWorkbenchDependentsRef.current = async () => {
+    if (!(await conversation.reload())) {
+      throw new Error("conversation_refresh_failed_after_workbench_mutation");
+    }
+  };
   const personalIntelligence = usePersonalIntelligenceController(
     personalIntelligenceDataSource,
     setAnnouncement
@@ -477,6 +503,9 @@ export function ProductWorkbench({
     onRouteChange?.({ mode: "product", surface: settingsReturnSurface });
     setAnnouncement("已返回之前的产品工作区，正在重新读取已生效设置。 ");
     if (settingsReturnSurface === "workspace") {
+      if (conversationDataSource) {
+        void conversation.reload();
+      }
       if (workbenchDataSource) {
         void workbench.load(false, conversation.selectedSessionId ?? "");
       }
@@ -722,6 +751,14 @@ export function ProductWorkbench({
     const selectedWorkReview = pendingWorkReviews.find(
       item => item.id === workbench.selectedItem?.id
     );
+    const turnTaskId =
+      conversation.turnState.phase === "resolved" ? conversation.turnState.taskId : undefined;
+    const turnTask = turnTaskId
+      ? tasks.find(task => task.canonicalTaskId === turnTaskId)
+      : undefined;
+    const recoveryControl = turnTask?.allowedControls.find(
+      control => control.enabled && (control.kind === "retry" || control.kind === "resume")
+    );
     const inlineCheckpoint =
       visibleReviews.length > 0 ? (
         <section className="ol-conversation-checkpoints" aria-label="当前 Work 的决定节点">
@@ -740,7 +777,13 @@ export function ProductWorkbench({
               setSelectedEvidence("");
               setAnnouncement(`已选择“${item.decisionContext.title}”；没有记录任何决定。`);
             }}
-            onRequestAction={workbench.requestReviewAction}
+            onRequestAction={action => {
+              const owningTask = tasks.find(task =>
+                task.pendingReviewItemRefs.some(ref => ref.id === action.targetReviewItemId)
+              );
+              if (owningTask) setSelectedTask(owningTask);
+              workbench.requestReviewAction(action);
+            }}
             onConfirmAction={workbench.confirmReviewAction}
             onCancelConfirmation={workbench.cancelReviewConfirmation}
             onEditLifeModelLearning={workbench.editLifeModelLearning}
@@ -810,6 +853,15 @@ export function ProductWorkbench({
           onOpenLifeModel={itemRef => navigateProduct("life-model", itemRef)}
           conversation={conversationDataSource ? conversation : undefined}
           inlineCheckpoint={inlineCheckpoint}
+          recoveryControl={recoveryControl}
+          onRequestRecovery={(control, expectedTaskId) => {
+            if (turnTask) setSelectedTask(turnTask);
+            workbench.requestTaskControl(control, expectedTaskId);
+          }}
+          onOpenProviderSettings={() => {
+            openSettings();
+            navigateSettings("model-provider");
+          }}
         />
         {tasks.length > 0 && (
           <ResultsView
@@ -845,8 +897,22 @@ export function ProductWorkbench({
             onCancelTaskControlConfirmation={workbench.cancelTaskControlConfirmation}
             onRequestArtifactUndo={async artifactId => {
               await workbenchDataSource.requestArtifactUndo(artifactId);
-              setAnnouncement("撤销请求已进入当前 Work 的决定节点；批准前不会移动文件。");
               await workbench.load(true);
+              setAnnouncement("撤销请求已进入当前 Work 的决定节点；批准前不会移动文件。");
+            }}
+            onRequestTaskArtifactUndo={async taskId => {
+              const receipt = await workbenchDataSource.requestTaskArtifactUndo(taskId);
+              const failureReason = receipt.failures[0]?.reasonCode;
+              const outcomeAnnouncement =
+                receipt.failures.length === 0
+                  ? "全部可撤销修改已进入当前 Work 的逐文件决定节点；批准前不会改动文件。"
+                  : failureReason === "artifact_undo_source_changed"
+                    ? `部分撤销决定已创建；${receipt.failures.length} 项文件已被修改，OpenLife 未覆盖这些新内容。`
+                    : failureReason === "artifact_undo_target_conflict"
+                      ? `部分撤销决定已创建；${receipt.failures.length} 项原位置已有文件，OpenLife 未覆盖现有内容。`
+                      : `部分撤销决定已创建；${receipt.failures.length} 项缺少可核验的恢复依据，保持原状态。`;
+              await workbench.load(true);
+              setAnnouncement(outcomeAnnouncement);
             }}
             onReviseArtifact={async (taskId, artifactId, baseVersion, instruction) => {
               await workbenchDataSource.reviseArtifact(

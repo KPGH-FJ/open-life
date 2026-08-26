@@ -36,6 +36,7 @@ pub enum ReviewItemDecisionStatus {
     Pending,
     Approved,
     Rejected,
+    Cancelled,
     Edited,
     Deferred,
     Unknown,
@@ -47,6 +48,7 @@ impl ReviewItemDecisionStatus {
             Self::Pending => "pending",
             Self::Approved => "approved",
             Self::Rejected => "rejected",
+            Self::Cancelled => "cancelled",
             Self::Edited => "edited",
             Self::Deferred => "deferred",
             Self::Unknown => "unknown",
@@ -60,6 +62,7 @@ impl From<ProposalStatus> for ReviewItemDecisionStatus {
             ProposalStatus::Pending => Self::Pending,
             ProposalStatus::Accepted => Self::Approved,
             ProposalStatus::Rejected => Self::Rejected,
+            ProposalStatus::Cancelled => Self::Cancelled,
             ProposalStatus::Edited => Self::Edited,
             ProposalStatus::Postponed => Self::Deferred,
             ProposalStatus::Expired => Self::Unknown,
@@ -193,6 +196,10 @@ pub struct ReviewCenterBuildInput {
     pub safe_path_overrides: BTreeMap<String, Vec<String>>,
     pub materialization_overrides: BTreeMap<String, ReviewItemMaterializationStatus>,
     pub artifact_evidence: BTreeMap<String, ReviewItemArtifactEvidence>,
+    /// Backend-owned presentation overrides derived from authoritative runtime
+    /// records. These may improve Review readability, but never change the
+    /// Proposal identity or the decision/effect contract.
+    pub decision_context_overrides: BTreeMap<String, ReviewDecisionContext>,
 }
 
 pub fn build_review_center_view_model(input: ReviewCenterBuildInput) -> ReviewCenterViewModel {
@@ -285,7 +292,14 @@ pub fn build_review_item(proposal: &AgentProposal, input: &ReviewCenterBuildInpu
     let status = ReviewItemDecisionStatus::from(proposal.status);
     let materialization_status = materialization_status_for(proposal, input);
     let evidence_refs = evidence_refs_for(proposal);
-    let decision_context = build_review_decision_context(proposal, &evidence_refs);
+    let mut decision_context = input
+        .decision_context_overrides
+        .get(&proposal.id)
+        .cloned()
+        .unwrap_or_else(|| build_review_decision_context(proposal, &evidence_refs));
+    // Evidence identity is always rebuilt from the Proposal by this canonical
+    // projection. A presentation override cannot remove or replace it.
+    decision_context.evidence_refs = evidence_refs.clone();
     let target_refs = target_refs_for(proposal);
     let allowed_actions = allowed_actions_for(
         proposal,
@@ -591,32 +605,45 @@ fn external_write_target_precondition_is_complete(proposal: &AgentProposal) -> b
         .get("operation")
         .and_then(|value| value.as_str())
         .unwrap_or("propose_write");
+    if proposal.after.get("undoOfArtifactId").is_some() {
+        let digest = |field: &str| {
+            proposal
+                .after
+                .get(field)
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| value.starts_with("sha256:") && value.len() > 7)
+        };
+        let path = |field: &str| {
+            proposal
+                .after
+                .get(field)
+                .and_then(|value| value.as_str())
+                .is_some_and(|value| !value.trim().is_empty())
+        };
+        return match operation {
+            "trash" | "restore" => {
+                path("source_path")
+                    && path("target_path")
+                    && digest("source_digest")
+                    && digest("contentDigest")
+            }
+            "restore_snapshot" => {
+                path("snapshot_path")
+                    && path("path")
+                    && digest("restore_digest")
+                    && digest("expected_target_digest")
+                    && digest("contentDigest")
+            }
+            _ => false,
+        };
+    }
     if matches!(operation, "move" | "trash" | "restore") {
         return true;
     }
-    if proposal.after.get("undoOfArtifactId").is_none() {
-        return serde_json::from_value::<crate::task_runtime::CanonicalArtifactReviewSubject>(
-            proposal.after.clone(),
-        )
-        .is_ok_and(|subject| subject.validate().is_ok());
-    }
-    let Some(expected_absent) = proposal
-        .after
-        .get("expected_target_absent")
-        .and_then(|value| value.as_bool())
-    else {
-        return false;
-    };
-    let expected_digest = proposal
-        .after
-        .get("expected_target_digest")
-        .and_then(|value| value.as_str())
-        .filter(|value| value.starts_with("sha256:") && value.len() > "sha256:".len());
-    if expected_absent {
-        expected_digest.is_none()
-    } else {
-        expected_digest.is_some()
-    }
+    serde_json::from_value::<crate::task_runtime::CanonicalArtifactReviewSubject>(
+        proposal.after.clone(),
+    )
+    .is_ok_and(|subject| subject.validate().is_ok())
 }
 
 fn is_path_in_safe_paths(path: Option<&str>, safe_paths: &[String]) -> bool {
@@ -657,7 +684,7 @@ fn materialization_status_for(
     }
     match proposal.status {
         ProposalStatus::Accepted => ReviewItemMaterializationStatus::Unknown,
-        ProposalStatus::Rejected | ProposalStatus::Expired => {
+        ProposalStatus::Rejected | ProposalStatus::Cancelled | ProposalStatus::Expired => {
             ReviewItemMaterializationStatus::NotApplicable
         }
         ProposalStatus::Pending | ProposalStatus::Edited | ProposalStatus::Postponed => {
@@ -850,6 +877,31 @@ mod tests {
     }
 
     #[test]
+    fn backend_decision_context_override_changes_presentation_not_review_actions() {
+        let mut proposal = proposal(ProposalType::MemoryWrite);
+        let mut override_context = build_review_decision_context(&proposal, &[]);
+        override_context.title = "Backend-derived exact preview".into();
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal.clone()],
+            decision_context_overrides: BTreeMap::from([(proposal.id.clone(), override_context)]),
+            ..Default::default()
+        });
+
+        assert_eq!(
+            model.items[0].decision_context.title,
+            "Backend-derived exact preview"
+        );
+        assert!(find_action(&model.items[0], ReviewActionKind::Approve).enabled);
+
+        proposal.status = ProposalStatus::Rejected;
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            ..Default::default()
+        });
+        assert!(!find_action(&model.items[0], ReviewActionKind::Approve).enabled);
+    }
+
+    #[test]
     fn review_item_safe_path_override_is_bound_to_one_exact_proposal() {
         let mut bound = proposal(ProposalType::ExternalWriteAction);
         bound.id = "proposal:external-write:bound".into();
@@ -908,6 +960,53 @@ mod tests {
         let item = &model.items[0];
         assert!(find_action(item, ReviewActionKind::Approve).enabled);
         assert!(find_action(item, ReviewActionKind::Edit).enabled);
+    }
+
+    #[test]
+    fn reviewed_artifact_restore_snapshot_inside_safe_path_enables_approval() {
+        let mut proposal = proposal(ProposalType::ExternalWriteAction);
+        proposal.after = json!({
+            "operation": "restore_snapshot",
+            "snapshot_path": "/owned/artifact-pre-change/original.md",
+            "path": "/allowed/report.md",
+            "restore_digest": "sha256:original",
+            "expected_target_digest": "sha256:replacement",
+            "contentDigest": "sha256:original",
+            "undoOfArtifactId": "artifact:report",
+            "undoOfProposalId": "proposal:replacement"
+        });
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            safe_paths: vec!["/allowed".into()],
+            ..Default::default()
+        });
+
+        let item = &model.items[0];
+        assert!(find_action(item, ReviewActionKind::Approve).enabled);
+        assert!(find_action(item, ReviewActionKind::Reject).enabled);
+    }
+
+    #[test]
+    fn reviewed_artifact_restore_move_inside_safe_path_enables_approval() {
+        let mut proposal = proposal(ProposalType::ExternalWriteAction);
+        proposal.after = json!({
+            "operation": "restore",
+            "source_path": "/allowed/renamed.md",
+            "target_path": "/allowed/original.md",
+            "source_digest": "sha256:renamed",
+            "contentDigest": "sha256:renamed",
+            "undoOfArtifactId": "artifact:renamed",
+            "undoOfProposalId": "proposal:rename"
+        });
+        let model = build_review_center_view_model(ReviewCenterBuildInput {
+            proposals: vec![proposal],
+            safe_paths: vec!["/allowed".into()],
+            ..Default::default()
+        });
+
+        let item = &model.items[0];
+        assert!(find_action(item, ReviewActionKind::Approve).enabled);
+        assert!(find_action(item, ReviewActionKind::Reject).enabled);
     }
 
     #[test]

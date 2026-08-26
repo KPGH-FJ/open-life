@@ -60,7 +60,13 @@ describe("GlobalActivityView", () => {
       />
     );
 
-    expect(screen.getByText("全部活动").closest("summary")).toHaveTextContent("2 项需要处理");
+    const summary = screen.getByText("全部活动").closest("summary");
+    const details = summary?.closest("details");
+    expect(summary).toHaveTextContent("2 项需要处理");
+    expect(details).not.toHaveAttribute("open");
+
+    await user.click(summary!);
+    expect(details).toHaveAttribute("open");
     expect(screen.getByRole("button", { name: /跨对话研究任务/ })).toHaveTextContent(
       "1 个决定节点等待处理"
     );

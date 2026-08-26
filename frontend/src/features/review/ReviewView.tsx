@@ -64,6 +64,7 @@ function approvedActionLabel(item: ReviewItem): string {
     case "trash":
       return "批准并移入 OpenLife 恢复区";
     case "restore":
+    case "restore_snapshot":
       return "批准并恢复文件";
     case "open_email_draft":
       return "批准并打开邮件草稿";
@@ -85,6 +86,7 @@ function confirmedActionStatusLabel(item: ReviewItem): string {
     case "trash":
       return "已移入恢复区";
     case "restore":
+    case "restore_snapshot":
       return "文件恢复已核验";
     case "open_email_draft":
       return "邮件草稿交接已记录";
@@ -137,6 +139,7 @@ export function reviewItemStatus(item: ReviewItem): {
     return { label: "已批准，尚未应用", status: "neutral" };
   }
   if (item.status === "rejected") return { label: "已拒绝", status: "neutral" };
+  if (item.status === "cancelled") return { label: "已取消", status: "neutral" };
   return { label: "状态未知", status: "unknown" };
 }
 
@@ -419,6 +422,32 @@ export function ReviewView({
         </aside>
       )}
 
+      {embedded && items.length > 1 && (
+        <nav className="ol-review-inline-switcher" aria-label="待审核文件">
+          <span>{items.length} 项修改，逐项确认</span>
+          <div>
+            {items.map((item, index) => {
+              const status = reviewItemStatus(item);
+              return (
+                <button
+                  key={item.id}
+                  type="button"
+                  data-current={selectedItem?.id === item.id ? "true" : "false"}
+                  aria-current={selectedItem?.id === item.id ? "true" : undefined}
+                  aria-label={`查看第 ${index + 1} 项：${item.decisionContext.summary}`}
+                  disabled={decisionBusy}
+                  onClick={() => onSelectItem(item)}
+                >
+                  <strong>{index + 1}</strong>
+                  <span>{item.decisionContext.summary}</span>
+                  <small>{status.label}</small>
+                </button>
+              );
+            })}
+          </div>
+        </nav>
+      )}
+
       <article className="ol-review-detail" data-review-item-id={selectedItem?.id ?? "none"}>
         {!selectedItem ? (
           <div className="ol-work-empty">
@@ -530,12 +559,6 @@ export function ReviewView({
                       <dd>{selectedItem.decisionContext.actionContract.terminalEvidenceSummary}</dd>
                     </div>
                   </dl>
-                  {selectedItem.decisionContext.after.detail && (
-                    <details>
-                      <summary>查看已审核的精确参数</summary>
-                      <pre>{selectedItem.decisionContext.after.detail}</pre>
-                    </details>
-                  )}
                 </section>
               </details>
             )}

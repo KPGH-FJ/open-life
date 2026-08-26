@@ -7,6 +7,8 @@ use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT
 use ring::digest::{digest, SHA256};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::collections::HashSet;
+use std::fmt;
 use std::net::IpAddr;
 use std::pin::Pin;
 use std::time::Duration;
@@ -33,6 +35,8 @@ pub struct ChatMessage {
 }
 
 const MAX_PREPARED_MESSAGES: usize = 128;
+pub const MAX_PREPARED_PROVIDER_IMAGES: usize = 4;
+pub const MAX_PREPARED_PROVIDER_IMAGE_BYTES: usize = 20 * 1024 * 1024;
 pub const MAX_PREPARED_CONTEXT_BLOCKS: usize = 32;
 pub const MAX_PREPARED_CONTENT_CHARS: usize = 262_144;
 
@@ -67,6 +71,7 @@ pub enum ProviderPayloadCategory {
     MainChatToolCandidateRanking,
     ExplicitProviderProbe,
     PrivacyPolicyMasked,
+    GovernedProjectImage,
 }
 
 impl ProviderPayloadCategory {
@@ -78,7 +83,84 @@ impl ProviderPayloadCategory {
             Self::MainChatToolCandidateRanking => "main_chat_tool_candidate_ranking",
             Self::ExplicitProviderProbe => "explicit_provider_probe",
             Self::PrivacyPolicyMasked => "privacy_policy_masked",
+            Self::GovernedProjectImage => "governed_project_image",
         }
+    }
+}
+
+/// One exact, bounded image admitted from a governed Project file read.
+///
+/// Raw bytes are transient and deliberately skipped by serde. Durable request
+/// projections retain only metadata; a deserialized request therefore cannot
+/// regain image dispatch authority.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BoundedProviderImage {
+    pub source_ref: String,
+    pub mime_type: String,
+    pub sha256: String,
+    pub byte_count: u64,
+    #[serde(skip)]
+    bytes: Vec<u8>,
+}
+
+impl fmt::Debug for BoundedProviderImage {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("BoundedProviderImage")
+            .field("source_ref", &self.source_ref)
+            .field("mime_type", &self.mime_type)
+            .field("sha256", &self.sha256)
+            .field("byte_count", &self.byte_count)
+            .field("bytes", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl BoundedProviderImage {
+    pub fn from_governed_bytes(
+        source_ref: impl Into<String>,
+        mime_type: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> Result<Self> {
+        let image = Self {
+            source_ref: source_ref.into(),
+            mime_type: mime_type.into(),
+            sha256: response_bytes_digest(&bytes),
+            byte_count: bytes.len() as u64,
+            bytes,
+        };
+        image.validate()?;
+        Ok(image)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if self.source_ref.trim().is_empty() {
+            anyhow::bail!("prepared provider image source is missing");
+        }
+        if !matches!(
+            self.mime_type.as_str(),
+            "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+        ) {
+            anyhow::bail!("prepared provider image MIME is unsupported");
+        }
+        if self.bytes.is_empty()
+            || self.bytes.len() > MAX_PREPARED_PROVIDER_IMAGE_BYTES
+            || self.byte_count != self.bytes.len() as u64
+            || self.sha256 != response_bytes_digest(&self.bytes)
+        {
+            anyhow::bail!("prepared provider image bytes do not match metadata");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn base64_bytes(&self) -> String {
+        use base64::Engine as _;
+        base64::engine::general_purpose::STANDARD.encode(&self.bytes)
+    }
+
+    pub(crate) fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.mime_type, self.base64_bytes())
     }
 }
 
@@ -276,7 +358,7 @@ pub enum ProviderLocalOnlyReason {
 pub enum ProviderPayloadPurpose {
     MainChatDirectAnswer,
     MainChatConversationStep,
-    AgentMemoryExtraction,
+    MainChatWorkGoalContract,
     MainChatWorkSemanticVerification,
     MainChatWorkPlan,
     MainChatInitialWorkDecision,
@@ -298,7 +380,7 @@ impl ProviderPayloadPurpose {
         match self {
             Self::MainChatDirectAnswer => "main_chat_direct_answer",
             Self::MainChatConversationStep => "main_chat_conversation_step",
-            Self::AgentMemoryExtraction => "agent_memory_extraction",
+            Self::MainChatWorkGoalContract => "main_chat_work_goal_contract",
             Self::MainChatWorkSemanticVerification => "main_chat_work_semantic_verification",
             Self::MainChatWorkPlan => "main_chat_work_plan",
             Self::MainChatInitialWorkDecision => "main_chat_initial_work_decision",
@@ -478,6 +560,7 @@ impl ProviderPolicyAuthorization {
             payload_purpose,
             messages,
             context_blocks,
+            &[],
         );
         Ok(Self {
             decision_id: authorization_id,
@@ -671,6 +754,7 @@ impl ProviderPolicyAuthorization {
         current_user_text: &str,
         messages: &[ChatMessage],
         context_blocks: &[BoundedContextBlock],
+        images: &[BoundedProviderImage],
     ) -> Result<Self> {
         self.validate_subject_text(current_user_text)?;
         let digest = provider_unfiltered_payload_digest(
@@ -678,6 +762,7 @@ impl ProviderPolicyAuthorization {
             purpose,
             messages,
             context_blocks,
+            images,
         );
         match (
             self.authorized_unfiltered_payload_purpose,
@@ -704,6 +789,7 @@ impl ProviderPolicyAuthorization {
         &self,
         messages: &[ChatMessage],
         context_blocks: &[BoundedContextBlock],
+        images: &[BoundedProviderImage],
     ) -> Result<()> {
         if self.prepared_envelope_digest.is_some() {
             anyhow::bail!("provider policy capability is already bound to a prepared envelope");
@@ -718,6 +804,7 @@ impl ProviderPolicyAuthorization {
                     purpose,
                     messages,
                     context_blocks,
+                    images,
                 );
                 if actual != expected {
                     anyhow::bail!("provider policy derived payload mismatch");
@@ -740,6 +827,7 @@ impl ProviderPolicyAuthorization {
         mut self,
         messages: &[ChatMessage],
         context_blocks: &[BoundedContextBlock],
+        images: &[BoundedProviderImage],
         manifest: &ContextManifest,
         provider_target: &str,
         model_target: &str,
@@ -754,6 +842,7 @@ impl ProviderPolicyAuthorization {
         self.prepared_envelope_digest = Some(provider_prepared_envelope_digest(
             messages,
             context_blocks,
+            images,
             manifest,
             provider_target,
             model_target,
@@ -774,6 +863,7 @@ impl ProviderPolicyAuthorization {
         &self,
         messages: &[ChatMessage],
         context_blocks: &[BoundedContextBlock],
+        images: &[BoundedProviderImage],
         manifest: &ContextManifest,
         provider_target: &str,
         model_target: &str,
@@ -823,6 +913,7 @@ impl ProviderPolicyAuthorization {
         let expected_envelope = provider_prepared_envelope_digest(
             messages,
             context_blocks,
+            images,
             manifest,
             provider_target,
             model_target,
@@ -851,6 +942,7 @@ fn append_scope_part(target: &mut Vec<u8>, value: &[u8]) {
 fn provider_prepared_envelope_digest(
     messages: &[ChatMessage],
     context_blocks: &[BoundedContextBlock],
+    images: &[BoundedProviderImage],
     manifest: &ContextManifest,
     provider_target: &str,
     model_target: &str,
@@ -898,6 +990,12 @@ fn provider_prepared_envelope_digest(
         append_scope_part(&mut scope, block.source_ref.as_bytes());
         append_scope_part(&mut scope, block.category.as_bytes());
         append_scope_part(&mut scope, block.content.as_bytes());
+    }
+    for image in images {
+        append_scope_part(&mut scope, image.source_ref.as_bytes());
+        append_scope_part(&mut scope, image.mime_type.as_bytes());
+        append_scope_part(&mut scope, image.sha256.as_bytes());
+        append_scope_part(&mut scope, &image.byte_count.to_be_bytes());
     }
     response_bytes_digest(&scope)
 }
@@ -948,6 +1046,7 @@ fn provider_unfiltered_payload_digest(
     purpose: ProviderPayloadPurpose,
     messages: &[ChatMessage],
     context_blocks: &[BoundedContextBlock],
+    images: &[BoundedProviderImage],
 ) -> String {
     let mut scope = Vec::new();
     append_scope_part(&mut scope, b"provider_unfiltered_payload_v1");
@@ -961,6 +1060,12 @@ fn provider_unfiltered_payload_digest(
         append_scope_part(&mut scope, block.source_ref.as_bytes());
         append_scope_part(&mut scope, block.category.as_bytes());
         append_scope_part(&mut scope, block.content.as_bytes());
+    }
+    for image in images {
+        append_scope_part(&mut scope, image.source_ref.as_bytes());
+        append_scope_part(&mut scope, image.mime_type.as_bytes());
+        append_scope_part(&mut scope, image.sha256.as_bytes());
+        append_scope_part(&mut scope, &image.byte_count.to_be_bytes());
     }
     response_bytes_digest(&scope)
 }
@@ -1290,6 +1395,8 @@ impl ProviderExecutionBinding {
 pub struct PreparedProviderRequest {
     pub messages: Vec<ChatMessage>,
     pub context_blocks: Vec<BoundedContextBlock>,
+    #[serde(default)]
+    pub images: Vec<BoundedProviderImage>,
     pub context_manifest: ContextManifest,
     pub provider_target: String,
     pub model_target: String,
@@ -1340,9 +1447,14 @@ pub struct ProviderToolDefinition {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ProviderFunctionBinding {
-    Capability { capability_id: String },
+    Capability {
+        capability_id: String,
+    },
     AgentStep,
     WorkPlan,
+    /// One non-authorizing runtime-defined structured result whose exact
+    /// schema is supplied with the current provider request.
+    StructuredResult,
 }
 
 impl ProviderToolDefinition {
@@ -1421,6 +1533,20 @@ impl PreparedProviderRequest {
         }
         self.context_manifest
             .validate_context_truth(&self.context_blocks)?;
+        if self.images.len() > MAX_PREPARED_PROVIDER_IMAGES {
+            anyhow::bail!("prepared provider request has too many images");
+        }
+        for image in &self.images {
+            image.validate()?;
+        }
+        if self.images.is_empty()
+            == self
+                .context_manifest
+                .declared_payload_categories
+                .contains(&ProviderPayloadCategory::GovernedProjectImage)
+        {
+            anyhow::bail!("prepared provider image payload category mismatch");
+        }
         if self.provider_tools.len() > 16 {
             anyhow::bail!("prepared provider request has too many tool definitions");
         }
@@ -1440,6 +1566,7 @@ impl PreparedProviderRequest {
         self.policy_authorization.validate_for_request(
             &self.messages,
             &self.context_blocks,
+            &self.images,
             &self.context_manifest,
             &self.provider_target,
             &self.model_target,
@@ -1777,6 +1904,135 @@ const ALL_GATEWAY_REASONING_EFFORTS: &[crate::conversation::ReasoningEffort] = &
     crate::conversation::ReasoningEffort::Max,
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredProviderModelCapabilities {
+    pub reasoning: Option<ProviderReasoningCapability>,
+    pub input_modalities: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiscoveredOpenRouterModel {
+    pub model_id: String,
+    pub display_name: String,
+    pub context_length: Option<u64>,
+    pub capabilities: DiscoveredProviderModelCapabilities,
+    pub supports_tools: bool,
+    pub supports_structured_output: bool,
+}
+
+pub fn parse_openrouter_model_catalog(
+    body: &serde_json::Value,
+) -> Result<Vec<DiscoveredOpenRouterModel>> {
+    let entries = body
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("openrouter model discovery payload is invalid"))?;
+    let mut models = Vec::new();
+    for entry in entries {
+        let Some(model_id) = entry
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|model_id| !model_id.is_empty())
+        else {
+            continue;
+        };
+        let parameters = entry
+            .get("supported_parameters")
+            .and_then(serde_json::Value::as_array)
+            .map(|parameters| {
+                parameters
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .collect::<HashSet<_>>()
+            })
+            .unwrap_or_default();
+        let supports_tools = parameters.contains("tools") && parameters.contains("tool_choice");
+        let supports_structured_output =
+            parameters.contains("response_format") || parameters.contains("structured_outputs");
+        let capabilities = match parse_openrouter_model_capabilities(body, model_id) {
+            Ok(capabilities) => capabilities,
+            Err(_) => continue,
+        };
+        // OpenLife's Chat/Work runtime requires text plus the model-authored
+        // typed-step contract. Entries that cannot satisfy that adapter floor
+        // stay out of the executable picker instead of being advertised and
+        // then predictably failing after a user sends a task.
+        if !capabilities
+            .input_modalities
+            .iter()
+            .any(|modality| modality == "text")
+            || !supports_tools
+            || !supports_structured_output
+        {
+            continue;
+        }
+        let display_name = entry
+            .get("name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(model_id)
+            .to_string();
+        models.push(DiscoveredOpenRouterModel {
+            model_id: model_id.to_string(),
+            display_name,
+            context_length: entry
+                .get("context_length")
+                .and_then(serde_json::Value::as_u64),
+            capabilities,
+            supports_tools,
+            supports_structured_output,
+        });
+    }
+    models.sort_by(|left, right| left.model_id.cmp(&right.model_id));
+    models.dedup_by(|left, right| left.model_id == right.model_id);
+    Ok(models)
+}
+
+pub fn parse_openrouter_model_capabilities(
+    body: &serde_json::Value,
+    model: &str,
+) -> Result<DiscoveredProviderModelCapabilities> {
+    let entries = body
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("openrouter model discovery payload is invalid"))?;
+    let Some(entry) = entries
+        .iter()
+        .find(|entry| entry.get("id").and_then(serde_json::Value::as_str) == Some(model))
+    else {
+        return Ok(DiscoveredProviderModelCapabilities {
+            reasoning: None,
+            input_modalities: Vec::new(),
+        });
+    };
+    let modalities = entry
+        .get("architecture")
+        .and_then(|value| value.get("input_modalities"))
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| anyhow::anyhow!("openrouter input modalities are unavailable"))?;
+    let mut input_modalities = Vec::new();
+    for modality in modalities {
+        let modality = modality
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("openrouter input modality is invalid"))?;
+        if !matches!(modality, "text" | "image" | "file" | "audio" | "video") {
+            anyhow::bail!("openrouter input modality is unsupported");
+        }
+        if !input_modalities.iter().any(|existing| existing == modality) {
+            input_modalities.push(modality.to_string());
+        }
+    }
+    if !input_modalities.iter().any(|modality| modality == "text") {
+        anyhow::bail!("openrouter text input modality is missing");
+    }
+    Ok(DiscoveredProviderModelCapabilities {
+        reasoning: parse_openrouter_reasoning_capability(body, model)?,
+        input_modalities,
+    })
+}
+
 /// Parse the capability object returned for one exact model by OpenRouter's
 /// `GET /api/v1/models` contract. Dynamic router entries omit `reasoning` and
 /// therefore correctly produce no selector.
@@ -1848,6 +2104,19 @@ pub async fn discover_openrouter_reasoning_capability(
     model: &str,
     network_policy: &NetworkPolicy,
 ) -> Result<Option<ProviderReasoningCapability>> {
+    Ok(
+        discover_openrouter_model_capabilities(openai_base, api_key, model, network_policy)
+            .await?
+            .reasoning,
+    )
+}
+
+pub async fn discover_openrouter_model_capabilities(
+    openai_base: &str,
+    api_key: &str,
+    model: &str,
+    network_policy: &NetworkPolicy,
+) -> Result<DiscoveredProviderModelCapabilities> {
     if !provider_endpoint_is_official("openrouter", openai_base) {
         anyhow::bail!("openrouter capability discovery requires the official endpoint");
     }
@@ -1876,7 +2145,47 @@ pub async fn discover_openrouter_reasoning_capability(
     }
     let body = serde_json::from_str::<serde_json::Value>(&response.body)
         .context("openrouter capability discovery response is invalid JSON")?;
-    parse_openrouter_reasoning_capability(&body, model)
+    parse_openrouter_model_capabilities(&body, model)
+}
+
+/// Discover the bounded executable model catalog for the user's exact
+/// official OpenRouter connection. The result contains provider metadata only;
+/// it does not claim account entitlement, successful generation, or Work
+/// compatibility for any individual model.
+pub async fn discover_openrouter_model_catalog(
+    openai_base: &str,
+    api_key: &str,
+    network_policy: &NetworkPolicy,
+) -> Result<Vec<DiscoveredOpenRouterModel>> {
+    if !provider_endpoint_is_official("openrouter", openai_base) {
+        anyhow::bail!("openrouter model discovery requires the official endpoint");
+    }
+    let url = provider_models_url("openrouter", openai_base);
+    let decision = crate::network_client::resolve_network_policy_decision(
+        network_policy,
+        &url,
+        "provider.openrouter.model_catalog_discovery",
+    )?;
+    if decision.disposition != crate::network_client::NetworkPolicyDisposition::Allow {
+        anyhow::bail!("openrouter model discovery is not allowed by network policy");
+    }
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_TYPE, "application/json".parse()?);
+    if !api_key.trim().is_empty() {
+        headers.insert(AUTHORIZATION, format!("Bearer {api_key}").parse()?);
+    }
+    let response = provider_network_client("openrouter", &url)?
+        .get_text_with_headers_for_decision(&url, network_policy, &decision, headers)
+        .await?;
+    if !response.status.is_success() {
+        anyhow::bail!(
+            "openrouter model discovery returned HTTP {}",
+            response.status
+        );
+    }
+    let body = serde_json::from_str::<serde_json::Value>(&response.body)
+        .context("openrouter model discovery response is invalid JSON")?;
+    parse_openrouter_model_catalog(&body)
 }
 
 fn render_provider_system_prompt(context_blocks: &[BoundedContextBlock]) -> Option<String> {
@@ -2210,6 +2519,7 @@ fn provider_http_error(label: &str, status: reqwest::StatusCode, body: &str) -> 
 /// remains the only privacy-safe request contract outside the adapter edge.
 pub(crate) struct OpenAiCompatibleAdapterRequest<'a> {
     pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) images: Vec<BoundedProviderImage>,
     pub(crate) system_prompt: Option<&'a str>,
     pub(crate) provider: &'a str,
     /// Exact final URL fixed by `PreparedProviderRequest`; the adapter must not
@@ -2232,6 +2542,43 @@ pub(crate) struct OpenAiCompatibleAdapterRequest<'a> {
     pub(crate) network_policy: &'a NetworkPolicy,
     pub(crate) network_policy_decision: &'a NetworkPolicyDecision,
     pub(crate) request_id: Option<&'a str>,
+}
+
+fn openai_compatible_request_messages(
+    messages: Vec<ChatMessage>,
+    images: &[BoundedProviderImage],
+) -> Result<Vec<serde_json::Value>> {
+    let last_user = (!images.is_empty())
+        .then(|| {
+            messages
+                .iter()
+                .rposition(|message| message.role.eq_ignore_ascii_case("user"))
+        })
+        .flatten();
+    if !images.is_empty() && last_user.is_none() {
+        anyhow::bail!("provider image input has no user message");
+    }
+    messages
+        .into_iter()
+        .enumerate()
+        .map(|(index, message)| {
+            if Some(index) == last_user {
+                let mut content = vec![json!({
+                    "type": "text",
+                    "text": message.content,
+                })];
+                content.extend(images.iter().map(|image| {
+                    json!({
+                        "type": "image_url",
+                        "image_url": { "url": image.data_url() },
+                    })
+                }));
+                Ok(json!({ "role": message.role, "content": content }))
+            } else {
+                Ok(json!({ "role": message.role, "content": message.content }))
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2349,6 +2696,7 @@ where
 {
     let OpenAiCompatibleAdapterRequest {
         messages,
+        images,
         system_prompt,
         provider,
         endpoint,
@@ -2384,12 +2732,7 @@ where
         }));
     }
 
-    for msg in messages {
-        req_messages.push(json!({
-            "role": msg.role,
-            "content": msg.content
-        }));
-    }
+    req_messages.extend(openai_compatible_request_messages(messages, &images)?);
 
     let max_tokens = if structured_json_output { 8192 } else { 2048 };
     let temperature = if structured_json_output { 0.2 } else { 0.7 };
@@ -2628,7 +2971,9 @@ fn extract_provider_tool_step(
                     "arguments": arguments,
                 }));
             }
-            ProviderFunctionBinding::AgentStep | ProviderFunctionBinding::WorkPlan => {
+            ProviderFunctionBinding::AgentStep
+            | ProviderFunctionBinding::WorkPlan
+            | ProviderFunctionBinding::StructuredResult => {
                 if calls.len() != 1 {
                     return Err(confirmed_provider_terminal_failure(
                         "provider_agent_step_call_mixed",
@@ -2672,6 +3017,7 @@ where
 {
     let OpenAiCompatibleAdapterRequest {
         messages,
+        images,
         system_prompt,
         provider,
         endpoint,
@@ -2702,12 +3048,7 @@ where
         }));
     }
 
-    for msg in messages {
-        req_messages.push(json!({
-            "role": msg.role,
-            "content": msg.content
-        }));
-    }
+    req_messages.extend(openai_compatible_request_messages(messages, &images)?);
 
     let mut body = json!({
         "model": model,
@@ -2884,6 +3225,57 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn governed_provider_image_is_transient_and_bound_to_exact_bytes() {
+        let image = super::BoundedProviderImage::from_governed_bytes(
+            "project-image://run/0/diagram.png",
+            "image/png",
+            vec![1, 2, 3, 4],
+        )
+        .unwrap();
+        assert_eq!(image.byte_count, 4);
+        assert!(format!("{image:?}").contains("[REDACTED]"));
+        assert!(!serde_json::to_string(&image).unwrap().contains("AQIDBA"));
+        let restored: super::BoundedProviderImage =
+            serde_json::from_str(&serde_json::to_string(&image).unwrap()).unwrap();
+        assert!(restored.validate().is_err());
+    }
+
+    #[test]
+    fn openai_image_transport_attaches_images_to_latest_user_message() {
+        let image = super::BoundedProviderImage::from_governed_bytes(
+            "project-image://run/0/diagram.png",
+            "image/png",
+            vec![1, 2, 3, 4],
+        )
+        .unwrap();
+        let messages = super::openai_compatible_request_messages(
+            vec![
+                super::ChatMessage {
+                    role: "user".into(),
+                    content: "first".into(),
+                },
+                super::ChatMessage {
+                    role: "assistant".into(),
+                    content: "reply".into(),
+                },
+                super::ChatMessage {
+                    role: "user".into(),
+                    content: "inspect".into(),
+                },
+            ],
+            &[image],
+        )
+        .unwrap();
+        assert!(messages[0]["content"].is_string());
+        assert_eq!(messages[2]["content"][0]["text"], "inspect");
+        assert_eq!(messages[2]["content"][1]["type"], "image_url");
+        assert_eq!(
+            messages[2]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,AQIDBA=="
+        );
+    }
+
     use super::{
         chat_completions_url, default_base_for_provider, effective_api_key_for_endpoint,
         extract_chat_content, extract_stream_content, has_reasoning_content,
@@ -3064,6 +3456,7 @@ mod tests {
         super::chat_with_openai_compatible_raw_with_start_observer(
             super::OpenAiCompatibleAdapterRequest {
                 messages,
+                images: Vec::new(),
                 system_prompt,
                 provider,
                 endpoint: &endpoint,
@@ -3082,6 +3475,54 @@ mod tests {
         .await
     }
 
+    #[tokio::test]
+    async fn openai_adapter_sends_governed_image_as_multipart_user_content() {
+        let (listener, base) = local_provider_base().await;
+        let server = tokio::spawn(serve_provider_response(
+            listener,
+            "200 OK",
+            br#"{"choices":[{"message":{"content":"seen"}}]}"#.to_vec(),
+            None,
+        ));
+        let (policy, decision) = allow_provider_network("openrouter", &base);
+        let endpoint = super::chat_completions_url("openrouter", &base);
+        let image = super::BoundedProviderImage::from_governed_bytes(
+            "project-image://run/0/diagram.png",
+            "image/png",
+            vec![1, 2, 3, 4],
+        )
+        .unwrap();
+        let result = super::chat_with_openai_compatible_raw_with_start_observer(
+            super::OpenAiCompatibleAdapterRequest {
+                messages: vec![super::ChatMessage {
+                    role: "user".into(),
+                    content: "Inspect this image.".into(),
+                }],
+                images: vec![image],
+                system_prompt: None,
+                provider: "openrouter",
+                endpoint: &endpoint,
+                api_key: "sk-test",
+                model: "stealth/ox-alpha",
+                reasoning_effort: None,
+                structured_json_output: false,
+                provider_native_json_mode: false,
+                provider_tools: &[],
+                network_policy: &policy,
+                network_policy_decision: &decision,
+                request_id: Some("request-image-input"),
+            },
+            || Ok(()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, "seen");
+        let request = server.await.unwrap();
+        assert!(request.contains("image_url"));
+        assert!(request.contains("data:image/png;base64,AQIDBA=="));
+        assert!(request.contains("Inspect this image."));
+    }
+
     async fn test_chat_with_openai_compatible_raw_stream(
         messages: Vec<super::ChatMessage>,
         system_prompt: Option<&str>,
@@ -3095,6 +3536,7 @@ mod tests {
         super::chat_with_openai_compatible_raw_stream_with_start_observer(
             super::OpenAiCompatibleAdapterRequest {
                 messages,
+                images: Vec::new(),
                 system_prompt,
                 provider,
                 endpoint: &endpoint,
@@ -3278,6 +3720,71 @@ mod tests {
     }
 
     #[test]
+    fn openrouter_discovery_preserves_exact_input_modalities() {
+        let body = serde_json::json!({
+            "data": [{
+                "id": "stealth/ox-alpha",
+                "architecture": {
+                    "input_modalities": ["text", "image", "video"]
+                },
+                "reasoning": {
+                    "supported_efforts": ["max", "high", "low"],
+                    "default_effort": "max",
+                    "mandatory": true
+                }
+            }]
+        });
+        let capabilities =
+            super::parse_openrouter_model_capabilities(&body, "stealth/ox-alpha").unwrap();
+        assert_eq!(
+            capabilities.input_modalities,
+            vec!["text", "image", "video"]
+        );
+        assert!(capabilities.reasoning.is_some());
+    }
+
+    #[test]
+    fn openrouter_catalog_only_admits_text_models_with_typed_tool_contracts() {
+        let body = serde_json::json!({
+            "data": [
+                {
+                    "id": "stealth/ox-alpha",
+                    "name": "Ox Alpha",
+                    "context_length": 1_048_576,
+                    "architecture": { "input_modalities": ["text", "image", "video"] },
+                    "supported_parameters": ["tools", "tool_choice", "response_format"],
+                    "reasoning": {
+                        "supported_efforts": ["low", "high"],
+                        "default_effort": "low"
+                    }
+                },
+                {
+                    "id": "vendor/text-only-no-tools",
+                    "architecture": { "input_modalities": ["text"] },
+                    "supported_parameters": ["response_format"]
+                },
+                {
+                    "id": "vendor/image-generator",
+                    "architecture": { "input_modalities": ["image"] },
+                    "supported_parameters": ["tools", "tool_choice", "structured_outputs"]
+                }
+            ]
+        });
+
+        let catalog = super::parse_openrouter_model_catalog(&body).unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].model_id, "stealth/ox-alpha");
+        assert_eq!(catalog[0].display_name, "Ox Alpha");
+        assert_eq!(catalog[0].context_length, Some(1_048_576));
+        assert_eq!(
+            catalog[0].capabilities.input_modalities,
+            vec!["text", "image", "video"]
+        );
+        assert!(catalog[0].supports_tools);
+        assert!(catalog[0].supports_structured_output);
+    }
+
+    #[test]
     fn openrouter_null_effort_list_means_all_gateway_levels() {
         let body = serde_json::json!({
             "data": [{
@@ -3317,6 +3824,7 @@ mod tests {
                     role: "user".into(),
                     content: "Answer.".into(),
                 }],
+                images: Vec::new(),
                 system_prompt: None,
                 provider: "openai",
                 endpoint: &endpoint,
@@ -3363,6 +3871,7 @@ mod tests {
                     role: "user".into(),
                     content: "Answer.".into(),
                 }],
+                images: Vec::new(),
                 system_prompt: None,
                 provider: "deepseek",
                 endpoint: &endpoint,
@@ -3409,6 +3918,7 @@ mod tests {
                     role: "user".into(),
                     content: "Answer.".into(),
                 }],
+                images: Vec::new(),
                 system_prompt: None,
                 provider: "openrouter",
                 endpoint: &endpoint,
@@ -3454,6 +3964,7 @@ mod tests {
                     role: "user".into(),
                     content: "Return JSON.".into(),
                 }],
+                images: Vec::new(),
                 system_prompt: Some("Return only one JSON object."),
                 provider: "deepseek",
                 endpoint: &endpoint,
@@ -3500,6 +4011,7 @@ mod tests {
                     role: "user".into(),
                     content: "Return JSON.".into(),
                 }],
+                images: Vec::new(),
                 system_prompt: Some("Return only one JSON object."),
                 provider: "deepseek",
                 endpoint: &endpoint,
@@ -3546,6 +4058,7 @@ mod tests {
                     role: "user".into(),
                     content: "Return JSON.".into(),
                 }],
+                images: Vec::new(),
                 system_prompt: Some("Return only one JSON object."),
                 provider: "openrouter",
                 endpoint: &endpoint,
@@ -3594,6 +4107,7 @@ mod tests {
                     role: "user".into(),
                     content: "Research OpenAI Work.".into(),
                 }],
+                images: Vec::new(),
                 system_prompt: Some("Use tools when needed."),
                 provider: "openrouter",
                 endpoint: &endpoint,
@@ -3699,6 +4213,7 @@ mod tests {
                     role: "user".into(),
                     content: "Finish the task.".into(),
                 }],
+                images: Vec::new(),
                 system_prompt: Some("Use the required terminal function."),
                 provider: "deepseek",
                 endpoint: &endpoint,
@@ -3792,6 +4307,7 @@ mod tests {
                     role: "user".into(),
                     content: "Research and write a report.".into(),
                 }],
+                images: Vec::new(),
                 system_prompt: Some("Call submit_work_plan."),
                 provider: "openrouter",
                 endpoint: &endpoint,
@@ -3843,6 +4359,7 @@ mod tests {
         let error = super::chat_with_openai_compatible_raw_with_start_observer(
             super::OpenAiCompatibleAdapterRequest {
                 messages: vec![],
+                images: Vec::new(),
                 system_prompt: None,
                 provider: "openai",
                 endpoint: &endpoint,
@@ -3881,6 +4398,7 @@ mod tests {
         let error = super::chat_with_openai_compatible_raw_with_start_observer(
             super::OpenAiCompatibleAdapterRequest {
                 messages: vec![],
+                images: Vec::new(),
                 system_prompt: None,
                 provider: "openai",
                 endpoint: &endpoint,
@@ -4110,6 +4628,7 @@ mod tests {
         let error = super::chat_with_openai_compatible_raw_with_start_observer(
             super::OpenAiCompatibleAdapterRequest {
                 messages: vec![],
+                images: Vec::new(),
                 system_prompt: None,
                 provider: "openai",
                 endpoint: &endpoint,

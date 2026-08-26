@@ -19,6 +19,7 @@ const KEYCHAIN_SERVICE_OVERRIDE_ENV: &str = "OPENLIFE_KEYCHAIN_SERVICE_OVERRIDE"
 #[cfg(all(feature = "dev-extensions", debug_assertions))]
 const TRIAL_KEYCHAIN_SERVICE_PREFIX: &str = "com.openlife.desktop.trial.";
 const PROVIDER_ACCOUNT: &str = "provider-api-key";
+const PROVIDER_CONNECTION_ACCOUNT_PREFIX: &str = "provider-connection-api-key-";
 const SEARCH_ACCOUNT: &str = "search-provider-api-key";
 const CANONICAL_TASK_RECEIPT_ACCOUNT: &str = "canonical-task-receipt-key-v1";
 const MCP_AUDIT_ACCOUNT_PREFIX: &str = "mcp-audit-key-epoch-";
@@ -29,6 +30,8 @@ static SELECTED_KEYRING_SERVICE: OnceLock<std::result::Result<String, String>> =
 static LOCAL_PROFILE_SECRET_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 pub(crate) const PROVIDER_KEY_REF: &str = "keychain://com.openlife.desktop/provider-api-key";
+pub(crate) const PROVIDER_CONNECTION_KEY_REF_PREFIX: &str =
+    "keychain://com.openlife.desktop/provider-connection-api-key-";
 pub(crate) const SEARCH_KEY_REF: &str = "keychain://com.openlife.desktop/search-provider-api-key";
 pub(crate) const CANONICAL_TASK_RECEIPT_KEY_REF: &str =
     "keychain://com.openlife.desktop/canonical-task-receipt-key-v1";
@@ -55,15 +58,20 @@ struct ProviderSecretEnvelope {
     binding: ProviderSecretBinding,
 }
 
-fn provider_secret_binding(config: &AppConfig, api_key: &str) -> Result<ProviderSecretBinding> {
-    let provider = config.llm.provider.trim().to_ascii_lowercase();
+fn provider_secret_binding(
+    provider_id: &str,
+    endpoint: &str,
+    credential_version: u64,
+    api_key: &str,
+) -> Result<ProviderSecretBinding> {
+    let provider = provider_id.trim().to_ascii_lowercase();
     if provider.is_empty() || provider == "ollama" || api_key.trim().is_empty() {
         anyhow::bail!("provider credential binding is incomplete");
     }
-    let base = if config.llm.openai_base.trim().is_empty() {
+    let base = if endpoint.trim().is_empty() {
         openlife_core::llm::default_base_for_provider(&provider).to_string()
     } else {
-        config.llm.openai_base.trim().to_string()
+        endpoint.trim().to_string()
     };
     let parsed = reqwest::Url::parse(&base).context("provider credential endpoint is invalid")?;
     if !matches!(parsed.scheme(), "http" | "https")
@@ -95,26 +103,37 @@ fn provider_secret_binding(config: &AppConfig, api_key: &str) -> Result<Provider
         port,
         base_path,
         credential_identity: openlife_core::llm::provider_credential_identity(api_key),
-        credential_version: config.llm.credential_version,
+        credential_version,
     })
 }
 
-pub(crate) fn encode_provider_secret(config: &AppConfig, api_key: &str) -> Result<String> {
+pub(crate) fn encode_provider_secret(
+    provider_id: &str,
+    endpoint: &str,
+    credential_version: u64,
+    api_key: &str,
+) -> Result<String> {
     serde_json::to_string(&ProviderSecretEnvelope {
         version: PROVIDER_SECRET_ENVELOPE_VERSION.into(),
         api_key: api_key.to_string(),
-        binding: provider_secret_binding(config, api_key)?,
+        binding: provider_secret_binding(provider_id, endpoint, credential_version, api_key)?,
     })
     .context("serialize provider credential envelope")
 }
 
-pub(crate) fn hydrate_bound_provider_secret(config: &AppConfig, encoded: &str) -> Result<String> {
+pub(crate) fn hydrate_bound_provider_secret(
+    provider_id: &str,
+    endpoint: &str,
+    credential_version: u64,
+    encoded: &str,
+) -> Result<String> {
     let envelope: ProviderSecretEnvelope =
         serde_json::from_str(encoded).context("provider credential reference is unbound")?;
     if envelope.version != PROVIDER_SECRET_ENVELOPE_VERSION || envelope.api_key.trim().is_empty() {
         anyhow::bail!("provider credential reference has no supported binding");
     }
-    let expected = provider_secret_binding(config, &envelope.api_key)?;
+    let expected =
+        provider_secret_binding(provider_id, endpoint, credential_version, &envelope.api_key)?;
     if envelope.binding != expected {
         anyhow::bail!("provider credential binding differs from current provider configuration");
     }
@@ -131,6 +150,13 @@ pub(crate) trait SecretStore {
 /// separate from `SecretStore` makes startup writes a compile-time error.
 pub(crate) trait SecretReader {
     fn read_secret(&self, secret_ref: &str) -> Result<Option<String>>;
+}
+
+pub(crate) fn provider_connection_secret_ref(connection_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+
+    let digest = format!("{:x}", Sha256::digest(connection_id.as_bytes()));
+    format!("{PROVIDER_CONNECTION_KEY_REF_PREFIX}{digest}")
 }
 
 impl<T: SecretStore + ?Sized> SecretReader for T {
@@ -415,6 +441,17 @@ fn keyring_service_for_profile(profile: &str) -> &'static str {
 fn keyring_account_for_secret_ref(secret_ref: &str) -> Result<String> {
     Ok(match secret_ref {
         PROVIDER_KEY_REF => PROVIDER_ACCOUNT.to_string(),
+        value if value.starts_with(PROVIDER_CONNECTION_KEY_REF_PREFIX) => {
+            let digest = value.trim_start_matches(PROVIDER_CONNECTION_KEY_REF_PREFIX);
+            if digest.len() != 64
+                || !digest.chars().all(|character| {
+                    character.is_ascii_hexdigit() && !character.is_ascii_uppercase()
+                })
+            {
+                anyhow::bail!("invalid provider connection secret reference");
+            }
+            format!("{PROVIDER_CONNECTION_ACCOUNT_PREFIX}{digest}")
+        }
         SEARCH_KEY_REF => SEARCH_ACCOUNT.to_string(),
         CANONICAL_TASK_RECEIPT_KEY_REF => CANONICAL_TASK_RECEIPT_ACCOUNT.to_string(),
         value if value.starts_with(MCP_AUDIT_KEY_REF_PREFIX) => {
@@ -785,16 +822,6 @@ impl SecretStore for KeyringSecretStore {
     }
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum ProviderCredentialHydrationStatus {
-    #[default]
-    NotReferenced,
-    Available,
-    Missing,
-    Invalid,
-    Unavailable,
-}
-
 #[derive(Debug, Default, PartialEq, Eq)]
 pub(crate) struct SecretHydrationOutcome {
     pub(crate) rewrite_config_without_plaintext: bool,
@@ -803,192 +830,19 @@ pub(crate) struct SecretHydrationOutcome {
     /// plaintext field is cleared before provider/tool construction.
     pub(crate) fail_closed_capabilities: Vec<String>,
     pub(crate) warnings: Vec<String>,
-    pub(crate) provider_credential_status: ProviderCredentialHydrationStatus,
 }
 
-/// Hydrate runtime-only secrets and migrate legacy plaintext without deleting the
-/// old file unless every legacy secret has first been copied successfully.
-#[cfg(test)]
-pub(crate) fn hydrate_config_secrets(
-    config: &mut AppConfig,
-    store: &dyn SecretStore,
-) -> SecretHydrationOutcome {
-    let legacy_provider = !config.llm.openai_key.trim().is_empty();
-    let legacy_search = !config.system.search_provider_key.trim().is_empty();
-    let mut outcome = SecretHydrationOutcome::default();
-    let mut migration_failed = false;
-    let mut rejected_provider_reference = false;
-
-    if legacy_provider {
-        let encoded = encode_provider_secret(config, &config.llm.openai_key)
-            .and_then(|encoded| store.set(PROVIDER_KEY_REF, &encoded));
-        match encoded {
-            Ok(()) => {
-                config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
-                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Available;
-            }
-            Err(error) => {
-                migration_failed = true;
-                config.llm.openai_key.clear();
-                config.llm.openai_key_ref = None;
-                outcome
-                    .fail_closed_capabilities
-                    .push("provider_credential".into());
-                outcome
-                    .warnings
-                    .push(format!("provider key migration failed: {error}"));
-                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Unavailable;
-            }
-        }
-    } else if config.llm.openai_key_ref.as_deref() == Some(PROVIDER_KEY_REF) {
-        match store.read_secret(PROVIDER_KEY_REF) {
-            Ok(Some(encoded)) => match hydrate_bound_provider_secret(config, &encoded) {
-                Ok(secret) => {
-                    config.llm.openai_key = secret;
-                    outcome.provider_credential_status =
-                        ProviderCredentialHydrationStatus::Available;
-                }
-                Err(_) => {
-                    config.llm.openai_key.clear();
-                    config.llm.openai_key_ref = None;
-                    rejected_provider_reference = true;
-                    outcome
-                        .fail_closed_capabilities
-                        .push("provider_credential".into());
-                    outcome.warnings.push(
-                        "provider key reference is unbound or belongs to another provider endpoint; reconfigure the credential"
-                            .into(),
-                    );
-                    outcome.provider_credential_status = ProviderCredentialHydrationStatus::Invalid;
-                }
-            },
-            Ok(None) => {
-                outcome
-                    .fail_closed_capabilities
-                    .push("provider_credential".into());
-                outcome
-                    .warnings
-                    .push("provider key reference has no credential".into());
-                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Missing;
-            }
-            Err(error) => {
-                outcome
-                    .fail_closed_capabilities
-                    .push("provider_credential".into());
-                outcome
-                    .warnings
-                    .push(format!("provider key hydration failed: {error}"));
-                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Unavailable;
-            }
-        }
-    }
-
-    if legacy_search {
-        match store.set(SEARCH_KEY_REF, &config.system.search_provider_key) {
-            Ok(()) => config.system.search_provider_key_ref = Some(SEARCH_KEY_REF.into()),
-            Err(error) => {
-                migration_failed = true;
-                config.system.search_provider_key.clear();
-                config.system.search_provider_key_ref = None;
-                outcome
-                    .fail_closed_capabilities
-                    .push("search_provider_credential".into());
-                outcome
-                    .warnings
-                    .push(format!("search key migration failed: {error}"));
-            }
-        }
-    } else if config.system.search_provider_key_ref.as_deref() == Some(SEARCH_KEY_REF) {
-        match store.read_secret(SEARCH_KEY_REF) {
-            Ok(Some(secret)) => config.system.search_provider_key = secret,
-            Ok(None) => {
-                outcome
-                    .fail_closed_capabilities
-                    .push("search_provider_credential".into());
-                outcome
-                    .warnings
-                    .push("search key reference has no credential".into());
-            }
-            Err(error) => {
-                outcome
-                    .fail_closed_capabilities
-                    .push("search_provider_credential".into());
-                outcome
-                    .warnings
-                    .push(format!("search key hydration failed: {error}"));
-            }
-        }
-    }
-
-    outcome.rewrite_config_without_plaintext =
-        ((legacy_provider || legacy_search) && !migration_failed) || rejected_provider_reference;
-    outcome
-}
-
-/// Hydrate referenced provider/search credentials without migrating legacy
-/// plaintext or mutating the OS credential store. Legacy plaintext remains a
-/// Settings-time migration concern and is disabled for this startup.
-pub(crate) fn hydrate_config_secrets_read_only<R: SecretReader + ?Sized>(
+/// Hydrate only the independent search credential retained in `AppConfig`.
+///
+/// Provider credentials are owned by persistent Provider Connections. Startup
+/// must not read the retired global provider slot merely because legacy
+/// migration metadata is still present in `config.yaml`.
+pub(crate) fn hydrate_search_config_secret_read_only<R: SecretReader + ?Sized>(
     config: &mut AppConfig,
     store: &R,
 ) -> SecretHydrationOutcome {
-    let legacy_provider = !config.llm.openai_key.trim().is_empty();
     let legacy_search = !config.system.search_provider_key.trim().is_empty();
     let mut outcome = SecretHydrationOutcome::default();
-
-    if legacy_provider {
-        config.llm.openai_key.clear();
-        config.llm.openai_key_ref = None;
-        outcome
-            .fail_closed_capabilities
-            .push("provider_credential".into());
-        outcome.warnings.push(
-            "legacy provider plaintext requires an explicit Settings save; startup did not migrate it"
-                .into(),
-        );
-        outcome.provider_credential_status = ProviderCredentialHydrationStatus::Invalid;
-    } else if config.llm.openai_key_ref.as_deref() == Some(PROVIDER_KEY_REF) {
-        match store.read_secret(PROVIDER_KEY_REF) {
-            Ok(Some(encoded)) => match hydrate_bound_provider_secret(config, &encoded) {
-                Ok(secret) => {
-                    config.llm.openai_key = secret;
-                    outcome.provider_credential_status =
-                        ProviderCredentialHydrationStatus::Available;
-                }
-                Err(_) => {
-                    config.llm.openai_key.clear();
-                    config.llm.openai_key_ref = None;
-                    outcome
-                        .fail_closed_capabilities
-                        .push("provider_credential".into());
-                    outcome.warnings.push(
-                        "provider key reference is unbound or belongs to another provider endpoint; reconfigure the credential"
-                            .into(),
-                    );
-                    outcome.provider_credential_status = ProviderCredentialHydrationStatus::Invalid;
-                }
-            },
-            Ok(None) => {
-                outcome
-                    .fail_closed_capabilities
-                    .push("provider_credential".into());
-                outcome
-                    .warnings
-                    .push("provider key reference has no credential".into());
-                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Missing;
-            }
-            Err(error) => {
-                outcome
-                    .fail_closed_capabilities
-                    .push("provider_credential".into());
-                outcome
-                    .warnings
-                    .push(format!("provider key hydration failed: {error}"));
-                outcome.provider_credential_status = ProviderCredentialHydrationStatus::Unavailable;
-            }
-        }
-    }
-
     if legacy_search {
         config.system.search_provider_key.clear();
         config.system.search_provider_key_ref = None;
@@ -1020,7 +874,6 @@ pub(crate) fn hydrate_config_secrets_read_only<R: SecretReader + ?Sized>(
             }
         }
     }
-
     outcome
 }
 
@@ -1041,60 +894,26 @@ impl SecretWriteRollback {
     }
 }
 
-/// Stage runtime secrets in the OS credential store. The caller must roll back
-/// the returned snapshot if writing the reference-only config subsequently fails.
-pub(crate) fn stage_config_secrets(
+/// Stage only the independently configured Web search credential. Provider
+/// credentials are owned by persistent Provider Connections and must never be
+/// rewritten as a side effect of saving unrelated product settings.
+pub(crate) fn stage_search_config_secret(
     config: &mut AppConfig,
     store: &dyn SecretStore,
 ) -> Result<SecretWriteRollback> {
-    let mut previous_values = Vec::new();
-    let provider_secret = (!config.llm.openai_key.trim().is_empty())
-        .then(|| encode_provider_secret(config, &config.llm.openai_key))
-        .transpose()?;
-    let search_secret = (!config.system.search_provider_key.trim().is_empty())
-        .then(|| config.system.search_provider_key.clone());
-    for (secret_ref, value) in [
-        (PROVIDER_KEY_REF, provider_secret),
-        (SEARCH_KEY_REF, search_secret),
-    ] {
-        let Some(value) = value else {
-            continue;
-        };
-        if value.trim().is_empty() {
-            continue;
-        }
-        let previous = match store.get(secret_ref) {
-            Ok(previous) => previous,
-            Err(error) => {
-                let rollback = SecretWriteRollback { previous_values };
-                let rollback_error = rollback.rollback(store).err();
-                return Err(match rollback_error {
-                    Some(rollback_error) => anyhow::anyhow!(
-                        "secret read failed: {error}; rollback also failed: {rollback_error}"
-                    ),
-                    None => error,
-                });
-            }
-        };
-        if let Err(error) = store.set(secret_ref, &value) {
-            let rollback = SecretWriteRollback { previous_values };
-            let rollback_error = rollback.rollback(store).err();
-            return Err(match rollback_error {
-                Some(rollback_error) => anyhow::anyhow!(
-                    "secret write failed: {error}; rollback also failed: {rollback_error}"
-                ),
-                None => error,
-            });
-        }
-        previous_values.push((secret_ref, previous));
-    }
-    if !config.llm.openai_key.trim().is_empty() {
-        config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
-    }
-    if !config.system.search_provider_key.trim().is_empty() {
-        config.system.search_provider_key_ref = Some(SEARCH_KEY_REF.into());
-    }
-    Ok(SecretWriteRollback { previous_values })
+    let Some(value) = (!config.system.search_provider_key.trim().is_empty())
+        .then(|| config.system.search_provider_key.clone())
+    else {
+        return Ok(SecretWriteRollback {
+            previous_values: Vec::new(),
+        });
+    };
+    let previous = store.get(SEARCH_KEY_REF)?;
+    store.set(SEARCH_KEY_REF, &value)?;
+    config.system.search_provider_key_ref = Some(SEARCH_KEY_REF.into());
+    Ok(SecretWriteRollback {
+        previous_values: vec![(SEARCH_KEY_REF, previous)],
+    })
 }
 
 pub(crate) struct McpAuditKeyHydration {
@@ -1371,6 +1190,18 @@ mod tests {
     }
 
     #[test]
+    fn provider_connection_secret_references_are_stable_and_keyring_safe() {
+        let first = provider_connection_secret_ref("connection-a");
+        assert_eq!(first, provider_connection_secret_ref("connection-a"));
+        assert_ne!(first, provider_connection_secret_ref("connection-b"));
+        assert!(first.starts_with(PROVIDER_CONNECTION_KEY_REF_PREFIX));
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
+        assert!(keyring_account_for_secret_ref(&first)
+            .unwrap()
+            .starts_with(PROVIDER_CONNECTION_ACCOUNT_PREFIX));
+    }
+
+    #[test]
     fn release_uses_keychain_while_dev_and_qa_use_profile_files() {
         assert_eq!(
             secret_backend_kind_for_profile("release", false),
@@ -1457,52 +1288,6 @@ mod tests {
         values: Mutex<HashMap<String, String>>,
     }
 
-    struct FailingSearchSecretStore {
-        values: Mutex<HashMap<String, String>>,
-    }
-
-    #[derive(Default)]
-    struct FailingProviderSecretStore;
-
-    impl SecretStore for FailingProviderSecretStore {
-        fn get(&self, _secret_ref: &str) -> Result<Option<String>> {
-            Ok(None)
-        }
-
-        fn set(&self, secret_ref: &str, _value: &str) -> Result<()> {
-            if secret_ref == PROVIDER_KEY_REF {
-                anyhow::bail!("injected provider secret failure");
-            }
-            Ok(())
-        }
-
-        fn delete(&self, _secret_ref: &str) -> Result<()> {
-            Ok(())
-        }
-    }
-
-    impl SecretStore for FailingSearchSecretStore {
-        fn get(&self, secret_ref: &str) -> Result<Option<String>> {
-            Ok(self.values.lock().unwrap().get(secret_ref).cloned())
-        }
-
-        fn set(&self, secret_ref: &str, value: &str) -> Result<()> {
-            if secret_ref == SEARCH_KEY_REF {
-                anyhow::bail!("injected search secret failure");
-            }
-            self.values
-                .lock()
-                .unwrap()
-                .insert(secret_ref.into(), value.into());
-            Ok(())
-        }
-
-        fn delete(&self, secret_ref: &str) -> Result<()> {
-            self.values.lock().unwrap().remove(secret_ref);
-            Ok(())
-        }
-    }
-
     impl SecretStore for MemorySecretStore {
         fn get(&self, secret_ref: &str) -> Result<Option<String>> {
             Ok(self.values.lock().unwrap().get(secret_ref).cloned())
@@ -1523,164 +1308,79 @@ mod tests {
     }
 
     #[test]
-    fn legacy_plaintext_is_copied_before_config_rewrite_is_allowed() {
+    fn provider_connection_secret_is_bound_without_reconstructing_legacy_config() {
+        let encoded = encode_provider_secret(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            7,
+            "sk-connection-secret",
+        )
+        .unwrap();
+
+        assert_eq!(
+            hydrate_bound_provider_secret(
+                "openrouter",
+                "https://openrouter.ai/api/v1",
+                7,
+                &encoded,
+            )
+            .unwrap(),
+            "sk-connection-secret"
+        );
+        assert!(hydrate_bound_provider_secret(
+            "openrouter",
+            "https://proxy.example/v1",
+            7,
+            &encoded,
+        )
+        .is_err());
+        assert!(hydrate_bound_provider_secret(
+            "openrouter",
+            "https://openrouter.ai/api/v1",
+            8,
+            &encoded,
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn startup_search_hydration_does_not_read_or_rewrite_legacy_provider_authority() {
         let store = MemorySecretStore::default();
         let mut config = AppConfig::default();
-        config.llm.openai_key = "sk-provider-secret".into();
-        config.system.search_provider_key = "sk-search-secret".into();
+        config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
+        config.system.search_provider_key_ref = Some(SEARCH_KEY_REF.into());
+        store.set(SEARCH_KEY_REF, "sk-search-secret").unwrap();
 
-        let outcome = hydrate_config_secrets(&mut config, &store);
+        let outcome = hydrate_search_config_secret_read_only(&mut config, &store);
 
-        assert!(outcome.rewrite_config_without_plaintext);
-        assert!(outcome.warnings.is_empty());
-        let encoded = store.get(PROVIDER_KEY_REF).unwrap().unwrap();
-        let envelope: ProviderSecretEnvelope = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(envelope.api_key, "sk-provider-secret");
-        assert_eq!(envelope.binding.provider, "openai");
-        assert_eq!(envelope.binding.scheme, "https");
-        assert_eq!(envelope.binding.host, "api.openai.com");
-        assert_eq!(envelope.binding.port, 443);
-        assert_eq!(envelope.binding.base_path, "/v1");
-        assert_eq!(envelope.binding.credential_version, 0);
-        assert_eq!(
-            envelope.binding.credential_identity,
-            openlife_core::llm::provider_credential_identity("sk-provider-secret")
-        );
         assert_eq!(config.llm.openai_key_ref.as_deref(), Some(PROVIDER_KEY_REF));
-        assert_eq!(
-            config.system.search_provider_key_ref.as_deref(),
-            Some(SEARCH_KEY_REF)
-        );
-    }
-
-    #[test]
-    fn startup_credential_hydration_never_migrates_legacy_plaintext() {
-        let store = MemorySecretStore::default();
-        let mut config = AppConfig::default();
-        config.llm.openai_key = "sk-provider-secret".into();
-        config.system.search_provider_key = "sk-search-secret".into();
-
-        let outcome = hydrate_config_secrets_read_only(&mut config, &store);
-
         assert!(config.llm.openai_key.is_empty());
-        assert!(config.system.search_provider_key.is_empty());
-        assert!(config.llm.openai_key_ref.is_none());
-        assert!(config.system.search_provider_key_ref.is_none());
-        assert!(!outcome.rewrite_config_without_plaintext);
-        assert_eq!(outcome.fail_closed_capabilities.len(), 2);
-        assert!(SecretStore::get(&store, PROVIDER_KEY_REF)
-            .unwrap()
-            .is_none());
-        assert!(SecretStore::get(&store, SEARCH_KEY_REF).unwrap().is_none());
+        assert_eq!(config.system.search_provider_key, "sk-search-secret");
+        assert!(outcome.fail_closed_capabilities.is_empty());
     }
 
     #[test]
-    fn failed_legacy_provider_migration_clears_runtime_plaintext_and_marks_degraded() {
-        let mut config = AppConfig::default();
-        config.llm.openai_key = "sk-plaintext-must-not-run".into();
-
-        let outcome = hydrate_config_secrets(&mut config, &FailingProviderSecretStore);
-
-        assert!(config.llm.openai_key.is_empty());
-        assert!(config.llm.openai_key_ref.is_none());
-        assert!(!outcome.rewrite_config_without_plaintext);
-        assert_eq!(
-            outcome.fail_closed_capabilities,
-            vec!["provider_credential".to_string()]
-        );
-        assert!(outcome
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("provider key migration failed")));
-    }
-
-    #[test]
-    fn reference_only_config_is_hydrated_for_runtime_use() {
+    fn search_settings_stage_never_rewrites_provider_credentials() {
         let store = MemorySecretStore::default();
-        let mut config = AppConfig::default();
         store
-            .set(
-                PROVIDER_KEY_REF,
-                &encode_provider_secret(&config, "sk-provider-secret").unwrap(),
-            )
+            .set(PROVIDER_KEY_REF, "existing-provider-secret")
             .unwrap();
-        config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
-
-        let outcome = hydrate_config_secrets(&mut config, &store);
-
-        assert!(!outcome.rewrite_config_without_plaintext);
-        assert_eq!(config.llm.openai_key, "sk-provider-secret");
-    }
-
-    #[test]
-    fn unbound_legacy_keychain_reference_fails_closed_and_requires_reconfiguration() {
-        let store = MemorySecretStore::default();
-        store.set(PROVIDER_KEY_REF, "sk-legacy-unbound").unwrap();
         let mut config = AppConfig::default();
-        config.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
+        config.llm.openai_key = "submitted-provider-secret".into();
+        config.system.search_provider_key = "new-search-secret".into();
 
-        let outcome = hydrate_config_secrets(&mut config, &store);
+        let rollback = stage_search_config_secret(&mut config, &store).unwrap();
 
-        assert!(config.llm.openai_key.is_empty());
-        assert!(config.llm.openai_key_ref.is_none());
-        assert!(outcome.rewrite_config_without_plaintext);
-        assert!(outcome
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("reconfigure")));
-    }
-
-    #[test]
-    fn provider_endpoint_or_generation_drift_cannot_hydrate_a_bound_key() {
-        let store = MemorySecretStore::default();
-        let original = AppConfig::default();
-        store
-            .set(
-                PROVIDER_KEY_REF,
-                &encode_provider_secret(&original, "sk-official").unwrap(),
-            )
-            .unwrap();
-
-        for mut drifted in [
-            {
-                let mut config = original.clone();
-                config.llm.openai_base = "https://capture.example/v1".into();
-                config
-            },
-            {
-                let mut config = original.clone();
-                config.llm.credential_version = 1;
-                config
-            },
-        ] {
-            drifted.llm.openai_key_ref = Some(PROVIDER_KEY_REF.into());
-            let outcome = hydrate_config_secrets(&mut drifted, &store);
-            assert!(drifted.llm.openai_key.is_empty());
-            assert!(drifted.llm.openai_key_ref.is_none());
-            assert!(outcome.rewrite_config_without_plaintext);
-        }
-    }
-
-    #[test]
-    fn staged_secret_write_rolls_back_when_the_second_secret_fails() {
-        let store = FailingSearchSecretStore {
-            values: Mutex::new(HashMap::from([(
-                PROVIDER_KEY_REF.into(),
-                "sk-old-provider".into(),
-            )])),
-        };
-        let mut config = AppConfig::default();
-        config.llm.openai_key = "sk-new-provider".into();
-        config.system.search_provider_key = "sk-new-search".into();
-
-        let result = stage_config_secrets(&mut config, &store);
-
-        assert!(result.is_err());
         assert_eq!(
             store.get(PROVIDER_KEY_REF).unwrap().as_deref(),
-            Some("sk-old-provider")
+            Some("existing-provider-secret")
         );
-        assert_eq!(store.get(SEARCH_KEY_REF).unwrap(), None);
+        assert_eq!(
+            store.get(SEARCH_KEY_REF).unwrap().as_deref(),
+            Some("new-search-secret")
+        );
+        rollback.rollback(&store).unwrap();
+        assert!(store.get(SEARCH_KEY_REF).unwrap().is_none());
     }
 
     #[test]

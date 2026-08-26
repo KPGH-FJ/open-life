@@ -14,6 +14,7 @@ const workIpcMocks = vi.hoisted(() => ({
   getWorkbenchViewModel: vi.fn(),
   openArtifactResult: vi.fn(),
   requestArtifactUndo: vi.fn(),
+  requestTaskArtifactUndo: vi.fn(),
   reviseWorkArtifact: vi.fn(),
   retryWorkTask: vi.fn(),
   stopWorkRun: vi.fn(),
@@ -85,6 +86,32 @@ describe("Workbench Tauri data source", () => {
       ...snapshot.workspaceEnvelope.data!,
       selectedConversationId: undefined,
     };
+
+    expect(activeScopedTask(snapshot)).toBeNull();
+  });
+
+  it("does not let an older terminal blocker replace the latest task as current execution", async () => {
+    const fixture = workbenchFixtureDataSource("fixture-ready");
+    const snapshot = await fixture.load();
+    const template = snapshot.tasksEnvelope.data!.items[0];
+    snapshot.tasksEnvelope.data!.items = [
+      {
+        ...template,
+        canonicalTaskId: "latest-completed",
+        lifecycleStatus: "completed",
+        terminalDeliveryStatus: "delivered",
+        finalDeliveryEvidencePresent: true,
+        pendingReviewItemRefs: [],
+      },
+      {
+        ...template,
+        canonicalTaskId: "older-blocked",
+        lifecycleStatus: "blocked",
+        terminalDeliveryStatus: "blocked",
+        finalDeliveryEvidencePresent: false,
+        pendingReviewItemRefs: [],
+      },
+    ];
 
     expect(activeScopedTask(snapshot)).toBeNull();
   });
@@ -255,6 +282,45 @@ describe("Workbench Tauri data source", () => {
 
     await expect(tauriWorkbenchDataSource.requestArtifactUndo("artifact-1")).rejects.toThrow(
       "artifact_undo_receipt_unverified"
+    );
+  });
+
+  it("verifies a grouped Artifact Undo receipt without hiding partial failures", async () => {
+    workIpcMocks.requestTaskArtifactUndo.mockResolvedValue({
+      taskId: "task-1",
+      status: "partial_waiting_review",
+      proposals: [
+        {
+          artifactId: "artifact-1",
+          proposalId: "proposal-undo-1",
+          status: "waiting_review",
+        },
+      ],
+      failures: [{ artifactId: "artifact-2", reasonCode: "artifact_undo_request_failed" }],
+    });
+
+    await expect(tauriWorkbenchDataSource.requestTaskArtifactUndo("task-1")).resolves.toEqual({
+      failures: [{ artifactId: "artifact-2", reasonCode: "artifact_undo_request_failed" }],
+    });
+    expect(workIpcMocks.requestTaskArtifactUndo).toHaveBeenCalledWith("task-1");
+  });
+
+  it("fails closed when a grouped Undo receipt claims success while carrying failures", async () => {
+    workIpcMocks.requestTaskArtifactUndo.mockResolvedValue({
+      taskId: "task-1",
+      status: "waiting_review",
+      proposals: [
+        {
+          artifactId: "artifact-1",
+          proposalId: "proposal-undo-1",
+          status: "waiting_review",
+        },
+      ],
+      failures: [{ artifactId: "artifact-2", reasonCode: "artifact_undo_request_failed" }],
+    });
+
+    await expect(tauriWorkbenchDataSource.requestTaskArtifactUndo("task-1")).rejects.toThrow(
+      "task_artifact_undo_receipt_unverified"
     );
   });
 

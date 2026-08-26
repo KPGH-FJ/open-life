@@ -16,10 +16,10 @@ working tree.
 
 ## Current Development Status
 
-`openlife_foundation_control_loop_plan.md` is the one active implementation
-plan. It supersedes the completed Agent capability rebuild plan, which remains
-available in Git history. Product direction lives in `PRODUCT.md`; accepted
-architecture lives in ADRs.
+`openlife_product_reconstruction_plan.md` is the one active implementation
+plan. It starts from the 2026-08-24 formal-product reality audit and supersedes
+the foundation control-loop plan, which remains available in Git history.
+Product direction lives in `PRODUCT.md`; accepted architecture lives in ADRs.
 
 ## Accepted Decisions
 
