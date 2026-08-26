@@ -1,5 +1,5 @@
 import { StrictMode } from "react";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { TaskControl, TaskViewModelItem } from "@/tauri";
@@ -10,39 +10,40 @@ import {
 } from "@/test/fixtures/workbench/settings";
 import { ProductWorkbench } from "./ProductWorkbench";
 
+async function openHistory(): Promise<void> {
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /^历史/ }));
+  expect(await screen.findByRole("heading", { name: "工作历史", level: 1 })).toBeInTheDocument();
+}
+
 describe("OpenLife product shell", () => {
-  it("uses Workbench as the single task surface and removes retired top-level pages", async () => {
+  it("uses one Conversation surface and moves saved Work into History", async () => {
     const dataSource = workbenchFixtureDataSource("fixture-ready");
     render(
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
-    expect(await screen.findByRole("heading", { name: "工作区", level: 1 })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Workbench/ })).toHaveAttribute(
-      "aria-current",
-      "page"
-    );
+    expect(await screen.findByRole("button", { name: "新对话" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开文件夹" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^历史/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^结果/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^需处理/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^今日/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^任务/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^审核中心/ })).not.toBeInTheDocument();
 
-    const resultsHeading = await screen.findByRole("heading", { name: "进度与结果" });
-    expect(resultsHeading).toBeInTheDocument();
-    expect(screen.getByTestId("conversation-workbench")).toHaveClass(
-      "ol-conversation-workbench-layout--with-results"
-    );
+    expect(screen.queryByRole("heading", { name: "进度与结果" })).not.toBeInTheDocument();
     const inlineCheckpoint = await screen.findByRole("region", {
       name: "当前 Work 的决定节点",
     });
     expect(screen.queryByLabelText("审核项列表")).not.toBeInTheDocument();
+    expect(inlineCheckpoint).toBeInTheDocument();
+
+    await openHistory();
     expect(
-      inlineCheckpoint.compareDocumentPosition(resultsHeading) & Node.DOCUMENT_POSITION_FOLLOWING
-    ).toBeTruthy();
-    expect(await screen.findByTestId("canonical-work-contract")).toHaveTextContent("交付最终回答");
-    expect(
-      await screen.findByRole("heading", { name: "读取本地客户访谈记录", level: 2 })
+      await screen.findByRole("button", {
+        name: /整理三次客户访谈，归纳下周要验证的问题/,
+      })
     ).toBeInTheDocument();
     expect(
       screen.getByText("ollama · qwen2.5:14b · 模型默认推理 · 标准执行 · Project 客户研究 r3")
@@ -89,10 +90,32 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
+    await openHistory();
     expect(await screen.findByTestId("canonical-task-answer")).toHaveTextContent(
       "STAGE6-PROJECT-ALPHA-SCOPED 已完成内部复核。"
     );
     expect(screen.queryByText("这项工作还没有可交付的结果。")).not.toBeInTheDocument();
+  });
+
+  it("opens the selected Work result in the contextual inspector without duplicating History", async () => {
+    const user = userEvent.setup();
+    const dataSource = workbenchFixtureDataSource("fixture-ready");
+    render(
+      <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
+    );
+
+    await openHistory();
+    const taskRow = await screen.findByRole("button", {
+      name: /整理三次客户访谈，归纳下周要验证的问题/,
+    });
+    await user.click(taskRow);
+    await user.click(screen.getByRole("button", { name: "打开详情" }));
+
+    const inspector = await screen.findByRole("complementary", {
+      name: /整理三次客户访谈，归纳下周要验证的问题/,
+    });
+    expect(within(inspector).getByTestId("canonical-work-contract")).toBeInTheDocument();
+    expect(within(inspector).queryByText("最近工作")).not.toBeInTheDocument();
   });
 
   it("restores the canonical Steering lifecycle and applied plan revision", async () => {
@@ -135,11 +158,12 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
+    await openHistory();
     expect(await screen.findByTestId("canonical-task-steerings")).toHaveTextContent("已应用");
     expect(screen.getByTestId("canonical-task-steerings")).toHaveTextContent("计划版本 1 → 2");
   });
 
-  it("opens an archived Conversation from global Activity without making it writable", async () => {
+  it("opens an archived Conversation from History without making it writable", async () => {
     const user = userEvent.setup();
     const dataSource = workbenchFixtureDataSource("fixture-ready");
     const loadConversation = vi.spyOn(dataSource, "loadConversation");
@@ -151,18 +175,10 @@ describe("OpenLife product shell", () => {
     expect(
       await screen.findByText("帮我整理这三次访谈，找出下周最值得验证的问题。")
     ).toBeInTheDocument();
+    await user.click(screen.getByText("对话设置"));
     await user.click(screen.getByRole("button", { name: "归档" }));
-    expect(await screen.findByRole("button", { name: "恢复对话" })).toBeEnabled();
-    await user.click(screen.getByRole("button", { name: "新对话" }));
-    await waitFor(() =>
-      expect(
-        screen.queryByText("帮我整理这三次访谈，找出下周最值得验证的问题。")
-      ).not.toBeInTheDocument()
-    );
-
-    await user.click(
-      screen.getByRole("button", { name: /整理三次客户访谈，归纳下周要验证的问题/ })
-    );
+    await user.click(screen.getByRole("button", { name: /^历史/ }));
+    await user.click(await screen.findByRole("button", { name: /整理客户访谈.*Turn.*Task 引用/ }));
 
     expect(
       await screen.findByText("帮我整理这三次访谈，找出下周最值得验证的问题。")
@@ -224,6 +240,7 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
+    await openHistory();
     expect(await screen.findByText("最终回答已交付，含已说明限制")).toBeInTheDocument();
     expect(screen.getByText("已交付，含限制")).toBeInTheDocument();
     expect(screen.getByText("一项官方权限模式的直接来源仍不可用。")).toBeInTheDocument();
@@ -302,6 +319,7 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
+    await openHistory();
     expect(await screen.findByRole("heading", { name: "失败", level: 4 })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "failed" })).not.toBeInTheDocument();
     const readsBeforeRetry = loadConversation.mock.calls.length;
@@ -402,6 +420,7 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
+    await openHistory();
     const artifactDetails = await screen.findByText("来源、完整性与恢复");
     expect(artifactDetails.closest("details")).not.toHaveAttribute("open");
     await user.click(await screen.findByRole("button", { name: "打开文件" }));
@@ -512,6 +531,7 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
+    await openHistory();
     expect(await screen.findByText("Word 文档 · v1")).toBeInTheDocument();
     expect(screen.getByText("提取内容")).toBeInTheDocument();
     expect(screen.queryByText("预览")).not.toBeInTheDocument();
@@ -592,6 +612,7 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
+    await openHistory();
     await user.click(await screen.findByRole("button", { name: "撤销全部修改" }));
     await waitFor(() => expect(requestTaskArtifactUndo).toHaveBeenCalledWith(task.canonicalTaskId));
     expect(screen.getAllByRole("button", { name: "申请撤销此产物" })).toHaveLength(2);
@@ -681,6 +702,7 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
+    await openHistory();
     expect(await screen.findByText("已撤销")).toBeInTheDocument();
     expect(screen.getByText("历史版本预览")).toBeInTheDocument();
     expect(screen.getByText("# 撤销前的旅行计划")).toBeInTheDocument();
@@ -757,6 +779,7 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
+    await openHistory();
     expect(await screen.findByTestId("canonical-task-artifacts")).toHaveTextContent("已物化");
     expect(screen.getByText("等待文件完整性核验")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "打开文件" })).not.toBeInTheDocument();
@@ -769,6 +792,7 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench
         workbenchDataSource={dataSource}
         personalIntelligenceDataSource={dataSource}
+        conversationDataSource={dataSource}
       />
     );
 
@@ -778,10 +802,7 @@ describe("OpenLife product shell", () => {
     expect(
       await screen.findByRole("heading", { name: "把上午作为优先深度工作时段", level: 2 })
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^Workbench/ })).toHaveAttribute(
-      "aria-current",
-      "page"
-    );
+    expect(screen.getByRole("button", { name: /^历史/ })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /^审核中心/ })).not.toBeInTheDocument();
   });
 
@@ -841,12 +862,12 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
+    await openHistory();
     expect(
       await screen.findByRole("button", {
         name: /查询官网标题.*需要处理：所需资料当前不可访问/,
       })
     ).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "进度与结果" })).toBeInTheDocument();
     expect(screen.queryByText("当前没有可展示的任务。")).not.toBeInTheDocument();
   });
 

@@ -585,9 +585,9 @@ describe("Personal Intelligence route", () => {
 
     expect(await screen.findByRole("heading", { name: "长期理解尚未建立" })).toBeInTheDocument();
     expect(screen.getAllByText("等待决定").length).toBeGreaterThan(0);
-    expect(screen.getByRole("button", { name: /^个人智能\s+关于我与记忆/ })).toHaveAttribute(
-      "aria-current",
-      "page"
+    expect(screen.getByRole("button", { name: "个人智能" })).toHaveAttribute(
+      "data-current",
+      "true"
     );
 
     await user.click(screen.getByRole("button", { name: "查看并决定" }));

@@ -1363,6 +1363,19 @@ export function useConversationController(
     ]
   );
 
+  const refreshDependentWorkAfterProjectScopeChange = useCallback(
+    async (conversationId: string | null): Promise<boolean> => {
+      if (!onAfterProjectScopeChange) return true;
+      try {
+        await onAfterProjectScopeChange(conversationId);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [onAfterProjectScopeChange]
+  );
+
   const bindProjectDirectory = useCallback(
     async (projectId: string, expectedRevision: number): Promise<boolean> => {
       const preserveNewConversationDraft = selectedSessionId === null;
@@ -1383,7 +1396,8 @@ export function useConversationController(
         }
         if (!result.project?.workspaceRoot) throw new Error("project_workspace_root_missing");
         if (!(await reload())) throw new Error("project_refresh_failed_after_directory_binding");
-        await onAfterProjectScopeChange?.(selectedSessionId);
+        const dependentWorkRefreshed =
+          await refreshDependentWorkAfterProjectScopeChange(selectedSessionId);
         if (preserveNewConversationDraft) {
           explicitConversationChoiceRef.current = true;
           requestRef.current += 1;
@@ -1414,7 +1428,11 @@ export function useConversationController(
         }
         setModeState("work");
         setSessionMutation({ phase: "idle" });
-        announce("Project 文件夹范围已更新并由系统重新读取确认。");
+        announce(
+          dependentWorkRefreshed
+            ? "Project 文件夹范围已更新并由系统重新读取确认。"
+            : "Project 文件夹范围已更新；任务结果暂未刷新，请重新读取。"
+        );
         return true;
       } catch (error) {
         setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
@@ -1430,7 +1448,7 @@ export function useConversationController(
       provider.selectedProfileId,
       provider.selectedReasoningEffort,
       reload,
-      onAfterProjectScopeChange,
+      refreshDependentWorkAfterProjectScopeChange,
       selectedSessionId,
     ]
   );
@@ -1451,9 +1469,14 @@ export function useConversationController(
         }
         if (!result.project) throw new Error("project_read_root_missing");
         if (!(await reload())) throw new Error("project_refresh_failed_after_read_root_add");
-        await onAfterProjectScopeChange?.(selectedSessionId);
+        const dependentWorkRefreshed =
+          await refreshDependentWorkAfterProjectScopeChange(selectedSessionId);
         setSessionMutation({ phase: "idle" });
-        announce("读取文件夹已加入 Project 范围；它不会获得文件写入权限。");
+        announce(
+          dependentWorkRefreshed
+            ? "读取文件夹已加入 Project 范围；它不会获得文件写入权限。"
+            : "读取文件夹已加入 Project 范围；任务结果暂未刷新，请重新读取。"
+        );
         return true;
       } catch (error) {
         setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
@@ -1461,7 +1484,14 @@ export function useConversationController(
         return false;
       }
     },
-    [announce, busy, dataSource, onAfterProjectScopeChange, reload, selectedSessionId]
+    [
+      announce,
+      busy,
+      dataSource,
+      refreshDependentWorkAfterProjectScopeChange,
+      reload,
+      selectedSessionId,
+    ]
   );
 
   const removeProjectReadRoot = useCallback(
@@ -1474,9 +1504,14 @@ export function useConversationController(
       try {
         await dataSource.removeProjectReadRoot(projectId, rootId, expectedRevision);
         if (!(await reload())) throw new Error("project_refresh_failed_after_read_root_remove");
-        await onAfterProjectScopeChange?.(selectedSessionId);
+        const dependentWorkRefreshed =
+          await refreshDependentWorkAfterProjectScopeChange(selectedSessionId);
         setSessionMutation({ phase: "idle" });
-        announce("读取范围已移除；本地文件夹和文件没有被删除。");
+        announce(
+          dependentWorkRefreshed
+            ? "读取范围已移除；本地文件夹和文件没有被删除。"
+            : "读取范围已移除；任务结果暂未刷新，请重新读取。"
+        );
         return true;
       } catch (error) {
         setSessionMutation({ phase: "failed", action: "project", reason: errorText(error) });
@@ -1484,7 +1519,14 @@ export function useConversationController(
         return false;
       }
     },
-    [announce, busy, dataSource, onAfterProjectScopeChange, reload, selectedSessionId]
+    [
+      announce,
+      busy,
+      dataSource,
+      refreshDependentWorkAfterProjectScopeChange,
+      reload,
+      selectedSessionId,
+    ]
   );
 
   const mutateProject = useCallback(

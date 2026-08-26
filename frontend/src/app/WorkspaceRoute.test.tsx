@@ -10,6 +10,12 @@ import {
   reviewQueueSections,
 } from "@/features/review/ReviewView";
 
+async function openHistory(): Promise<void> {
+  const user = userEvent.setup();
+  await user.click(await screen.findByRole("button", { name: /^历史/ }));
+  expect(await screen.findByRole("heading", { name: "工作历史", level: 1 })).toBeInTheDocument();
+}
+
 describe("Workspace route", () => {
   it("groups LifeModel learning reviews separately and shows at most five at once", async () => {
     const fixture = workbenchFixtureDataSource("fixture-ready");
@@ -87,10 +93,7 @@ describe("Workspace route", () => {
       />
     );
 
-    expect(await screen.findByRole("heading", { name: "进度与结果" })).toBeInTheDocument();
-    expect(
-      await screen.findByRole("heading", { name: "读取本地客户访谈记录", level: 2 })
-    ).toBeInTheDocument();
+    expect(await screen.findByRole("region", { name: "当前 Work 的决定节点" })).toBeInTheDocument();
     expect(dispatchReview).not.toHaveBeenCalled();
     expect(screen.getAllByText("等待决定").length).toBeGreaterThan(0);
 
@@ -100,6 +103,7 @@ describe("Workspace route", () => {
 
     await user.click(screen.getByRole("button", { name: "确认仅允许本次" }));
     await waitFor(() => expect(dispatchReview).toHaveBeenCalledTimes(1));
+    await openHistory();
     expect(
       await screen.findAllByText("已开始读取本地记录并提取重复问题；尚未形成最终结果。")
     ).not.toHaveLength(0);
@@ -193,6 +197,7 @@ describe("Workspace route", () => {
     await user.click(await screen.findByRole("button", { name: "仅允许本次" }));
     await user.click(screen.getByRole("button", { name: "确认仅允许本次" }));
 
+    await openHistory();
     expect(await screen.findByText("本次多文件修改已完成。")).toBeInTheDocument();
     expect(screen.queryByText("旧失败任务不应替换刚完成任务的详情。")).not.toBeInTheDocument();
   });
@@ -260,6 +265,7 @@ describe("Workspace route", () => {
       />
     );
 
+    await openHistory();
     expect(await screen.findByText("最新多文件修改已完成。")).toBeInTheDocument();
     expect(screen.queryByText("更旧失败不应成为默认详情。")).not.toBeInTheDocument();
   });
@@ -656,12 +662,12 @@ describe("Workspace route", () => {
       />
     );
 
-    await user.click(await screen.findByRole("button", { name: /^个人智能\s+关于我与记忆/ }));
+    await user.click(await screen.findByRole("button", { name: "个人智能" }));
 
     expect(await screen.findByRole("tab", { name: /关于我.*LifeModel/ })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /^个人智能\s+关于我与记忆/ })).toHaveAttribute(
-      "aria-current",
-      "page"
+    expect(screen.getByRole("button", { name: "个人智能" })).toHaveAttribute(
+      "data-current",
+      "true"
     );
   });
 
@@ -722,6 +728,7 @@ describe("Workspace route", () => {
     await waitFor(() => expect(workMode).toBeEnabled());
     await user.click(workMode);
     await waitFor(() => expect(screen.getByRole("radio", { name: "Work" })).toBeChecked());
+    await user.click(screen.getByText("文件、技能与工具"));
     await user.click(await screen.findByRole("button", { name: "添加文件" }));
 
     expect(await screen.findByText("访谈记录.md")).toBeInTheDocument();
@@ -885,11 +892,12 @@ describe("Workspace route", () => {
       />
     );
 
-    expect(await screen.findByRole("button", { name: "归档" })).toBeEnabled();
+    await user.click(await screen.findByText("对话设置"));
+    expect(screen.getByRole("button", { name: "归档" })).toBeEnabled();
     await user.click(screen.getByRole("button", { name: "归档" }));
     await waitFor(() => expect(archiveSession).toHaveBeenCalledTimes(1));
     expect(deleteSession).not.toHaveBeenCalled();
-    await user.click(await screen.findByText("已归档对话（1）"));
+    await user.click(screen.getByRole("button", { name: /^历史/ }));
     expect(screen.getByRole("button", { name: "永久删除空记录" })).toBeDisabled();
     expect(screen.getByText("对话仍有消息或 Turn 历史，必须保留原始记录。")).toBeInTheDocument();
   });

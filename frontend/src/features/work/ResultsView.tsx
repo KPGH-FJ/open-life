@@ -457,6 +457,7 @@ export function ResultsView({
   fixedFilter,
   scopedItems,
   embedded = false,
+  detailOnly = false,
 }: {
   envelope: ViewModelEnvelope<TasksViewModel>;
   refreshing: boolean;
@@ -482,6 +483,7 @@ export function ResultsView({
   fixedFilter?: TaskFilter;
   scopedItems?: readonly TaskViewModelItem[];
   embedded?: boolean;
+  detailOnly?: boolean;
 }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<TaskFilter>("all");
@@ -543,31 +545,33 @@ export function ResultsView({
 
   return (
     <article
-      className={`ol-workbench-result-page${embedded ? " ol-workbench-result-page--embedded" : ""}`}
+      className={`ol-workbench-result-page${embedded ? " ol-workbench-result-page--embedded" : ""}${detailOnly ? " ol-workbench-result-page--detail-only" : ""}`}
       data-testid="tasks-product-view"
     >
-      <header className="ol-workbench-result-page-heading ol-workbench-result-page-heading--with-actions">
-        <div>
-          <span>{embedded ? "当前对话" : "哪些工作需要我或可以继续"}</span>
-          <h2>{embedded ? "进度与结果" : taskPrimaryQuestion(envelope)}</h2>
-          <p>
-            {embedded
-              ? "计划、重要进度、待决定事项和最终结果会在这里持续更新。"
-              : "这里显示 OpenLife 已确认的进度、阻塞、结果和可用动作。"}
-          </p>
-        </div>
-        {!fixedFilter && (
-          <FoundationActionButton
-            label="重新读取"
-            variant="quiet"
-            icon={<RefreshCw size={18} strokeWidth={1.75} aria-hidden="true" />}
-            loading={refreshing}
-            loadingLabel="正在读取"
-            {...actionAttributes(refreshAction)}
-            onClick={onRefresh}
-          />
-        )}
-      </header>
+      {!detailOnly && (
+        <header className="ol-workbench-result-page-heading ol-workbench-result-page-heading--with-actions">
+          <div>
+            <span>{embedded ? "当前对话" : "哪些工作需要我或可以继续"}</span>
+            <h2>{embedded ? "进度与结果" : taskPrimaryQuestion(envelope)}</h2>
+            <p>
+              {embedded
+                ? "计划、重要进度、待决定事项和最终结果会在这里持续更新。"
+                : "这里显示 OpenLife 已确认的进度、阻塞、结果和可用动作。"}
+            </p>
+          </div>
+          {!fixedFilter && (
+            <FoundationActionButton
+              label="重新读取"
+              variant="quiet"
+              icon={<RefreshCw size={18} strokeWidth={1.75} aria-hidden="true" />}
+              loading={refreshing}
+              loadingLabel="正在读取"
+              {...actionAttributes(refreshAction)}
+              onClick={onRefresh}
+            />
+          )}
+        </header>
+      )}
 
       {envelope.status === "loading" && (
         <FoundationNotice title="正在读取任务列表" tone="neutral" live>
@@ -587,7 +591,7 @@ export function ResultsView({
         </FoundationNotice>
       )}
 
-      {listAvailable && (
+      {listAvailable && !detailOnly && (
         <section className="ol-workbench-result-section" aria-labelledby="tasks-list-title">
           <div className="ol-workbench-result-section-heading ol-workbench-result-task-tools-heading">
             <div>

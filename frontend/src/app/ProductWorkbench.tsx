@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Activity, Bot, Monitor, Network, UserRound } from "lucide-react";
+import { Activity, Bot, Network } from "lucide-react";
 import type {
   EvidenceRef,
   ProviderPrivacyBoundarySummary,
@@ -16,9 +16,8 @@ import {
   type WorkbenchNavigationItem,
 } from "@/ui/shell";
 import { ResultsView } from "@/features/work/ResultsView";
-import { GlobalActivityView } from "@/features/work/GlobalActivityView";
 import { buildReadModelErrorEnvelope } from "@/shared/readModelEnvelope";
-import { taskLifecyclePresentation } from "@/features/work/taskPresentation";
+import { taskLifecyclePresentation, taskNeedsAttention } from "@/features/work/taskPresentation";
 import { useConversationController } from "@/features/conversation/useConversationController";
 import type { ConversationDataSource } from "@/features/conversation/conversationDataSource";
 import {
@@ -48,6 +47,8 @@ import type { SettingsSurfaceId } from "@/features/settings/settingsPresentation
 import { settingsContext, settingsInspector } from "@/features/settings/settingsShellModel";
 import { SettingsView } from "@/features/settings/SettingsView";
 import { useSettingsController } from "@/features/settings/useSettingsController";
+import { ProductSidebar, type ProductSidebarView } from "@/app/ProductSidebar";
+import { HistoryLifecycleView } from "@/app/HistoryLifecycleView";
 
 export type PublicProductSurfaceId = "workspace" | "life-model";
 export type ProductWorkbenchRouteState = {
@@ -58,16 +59,11 @@ export type ProductWorkbenchRouteState = {
 function routeEntryAnnouncement(surface: PublicProductSurfaceId): string {
   switch (surface) {
     case "workspace":
-      return "已进入 Workbench；对话、工作、结果与需处理事项共享同一上下文。";
+      return "已进入对话；当前工作与结果会在需要时显示，其他记录保存在历史中。";
     case "life-model":
       return "已进入个人智能；LifeModel 与 Agent Memory 分别显示各自系统已经证明的结果。";
   }
 }
-
-const productNavigation: readonly WorkbenchNavigationItem[] = [
-  { id: "workspace", label: "Workbench", meta: "对话、工作与结果", icon: Monitor },
-  { id: "life-model", label: "个人智能", meta: "关于我与记忆", icon: UserRound },
-];
 
 const settingsNavigation: readonly WorkbenchNavigationItem[] = [
   {
@@ -265,7 +261,7 @@ function unavailableInspector(title: string): WorkbenchInspectorModel {
     title,
     conclusion: "当前页面没有可用的系统契约或数据源。",
     risk: "使用示例或旧页面记录填充这里会制造未经系统确认的产品结论。",
-    nextAction: "返回 Workbench；在受治理的数据源可用前保持关闭状态。",
+    nextAction: "返回对话；在受治理的数据源可用前保持关闭状态。",
     evidence: [],
     evidenceFeedback: "当前没有可确认的证据；页面不会补造来源。",
     technicalDetails: [{ label: "availability", value: "not_migrated" }],
@@ -291,6 +287,7 @@ export function ProductWorkbench({
 }) {
   const [mode, setMode] = useState<"product" | "settings">(initialMode);
   const [activeSurface, setActiveSurface] = useState<PublicProductSurfaceId>(initialSurface);
+  const [workspaceView, setWorkspaceView] = useState<"conversation" | "history">("conversation");
   const [settingsReturnSurface, setSettingsReturnSurface] = useState<PublicProductSurfaceId>(
     initialSurface === "life-model" ? "life-model" : "workspace"
   );
@@ -466,6 +463,7 @@ export function ProductWorkbench({
     setReviewOrigin(null);
     setMode("product");
     setActiveSurface(next);
+    if (next === "workspace") setWorkspaceView("conversation");
     onRouteChange?.({ mode: "product", surface: next });
     setInspectorOpen(false);
     setSelectedEvidence("");
@@ -580,6 +578,12 @@ export function ProductWorkbench({
     selectedTask,
     conversationDataSource,
   ]);
+  const selectedConversation = [...conversation.sessions, ...conversation.archivedSessions].find(
+    session => session.session_id === conversation.selectedSessionId
+  );
+  const selectedProject = conversation.projects.find(
+    project => project.id === conversation.selectedProjectId
+  );
 
   const context: WorkbenchContextSummary = useMemo(() => {
     if (mode === "settings") {
@@ -593,7 +597,15 @@ export function ProductWorkbench({
       };
     }
     if (activeSurface === "workspace" && workbenchDataSource) {
-      return workspaceContext(workbench.snapshot);
+      const projected = workspaceContext(workbench.snapshot);
+      if (workspaceView === "history") {
+        return { ...projected, eyebrow: "历史", title: "工作历史" };
+      }
+      return {
+        ...projected,
+        eyebrow: selectedProject?.name ?? "对话",
+        title: selectedConversation?.title ?? "新对话",
+      };
     }
     if (activeSurface === "life-model" && personalIntelligenceDataSource) {
       return personalIntelligenceContext(
@@ -619,6 +631,9 @@ export function ProductWorkbench({
     mode,
     settingsController,
     settingsDataSource,
+    selectedConversation?.title,
+    selectedProject?.name,
+    workspaceView,
   ]);
 
   const inspector = useMemo(() => {
@@ -717,6 +732,72 @@ export function ProductWorkbench({
     );
   }
 
+  function renderResults(items: TaskViewModelItem[], embedded: boolean, detailOnly = false) {
+    return (
+      <ResultsView
+        envelope={effectiveTasksSnapshot.envelope}
+        scopedItems={items}
+        embedded={embedded}
+        detailOnly={detailOnly}
+        refreshing={workbench.refreshing}
+        selectedTaskId={effectiveSelectedTask?.canonicalTaskId ?? null}
+        onRefresh={() => void workbench.load(true)}
+        onSelectTask={task => {
+          setSelectedTask(task);
+          setExplicitReviewItemId(null);
+          setWorkspaceInspectorContext("task");
+          setSelectedEvidence("");
+          setAnnouncement(`已选择 Work“${task.title}”。`);
+        }}
+        onOpenInspector={() => {
+          setWorkspaceInspectorContext("task");
+          openInspector();
+        }}
+        onAnnounce={setAnnouncement}
+        taskControlState={workbench.taskControlState}
+        onRequestTaskControl={(control, expectedTaskId) => {
+          const target = items.find(task => task.canonicalTaskId === expectedTaskId);
+          if (target) setSelectedTask(target);
+          workbench.requestTaskControl(control, expectedTaskId);
+        }}
+        onConfirmTaskControl={workbench.confirmTaskControl}
+        onCancelTaskControlConfirmation={workbench.cancelTaskControlConfirmation}
+        onRequestArtifactUndo={async artifactId => {
+          await workbenchDataSource!.requestArtifactUndo(artifactId);
+          await workbench.load(true);
+          setAnnouncement("撤销请求已进入当前 Work 的决定节点；批准前不会移动文件。");
+        }}
+        onRequestTaskArtifactUndo={async taskId => {
+          const receipt = await workbenchDataSource!.requestTaskArtifactUndo(taskId);
+          const failureReason = receipt.failures[0]?.reasonCode;
+          const outcomeAnnouncement =
+            receipt.failures.length === 0
+              ? "全部可撤销修改已进入当前 Work 的逐文件决定节点；批准前不会改动文件。"
+              : failureReason === "artifact_undo_source_changed"
+                ? `部分撤销决定已创建；${receipt.failures.length} 项文件已被修改，OpenLife 未覆盖这些新内容。`
+                : failureReason === "artifact_undo_target_conflict"
+                  ? `部分撤销决定已创建；${receipt.failures.length} 项原位置已有文件，OpenLife 未覆盖现有内容。`
+                  : `部分撤销决定已创建；${receipt.failures.length} 项缺少可核验的恢复依据，保持原状态。`;
+          await workbench.load(true);
+          setAnnouncement(outcomeAnnouncement);
+        }}
+        onReviseArtifact={async (taskId, artifactId, baseVersion, instruction) => {
+          await workbenchDataSource!.reviseArtifact(taskId, artifactId, baseVersion, instruction);
+          setAnnouncement("聚焦修订已创建新 Run；当前版本会保留到新版本完成验证与必要审核。");
+          await workbench.load(true);
+        }}
+        onOpenArtifact={async (artifactId, version) => {
+          await workbenchDataSource!.openArtifactResult(artifactId, version);
+          setAnnouncement("已核验并打开文件。");
+        }}
+        onExportArtifact={async (artifactId, version) => {
+          const savedPath = await workbenchDataSource!.exportArtifactResult(artifactId, version);
+          setAnnouncement(savedPath ? `已另存并核验：${savedPath}` : "已取消另存。");
+        }}
+      />
+    );
+  }
+
   let content;
   if (mode === "settings") {
     if (settingsDataSource) {
@@ -808,7 +889,7 @@ export function ProductWorkbench({
                 ? "返回设置"
                 : reviewOrigin?.surface === "life-model"
                   ? "返回个人智能"
-                  : "返回 Workbench"
+                  : "返回对话"
             }
             onOpenInspector={() => {
               setWorkspaceInspectorContext("review");
@@ -817,125 +898,50 @@ export function ProductWorkbench({
           />
         </section>
       ) : undefined;
-    content = (
-      <div
-        className={`ol-conversation-workbench-layout${
-          tasks.length > 0 ? " ol-conversation-workbench-layout--with-results" : ""
-        }`}
-        data-testid="conversation-workbench"
-      >
-        <GlobalActivityView
-          items={workbench.snapshot?.tasksEnvelope.data?.items ?? []}
-          selectedTaskId={effectiveSelectedTask?.canonicalTaskId ?? null}
-          onOpenTask={task => {
-            setSelectedTask(task);
-            setExplicitReviewItemId(null);
-            setWorkspaceInspectorContext("task");
-            setSelectedEvidence("");
-            if (
-              conversationDataSource &&
-              task.conversationId &&
-              task.conversationId !== conversation.selectedSessionId
-            ) {
-              conversation.selectSession(task.conversationId);
-            }
-            setAnnouncement(`已打开全局活动“${task.title}”；正在核对它的对话与运行状态。`);
-          }}
-        />
-        <WorkspaceView
-          snapshot={workbench.snapshot}
-          refreshing={workbench.refreshing}
-          onRefresh={() => void workbench.load(true)}
-          onOpenInspector={() => {
-            setWorkspaceInspectorContext("workspace");
-            openInspector();
-          }}
-          onOpenLifeModel={itemRef => navigateProduct("life-model", itemRef)}
-          conversation={conversationDataSource ? conversation : undefined}
-          inlineCheckpoint={inlineCheckpoint}
-          recoveryControl={recoveryControl}
-          onRequestRecovery={(control, expectedTaskId) => {
-            if (turnTask) setSelectedTask(turnTask);
-            workbench.requestTaskControl(control, expectedTaskId);
-          }}
-          onOpenProviderSettings={() => {
-            openSettings();
-            navigateSettings("model-provider");
-          }}
-        />
-        {tasks.length > 0 && (
-          <ResultsView
-            envelope={effectiveTasksSnapshot.envelope}
-            scopedItems={tasks}
-            embedded
+    const allTasks = ["ready", "stale"].includes(effectiveTasksSnapshot.envelope.status)
+      ? (effectiveTasksSnapshot.envelope.data?.items ?? [])
+      : [];
+    content =
+      workspaceView === "history" ? (
+        <div className="ol-product-history">
+          {renderResults(allTasks, false)}
+          {conversationDataSource && (
+            <HistoryLifecycleView
+              controller={conversation}
+              onOpenConversation={conversationId => {
+                conversation.selectSession(conversationId);
+                setWorkspaceView("conversation");
+                setInspectorOpen(false);
+                setAnnouncement("已打开归档对话；恢复前保持只读。 ");
+              }}
+            />
+          )}
+        </div>
+      ) : (
+        <div className="ol-conversation-workbench-layout" data-testid="conversation-workbench">
+          <WorkspaceView
+            snapshot={workbench.snapshot}
             refreshing={workbench.refreshing}
-            selectedTaskId={effectiveSelectedTask?.canonicalTaskId ?? null}
             onRefresh={() => void workbench.load(true)}
-            onSelectTask={task => {
-              setSelectedTask(task);
-              setExplicitReviewItemId(null);
-              setWorkspaceInspectorContext("task");
-              setSelectedEvidence("");
-              setAnnouncement(`已选择 Work“${task.title}”。`);
-            }}
             onOpenInspector={() => {
-              setWorkspaceInspectorContext("task");
+              setWorkspaceInspectorContext(effectiveSelectedTask ? "task" : "workspace");
               openInspector();
             }}
-            onAnnounce={setAnnouncement}
-            taskControlState={workbench.taskControlState}
-            onRequestTaskControl={(control, expectedTaskId) => {
-              // A task can be the default Results selection without having
-              // been explicitly clicked. Pin the exact command target before
-              // a retry/continue refresh so another older attention item
-              // cannot silently replace it in the detail pane.
-              const target = tasks.find(task => task.canonicalTaskId === expectedTaskId);
-              if (target) setSelectedTask(target);
+            onOpenLifeModel={itemRef => navigateProduct("life-model", itemRef)}
+            conversation={conversationDataSource ? conversation : undefined}
+            inlineCheckpoint={inlineCheckpoint}
+            recoveryControl={recoveryControl}
+            onRequestRecovery={(control, expectedTaskId) => {
+              if (turnTask) setSelectedTask(turnTask);
               workbench.requestTaskControl(control, expectedTaskId);
             }}
-            onConfirmTaskControl={workbench.confirmTaskControl}
-            onCancelTaskControlConfirmation={workbench.cancelTaskControlConfirmation}
-            onRequestArtifactUndo={async artifactId => {
-              await workbenchDataSource.requestArtifactUndo(artifactId);
-              await workbench.load(true);
-              setAnnouncement("撤销请求已进入当前 Work 的决定节点；批准前不会移动文件。");
-            }}
-            onRequestTaskArtifactUndo={async taskId => {
-              const receipt = await workbenchDataSource.requestTaskArtifactUndo(taskId);
-              const failureReason = receipt.failures[0]?.reasonCode;
-              const outcomeAnnouncement =
-                receipt.failures.length === 0
-                  ? "全部可撤销修改已进入当前 Work 的逐文件决定节点；批准前不会改动文件。"
-                  : failureReason === "artifact_undo_source_changed"
-                    ? `部分撤销决定已创建；${receipt.failures.length} 项文件已被修改，OpenLife 未覆盖这些新内容。`
-                    : failureReason === "artifact_undo_target_conflict"
-                      ? `部分撤销决定已创建；${receipt.failures.length} 项原位置已有文件，OpenLife 未覆盖现有内容。`
-                      : `部分撤销决定已创建；${receipt.failures.length} 项缺少可核验的恢复依据，保持原状态。`;
-              await workbench.load(true);
-              setAnnouncement(outcomeAnnouncement);
-            }}
-            onReviseArtifact={async (taskId, artifactId, baseVersion, instruction) => {
-              await workbenchDataSource.reviseArtifact(
-                taskId,
-                artifactId,
-                baseVersion,
-                instruction
-              );
-              setAnnouncement("聚焦修订已创建新 Run；当前版本会保留到新版本完成验证与必要审核。");
-              await workbench.load(true);
-            }}
-            onOpenArtifact={async (artifactId, version) => {
-              await workbenchDataSource.openArtifactResult(artifactId, version);
-              setAnnouncement("已核验并打开文件。");
-            }}
-            onExportArtifact={async (artifactId, version) => {
-              const savedPath = await workbenchDataSource.exportArtifactResult(artifactId, version);
-              setAnnouncement(savedPath ? `已另存并核验：${savedPath}` : "已取消另存。");
+            onOpenProviderSettings={() => {
+              openSettings();
+              navigateSettings("model-provider");
             }}
           />
-        )}
-      </div>
-    );
+        </div>
+      );
   } else if (activeSurface === "life-model" && personalIntelligenceDataSource) {
     content = (
       <PersonalIntelligenceView
@@ -978,11 +984,78 @@ export function ProductWorkbench({
     content = null;
   }
 
+  const sidebarTasks = ["ready", "stale"].includes(
+    workbench.snapshot?.tasksEnvelope.status ?? "loading"
+  )
+    ? (workbench.snapshot?.tasksEnvelope.data?.items ?? [])
+    : [];
+  const productSidebarView: ProductSidebarView =
+    activeSurface === "life-model" ? "personal-intelligence" : workspaceView;
+  const productSidebar = (
+    <ProductSidebar
+      controller={conversation}
+      activeView={productSidebarView}
+      attentionCount={sidebarTasks.filter(taskNeedsAttention).length}
+      onNewConversation={() => {
+        setMode("product");
+        setActiveSurface("workspace");
+        setWorkspaceView("conversation");
+        setInspectorOpen(false);
+        setSelectedTask(null);
+        conversation.startNewConversation();
+        onRouteChange?.({ mode: "product", surface: "workspace" });
+        setAnnouncement("已开始新对话；发送前不会创建任务或写入长期状态。");
+      }}
+      onOpenFolder={() => {
+        setMode("product");
+        setActiveSurface("workspace");
+        setWorkspaceView("conversation");
+        setInspectorOpen(false);
+        onRouteChange?.({ mode: "product", surface: "workspace" });
+        void conversation.createProject("");
+      }}
+      onSelectProject={projectId => {
+        setMode("product");
+        setActiveSurface("workspace");
+        setWorkspaceView("conversation");
+        setInspectorOpen(false);
+        onRouteChange?.({ mode: "product", surface: "workspace" });
+        void conversation.assignProject(projectId);
+      }}
+      onSelectConversation={conversationId => {
+        setMode("product");
+        setActiveSurface("workspace");
+        setWorkspaceView("conversation");
+        setInspectorOpen(false);
+        onRouteChange?.({ mode: "product", surface: "workspace" });
+        conversation.selectSession(conversationId);
+      }}
+      onOpenHistory={() => {
+        setMode("product");
+        setActiveSurface("workspace");
+        setWorkspaceView("history");
+        setInspectorOpen(false);
+        onRouteChange?.({ mode: "product", surface: "workspace" });
+        void workbench.load(false, "");
+        setAnnouncement("已打开工作历史；这里只显示系统保存的任务与结果。");
+      }}
+      onOpenPersonalIntelligence={() => navigateProduct("life-model")}
+    />
+  );
+  const inspectorContent =
+    mode === "product" &&
+    activeSurface === "workspace" &&
+    workspaceInspectorContext === "task" &&
+    effectiveSelectedTask
+      ? renderResults([effectiveSelectedTask], true, true)
+      : undefined;
+
   return (
     <OpenLifeWorkbenchShell
       mode={mode}
-      activeNavigationId={activeSurface}
-      navigationItems={productNavigation}
+      activeNavigationId={productSidebarView}
+      navigationItems={[]}
+      productSidebar={productSidebar}
       onNavigate={navigateProduct}
       activeSettingsId={activeSettingsId}
       settingsItems={settingsNavigation}
@@ -996,6 +1069,7 @@ export function ProductWorkbench({
       focusKey={focusKey}
       inspectorOpen={inspectorOpen}
       inspector={inspector}
+      inspectorContent={inspectorContent}
       onOpenInspector={openInspector}
       onCloseInspector={() => {
         setInspectorOpen(false);
