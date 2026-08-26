@@ -22,7 +22,7 @@ pub(crate) async fn verified_artifact_path(
         .canonical_task_runtime_store
         .as_ref()
         .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
-    let (artifact, artifact_version) = {
+    let (artifact, artifact_version, source_run_id) = {
         let store = store.lock().await;
         let artifact = store
             .load_artifact(artifact_id)
@@ -32,7 +32,17 @@ pub(crate) async fn verified_artifact_path(
             .load_artifact_version(artifact_id, version)
             .map_err(|error| error.to_string())?
             .ok_or_else(|| "artifact_version_not_found".to_string())?;
-        (artifact, artifact_version)
+        let task = store
+            .load_task_snapshot(&artifact.task_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "artifact_task_not_found".to_string())?;
+        let source_run_id = task
+            .items
+            .iter()
+            .find(|item| item.id == artifact.source_item_id)
+            .map(|item| item.run_id.clone())
+            .ok_or_else(|| "artifact_source_run_missing".to_string())?;
+        (artifact, artifact_version, source_run_id)
     };
     if artifact.current_version != version
         || artifact.status != CanonicalArtifactStatus::Materialized
@@ -48,6 +58,28 @@ pub(crate) async fn verified_artifact_path(
         .filter(|reference| artifact_version.materialized_reference.as_deref() == Some(*reference))
         .ok_or_else(|| "artifact_materialized_reference_missing".to_string())?;
     let path = PathBuf::from(reference);
+    let safe_paths = crate::canonical_work_runtime::artifact_materialized_safe_paths_for_task_run(
+        state,
+        &artifact.task_id,
+        &source_run_id,
+    )
+    .await?;
+    let metadata =
+        std::fs::symlink_metadata(&path).map_err(|_| "artifact_file_unavailable".to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("artifact_file_type_invalid".into());
+    }
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|_| "artifact_file_unavailable".to_string())?;
+    let within_current_scope = safe_paths.iter().any(|safe| {
+        PathBuf::from(safe)
+            .canonicalize()
+            .is_ok_and(|canonical_safe| canonical_path.starts_with(canonical_safe))
+    });
+    if !within_current_scope {
+        return Err("artifact_path_outside_current_scope".into());
+    }
     let bytes = std::fs::read(&path).map_err(|_| "artifact_file_unavailable".to_string())?;
     if artifact_content_digest(&bytes) != artifact.content_digest {
         return Err("artifact_file_changed".into());
@@ -148,8 +180,10 @@ mod tests {
         let digest = artifact_content_digest(bytes);
         let instruction_digest = artifact_content_digest(b"instruction");
         let request_digest = artifact_content_digest(b"request");
-        let target =
-            std::env::temp_dir().join(format!("openlife-open-{}.md", uuid::Uuid::new_v4()));
+        let managed_root =
+            crate::artifact_materializer::managed_artifact_root(None, &conversation_id).unwrap();
+        std::fs::create_dir_all(&managed_root).unwrap();
+        let target = managed_root.join(format!("openlife-open-{}.md", uuid::Uuid::new_v4()));
         std::fs::write(&target, bytes).unwrap();
         let prepared = {
             let store = store.lock().await;
@@ -225,6 +259,7 @@ mod tests {
                 .unwrap_err(),
             "artifact_file_changed"
         );
+        std::fs::remove_dir_all(managed_root).unwrap();
     }
 
     #[test]

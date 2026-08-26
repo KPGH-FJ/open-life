@@ -822,6 +822,56 @@ struct ArtifactEffectRecoveryRecord {
     state: CanonicalArtifactEffectState,
 }
 
+async fn artifact_effect_safe_paths(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<Vec<String>, String> {
+    let Some(artifact_id) = proposal
+        .after
+        .get("undoOfArtifactId")
+        .and_then(Value::as_str)
+    else {
+        return crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, proposal)
+            .await;
+    };
+    let canonical_store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let (task_id, source_run_id) = {
+        let store = canonical_store.lock().await;
+        let artifact = store
+            .load_artifact(artifact_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "canonical_artifact_undo_owner_missing".to_string())?;
+        let undo = store
+            .load_artifact_undo(artifact_id)
+            .map_err(|error| error.to_string())?
+            .filter(|undo| undo.proposal_id == proposal.id)
+            .ok_or_else(|| "canonical_artifact_undo_checkpoint_missing".to_string())?;
+        if undo.artifact_id != artifact.id {
+            return Err("canonical_artifact_undo_identity_mismatch".into());
+        }
+        let task = store
+            .load_task_snapshot(&artifact.task_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "canonical_artifact_task_missing".to_string())?;
+        let source_run_id = task
+            .items
+            .iter()
+            .find(|item| item.id == artifact.source_item_id)
+            .map(|item| item.run_id.clone())
+            .ok_or_else(|| "canonical_artifact_source_item_missing".to_string())?;
+        (artifact.task_id, source_run_id)
+    };
+    crate::canonical_work_runtime::artifact_materialized_safe_paths_for_task_run(
+        state,
+        &task_id,
+        &source_run_id,
+    )
+    .await
+}
+
 async fn reconcile_artifact_effects_with_state(
     state: &Arc<AppState>,
     limit: i64,
@@ -877,23 +927,20 @@ async fn reconcile_artifact_effects_with_state(
             reconciled += 1;
             continue;
         }
-        let safe_paths =
-            match crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, &proposal)
-                .await
-            {
-                Ok(safe_paths) => safe_paths,
-                Err(_) => {
-                    persist_artifact_unknown(
-                        state,
-                        &record.proposal_id,
-                        &record.dispatch_claim_id,
-                        "artifact_recovery_scope_binding_failed",
-                    )
-                    .await?;
-                    reconciled += 1;
-                    continue;
-                }
-            };
+        let safe_paths = match artifact_effect_safe_paths(state, &proposal).await {
+            Ok(safe_paths) => safe_paths,
+            Err(_) => {
+                persist_artifact_unknown(
+                    state,
+                    &record.proposal_id,
+                    &record.dispatch_claim_id,
+                    "artifact_recovery_scope_binding_failed",
+                )
+                .await?;
+                reconciled += 1;
+                continue;
+            }
+        };
         let operation = proposal
             .after
             .get("operation")
@@ -1403,9 +1450,7 @@ async fn confirmed_artifact_receipt_from_store(
             .get("target_path")
             .and_then(Value::as_str)
             .ok_or_else(|| "confirmed artifact move lost target_path".to_string())?;
-        let safe_paths =
-            crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, proposal)
-                .await?;
+        let safe_paths = artifact_effect_safe_paths(state, proposal).await?;
         let (move_reference_digest, observation) =
             inspect_artifact_move(source, target, &content_digest, &safe_paths)?;
         let expected_effect_digest_matches = canonical_move_effect_target_digest_matches(
@@ -1442,8 +1487,7 @@ async fn confirmed_artifact_receipt_from_store(
         };
     let path = resolved.path.as_str();
     let content = resolved.content.as_slice();
-    let safe_paths =
-        crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, proposal).await?;
+    let safe_paths = artifact_effect_safe_paths(state, proposal).await?;
     let prepared = prepare_artifact_materialization_with_precondition_for_artifact_bytes(
         &resolved.artifact_id,
         &proposal.id,
@@ -2106,11 +2150,7 @@ async fn apply_external_write_artifact(
         let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
         return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
     }
-    let safe_paths = match crate::canonical_work_runtime::artifact_safe_paths_for_proposal(
-        state, proposal,
-    )
-    .await
-    {
+    let safe_paths = match artifact_effect_safe_paths(state, proposal).await {
         Ok(safe_paths) => safe_paths,
         Err(error) => {
             let code = "artifact_scope_binding_failed";
@@ -2297,11 +2337,7 @@ async fn apply_external_move_artifact(
         let _ = persist_artifact_failed_before_effect(state, &proposal.id, claim_id, code).await;
         return ArtifactApplyOutcome::FailedBeforeEffect(code.into());
     }
-    let safe_paths = match crate::canonical_work_runtime::artifact_safe_paths_for_proposal(
-        state, proposal,
-    )
-    .await
-    {
+    let safe_paths = match artifact_effect_safe_paths(state, proposal).await {
         Ok(safe_paths) => safe_paths,
         Err(error) => {
             let code = "artifact_move_scope_binding_failed";
@@ -4207,11 +4243,13 @@ pub(crate) async fn request_artifact_undo_with_state(
                 .and_then(Value::as_str)
                 .unwrap_or("create")
                 .to_string();
-            let safe_paths = crate::canonical_work_runtime::artifact_safe_paths_for_proposal(
-                state,
-                &original_proposal,
-            )
-            .await?;
+            let safe_paths =
+                crate::canonical_work_runtime::artifact_materialized_safe_paths_for_task_run(
+                    state,
+                    &artifact.task_id,
+                    &source_item.run_id,
+                )
+                .await?;
             (
                 Some(original_proposal),
                 operation,
@@ -4233,12 +4271,13 @@ pub(crate) async fn request_artifact_undo_with_state(
             {
                 return Err("canonical_direct_artifact_undo_origin_invalid".into());
             }
-            let safe_paths = crate::canonical_work_runtime::artifact_safe_paths_for_task_run(
-                state,
-                &artifact.task_id,
-                &source_item.run_id,
-            )
-            .await?;
+            let safe_paths =
+                crate::canonical_work_runtime::artifact_materialized_safe_paths_for_task_run(
+                    state,
+                    &artifact.task_id,
+                    &source_item.run_id,
+                )
+                .await?;
             (None, "create".to_string(), true, safe_paths)
         };
     let prepared_undo = if original_operation == "move" {

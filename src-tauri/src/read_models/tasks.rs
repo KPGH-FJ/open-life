@@ -1,4 +1,4 @@
-use crate::{artifact_materializer::managed_artifact_root, state::AppState};
+use crate::state::AppState;
 use openlife_core::agent::{
     build_tasks_view_model, build_workspace_view_model, BackendEntityKind, BackendEntityRef,
     EvidenceRef, EvidenceSensitivity, EvidenceSource, ProviderPrivacyBoundarySummary,
@@ -18,7 +18,7 @@ use openlife_core::task_runtime::{
     CanonicalWorkPlanRecord,
 };
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use tauri::State;
 
@@ -1379,53 +1379,12 @@ async fn canonical_artifact_safe_paths(
         .find(|item| item.id == artifact.artifact.source_item_id)
         .map(|item| item.run_id.as_str())
         .ok_or_else(|| "artifact_source_run_missing".to_string())?;
-    let run = task
-        .runs
-        .iter()
-        .find(|run| run.run_id == source_run_id)
-        .ok_or_else(|| "artifact_source_run_missing".to_string())?;
-    let root = match run.project_id.as_deref() {
-        Some(project_id) => {
-            let conversation_store = state
-                .conversation_store
-                .as_ref()
-                .ok_or_else(|| "conversation_store_unavailable".to_string())?;
-            let project = conversation_store
-                .lock()
-                .await
-                .get_project(project_id)
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "artifact_project_missing".to_string())?;
-            let scope_digest =
-                openlife_core::conversation::ConversationStore::project_scope_digest(&project);
-            if run.project_revision != Some(project.revision)
-                || run.scope_digest.as_deref() != Some(scope_digest.as_str())
-            {
-                return Err("artifact_project_scope_stale".into());
-            }
-            match project.workspace_root {
-                Some(root) => PathBuf::from(root),
-                None => task_managed_artifact_root(state, &task.task.conversation_id).await?,
-            }
-        }
-        None => task_managed_artifact_root(state, &task.task.conversation_id).await?,
-    };
-    let canonical = root
-        .canonicalize()
-        .map_err(|_| "artifact_authorized_root_unavailable".to_string())?;
-    Ok(vec![canonical.to_string_lossy().into_owned()])
-}
-
-async fn task_managed_artifact_root(
-    state: &Arc<AppState>,
-    conversation_id: &str,
-) -> Result<PathBuf, String> {
-    let store = state
-        .canonical_task_runtime_store
-        .as_ref()
-        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
-    let database_path = store.lock().await.db_path().map(Path::to_path_buf);
-    managed_artifact_root(database_path.as_deref(), conversation_id)
+    crate::canonical_work_runtime::artifact_materialized_safe_paths_for_task_run(
+        state,
+        &task.task.id,
+        source_run_id,
+    )
+    .await
 }
 
 fn bounded_artifact_preview(content: &str) -> TaskArtifactPreviewViewModel {

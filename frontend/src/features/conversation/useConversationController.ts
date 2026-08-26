@@ -249,7 +249,8 @@ export function useConversationController(
   announce: Announce,
   onAfterTurn: (conversationId: string) => Promise<void>,
   preferredSessionId?: string | null,
-  stopRunningWork?: (taskId: string, runId: string) => Promise<void>
+  stopRunningWork?: (taskId: string, runId: string) => Promise<void>,
+  onAfterProjectScopeChange?: (conversationId: string | null) => Promise<void>
 ): ConversationController {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [archivedSessions, setArchivedSessions] = useState<ChatSession[]>([]);
@@ -1382,6 +1383,7 @@ export function useConversationController(
         }
         if (!result.project?.workspaceRoot) throw new Error("project_workspace_root_missing");
         if (!(await reload())) throw new Error("project_refresh_failed_after_directory_binding");
+        await onAfterProjectScopeChange?.(selectedSessionId);
         if (preserveNewConversationDraft) {
           explicitConversationChoiceRef.current = true;
           requestRef.current += 1;
@@ -1428,6 +1430,7 @@ export function useConversationController(
       provider.selectedProfileId,
       provider.selectedReasoningEffort,
       reload,
+      onAfterProjectScopeChange,
       selectedSessionId,
     ]
   );
@@ -1448,6 +1451,7 @@ export function useConversationController(
         }
         if (!result.project) throw new Error("project_read_root_missing");
         if (!(await reload())) throw new Error("project_refresh_failed_after_read_root_add");
+        await onAfterProjectScopeChange?.(selectedSessionId);
         setSessionMutation({ phase: "idle" });
         announce("读取文件夹已加入 Project 范围；它不会获得文件写入权限。");
         return true;
@@ -1457,7 +1461,7 @@ export function useConversationController(
         return false;
       }
     },
-    [announce, busy, dataSource, reload]
+    [announce, busy, dataSource, onAfterProjectScopeChange, reload, selectedSessionId]
   );
 
   const removeProjectReadRoot = useCallback(
@@ -1470,6 +1474,7 @@ export function useConversationController(
       try {
         await dataSource.removeProjectReadRoot(projectId, rootId, expectedRevision);
         if (!(await reload())) throw new Error("project_refresh_failed_after_read_root_remove");
+        await onAfterProjectScopeChange?.(selectedSessionId);
         setSessionMutation({ phase: "idle" });
         announce("读取范围已移除；本地文件夹和文件没有被删除。");
         return true;
@@ -1479,7 +1484,7 @@ export function useConversationController(
         return false;
       }
     },
-    [announce, busy, dataSource, reload]
+    [announce, busy, dataSource, onAfterProjectScopeChange, reload, selectedSessionId]
   );
 
   const mutateProject = useCallback(

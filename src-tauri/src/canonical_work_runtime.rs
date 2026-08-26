@@ -4171,7 +4171,7 @@ pub(crate) async fn artifact_safe_paths_for_proposal(
     .await
 }
 
-pub(crate) async fn artifact_safe_paths_for_task_run(
+pub(crate) async fn artifact_materialized_safe_paths_for_task_run(
     state: &Arc<AppState>,
     task_id: &str,
     run_id: &str,
@@ -4188,7 +4188,57 @@ pub(crate) async fn artifact_safe_paths_for_task_run(
             .ok_or_else(|| "canonical_artifact_task_missing".to_string())?;
         (snapshot, store.db_path().map(Path::to_path_buf))
     };
-    artifact_safe_paths_for_snapshot(state, &snapshot, database_path.as_deref(), run_id).await
+    artifact_materialized_safe_paths_for_snapshot(
+        state,
+        &snapshot,
+        database_path.as_deref(),
+        run_id,
+    )
+    .await
+}
+
+async fn artifact_materialized_safe_paths_for_snapshot(
+    state: &Arc<AppState>,
+    snapshot: &openlife_core::task_runtime::CanonicalTaskSnapshot,
+    database_path: Option<&Path>,
+    run_id: &str,
+) -> Result<Vec<String>, String> {
+    let run = snapshot
+        .runs
+        .iter()
+        .find(|run| run.run_id == run_id)
+        .ok_or_else(|| "canonical_artifact_source_run_missing".to_string())?;
+    let managed_root = managed_artifact_root(database_path, &snapshot.task.conversation_id)?;
+    let mut roots = Vec::new();
+    if let Ok(canonical) = managed_root.canonicalize() {
+        roots.push(canonical);
+    }
+    if let Some(project_id) = run.project_id.as_deref() {
+        let conversation_store = state
+            .conversation_store
+            .as_ref()
+            .ok_or_else(|| "conversation_store_unavailable".to_string())?;
+        let project = conversation_store
+            .lock()
+            .await
+            .get_project(project_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "canonical_artifact_project_missing".to_string())?;
+        if let Some(root) = project.workspace_root {
+            if let Ok(canonical) = PathBuf::from(root).canonicalize() {
+                roots.push(canonical);
+            }
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    if roots.is_empty() {
+        return Err("canonical_artifact_authorized_root_unavailable".into());
+    }
+    Ok(roots
+        .into_iter()
+        .map(|root| root.to_string_lossy().into_owned())
+        .collect())
 }
 
 async fn artifact_safe_paths_for_snapshot(
@@ -13956,6 +14006,95 @@ mod tests {
         }));
 
         let artifact_id = snapshot.artifacts[0].artifact.id.clone();
+        let additional_root = tempfile::tempdir().unwrap();
+        let replacement_root = tempfile::tempdir().unwrap();
+        let project = {
+            let store = state.conversation_store.as_ref().unwrap().lock().await;
+            let current = store.get_project(&project_id).unwrap().unwrap();
+            store
+                .add_project_read_root(
+                    &project_id,
+                    &uuid::Uuid::new_v4().to_string(),
+                    "Reference only",
+                    additional_root.path().to_str().unwrap(),
+                    current.revision,
+                )
+                .unwrap()
+        };
+        let evolved_scope_view = crate::read_models::tasks::get_tasks_view_model_with_state(&state)
+            .await
+            .unwrap()
+            .data
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|task| task.canonical_task_id == task_id)
+            .unwrap();
+        assert_eq!(
+            evolved_scope_view.artifacts[0].verification.status,
+            openlife_core::agent::TaskArtifactVerificationStatus::Verified
+        );
+        assert!(evolved_scope_view.artifacts[0].undo.available);
+        assert_eq!(
+            crate::commands::artifact::verified_artifact_path(&state, &artifact_id, 1)
+                .await
+                .unwrap(),
+            target
+        );
+
+        let rebound_project = state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .update_project_scope(
+                &project_id,
+                "Direct Artifact Project",
+                Some(replacement_root.path().to_str().unwrap()),
+                project.revision,
+            )
+            .unwrap();
+        let rebound_view = crate::read_models::tasks::get_tasks_view_model_with_state(&state)
+            .await
+            .unwrap()
+            .data
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|task| task.canonical_task_id == task_id)
+            .unwrap();
+        assert_eq!(
+            rebound_view.artifacts[0].verification.status,
+            openlife_core::agent::TaskArtifactVerificationStatus::Failed
+        );
+        assert!(!rebound_view.artifacts[0].undo.available);
+        assert_eq!(
+            crate::commands::artifact::verified_artifact_path(&state, &artifact_id, 1)
+                .await
+                .unwrap_err(),
+            "artifact_path_outside_current_scope"
+        );
+        assert!(crate::commands::proposal::request_artifact_undo_with_state(
+            artifact_id.clone(),
+            &state,
+        )
+        .await
+        .is_err());
+
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .update_project_scope(
+                &project_id,
+                "Direct Artifact Project",
+                Some(project_root.path().to_str().unwrap()),
+                rebound_project.revision,
+            )
+            .unwrap();
         let undo = crate::commands::proposal::request_artifact_undo_with_state(
             artifact_id.clone(),
             &state,

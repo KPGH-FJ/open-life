@@ -757,3 +757,32 @@ Slice 2 的直接创建文件 Undo 也已补齐真实执行链。Project 内新�
 Undo。桌面集成回归证明文件在批准前保持存在，批准后进入 trash 并投影为 `undone`。修改后的完整
 门禁仍为 Rust core 686 passed / 3 ignored、desktop 431 passed / 2 ignored、parser binary 3、doc
 tests 2；Clippy 零告警、Rust fmt 与 diff check 通过；本轮未把工程测试冒充正式安装应用验收。
+
+Slice 2 的历史产物授权也已与 Project 范围演进解耦。此前 Project 只要增加或删除一个额外只读
+目录，revision 与 scope digest 就会变化，已经完成且摘要仍一致的产物也会失去提取预览、打开和
+Undo；界面按文件事实判断可恢复，批准路径却按原始 Run revision 拒绝，形成前后端承诺冲突。现在
+待执行的初始写入仍严格绑定原始 Project revision/scope，不能借后续扩权通过审批；已物化产物的
+预览、打开、另存与受治理 Undo 则只接受当前主 Project 根或该 Conversation 的 canonical managed
+root，并继续绑定精确 Artifact、Task/Run、路径、版本和内容摘要。额外只读目录变化不会再使历史
+结果失效；主 Project 根换走后，旧文件的预览、打开和 Undo 会同步失败关闭，只有当前主根重新覆盖
+该精确路径后才恢复。Undo 的批准、确认收据和启动 reconciliation 共用同一后物化授权函数，不能在
+请求阶段通过、执行阶段又退回旧 revision。端到端回归覆盖“增加只读根仍可用 -> 主根换走全部拒绝
+-> 主根恢复后批准 Undo”，并修正了一个把无 Project 产物伪造到 managed root 外部的旧测试夹具。
+全量门禁为 Rust core 686 passed / 3 ignored、desktop 431 passed / 2 ignored、parser binary 3、
+doc tests 2；前端 31 files / 274 tests、typecheck、format、production build 与 authority guard，
+以及 Clippy、Rust fmt 和 diff check 全部通过。正式安装应用证据仍待后续原生验收。
+
+该历史产物闭环现已补齐本地签名 QA 原生证据，并修正了原生操作中发现的跨读模型刷新缺口。
+Project 主目录、额外只读目录、Task 与 PDF Artifact 在应用重启后均从持久化状态恢复；增加额外只读目录后，
+既有 PDF 继续显示为已完成，提取预览、打开与另存入口保持可用。原先更换主目录只重读 Conversation，导致
+结果区仍保留旧 Task 快照并要求用户再次点击“重新读取”；现在 Project 主目录绑定、增加只读目录和移除
+只读目录都会在 Conversation 重读成功后同步重读同一对话的 Workbench，并清除可能钉住旧结果的前端选择。
+修复后的原生复核证明：主目录换到不覆盖产物路径时，页面立即变为“缺少完成证据”并关闭预览、打开和修订；
+切回原目录时立即恢复“已完成”、提取预览、打开、另存和继续修订，全程未手动刷新。QA 数据库同时确认
+Project revision 及额外只读根已持久化，Artifact 的声明摘要、观察摘要和文件 SHA-256 完全一致。安装包使用
+`ai.openlife.desktop.qa` 与 `OpenLife Local Code Signing`，built/staged/installed executable SHA-256 均为
+`5f9e56e202f494a5ef0f5e57638a896f3f1e075af5a70bcdbfc4d4ac6c303a87`，strict codesign、Designated Requirement、
+resource seal 和安装哈希一致性均通过；它仍是本地 QA 证据，不是 Developer ID、notarization 或正式发布验收。
+前端回归更新为 31 files / 275 tests，并通过 typecheck、format、production build、authority guard 与 diff check；
+Rust 全量门禁沿用本次后端变更后已通过的 686 passed / 3 ignored、desktop 431 passed / 2 ignored、parser 3、
+doc tests 2、Clippy 与 Rust fmt。

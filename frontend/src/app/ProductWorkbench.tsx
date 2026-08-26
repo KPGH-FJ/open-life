@@ -336,12 +336,27 @@ export function ProductWorkbench({
     },
     [workbench.load, workbenchDataSource]
   );
+  const refreshWorkbenchAfterProjectScopeChange = useCallback(
+    async (conversationId: string | null) => {
+      if (!workbenchDataSource) return;
+      setSelectedTask(null);
+      const refreshed = await workbench.load(false, conversationId ?? "");
+      if (
+        !["ready", "empty"].includes(refreshed.workspaceEnvelope.status) ||
+        !["ready", "empty"].includes(refreshed.tasksEnvelope.status)
+      ) {
+        throw new Error("project_scope_workbench_refresh_unconfirmed");
+      }
+    },
+    [workbench.load, workbenchDataSource]
+  );
   const conversation = useConversationController(
     conversationDataSource,
     setAnnouncement,
     refreshWorkbenchAfterTurn,
     null,
-    workbench.stopRunningTask
+    workbench.stopRunningTask,
+    refreshWorkbenchAfterProjectScopeChange
   );
   refreshWorkbenchDependentsRef.current = async () => {
     if (!(await conversation.reload())) {

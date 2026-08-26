@@ -1743,6 +1743,83 @@ describe("conversation controller", () => {
     });
   });
 
+  it("refreshes dependent work state after a Project folder is rebound", async () => {
+    const project = {
+      id: "project-rebound-work",
+      name: "Artifact Project",
+      workspaceRoot: "/tmp/original-project-folder",
+      additionalReadRoots: [],
+      revision: 1,
+      status: "active" as const,
+      createdAt: "2026-08-24T00:00:00Z",
+      updatedAt: "2026-08-24T00:00:00Z",
+      activeConversationCount: 1,
+      totalConversationCount: 1,
+      taskRunReferenceCount: 1,
+      selectedForNewConversation: false,
+      allowedControls: ["update"] as ("update" | "archive")[],
+      blockerCodes: [],
+    };
+    const canonical = (workspaceRoot: string): ConversationViewModel => ({
+      status: "ready",
+      conversations: [
+        {
+          session_id: "conversation-artifact",
+          title: "Artifact conversation",
+          created_at: "2026-08-24T00:00:00Z",
+          updated_at: "2026-08-24T00:01:00Z",
+        },
+      ],
+      projects: [
+        { ...project, workspaceRoot, revision: workspaceRoot === project.workspaceRoot ? 1 : 2 },
+      ],
+      selectedProjectId: project.id,
+      selectedConversationId: "conversation-artifact",
+      globalMemoryEnabled: true,
+      selectedMemoryMode: "use_and_learn",
+      messages: [],
+      latestTurn: null,
+      providerStatus: "ready",
+      providerProfiles: [],
+      selectedProviderProfileId: null,
+      providerErrorCode: null,
+      workStatus: "available",
+    });
+    const reboundProject = {
+      ...project,
+      workspaceRoot: "/tmp/rebound-project-folder",
+      revision: 2,
+    };
+    const loadConversation = vi
+      .fn()
+      .mockResolvedValueOnce(canonical(project.workspaceRoot))
+      .mockResolvedValueOnce(canonical(reboundProject.workspaceRoot));
+    const bindProjectDirectory = vi.fn().mockResolvedValue({
+      cancelled: false,
+      project: reboundProject,
+    });
+    const refreshDependentWork = vi.fn().mockResolvedValue(undefined);
+    const dataSource = source({ loadConversation, bindProjectDirectory });
+    const { result } = renderHook(() =>
+      useConversationController(
+        dataSource,
+        vi.fn(),
+        vi.fn().mockResolvedValue(undefined),
+        undefined,
+        undefined,
+        refreshDependentWork
+      )
+    );
+    await act(async () => result.current.reload());
+
+    await act(async () =>
+      expect(await result.current.bindProjectDirectory(project.id, project.revision)).toBe(true)
+    );
+
+    expect(refreshDependentWork).toHaveBeenCalledWith("conversation-artifact");
+    expect(refreshDependentWork).toHaveBeenCalledTimes(1);
+  });
+
   it("accepts a Project lifecycle mutation only after the canonical view confirms it", async () => {
     const project = {
       id: "project-lifecycle",
@@ -1851,9 +1928,17 @@ describe("conversation controller", () => {
       .mockResolvedValueOnce(canonical(removed));
     const addProjectReadRoot = vi.fn().mockResolvedValue({ cancelled: false, project: added });
     const removeProjectReadRoot = vi.fn().mockResolvedValue(removed);
+    const refreshDependentWork = vi.fn().mockResolvedValue(undefined);
     const dataSource = source({ loadConversation, addProjectReadRoot, removeProjectReadRoot });
     const { result } = renderHook(() =>
-      useConversationController(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+      useConversationController(
+        dataSource,
+        vi.fn(),
+        vi.fn().mockResolvedValue(undefined),
+        undefined,
+        undefined,
+        refreshDependentWork
+      )
     );
     await act(async () => result.current.reload());
 
@@ -1870,6 +1955,8 @@ describe("conversation controller", () => {
     expect(removeProjectReadRoot).toHaveBeenCalledWith(added.id, "root-1", added.revision);
     expect(result.current.projects[0].additionalReadRoots).toEqual([]);
     expect(result.current.projects[0].revision).toBe(4);
+    expect(refreshDependentWork).toHaveBeenNthCalledWith(1, null);
+    expect(refreshDependentWork).toHaveBeenNthCalledWith(2, null);
   });
 
   it("selects an existing Project before the first Conversation is created", async () => {
