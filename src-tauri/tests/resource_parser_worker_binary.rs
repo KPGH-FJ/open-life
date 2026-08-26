@@ -5,6 +5,7 @@ use std::process::{Command, Output, Stdio};
 
 const WORKER_ARG: &str = "--openlife-resource-parser-worker-v1";
 const XLSX_MIME: &str = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const DOCX_MIME: &str = "application/vnd.openxmlformats-officedocument.wordprocessingml.document";
 
 fn invoke_worker(filename: &str, declared_mime: &str, bytes: &[u8]) -> Output {
     let header = serde_json::to_vec(&json!({
@@ -35,6 +36,13 @@ fn frozen_xlsx() -> Vec<u8> {
     let path =
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../test-fixtures/resources/metrics.xlsx");
     std::fs::read(path).expect("read frozen RC-03 XLSX fixture")
+}
+
+fn frozen_resource(filename: &str) -> Vec<u8> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../test-fixtures/resources")
+        .join(filename);
+    std::fs::read(path).expect("read frozen resource fixture")
 }
 
 #[test]
@@ -102,4 +110,50 @@ fn real_binary_worker_returns_typed_failure_for_corrupt_xlsx_without_echoing_byt
         !String::from_utf8_lossy(&output.stdout).contains("RC03_PRIVATE_CORRUPT_XLSX_BODY"),
         "typed worker failures must not echo input bytes"
     );
+}
+
+#[test]
+fn real_binary_worker_extracts_pdf_pages_and_docx_paragraphs() {
+    let pdf_output = invoke_worker(
+        "combined-report.pdf",
+        "application/pdf",
+        &frozen_resource("combined-report.pdf"),
+    );
+    assert!(pdf_output.status.success());
+    assert!(pdf_output.stderr.is_empty());
+    let pdf: Value = serde_json::from_slice(&pdf_output.stdout).expect("decode PDF response");
+    assert_eq!(pdf["status"], "success");
+    assert_eq!(pdf["extraction"]["format"], "pdf");
+    assert!(pdf["extraction"]["chunks"]
+        .as_array()
+        .expect("PDF chunks")
+        .iter()
+        .any(|chunk| {
+            chunk["provenance"]["kind"] == "pdf"
+                && chunk["provenance"]["page"] == 1
+                && chunk["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("COMBINED_REPORT_PAGE_ONE"))
+        }));
+
+    let docx_output = invoke_worker(
+        "checklist.docx",
+        DOCX_MIME,
+        &frozen_resource("checklist.docx"),
+    );
+    assert!(docx_output.status.success());
+    assert!(docx_output.stderr.is_empty());
+    let docx: Value = serde_json::from_slice(&docx_output.stdout).expect("decode DOCX response");
+    assert_eq!(docx["status"], "success");
+    assert_eq!(docx["extraction"]["format"], "docx");
+    assert!(docx["extraction"]["chunks"]
+        .as_array()
+        .expect("DOCX chunks")
+        .iter()
+        .any(|chunk| {
+            chunk["provenance"]["kind"] == "docx"
+                && chunk["content"]
+                    .as_str()
+                    .is_some_and(|content| content.contains("ROADSHOW_CHECKLIST_SENTINEL"))
+        }));
 }

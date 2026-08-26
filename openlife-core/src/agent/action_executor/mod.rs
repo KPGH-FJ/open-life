@@ -457,6 +457,10 @@ pub struct ActionExecutionContext<'a> {
     /// `document.read` requires this store plus an exact message identity; it
     /// never scans arbitrary filesystem paths.
     pub resource_store: Option<&'a crate::resource::ResourceStore>,
+    /// Process-isolated parser for governed Project PDF/Office reads. This is
+    /// separate from `resource_store`: reading a selected Project file must not
+    /// silently import or persist it as a bound Resource.
+    pub resource_parser: Option<&'a crate::resource_gateway::ResourceParserProcess>,
     pub(crate) bound_content_receipt_issuer: Option<&'a dyn BoundContentReceiptIssuer>,
     pub network_policy: Option<&'a crate::config::NetworkPolicy>,
     pub web_search_fixture_output: Option<&'a str>,
@@ -487,6 +491,7 @@ impl<'a> ActionExecutionContext<'a> {
             privacy_engine,
             safe_paths,
             resource_store: None,
+            resource_parser: None,
             bound_content_receipt_issuer: None,
             network_policy: None,
             web_search_fixture_output: None,
@@ -503,6 +508,14 @@ impl<'a> ActionExecutionContext<'a> {
         resource_store: &'a crate::resource::ResourceStore,
     ) -> Self {
         self.resource_store = Some(resource_store);
+        self
+    }
+
+    pub fn with_resource_parser(
+        mut self,
+        resource_parser: &'a crate::resource_gateway::ResourceParserProcess,
+    ) -> Self {
+        self.resource_parser = Some(resource_parser);
         self
     }
 

@@ -119,6 +119,17 @@ export async function getConversationViewModel(
   return safeInvoke<ConversationViewModel>("get_conversation_view_model", { conversationId });
 }
 
+export async function selectConversation(conversationId: string): Promise<void> {
+  return safeInvoke("select_conversation", { conversationId });
+}
+
+export async function selectProviderProfile(
+  conversationId: string | null,
+  profileId: string
+): Promise<void> {
+  return safeInvoke("select_provider_profile", { conversationId, profileId });
+}
+
 export async function createChatSession(
   sessionId: string,
   title: string,

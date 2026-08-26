@@ -25,20 +25,25 @@ pub(crate) async fn load_product_readiness(
     let persistence_health = state.persistence_coordinator.snapshot();
     let provider_runtime = state.provider_runtime_snapshot().await;
     let config = &provider_runtime.config;
-    let provider = config.effective_provider_label();
-    let validation_load = crate::provider_validation::load_provider_validation_record_from_path(
-        &crate::provider_validation::provider_validation_path(),
-    );
-    let mut validation = crate::provider_validation::summarize_loaded_provider_validation(
-        config,
-        &validation_load,
-        chrono::Utc::now(),
-    );
-    if !provider_runtime.coherent {
-        validation.validated = false;
-        validation.status = "runtime_generation_incoherent";
-        validation.last_error = Some("provider_runtime_generation_incoherent".into());
-    }
+    let provider_registry = crate::provider_registry::provider_profile_registry(state).await;
+    let (selected_cloud_provider, cloud_configured, cloud_ready, cloud_error) =
+        match provider_registry {
+            Ok(registry) => match registry.default_profile_id.as_deref().and_then(|selected| {
+                registry
+                    .profiles
+                    .iter()
+                    .find(|profile| profile.profile_id == selected)
+            }) {
+                Some(profile) if profile.endpoint_class == "cloud" => (
+                    profile.display_name.clone(),
+                    true,
+                    profile.availability == "ready",
+                    profile.unavailable_reason.clone(),
+                ),
+                _ => ("未选择云端 Provider".into(), false, false, None),
+            },
+            Err(error) => ("Provider 状态未知".into(), false, false, Some(error)),
+        };
 
     let ollama_status = inspect_ollama_status_for_generation(
         &config.local_model,
@@ -112,26 +117,27 @@ pub(crate) async fn load_product_readiness(
     };
 
     let mut readiness_issues = Vec::new();
-    if !ollama_online && !validation.configured {
+    if !ollama_online && !cloud_configured {
         readiness_issues
             .push("聊天不可用：未检测到可用 Ollama 本地模型，也没有配置云端 API Key。".into());
-    } else if !ollama_online && validation.configured && !validation.validated {
+    } else if !ollama_online && cloud_configured && !cloud_ready {
         readiness_issues.push(format!(
-            "聊天不可用：未检测到可用 Ollama 本地模型，{provider} API 已配置但尚未通过真实连接验证。"
+            "聊天不可用：未检测到可用 Ollama 本地模型，{selected_cloud_provider} Profile 尚未就绪（{}）。",
+            cloud_error.as_deref().unwrap_or("provider_profile_unavailable")
         ));
     }
     if !life_model_ready {
         readiness_issues.push("LifeModel 读取失败；个性化保持不可用。".into());
     }
-    if config.prefer_local_model && !ollama_online && !validation.validated {
+    if config.prefer_local_model && !ollama_online && !cloud_ready {
         readiness_issues.push(format!(
             "当前设置为优先本地模型，但未找到可用模型：{}。",
             config.local_model
         ));
     }
-    if validation.configured && !validation.validated {
+    if cloud_configured && !cloud_ready {
         readiness_issues.push(format!(
-            "{provider} API 尚未完成连接测试；云端模型保持不可用。"
+            "{selected_cloud_provider} Profile 尚未完成连接测试；云端模型保持不可用。"
         ));
     }
     if vector_corrupt_embedding_count > 0 {
@@ -157,7 +163,7 @@ pub(crate) async fn load_product_readiness(
 
     let chat_ready = persistence_health.provider_dispatch_allowed
         && life_model_ready
-        && (ollama_online || validation.validated);
+        && (ollama_online || cloud_ready);
     let mut usage_readiness_issues = Vec::new();
     if !chat_ready {
         usage_readiness_issues.push("核心聊天链路尚未就绪。".into());

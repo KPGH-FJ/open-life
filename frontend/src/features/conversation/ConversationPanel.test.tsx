@@ -41,6 +41,8 @@ function workController(): ConversationController {
           defaultReasoningEffort: "high",
           reasoningMandatory: false,
           reasoningCapabilitySource: "official_builtin",
+          inputModalities: ["text"],
+          inputCapabilitySource: "adapter_default",
           chatCompatibility: "validated",
           workCompatibility: "unverified",
           workCompatibilityReason: null,
@@ -75,7 +77,7 @@ function workController(): ConversationController {
     deleteProject: vi.fn().mockResolvedValue(true),
     assignProject: vi.fn().mockResolvedValue(true),
     setMemoryMode: vi.fn().mockResolvedValue(true),
-    selectProviderProfile: vi.fn().mockReturnValue(true),
+    selectProviderProfile: vi.fn().mockResolvedValue(true),
     selectReasoningEffort: vi.fn().mockReturnValue(true),
     setDraft: vi.fn(),
     setMode: vi.fn(),
@@ -177,25 +179,104 @@ describe("ConversationPanel", () => {
     const details = summary.closest("details");
     expect(details).not.toHaveAttribute("open");
     expect(screen.getByText("按需添加")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "模型" })).toHaveValue("deepseek-default");
-    expect(
-      screen.getByRole("option", { name: /deepseek · deepseek-v4-flash/ })
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Work 尚未验证/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "模型" })).toHaveTextContent("deepseek-v4-flash");
 
     await user.click(summary);
     expect(details).toHaveAttribute("open");
     expect(screen.getByRole("button", { name: "添加文件" })).toBeInTheDocument();
   });
 
-  it("selects an explicit Work execution ceiling before sending", async () => {
+  it("keeps conversation and Project administration out of the default work surface", async () => {
+    const user = userEvent.setup();
+    const controller = workController();
+
+    render(<ConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
+
+    const summary = screen.getByText("管理对话与 Project");
+    const details = summary.closest("details");
+    expect(details).not.toHaveAttribute("open");
+    await user.click(summary);
+    expect(details).toHaveAttribute("open");
+    expect(screen.getByRole("button", { name: "新对话" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "打开 Project 文件夹" })).toBeInTheDocument();
+  });
+
+  it("offers only the exact backend-owned recovery control beside a failed Work turn", async () => {
+    const user = userEvent.setup();
+    const controller = workController();
+    controller.selectedSessionId = "conversation-failed-work";
+    controller.turnState = {
+      phase: "resolved",
+      sessionId: "conversation-failed-work",
+      status: "failed",
+      blockers: ["provider_timeout"],
+      taskId: "task-failed-work",
+      runId: "run-failed-work",
+    };
+    const onRequestRecovery = vi.fn();
+    const recoveryControl = {
+      id: "task-failed-work:retry",
+      label: "Retry",
+      kind: "retry" as const,
+      effect: "task_retry_request" as const,
+      enabled: true,
+      requiresConfirmation: false,
+      targetTaskId: "task-failed-work",
+      targetActionId: "run-failed-work",
+      completionProofAfterDispatch: false,
+    };
+
+    render(
+      <ConversationPanel
+        controller={controller}
+        onOpenLifeModel={vi.fn()}
+        recoveryControl={recoveryControl}
+        onRequestRecovery={onRequestRecovery}
+      />
+    );
+
+    await user.click(screen.getByRole("button", { name: "重试并创建新运行" }));
+    expect(onRequestRecovery).toHaveBeenCalledWith(recoveryControl, "task-failed-work");
+  });
+
+  it("offers a direct model-settings recovery action for a provider preparation failure", async () => {
+    const user = userEvent.setup();
+    const controller = workController();
+    controller.turnState = {
+      phase: "failed",
+      stage: "send",
+      reason: "provider_request_preparation_failed",
+    };
+    const onOpenProviderSettings = vi.fn();
+
+    render(
+      <ConversationPanel
+        controller={controller}
+        onOpenLifeModel={vi.fn()}
+        onOpenProviderSettings={onOpenProviderSettings}
+      />
+    );
+
+    expect(
+      screen.getByText("当前模型连接尚未准备好。请在设置中检查模型后重试。")
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "检查模型连接" }));
+    expect(onOpenProviderSettings).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the explicit Work execution ceiling in the progressive options disclosure", async () => {
     const user = userEvent.setup();
     const controller = workController();
     render(<ConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
 
-    const select = screen.getByRole("combobox", { name: /执行权限/ });
+    const summary = screen.getByText("本轮选项");
+    const details = summary.closest("details");
+    expect(details).not.toHaveAttribute("open");
+    await user.click(summary);
+
+    const select = screen.getByRole("combobox", { name: /执行方式/ });
     expect(select).toHaveValue("scoped_agent");
-    expect(screen.getByText(/扩展范围、外部写入和破坏性动作仍会请你确认/)).toBeInTheDocument();
+    expect(screen.getByText(/扩大范围或产生重要外部影响时再请你决定/)).toBeInTheDocument();
     await user.selectOptions(select, "observe_only");
     expect(controller.setExecutionMode).toHaveBeenCalledWith("observe_only");
   });
@@ -392,6 +473,8 @@ describe("ConversationPanel", () => {
       defaultReasoningEffort: null,
       reasoningMandatory: false,
       reasoningCapabilitySource: "unavailable",
+      inputModalities: ["text"],
+      inputCapabilitySource: "adapter_default",
       chatCompatibility: "reachable_unverified",
       workCompatibility: "observed_contract_failure",
       workCompatibilityReason: "agent_step_artifact_content_type_invalid",
@@ -399,8 +482,8 @@ describe("ConversationPanel", () => {
 
     render(<ConversationPanel controller={controller} onOpenLifeModel={vi.fn()} />);
 
-    expect(screen.getByRole("option", { name: /Work 协议失败/ })).toBeInTheDocument();
-    await user.selectOptions(screen.getByRole("combobox", { name: "模型" }), "local-llama3");
+    await user.click(screen.getByRole("button", { name: "模型" }));
+    await user.click(screen.getByRole("option", { name: /llama3:latest/ }));
     expect(controller.selectProviderProfile).toHaveBeenCalledWith("local-llama3");
   });
 

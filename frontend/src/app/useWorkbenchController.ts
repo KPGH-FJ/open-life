@@ -456,6 +456,13 @@ export function useWorkbenchController(
           announce("任务请求已发送，但刷新后的同一任务尚未确认该变化。");
         } else if (verification.phase === "resolved" && control.kind === "stop_run") {
           announce("刷新后的同一任务已确认当前运行停止；继续会创建新运行。");
+        } else if (
+          verification.phase === "resolved" &&
+          verification.refreshedTask.lifecycleStatus === "completed" &&
+          verification.refreshedTask.terminalDeliveryStatus === "delivered" &&
+          verification.refreshedTask.finalDeliveryEvidencePresent
+        ) {
+          announce("刷新后的同一任务已完成，最终结果已经交付。");
         } else if (verification.phase === "resolved" && control.kind === "retry") {
           announce("刷新后的同一任务已创建新的重试运行；这还不是完成结论。");
         } else if (verification.phase === "resolved") {

@@ -5,7 +5,9 @@ import type {
   LifeStateProjection,
   LlmConnectionTestResult,
   ProductDiagnosticsViewModel,
+  ProviderConnectionsViewModel,
   ProviderPrivacyBoundarySummary,
+  SaveProviderConnectionInput,
   ToolPermissionViewModel,
   ViewModelEnvelope,
 } from "../tauri";
@@ -17,6 +19,34 @@ export async function getConfig(): Promise<AppConfig> {
 
 export async function saveConfig(config: AppConfig): Promise<void> {
   return safeInvoke("save_config", { config });
+}
+
+export async function getProviderConnections(): Promise<ProviderConnectionsViewModel> {
+  return safeInvoke<ProviderConnectionsViewModel>("get_provider_connections");
+}
+
+export async function saveProviderConnection(
+  input: SaveProviderConnectionInput
+): Promise<ProviderConnectionsViewModel> {
+  return safeInvoke<ProviderConnectionsViewModel>("save_provider_connection", { input });
+}
+
+export async function deleteProviderConnection(
+  connectionId: string
+): Promise<ProviderConnectionsViewModel> {
+  return safeInvoke<ProviderConnectionsViewModel>("delete_provider_connection", {
+    connectionId,
+  });
+}
+
+export async function testProviderConnection(
+  connectionId: string,
+  profileId: string
+): Promise<LlmConnectionTestResult> {
+  return safeInvoke<LlmConnectionTestResult>("test_provider_connection", {
+    connectionId,
+    profileId,
+  });
 }
 
 export async function selectArtifactOutputDirectory(): Promise<ArtifactOutputDirectorySelection> {
@@ -43,10 +73,6 @@ export async function getToolPermissionViewModel(): Promise<
 
 export async function revokeToolPermission(permissionId: string): Promise<void> {
   return safeInvoke("revoke_tool_permission", { permissionId });
-}
-
-export async function testLlmConnection(config: AppConfig): Promise<LlmConnectionTestResult> {
-  return safeInvoke<LlmConnectionTestResult>("test_llm_connection", { config });
 }
 
 export async function getProviderPrivacyBoundarySummary(

@@ -1022,6 +1022,7 @@ pub enum ProposalStatus {
     Pending,
     Accepted,
     Rejected,
+    Cancelled,
     Edited,
     Postponed,
     Expired,
@@ -1033,6 +1034,7 @@ impl std::fmt::Display for ProposalStatus {
             ProposalStatus::Pending => write!(f, "pending"),
             ProposalStatus::Accepted => write!(f, "accepted"),
             ProposalStatus::Rejected => write!(f, "rejected"),
+            ProposalStatus::Cancelled => write!(f, "cancelled"),
             ProposalStatus::Edited => write!(f, "edited"),
             ProposalStatus::Postponed => write!(f, "postponed"),
             ProposalStatus::Expired => write!(f, "expired"),
@@ -1215,6 +1217,11 @@ impl AgentProposal {
 
     pub fn reject(&mut self) {
         self.status = ProposalStatus::Rejected;
+        self.resolved_at = Some(Utc::now());
+    }
+
+    pub fn cancel(&mut self) {
+        self.status = ProposalStatus::Cancelled;
         self.resolved_at = Some(Utc::now());
     }
 

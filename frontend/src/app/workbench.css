@@ -217,6 +217,43 @@
   font-weight: 650;
 }
 
+.ol-workspace-conversation__manage {
+  min-width: 0;
+}
+
+.ol-workspace-conversation__manage > summary {
+  display: flex;
+  min-height: var(--ol-control-height);
+  align-items: center;
+  padding: 0 var(--ol-space-2);
+  border-radius: var(--ol-radius-2);
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-body);
+  font-weight: 600;
+  cursor: pointer;
+  list-style: none;
+}
+
+.ol-workspace-conversation__manage > summary::-webkit-details-marker {
+  display: none;
+}
+
+.ol-workspace-conversation__manage > summary::before {
+  width: var(--ol-space-4);
+  color: var(--ol-ink-muted);
+  content: "+";
+}
+
+.ol-workspace-conversation__manage[open] > summary {
+  margin-bottom: var(--ol-space-3);
+  background: var(--ol-surface-sunken);
+  color: var(--ol-ink);
+}
+
+.ol-workspace-conversation__manage[open] > summary::before {
+  content: "−";
+}
+
 .ol-workspace-conversation__tools {
   display: grid;
   min-width: 0;
@@ -672,14 +709,104 @@
   align-items: center;
 }
 
-.ol-workspace-provider select {
+.ol-workspace-model-trigger {
   max-width: min(34rem, 60vw);
   height: var(--ol-control-height);
+  padding: 0 var(--ol-space-3);
+  overflow: hidden;
   border: var(--ol-divider-width) solid var(--ol-line-strong);
   border-radius: var(--ol-radius-2);
   background: var(--ol-surface);
   color: var(--ol-ink-secondary);
   font: inherit;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ol-workspace-model-trigger:disabled {
+  cursor: not-allowed;
+  opacity: 0.56;
+}
+
+.ol-workspace-model-picker {
+  display: grid;
+  gap: var(--ol-space-3);
+}
+
+.ol-workspace-model-picker > label {
+  display: grid;
+  gap: var(--ol-space-2);
+  color: var(--ol-ink-secondary);
+  font-size: var(--ol-type-caption);
+}
+
+.ol-workspace-model-picker input {
+  min-height: var(--ol-control-height);
+  padding: 0 var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-line-strong);
+  border-radius: var(--ol-radius-2);
+  background: var(--ol-surface);
+  color: var(--ol-ink);
+  font: inherit;
+}
+
+.ol-workspace-model-picker > p {
+  margin: 0;
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+}
+
+.ol-workspace-model-picker__list {
+  display: grid;
+  max-height: min(24rem, 50vh);
+  overflow: auto;
+  border-block: var(--ol-divider-width) solid var(--ol-line);
+}
+
+.ol-workspace-model-picker__list > button {
+  display: flex;
+  min-width: 0;
+  justify-content: space-between;
+  gap: var(--ol-space-3);
+  padding: var(--ol-space-3) 0;
+  border: 0;
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+  background: transparent;
+  color: var(--ol-ink);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ol-workspace-model-picker__list > button:last-child {
+  border-bottom: 0;
+}
+
+.ol-workspace-model-picker__list > button[aria-selected="true"] {
+  color: var(--ol-accent);
+}
+
+.ol-workspace-model-picker__list > button:disabled {
+  color: var(--ol-ink-muted);
+  cursor: not-allowed;
+}
+
+.ol-workspace-model-picker__list > button > span:first-child {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.ol-workspace-model-picker__list strong,
+.ol-workspace-model-picker__list small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ol-workspace-model-picker__list small {
+  color: var(--ol-ink-muted);
+  font-weight: 400;
 }
 
 .ol-workspace-memory-mode {
@@ -748,8 +875,15 @@
 }
 
 .ol-workspace-composer-context[open] > .ol-workspace-resources,
-.ol-workspace-composer-context[open] > .ol-workspace-capabilities {
+.ol-workspace-composer-context[open] > .ol-workspace-capabilities,
+.ol-workspace-composer-context[open] > .ol-workspace-composer-options__body {
   margin-top: var(--ol-space-2);
+}
+
+.ol-workspace-composer-options__body {
+  display: grid;
+  gap: var(--ol-space-3);
+  padding: var(--ol-space-2) 0;
 }
 
 .ol-workspace-resources {
@@ -1093,6 +1227,71 @@
 
 .ol-review-layout--embedded .ol-review-detail {
   padding: var(--ol-space-5);
+}
+
+.ol-review-inline-switcher {
+  display: grid;
+  gap: var(--ol-space-2);
+  padding: var(--ol-space-3) var(--ol-space-5);
+  border-bottom: var(--ol-divider-width) solid var(--ol-line);
+  background: var(--ol-surface-subtle);
+}
+
+.ol-review-inline-switcher > span {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+}
+
+.ol-review-inline-switcher > div {
+  display: flex;
+  gap: var(--ol-space-2);
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.ol-review-inline-switcher button {
+  display: grid;
+  grid-template-columns: auto minmax(120px, 1fr) auto;
+  align-items: center;
+  flex: 0 1 320px;
+  min-width: 220px;
+  gap: var(--ol-space-2);
+  padding: var(--ol-space-2) var(--ol-space-3);
+  border: var(--ol-divider-width) solid var(--ol-line);
+  border-radius: var(--ol-radius-2);
+  background: var(--ol-canvas);
+  color: var(--ol-ink);
+  font: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.ol-review-inline-switcher button[data-current="true"] {
+  border-color: var(--ol-ink);
+}
+
+.ol-review-inline-switcher button:disabled {
+  cursor: default;
+}
+
+.ol-review-inline-switcher button strong {
+  font-size: var(--ol-type-caption);
+}
+
+.ol-review-inline-switcher button span {
+  overflow: hidden;
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ol-review-inline-switcher button small {
+  color: var(--ol-ink-muted);
+  font-size: var(--ol-type-caption);
+  line-height: var(--ol-line-caption);
+  white-space: nowrap;
 }
 
 .ol-review-queue {

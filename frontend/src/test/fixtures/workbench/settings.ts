@@ -1,7 +1,9 @@
 import type {
   AppConfig,
+  CloudProviderId,
   EvidenceRef,
   LlmConnectionTestResult,
+  ProviderConnectionsViewModel,
   ProviderPrivacyBoundarySummary,
   ReviewAction,
   ReviewItem,
@@ -73,15 +75,6 @@ function configForFixture(id: WorkbenchFixtureId): AppConfig {
     "fixture-settings-save-failed",
   ].includes(id);
   return {
-    llm: {
-      provider: external ? "deepseek" : "custom",
-      openai_base: external ? "https://api.deepseek.com" : "http://127.0.0.1:11434/v1",
-      openai_key: "***",
-      credential_version: 7,
-      embedding_model: "nomic-embed-text",
-      chat_model: external ? "deepseek-chat" : "qwen2.5:14b",
-      embedding_enabled: false,
-    },
     prefer_local_model: !external,
     local_model: "qwen2.5:14b",
     system: {
@@ -94,6 +87,31 @@ function configForFixture(id: WorkbenchFixtureId): AppConfig {
       },
     },
   };
+}
+
+type FixtureProviderRoute = {
+  providerId: CloudProviderId;
+  endpoint: string;
+  modelId: string;
+};
+
+function providerForFixture(id: WorkbenchFixtureId): FixtureProviderRoute {
+  const external = [
+    "fixture-settings-review-required",
+    "fixture-settings-refresh-unknown",
+    "fixture-settings-save-failed",
+  ].includes(id);
+  return external
+    ? {
+        providerId: "deepseek",
+        endpoint: "https://api.deepseek.com",
+        modelId: "deepseek-chat",
+      }
+    : {
+        providerId: "custom",
+        endpoint: "http://127.0.0.1:11434/v1",
+        modelId: "qwen2.5:14b",
+      };
 }
 
 function boundaryEnvelope(
@@ -154,7 +172,7 @@ export function providerTestReviewItem(stage: ProviderTestFixtureStage): ReviewI
     source: {
       kind: "proposal",
       proposalId: providerTestProposalId,
-      proposalSource: "settings_manual_test",
+      proposalSource: "settings_provider_connection_test",
       sourceDetail: "验证 DeepSeek deepseek-chat 的一次外部连接",
     },
     status: stage,
@@ -226,11 +244,10 @@ export function providerTestReviewItem(stage: ProviderTestFixtureStage): ReviewI
   };
 }
 
-function validatedResult(config: AppConfig): LlmConnectionTestResult {
-  const provider = config.llm.provider ?? "custom";
+function validatedResult(route: FixtureProviderRoute): LlmConnectionTestResult {
   return {
     ok: true,
-    provider,
+    provider: route.providerId,
     message: "连接成功，当前模型完成了一次受控验证。",
     validation_status: "validated",
     network_policy_decision_id: "network-decision:fixture:provider-probe",
@@ -239,8 +256,8 @@ function validatedResult(config: AppConfig): LlmConnectionTestResult {
     permission_id: "permission:fixture:provider-probe:once",
     provider_invocation_receipt: {
       request_id: "provider-request:fixture:settings-test",
-      provider,
-      model: config.llm.chat_model,
+      provider: route.providerId,
+      model: route.modelId,
       status: "completed",
       started_at: generatedAt,
       finished_at: "2026-07-21T04:15:01.000Z",
@@ -289,12 +306,37 @@ function settingsSnapshot(
   };
 }
 
+function providerConnectionsFixture(route: FixtureProviderRoute): ProviderConnectionsViewModel {
+  return {
+    connections: [
+      {
+        id: "fixture-provider-connection",
+        providerId: route.providerId,
+        displayName: route.providerId === "deepseek" ? "DeepSeek" : "Fixture Provider",
+        endpoint: route.endpoint,
+        credentialState: "stored",
+        validationState: "unverified",
+        models: [
+          {
+            profileId: "fixture-provider-profile",
+            modelId: route.modelId,
+            displayName: route.modelId,
+            selected: true,
+            validationState: "unverified",
+          },
+        ],
+      },
+    ],
+  };
+}
+
 export function createSettingsFixture(id: WorkbenchFixtureId): {
   dataSource: SettingsDataSource;
   currentReviewItem: () => ReviewItem | null;
   dispatchReviewAction: (action: ReviewAction) => boolean;
 } {
   let config = configForFixture(id);
+  let provider = providerForFixture(id);
   let saved = false;
   let reviewStage: ProviderTestFixtureStage = "pending";
 
@@ -304,21 +346,21 @@ export function createSettingsFixture(id: WorkbenchFixtureId): {
         if (id === "fixture-error") throw new Error("fixture_settings_load_failed");
         return settingsSnapshot(id, config, saved);
       },
-      async testProviderConnection(draft) {
+      async testSavedProviderConnection() {
         if (id === "fixture-error") throw new Error("fixture_settings_test_failed");
         if (id === "fixture-stale") {
           return {
             result: {
               ok: false,
-              provider: draft.llm.provider ?? "custom",
+              provider: provider.providerId,
               message: "请求已经开始，但静态样例没有可信远端终态。",
               validation_status: "remote_unknown",
               network_policy_decision_id: "network-decision:fixture:remote-unknown",
               consent_status: "not_required",
               provider_invocation_receipt: {
                 request_id: "provider-request:fixture:remote-unknown",
-                provider: draft.llm.provider ?? "custom",
-                model: draft.llm.chat_model,
+                provider: provider.providerId,
+                model: provider.modelId,
                 status: "remote_unknown",
                 started_at: generatedAt,
                 finished_at: "2026-07-21T04:15:03.000Z",
@@ -346,17 +388,30 @@ export function createSettingsFixture(id: WorkbenchFixtureId): {
           };
         }
         return {
-          result: validatedResult(draft),
+          result: validatedResult(provider),
           reviewItem: null,
           reviewResolution: "not_requested",
         };
+      },
+      async loadProviderConnections() {
+        return providerConnectionsFixture(provider);
+      },
+      async saveProviderConnection(input) {
+        provider = {
+          providerId: input.providerId,
+          endpoint: input.endpoint,
+          modelId: input.modelId,
+        };
+        return providerConnectionsFixture(provider);
+      },
+      async deleteProviderConnection() {
+        return { connections: [] };
       },
       async saveSettings(next) {
         if (id === "fixture-settings-save-failed") {
           throw new Error("fixture_settings_save_failed");
         }
         config = cloneSettingsConfig(next);
-        if (config.llm.openai_key?.trim()) config.llm.openai_key = "***";
         saved = true;
       },
     },

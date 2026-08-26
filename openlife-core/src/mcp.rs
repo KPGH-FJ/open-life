@@ -813,7 +813,7 @@ impl McpRegistry {
         // Execution Tools: P1 (file, web)
         self.register_execution_tool(
             "file.read",
-            "读取指定路径的文件内容（仅限当前 Run 绑定或额外授权的读取根目录）",
+            "读取当前 Run 已绑定 Project 根目录中的文本、PDF、DOCX、XLSX、PPTX 或受支持图片；文档通过隔离解析器提取有界文本，图片只返回摘要元数据并在模型调用前重新校验",
             "low",
             vec!["read".into(), "filesystem".into()],
             "read",
@@ -828,6 +828,46 @@ impl McpRegistry {
                     "governedInputSource": { "type": "string", "enum": ["canonical_work_agent_step_workspace_scope"] }
                 },
                 "required": ["path"]
+            }),
+        );
+        self.register_execution_tool(
+            "folder.list",
+            "枚举当前 Run 绑定的 Project 读取根目录中的一个目录",
+            "low",
+            vec!["read".into(), "filesystem".into()],
+            "read",
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    "maxEntries": { "type": "integer", "minimum": 1, "maximum": 200 },
+                    "projectReadRootId": { "type": "string", "minLength": 1, "maxLength": 128 },
+                    "projectReadRootName": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "workspaceRelativePath": { "type": "string", "maxLength": 4096 },
+                    "governedInputSource": { "type": "string", "enum": ["canonical_work_agent_step_workspace_scope"] }
+                },
+                "required": ["path"]
+            }),
+        );
+        self.register_execution_tool(
+            "file.search",
+            "在当前 Run 绑定的 Project 读取根目录内搜索文件名和受支持文本内容",
+            "low",
+            vec!["read".into(), "filesystem".into()],
+            "read",
+            serde_json::json!({
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+                    "query": { "type": "string", "minLength": 1, "maxLength": 512 },
+                    "maxResults": { "type": "integer", "minimum": 1, "maximum": 50 },
+                    "projectReadRootId": { "type": "string", "minLength": 1, "maxLength": 128 },
+                    "projectReadRootName": { "type": "string", "minLength": 1, "maxLength": 256 },
+                    "governedInputSource": { "type": "string", "enum": ["canonical_work_agent_step_workspace_scope"] }
+                },
+                "required": ["path", "query"]
             }),
         );
 
@@ -1761,6 +1801,8 @@ mod tests {
         assert!(names.contains("web.search"));
         assert!(names.contains("web.fetch"));
         assert!(names.contains("file.read"));
+        assert!(names.contains("file.search"));
+        assert!(names.contains("folder.list"));
         assert!(names.contains("document.read"));
         assert!(!names.contains("life_model.read"));
         assert!(!names.contains("tool.list_available"));

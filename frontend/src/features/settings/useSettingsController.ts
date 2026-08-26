@@ -7,22 +7,19 @@ import {
 import type {
   AppConfig,
   CredentialRecoveryReport,
+  ProviderConnectionsViewModel,
   ProviderPrivacyBoundarySummary,
   ViewModelEnvelope,
 } from "@/tauri";
 import { productErrorCode as errorCode } from "@/shared/productError";
 import {
   buildSettingsErrorSnapshot,
-  type SettingsConnectionTestOutcome,
   type SettingsDataSource,
   type SettingsSnapshot,
+  type ProviderConnectionDataSource,
 } from "./settingsDataSource";
 import {
   cloneSettingsConfig,
-  connectionTestPresentation,
-  credentialState,
-  endpointHost,
-  providerIdentity,
   searchCredentialState,
   searchProviderIdentity,
   settingsConfigMatchesSavedDraft,
@@ -31,7 +28,6 @@ import {
   unknownSettingsProtectionBoundaryEnvelope,
   validateSettingsDraft,
   type SettingsDraftValidation,
-  type SettingsTestPresentation,
 } from "./settingsPresentation";
 
 type Announce = (message: string) => void;
@@ -39,10 +35,6 @@ type Announce = (message: string) => void;
 export type SettingsProtectionState = "loading" | "normal" | "active" | "unknown";
 
 export type SettingsDraftEdit =
-  | { field: "provider"; value: NonNullable<AppConfig["llm"]["provider"]> }
-  | { field: "endpoint"; value: string }
-  | { field: "chat_model"; value: string }
-  | { field: "credential"; value: string }
   | { field: "prefer_local"; value: boolean }
   | { field: "local_model"; value: string }
   | { field: "agent_memory_enabled"; value: boolean }
@@ -60,13 +52,10 @@ export type SettingsController = {
   draft: AppConfig | null;
   state: SettingsOrchestrationState;
   loading: boolean;
-  lastTestOutcome: SettingsConnectionTestOutcome | null;
-  testPresentation: SettingsTestPresentation | null;
   protectionState: SettingsProtectionState;
   validation: SettingsDraftValidation;
   actions: ReturnType<typeof settingsProductActions>;
   effectiveBoundaryEnvelope: ViewModelEnvelope<ProviderPrivacyBoundarySummary>;
-  testConfirmationOpen: boolean;
   credentialInitialization: {
     phase: "idle" | "running" | "restart_required" | "blocked" | "failed";
     report: CredentialRecoveryReport | null;
@@ -75,12 +64,12 @@ export type SettingsController = {
   eligibleCredentialPurposes: string[];
   artifactDirectorySelection: { phase: "idle" | "selecting" | "failed"; error: string | null };
   permissionRevocation: { permissionId: string | null; error: string | null };
+  providerConnectionDataSource: ProviderConnectionDataSource | null;
+  providerConnections: ProviderConnectionsViewModel | null;
+  setProviderConnections: (viewModel: ProviderConnectionsViewModel) => void;
   load: (announceResult?: boolean) => Promise<SettingsSnapshot>;
   ensureLoaded: () => Promise<SettingsEnsureLoadedResult>;
   edit: (edit: SettingsDraftEdit) => void;
-  requestTest: () => void;
-  confirmTest: () => void;
-  cancelTest: () => void;
   initializeRequiredCredentials: () => void;
   save: () => void;
   retryBoundaryRefresh: () => void;
@@ -96,7 +85,6 @@ export type SettingsEnsureLoadedResult = {
 
 type SettingsOperationToken = {
   kind:
-    | "test"
     | "save"
     | "boundary_refresh"
     | "credential_initialization"
@@ -121,18 +109,6 @@ function loadingBoundaryEnvelope(): ViewModelEnvelope<ProviderPrivacyBoundarySum
 function applyDraftEdit(config: AppConfig, edit: SettingsDraftEdit): AppConfig {
   const next = cloneSettingsConfig(config);
   switch (edit.field) {
-    case "provider":
-      next.llm.provider = edit.value;
-      return next;
-    case "endpoint":
-      next.llm.openai_base = edit.value;
-      return next;
-    case "chat_model":
-      next.llm.chat_model = edit.value;
-      return next;
-    case "credential":
-      next.llm.openai_key = edit.value;
-      return next;
     case "prefer_local":
       next.prefer_local_model = edit.value;
       return next;
@@ -193,15 +169,13 @@ export function useSettingsController(
 ): SettingsController {
   const [snapshot, setSnapshot] = useState<SettingsSnapshot | null>(null);
   const [draft, setDraft] = useState<AppConfig | null>(null);
+  const [providerConnections, setProviderConnections] =
+    useState<ProviderConnectionsViewModel | null>(null);
   const [state, dispatch] = useReducer(
     settingsOrchestrationReducer,
     initialSettingsOrchestrationState
   );
   const [loading, setLoading] = useState(false);
-  const [lastTestOutcome, setLastTestOutcome] = useState<SettingsConnectionTestOutcome | null>(
-    null
-  );
-  const [testConfirmationOpen, setTestConfirmationOpen] = useState(false);
   const [credentialInitialization, setCredentialInitialization] = useState<{
     phase: "idle" | "running" | "restart_required" | "blocked" | "failed";
     report: CredentialRecoveryReport | null;
@@ -239,9 +213,8 @@ export function useSettingsController(
     pendingSaveAttestationRef.current = null;
     setSnapshot(null);
     setDraft(null);
+    setProviderConnections(null);
     setLoading(false);
-    setLastTestOutcome(null);
-    setTestConfirmationOpen(false);
     setCredentialInitialization({ phase: "idle", report: null, error: null });
     setArtifactDirectorySelection({ phase: "idle", error: null });
     setPermissionRevocation({ permissionId: null, error: null });
@@ -326,27 +299,9 @@ export function useSettingsController(
         announce("当前不能修改设置；请等待系统配置读取或当前操作结束。");
         return;
       }
-      const previousIdentity = providerIdentity(draft);
       const previousSearchIdentity = searchProviderIdentity(draft);
       const next = applyDraftEdit(draft, change);
-      const identityChanged = providerIdentity(next) !== previousIdentity;
       const searchIdentityChanged = searchProviderIdentity(next) !== previousSearchIdentity;
-      const matchesStoredIdentity =
-        snapshot?.config !== null &&
-        snapshot?.config !== undefined &&
-        credentialState(snapshot.config) === "stored" &&
-        providerIdentity(next) === providerIdentity(snapshot.config);
-      const restoreStoredCredential =
-        matchesStoredIdentity &&
-        (identityChanged || (change.field === "credential" && !change.value.trim()));
-      if (identityChanged) {
-        next.llm.openai_key = "";
-        next.llm.openai_key_ref = undefined;
-      }
-      if (restoreStoredCredential) {
-        next.llm.openai_key = snapshot?.config?.llm.openai_key === "***" ? "***" : "";
-        next.llm.openai_key_ref = snapshot?.config?.llm.openai_key_ref;
-      }
       const matchesStoredSearchIdentity =
         snapshot?.config !== null &&
         snapshot?.config !== undefined &&
@@ -370,16 +325,9 @@ export function useSettingsController(
         };
       }
       setDraft(next);
-      setLastTestOutcome(null);
       pendingSaveAttestationRef.current = null;
       dispatch({ type: "edit" });
-      if (identityChanged) {
-        announce(
-          restoreStoredCredential
-            ? "已返回原始供应商目标；同一目标继续使用系统保存的凭据，传输边界仍等待保存后确认。"
-            : "供应商目标已更改；旧凭据已清除，当前传输边界等待系统重新确认。"
-        );
-      } else if (searchIdentityChanged) {
+      if (searchIdentityChanged) {
         announce(
           restoreStoredSearchCredential
             ? "已返回原始网页搜索目标；同一目标继续使用系统保存的独立搜索凭据。"
@@ -392,7 +340,10 @@ export function useSettingsController(
     [announce, draft, loading, snapshot?.config]
   );
 
-  const validation = useMemo(() => validateSettingsDraft(draft), [draft]);
+  const validation = useMemo(
+    () => validateSettingsDraft(draft, providerConnections),
+    [draft, providerConnections]
+  );
   const eligibleCredentialPurposes = useMemo(() => {
     if (!dataSource?.initializeRequiredCredentials) return [];
     const purposes = snapshot?.credentialBootstrap?.purposes ?? [];
@@ -419,98 +370,14 @@ export function useSettingsController(
     if (protectionState === "normal") return base;
     const disabledReason =
       protectionState === "active"
-        ? "系统安全模式仍在生效；连接测试和设置保存保持关闭。"
+        ? "系统安全模式仍在生效；设置保存保持关闭。"
         : protectionState === "loading"
           ? "正在读取 LifeStateProjection 保护状态。"
-          : "LifeStateProjection 保护状态未知；连接测试和设置保存保持关闭。";
+          : "LifeStateProjection 保护状态未知；设置保存保持关闭。";
     return {
-      test: { ...base.test, enabled: false, disabledReason },
       save: { ...base.save, enabled: false, disabledReason },
     };
   }, [protectionState, state, validation]);
-
-  const executeTest = useCallback(async () => {
-    if (!dataSource || !draft || operationRef.current || !actions.test.enabled) return;
-    const draftIsAlreadySaved = state.savedRevision === state.draftRevision;
-    const operationToken: SettingsOperationToken = {
-      kind: "test",
-      sourceGeneration: sourceGenerationRef.current,
-      sequence: ++operationSequenceRef.current,
-    };
-    operationRef.current = operationToken;
-    const operationIsCurrent = () =>
-      operationRef.current === operationToken &&
-      sourceGenerationRef.current === operationToken.sourceGeneration;
-    dispatch({ type: "test_requested" });
-    setLastTestOutcome(null);
-    announce("正在验证这一份设置草稿；测试不会保存任何配置。");
-    try {
-      const outcome = await dataSource.testProviderConnection(cloneSettingsConfig(draft));
-      if (!operationIsCurrent()) return;
-      setLastTestOutcome(outcome);
-      const result = outcome.result;
-      const receipt = result.provider_invocation_receipt;
-      const verified =
-        result.ok &&
-        result.validation_status === "validated" &&
-        receipt?.status === "completed" &&
-        !receipt.simulated;
-      if (verified) {
-        dispatch({
-          type: "test_succeeded",
-          result: { ok: true, message: result.message },
-        });
-        announce(
-          draftIsAlreadySaved
-            ? "本次连接验证已有可信回执；当前已保存设置未被测试改变。"
-            : "本次连接验证已有可信回执；设置仍未保存。"
-        );
-      } else {
-        dispatch({
-          type: "test_failed",
-          errorCode: result.validation_status || "provider_test_not_verified",
-        });
-        announce(
-          result.validation_status === "consent_required"
-            ? outcome.reviewItem
-              ? "测试请求需要审核；精确待决定项已经找到，请按需查看。"
-              : "测试请求需要审核，但当前无法解析精确待决定项；不会跳转到猜测目标。"
-            : result.validation_status === "remote_unknown"
-              ? "外部结果未知；当前不会自动重试或显示连接可用。"
-              : "连接没有通过可信验证；当前不会显示可用，也不会自动保存。"
-        );
-      }
-    } catch (error) {
-      if (!operationIsCurrent()) return;
-      dispatch({ type: "test_failed", errorCode: errorCode(error) });
-      announce("连接测试命令失败；当前配置没有可用性证明。");
-    } finally {
-      if (operationIsCurrent()) operationRef.current = null;
-    }
-  }, [actions.test.enabled, announce, dataSource, draft, state.draftRevision, state.savedRevision]);
-
-  const requestTest = useCallback(() => {
-    if (!actions.test.enabled) {
-      announce(`当前不能测试连接：${actions.test.disabledReason ?? "设置草稿不可用。"}`);
-      return;
-    }
-    if (validation.mayTransmitExternally) {
-      setTestConfirmationOpen(true);
-      announce("等待你确认这次可能发生的外部连接；尚未发送请求。");
-      return;
-    }
-    void executeTest();
-  }, [actions.test, announce, executeTest, validation.mayTransmitExternally]);
-
-  const confirmTest = useCallback(() => {
-    setTestConfirmationOpen(false);
-    void executeTest();
-  }, [executeTest]);
-
-  const cancelTest = useCallback(() => {
-    setTestConfirmationOpen(false);
-    announce("已取消连接测试；没有发送网络请求，也没有保存设置。");
-  }, [announce]);
 
   const save = useCallback(() => {
     if (
@@ -813,6 +680,23 @@ export function useSettingsController(
   );
 
   const hasUnsavedDraft = state.draftRevision !== state.savedRevision;
+  const providerConnectionDataSource = useMemo<ProviderConnectionDataSource | null>(() => {
+    if (
+      !dataSource?.loadProviderConnections ||
+      !dataSource.saveProviderConnection ||
+      !dataSource.deleteProviderConnection ||
+      !dataSource.testSavedProviderConnection
+    ) {
+      return null;
+    }
+    return {
+      loadProviderConnections: () => dataSource.loadProviderConnections!(),
+      saveProviderConnection: input => dataSource.saveProviderConnection!(input),
+      deleteProviderConnection: connectionId => dataSource.deleteProviderConnection!(connectionId),
+      testSavedProviderConnection: (connectionId, profileId) =>
+        dataSource.testSavedProviderConnection!(connectionId, profileId),
+    };
+  }, [dataSource]);
   const effectiveBoundaryEnvelope = useMemo(() => {
     if (!snapshot) return loadingBoundaryEnvelope();
     if (protectionState === "loading") return loadingBoundaryEnvelope();
@@ -853,40 +737,24 @@ export function useSettingsController(
     draft,
     state,
     loading,
-    lastTestOutcome,
-    testPresentation: connectionTestPresentation(lastTestOutcome?.result ?? null),
     protectionState,
     validation,
     actions,
     effectiveBoundaryEnvelope,
-    testConfirmationOpen,
     credentialInitialization,
     eligibleCredentialPurposes,
     artifactDirectorySelection,
     permissionRevocation,
+    providerConnectionDataSource,
+    providerConnections,
+    setProviderConnections,
     load,
     ensureLoaded,
     edit,
-    requestTest,
-    confirmTest,
-    cancelTest,
     initializeRequiredCredentials,
     save,
     retryBoundaryRefresh,
     selectArtifactOutputDirectory,
     revokeToolPermission,
-  };
-}
-
-export function settingsTestConfirmationTarget(controller: SettingsController): {
-  provider: string;
-  host: string;
-  model: string;
-} {
-  const draft = controller.draft;
-  return {
-    provider: draft?.llm.provider ?? "未知供应商",
-    host: draft ? (endpointHost(draft.llm.openai_base) ?? "无法确认的目标") : "无法确认的目标",
-    model: draft?.llm.chat_model || "未知模型",
   };
 }

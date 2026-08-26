@@ -249,8 +249,10 @@ describe("OpenLife product shell", () => {
       completionProofAfterDispatch: false,
     };
     let retried = false;
+    const loadConversation = vi.fn(fixture.loadConversation);
     const dataSource = {
       ...fixture,
+      loadConversation,
       async load() {
         const snapshot = await fixture.load();
         const target: TaskViewModelItem = {
@@ -296,10 +298,13 @@ describe("OpenLife product shell", () => {
       },
     };
 
-    render(<ProductWorkbench workbenchDataSource={dataSource} />);
+    render(
+      <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
+    );
 
     expect(await screen.findByRole("heading", { name: "失败", level: 4 })).toBeInTheDocument();
     expect(screen.queryByRole("heading", { name: "failed" })).not.toBeInTheDocument();
+    const readsBeforeRetry = loadConversation.mock.calls.length;
     await user.click(await screen.findByRole("button", { name: "重试并创建新运行" }));
     await waitFor(() =>
       expect(screen.getByTestId("canonical-task-answer")).toHaveTextContent(
@@ -311,6 +316,8 @@ describe("OpenLife product shell", () => {
       .find(button => button.hasAttribute("aria-pressed"));
     expect(targetRow).toBeDefined();
     expect(targetRow).toHaveAttribute("aria-pressed", "true");
+    expect(loadConversation.mock.calls.length).toBeGreaterThan(readsBeforeRetry);
+    expect(screen.queryByText(/这不是完成证明/)).not.toBeInTheDocument();
   });
 
   it("opens or exports only a backend-verified Artifact from the result card", async () => {
@@ -395,6 +402,8 @@ describe("OpenLife product shell", () => {
       <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
     );
 
+    const artifactDetails = await screen.findByText("来源、完整性与恢复");
+    expect(artifactDetails.closest("details")).not.toHaveAttribute("open");
     await user.click(await screen.findByRole("button", { name: "打开文件" }));
     expect(screen.getByText("文件完整性已核验")).toBeInTheDocument();
     expect(screen.getByText("出行要求.md")).toBeInTheDocument();
@@ -434,9 +443,254 @@ describe("OpenLife product shell", () => {
     );
     expect(await screen.findByRole("button", { name: "聚焦修订此版本" })).toBeInTheDocument();
 
+    await user.click(artifactDetails);
     await user.click(screen.getByRole("button", { name: "申请撤销此产物" }));
     expect(await screen.findByText("撤销申请没有创建")).toBeInTheDocument();
     expect(requestArtifactUndo).toHaveBeenCalledWith("artifact:travel-checklist");
+  });
+
+  it("labels Office extracted text honestly instead of presenting it as a visual preview", async () => {
+    const fixture = workbenchFixtureDataSource("fixture-ready");
+    const snapshot = await fixture.load();
+    const baseTask = snapshot.tasksEnvelope.data!.items[0];
+    const officeTask = {
+      ...baseTask,
+      lifecycleStatus: "completed" as const,
+      terminalDeliveryStatus: "delivered" as const,
+      finalDeliveryEvidencePresent: true,
+      pendingBlockers: [],
+      pendingReviewItemRefs: [],
+      artifacts: [
+        {
+          artifactId: "artifact:office-brief",
+          version: 1,
+          status: "materialized" as const,
+          mediaType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+          contentDigest: "sha256:office-brief-v1",
+          targetReferenceDigest: "sha256:office-brief-target",
+          materializedReference: "/OpenLife/Results/brief.docx",
+          observedContentDigest: "sha256:office-brief-v1",
+          sourceItemRef: {
+            id: "item:office-brief-delivery",
+            kind: "evidence" as const,
+            label: "Word 文档草稿",
+          },
+          sourceResourceRefs: [],
+          evidenceRefs: baseTask.evidenceRefs,
+          change: {
+            kind: "create" as const,
+            status: "materialized" as const,
+            targetReference: "/OpenLife/Results/brief.docx",
+          },
+          preview: { status: "available" as const, content: "季度总结\n结论\n核心指标稳定。" },
+          verification: {
+            status: "verified" as const,
+            expectedContentDigest: "sha256:office-brief-v1",
+            observedContentDigest: "sha256:office-brief-v1",
+            verificationItemPresent: true,
+          },
+          undo: { available: true },
+          revision: { available: true },
+        },
+      ],
+    };
+    const dataSource = {
+      ...fixture,
+      async load() {
+        const current = await fixture.load();
+        return {
+          ...current,
+          tasksEnvelope: {
+            ...current.tasksEnvelope,
+            data: { ...current.tasksEnvelope.data!, items: [officeTask] },
+          },
+        };
+      },
+    };
+
+    render(
+      <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
+    );
+
+    expect(await screen.findByText("Word 文档 · v1")).toBeInTheDocument();
+    expect(screen.getByText("提取内容")).toBeInTheDocument();
+    expect(screen.queryByText("预览")).not.toBeInTheDocument();
+  });
+
+  it("offers one compact grouped Undo entry for a verified multi-file result", async () => {
+    const fixture = workbenchFixtureDataSource("fixture-ready");
+    const snapshot = await fixture.load();
+    const baseTask = snapshot.tasksEnvelope.data!.items[0];
+    const artifact = (artifactId: string, path: string) => ({
+      artifactId,
+      version: 1,
+      status: "materialized" as const,
+      mediaType: "text/plain; charset=utf-8",
+      contentDigest: `sha256:${artifactId}`,
+      targetReferenceDigest: `sha256:${artifactId}:target`,
+      materializedReference: path,
+      observedContentDigest: `sha256:${artifactId}`,
+      sourceItemRef: {
+        id: `item:${artifactId}`,
+        kind: "evidence" as const,
+        label: "文件草稿",
+      },
+      sourceRunProvenance: baseTask.latestRunProvenance,
+      sourceResourceRefs: [],
+      evidenceRefs: baseTask.evidenceRefs,
+      change: {
+        kind: "replace" as const,
+        status: "materialized" as const,
+        targetReference: path,
+        expectedPriorDigest: `sha256:${artifactId}:prior`,
+      },
+      preview: { status: "available" as const, content: `Updated ${artifactId}` },
+      verification: {
+        status: "verified" as const,
+        expectedContentDigest: `sha256:${artifactId}`,
+        observedContentDigest: `sha256:${artifactId}`,
+        verificationItemPresent: true,
+      },
+      undo: { available: true },
+      revision: { available: true },
+    });
+    const task = {
+      ...baseTask,
+      lifecycleStatus: "completed" as const,
+      terminalDeliveryStatus: "delivered" as const,
+      finalDeliveryEvidencePresent: true,
+      pendingBlockers: [],
+      pendingReviewItemRefs: [],
+      artifacts: [
+        artifact("artifact:readme", "/OpenLife/README.md"),
+        artifact("artifact:notes", "/OpenLife/notes.txt"),
+      ],
+    };
+    const requestTaskArtifactUndo = vi
+      .fn()
+      .mockResolvedValueOnce({ failures: [] })
+      .mockResolvedValueOnce({
+        failures: [{ artifactId: "artifact:readme", reasonCode: "artifact_undo_source_changed" }],
+      });
+    const dataSource = {
+      ...fixture,
+      requestTaskArtifactUndo,
+      async load() {
+        const current = await fixture.load();
+        return {
+          ...current,
+          tasksEnvelope: {
+            ...current.tasksEnvelope,
+            data: { ...current.tasksEnvelope.data!, items: [task] },
+          },
+        };
+      },
+    };
+    const user = userEvent.setup();
+
+    render(
+      <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
+    );
+
+    await user.click(await screen.findByRole("button", { name: "撤销全部修改" }));
+    await waitFor(() => expect(requestTaskArtifactUndo).toHaveBeenCalledWith(task.canonicalTaskId));
+    expect(screen.getAllByRole("button", { name: "申请撤销此产物" })).toHaveLength(2);
+
+    await user.click(screen.getByRole("button", { name: "撤销全部修改" }));
+    await waitFor(() => expect(requestTaskArtifactUndo).toHaveBeenCalledTimes(2));
+    expect(
+      await screen.findByText("部分撤销决定已创建；1 项文件已被修改，OpenLife 未覆盖这些新内容。")
+    ).toBeInTheDocument();
+  });
+
+  it("presents a confirmed Artifact Undo as a verified historical result", async () => {
+    const fixture = workbenchFixtureDataSource("fixture-ready");
+    const snapshot = await fixture.load();
+    const baseTask = snapshot.tasksEnvelope.data!.items[0];
+    const undoneTask = {
+      ...baseTask,
+      lifecycleStatus: "completed" as const,
+      terminalDeliveryStatus: "delivered" as const,
+      finalDeliveryEvidencePresent: true,
+      pendingBlockers: [],
+      pendingReviewItemRefs: [],
+      artifacts: [
+        {
+          artifactId: "artifact:restored-plan",
+          version: 1,
+          status: "materialized" as const,
+          mediaType: "text/markdown; charset=utf-8",
+          contentDigest: "sha256:modified-plan",
+          targetReferenceDigest: "sha256:plan-target",
+          materializedReference: "/OpenLife/Results/旅行计划.md",
+          observedContentDigest: "sha256:modified-plan",
+          sourceItemRef: {
+            id: "item:restored-plan",
+            kind: "evidence" as const,
+            label: "旅行计划草稿",
+          },
+          sourceResourceRefs: [],
+          evidenceRefs: baseTask.evidenceRefs,
+          change: {
+            kind: "replace" as const,
+            status: "materialized" as const,
+            targetReference: "/OpenLife/Results/旅行计划.md",
+            expectedPriorDigest: "sha256:original-plan",
+          },
+          preview: { status: "available" as const, content: "# 撤销前的旅行计划" },
+          verification: {
+            status: "verified" as const,
+            expectedContentDigest: "sha256:modified-plan",
+            observedContentDigest: "sha256:modified-plan",
+            verificationItemPresent: true,
+            reasonCode: "artifact_undone",
+          },
+          undo: {
+            available: false,
+            operation: "restore_replaced" as const,
+            status: "undone",
+            proposalRef: {
+              id: "proposal:undo-restored-plan",
+              kind: "review_item" as const,
+              label: "Artifact Undo Review checkpoint",
+            },
+          },
+          revision: {
+            available: false,
+            reasonCode: "artifact_revision_conflicts_with_undo",
+          },
+        },
+      ],
+    };
+    const dataSource = {
+      ...fixture,
+      async load() {
+        const current = await fixture.load();
+        return {
+          ...current,
+          tasksEnvelope: {
+            ...current.tasksEnvelope,
+            data: { ...current.tasksEnvelope.data!, items: [undoneTask] },
+          },
+        };
+      },
+    };
+    const user = userEvent.setup();
+
+    render(
+      <ProductWorkbench workbenchDataSource={dataSource} conversationDataSource={dataSource} />
+    );
+
+    expect(await screen.findByText("已撤销")).toBeInTheDocument();
+    expect(screen.getByText("历史版本预览")).toBeInTheDocument();
+    expect(screen.getByText("# 撤销前的旅行计划")).toBeInTheDocument();
+    expect(screen.getByText("原产物已撤销；目标位置已恢复为替换前的内容。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "打开文件" })).not.toBeInTheDocument();
+    await user.click(screen.getByText("来源、完整性与恢复"));
+    expect(screen.getByText("撤销已核验")).toBeInTheDocument();
+    expect(
+      screen.getByText("该版本已按用户请求撤销；这里保留撤销前已核验的历史记录")
+    ).toBeInTheDocument();
   });
 
   it("renders a materialized Artifact while verification is still pending", async () => {
@@ -625,7 +879,8 @@ describe("OpenLife product shell", () => {
     const user = userEvent.setup();
     const fixture = workbenchFixtureDataSource("fixture-ready");
     const load = vi.fn(fixture.load);
-    const dataSource = { ...fixture, load };
+    const loadConversation = vi.fn(fixture.loadConversation);
+    const dataSource = { ...fixture, load, loadConversation };
 
     render(
       <ProductWorkbench
@@ -637,10 +892,16 @@ describe("OpenLife product shell", () => {
 
     await waitFor(() => expect(load.mock.calls.length).toBeGreaterThan(0));
     const callsBeforeSettingsReturn = load.mock.calls.length;
+    const conversationCallsBeforeSettingsReturn = loadConversation.mock.calls.length;
     await user.click(await screen.findByRole("button", { name: "设置" }));
     await user.click(await screen.findByRole("button", { name: "返回工作台" }));
 
     await waitFor(() => expect(load.mock.calls.length).toBeGreaterThan(callsBeforeSettingsReturn));
+    await waitFor(() =>
+      expect(loadConversation.mock.calls.length).toBeGreaterThan(
+        conversationCallsBeforeSettingsReturn
+      )
+    );
   });
 
   it("refreshes Workbench state before opening a review created from settings", async () => {
@@ -666,21 +927,20 @@ describe("OpenLife product shell", () => {
         },
       };
     });
-    const testProviderConnection = vi.fn(
-      async (...args: Parameters<typeof fixture.testProviderConnection>) => {
-        const outcome = await fixture.testProviderConnection(...args);
+    const testSavedProviderConnection = vi.fn(
+      async (...args: Parameters<NonNullable<typeof fixture.testSavedProviderConnection>>) => {
+        const outcome = await fixture.testSavedProviderConnection!(...args);
         providerReviewCreated = true;
         return outcome;
       }
     );
-    const dataSource = { ...fixture, load, testProviderConnection };
+    const dataSource = { ...fixture, load, testSavedProviderConnection };
 
     render(<ProductWorkbench workbenchDataSource={dataSource} settingsDataSource={dataSource} />);
 
     await user.click(await screen.findByRole("button", { name: "设置" }));
-    await user.click(screen.getByRole("button", { name: "测试连接" }));
-    await user.click(screen.getByRole("button", { name: "确认并测试" }));
-    await user.click(await screen.findByRole("button", { name: "查看并决定" }));
+    await user.click(await screen.findByRole("button", { name: "测试" }));
+    await user.click(await screen.findByRole("button", { name: "查看并确认" }));
 
     expect(
       await screen.findByRole("heading", { name: "允许一次模型连接测试", level: 2 })

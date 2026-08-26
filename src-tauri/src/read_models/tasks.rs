@@ -346,6 +346,8 @@ async fn canonical_task_input(
     snapshot: CanonicalTaskSnapshot,
     work_plan: Option<CanonicalWorkPlanRecord>,
 ) -> (TaskViewModelTaskInput, Vec<WorkspaceActivityItem>) {
+    let retired_work_personal_intelligence =
+        has_retired_work_personal_intelligence_completion(&snapshot);
     let run_ids = snapshot
         .runs
         .iter()
@@ -354,19 +356,33 @@ async fn canonical_task_input(
     let canonical_items = snapshot
         .items
         .iter()
-        .map(|item| TaskItemViewModel {
-            id: item.id.clone(),
-            run_id: item.run_id.clone(),
-            sequence: item.sequence,
-            kind: item.kind,
-            status: item.status,
-            summary_code: item.summary_code.clone(),
-            evidence_refs: vec![EvidenceRef {
+        .map(|item| {
+            let retired_completion_item = retired_work_personal_intelligence
+                && (item.summary_code.starts_with("work_memory_")
+                    || item.kind
+                        == openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult);
+            TaskItemViewModel {
                 id: item.id.clone(),
-                label: "Canonical Task Item".into(),
-                source: EvidenceSource::Task,
-                sensitivity: Some(EvidenceSensitivity::LocalPrivate),
-            }],
+                run_id: item.run_id.clone(),
+                sequence: item.sequence,
+                kind: item.kind,
+                status: if retired_completion_item {
+                    openlife_core::task_runtime::CanonicalTaskItemStatus::Blocked
+                } else {
+                    item.status
+                },
+                summary_code: if retired_completion_item {
+                    "legacy_work_personal_intelligence_unproven".into()
+                } else {
+                    item.summary_code.clone()
+                },
+                evidence_refs: vec![EvidenceRef {
+                    id: item.id.clone(),
+                    label: "Canonical Task Item".into(),
+                    source: EvidenceSource::Task,
+                    sensitivity: Some(EvidenceSensitivity::LocalPrivate),
+                }],
+            }
         })
         .collect::<Vec<_>>();
     let canonical_steerings = snapshot
@@ -418,7 +434,19 @@ async fn canonical_task_input(
                 href: None,
             }),
     );
-    let blockers = snapshot
+    pending_review_item_refs.extend(snapshot.artifacts.iter().filter_map(|artifact| {
+        artifact
+            .undo
+            .as_ref()
+            .filter(|undo| undo.status == "waiting_review")
+            .map(|undo| BackendEntityRef {
+                id: undo.proposal_id.clone(),
+                kind: BackendEntityKind::ReviewItem,
+                label: "Artifact Undo review".into(),
+                href: None,
+            })
+    }));
+    let mut blockers = snapshot
         .items
         .iter()
         .filter(|item| {
@@ -431,6 +459,9 @@ async fn canonical_task_input(
         })
         .map(|item| item.summary_code.clone())
         .collect::<Vec<_>>();
+    if retired_work_personal_intelligence {
+        blockers.push("legacy_work_personal_intelligence_unproven".into());
+    }
     let preview = canonical_result_preview(state, &snapshot, &canonical_artifacts)
         .await
         .or_else(|| canonical_task_preview(&snapshot));
@@ -445,11 +476,23 @@ async fn canonical_task_input(
         .items
         .iter()
         .map(|item| {
+            let retired_completion_item = retired_work_personal_intelligence
+                && (item.summary_code.starts_with("work_memory_")
+                    || item.kind
+                        == openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult);
+            let (status, summary) = if retired_completion_item {
+                (
+                    openlife_core::task_runtime::CanonicalTaskItemStatus::Blocked,
+                    "legacy_work_personal_intelligence_unproven".to_string(),
+                )
+            } else {
+                (item.status, item.summary_code.clone())
+            };
             WorkspaceActivityItem::from_product_event(
                 item.id.clone(),
                 item.kind.as_str(),
-                canonical_item_activity_summary(item.kind, &item.summary_code),
-                Some(item.status.as_str()),
+                canonical_item_activity_summary(item.kind, &summary),
+                Some(status.as_str()),
                 None,
                 vec![EvidenceRef {
                     id: item.id.clone(),
@@ -474,13 +517,16 @@ async fn canonical_task_input(
         attention.resolved_at.is_none()
             && attention.kind == openlife_core::task_runtime::CanonicalAttentionKind::ScopeStale
     });
-    let completion_disposition = snapshot.final_result.as_ref().map(|result| {
-        if result.summary_code.ends_with("_with_disclosed_limitations") {
-            TaskCompletionDisposition::CompleteWithDisclosedLimitations
-        } else {
-            TaskCompletionDisposition::Complete
-        }
-    });
+    let completion_disposition = (!retired_work_personal_intelligence)
+        .then_some(snapshot.final_result.as_ref())
+        .flatten()
+        .map(|result| {
+            if result.summary_code.ends_with("_with_disclosed_limitations") {
+                TaskCompletionDisposition::CompleteWithDisclosedLimitations
+            } else {
+                TaskCompletionDisposition::Complete
+            }
+        });
     let completion_limitations = snapshot
         .final_result
         .as_ref()
@@ -644,6 +690,11 @@ fn canonical_item_activity_summary(
     kind: openlife_core::task_runtime::CanonicalTaskItemKind,
     summary_code: &str,
 ) -> String {
+    if summary_code == "legacy_work_personal_intelligence_unproven"
+        || summary_code.starts_with("work_memory_")
+    {
+        return "历史 Work 个人智能路径已停用，不能作为任务完成证据。".into();
+    }
     let tool_name = summary_code.split_once(':').map(|(_, tool)| tool);
     match (kind, tool_name) {
         (openlife_core::task_runtime::CanonicalTaskItemKind::ToolCall, Some(tool)) => {
@@ -671,6 +722,9 @@ fn canonical_item_activity_summary(
 fn canonical_tool_label(tool: &str) -> &str {
     match tool {
         "document.read" => "本地文档读取",
+        "folder.list" => "Project 目录枚举",
+        "file.search" => "Project 文件搜索",
+        "file.read" => "Project 文件读取",
         "web.search" => "Web 搜索",
         "web.fetch" => "网页读取",
         "mcp.read_only" => "MCP 只读工具",
@@ -678,18 +732,27 @@ fn canonical_tool_label(tool: &str) -> &str {
     }
 }
 
+fn has_retired_work_personal_intelligence_completion(snapshot: &CanonicalTaskSnapshot) -> bool {
+    snapshot.items.iter().any(|item| {
+        item.status == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+            && item.summary_code.starts_with("work_memory_")
+    })
+}
+
 fn canonical_general_delivery_status(
     snapshot: &CanonicalTaskSnapshot,
 ) -> (TaskLifecycleStatus, TaskTerminalDeliveryStatus, bool) {
-    let delivered = snapshot.final_result.as_ref().is_some_and(|result| {
-        snapshot.items.iter().any(|item| {
-            item.id == result.item_id
-                && item.run_id == result.run_id
-                && item.kind == openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult
-                && item.status == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
-                && item.payload_digest == result.result_digest
-        })
-    });
+    let delivered = !has_retired_work_personal_intelligence_completion(snapshot)
+        && snapshot.final_result.as_ref().is_some_and(|result| {
+            snapshot.items.iter().any(|item| {
+                item.id == result.item_id
+                    && item.run_id == result.run_id
+                    && item.kind == openlife_core::task_runtime::CanonicalTaskItemKind::FinalResult
+                    && item.status
+                        == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+                    && item.payload_digest == result.result_digest
+            })
+        });
     match snapshot.task.status {
         CanonicalTaskStatus::Running => (
             TaskLifecycleStatus::Running,
@@ -744,6 +807,11 @@ async fn canonical_result_preview(
     snapshot: &CanonicalTaskSnapshot,
     artifact_views: &[TaskArtifactViewModel],
 ) -> Option<String> {
+    if has_retired_work_personal_intelligence_completion(snapshot) {
+        return Some(
+            "历史运行使用了已停用的 Work 个人智能路径，不能证明原任务已完成。请创建新运行。".into(),
+        );
+    }
     let result = snapshot.final_result.as_ref()?;
     if !artifact_views.is_empty() {
         let undone = snapshot
@@ -807,58 +875,41 @@ fn canonical_artifact_delivery_status(
                         == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
             })
     });
-    let delivery_proven = !snapshot.artifacts.is_empty()
-        && artifact_views.len() == snapshot.artifacts.len()
-        && snapshot
-            .artifacts
-            .iter()
-            .zip(artifact_views.iter())
-            .all(|(artifact, artifact_view)| {
-            let observed_digest = artifact
-                .current_version
-                .observed_content_digest
-                .as_deref()
-                .unwrap_or("");
-            let expected_verification_id = openlife_core::task_runtime::artifact_verification_item_id(
-                &artifact.artifact.id,
-                artifact.current_version.version,
-                observed_digest,
-            );
-            let governed_undo_proven = artifact
-                .undo
-                .as_ref()
-                .is_some_and(|undo| undo.status == "undone")
-                && snapshot.items.iter().any(|item| {
-                    item.kind
-                        == openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint
-                        && item.status
-                            == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
-                        && item.summary_code == "artifact_undo_confirmed"
-                        && snapshot.attempts.iter().any(|attempt| {
-                            attempt.item_id == item.id
-                                && attempt.executor_kind == "materializer"
-                                && attempt.status
-                                    == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
-                                && attempt.receipt_digest.is_some()
-                        })
-                });
-            artifact.artifact.status == CanonicalArtifactStatus::Materialized
-                && artifact.artifact.content_digest == observed_digest
-                && artifact.artifact.materialized_reference.is_some()
-                && artifact.artifact.materialized_reference
-                    == artifact.current_version.materialized_reference
-                && snapshot.items.iter().any(|item| {
-                    item.id == expected_verification_id
+    let delivery_proven =
+        !snapshot.artifacts.is_empty()
+            && artifact_views.len() == snapshot.artifacts.len()
+            && snapshot.artifacts.iter().zip(artifact_views.iter()).all(
+                |(artifact, artifact_view)| {
+                    let observed_digest = artifact
+                        .current_version
+                        .observed_content_digest
+                        .as_deref()
+                        .unwrap_or("");
+                    let expected_verification_id =
+                        openlife_core::task_runtime::artifact_verification_item_id(
+                            &artifact.artifact.id,
+                            artifact.current_version.version,
+                            observed_digest,
+                        );
+                    let governed_undo_proven = governed_artifact_undo_proven(snapshot, artifact);
+                    artifact.artifact.status == CanonicalArtifactStatus::Materialized
+                        && artifact.artifact.content_digest == observed_digest
+                        && artifact.artifact.materialized_reference.is_some()
+                        && artifact.artifact.materialized_reference
+                            == artifact.current_version.materialized_reference
+                        && snapshot.items.iter().any(|item| {
+                            item.id == expected_verification_id
                         && item.kind
                             == openlife_core::task_runtime::CanonicalTaskItemKind::Verification
                         && item.status
                             == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
-                })
-                && (artifact_view.verification.status
-                    == TaskArtifactVerificationStatus::Verified
-                    || governed_undo_proven)
-        })
-        && final_result_present;
+                        })
+                        && (artifact_view.verification.status
+                            == TaskArtifactVerificationStatus::Verified
+                            || governed_undo_proven)
+                },
+            )
+            && final_result_present;
     match snapshot.task.status {
         CanonicalTaskStatus::Running => (
             TaskLifecycleStatus::Running,
@@ -906,6 +957,33 @@ fn canonical_artifact_delivery_status(
             false,
         ),
     }
+}
+
+fn governed_artifact_undo_proven(
+    task: &CanonicalTaskSnapshot,
+    artifact: &CanonicalArtifactSnapshot,
+) -> bool {
+    let expected_item_id = openlife_core::task_runtime::artifact_undo_item_id(
+        &artifact.artifact.id,
+        artifact.current_version.version,
+    );
+    artifact
+        .undo
+        .as_ref()
+        .is_some_and(|undo| undo.status == "undone")
+        && task.items.iter().any(|item| {
+            item.id == expected_item_id
+                && item.kind == openlife_core::task_runtime::CanonicalTaskItemKind::ReviewCheckpoint
+                && item.status == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+                && item.summary_code == "artifact_undo_confirmed"
+                && task.attempts.iter().any(|attempt| {
+                    attempt.item_id == item.id
+                        && attempt.executor_kind == "materializer"
+                        && attempt.status
+                            == openlife_core::task_runtime::CanonicalTaskItemStatus::Completed
+                        && attempt.receipt_digest.is_some()
+                })
+        })
 }
 
 async fn canonical_artifact_view(
@@ -1057,15 +1135,17 @@ fn artifact_undo_view(
                 .then(|| "artifact_undo_pending_or_failed".into()),
         };
     }
-    let recoverable_change = change.kind == TaskArtifactChangeKind::Create
-        || (change.kind == TaskArtifactChangeKind::Replace
-            && snapshot
-                .pre_change_snapshot
-                .as_ref()
-                .is_some_and(|pre_change| {
-                    snapshot.current_version.expected_target_digest.as_deref()
-                        == Some(pre_change.content_digest.as_str())
-                }));
+    let recoverable_change = matches!(
+        change.kind,
+        TaskArtifactChangeKind::Create | TaskArtifactChangeKind::Rename
+    ) || (change.kind == TaskArtifactChangeKind::Replace
+        && snapshot
+            .pre_change_snapshot
+            .as_ref()
+            .is_some_and(|pre_change| {
+                snapshot.current_version.expected_target_digest.as_deref()
+                    == Some(pre_change.content_digest.as_str())
+            }));
     let available = snapshot.artifact.status == CanonicalArtifactStatus::Materialized
         && verification.status == TaskArtifactVerificationStatus::Verified
         && recoverable_change;
@@ -1100,6 +1180,26 @@ async fn artifact_presentation(
     task: &CanonicalTaskSnapshot,
     verification_item_present: bool,
 ) -> ArtifactPresentation {
+    let reviewed_operation = if let (Some(proposal_store), Some(checkpoint)) = (
+        state.proposal_store.as_ref(),
+        snapshot.review_checkpoint.as_ref(),
+    ) {
+        proposal_store
+            .lock()
+            .await
+            .get_proposal(&checkpoint.proposal_id)
+            .ok()
+            .flatten()
+            .and_then(|proposal| {
+                proposal
+                    .after
+                    .get("operation")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::to_string)
+            })
+    } else {
+        None
+    };
     let unavailable = |reason: &str| TaskArtifactPreviewViewModel {
         status: TaskArtifactPreviewStatus::Unavailable,
         content: None,
@@ -1132,7 +1232,9 @@ async fn artifact_presentation(
         snapshot.current_version.target_reference.as_ref(),
         snapshot.current_version.expected_target_absent,
     ) {
-        change.kind = if expected_absent {
+        change.kind = if reviewed_operation.as_deref() == Some("move") {
+            TaskArtifactChangeKind::Rename
+        } else if expected_absent {
             TaskArtifactChangeKind::Create
         } else {
             TaskArtifactChangeKind::Replace
@@ -1159,6 +1261,50 @@ async fn artifact_presentation(
             }
         }
         verification.reason_code = Some("artifact_waiting_materialization".to_string());
+        return ArtifactPresentation {
+            change,
+            preview,
+            verification,
+        };
+    }
+
+    if snapshot
+        .undo
+        .as_ref()
+        .is_some_and(|undo| undo.status == "undone")
+    {
+        if !governed_artifact_undo_proven(task, snapshot) {
+            verification.status = TaskArtifactVerificationStatus::Unknown;
+            verification.reason_code = Some("artifact_undo_confirmation_incomplete".to_string());
+            return ArtifactPresentation {
+                change,
+                preview,
+                verification,
+            };
+        }
+        if let Some(draft_reference) = snapshot.current_version.draft_reference.as_deref() {
+            match read_canonical_artifact_draft(
+                state,
+                draft_reference,
+                &snapshot.artifact.content_digest,
+                &snapshot.artifact.media_type,
+            )
+            .await
+            {
+                Ok(content) => preview = bounded_artifact_preview(&content),
+                Err(reason) => preview = unavailable(&reason),
+            }
+        }
+        if snapshot.current_version.observed_content_digest.as_deref()
+            == Some(snapshot.artifact.content_digest.as_str())
+            && verification_item_present
+        {
+            verification.status = TaskArtifactVerificationStatus::Verified;
+            verification.reason_code = Some("artifact_undone".to_string());
+        } else {
+            verification.status = TaskArtifactVerificationStatus::Unknown;
+            verification.reason_code = Some("artifact_undo_prior_verification_missing".to_string());
+        }
         return ArtifactPresentation {
             change,
             preview,
@@ -1706,6 +1852,103 @@ mod tests {
             .allowed_controls
             .iter()
             .any(|control| control.kind == openlife_core::agent::TaskControlKind::Retry));
+    }
+
+    #[tokio::test]
+    async fn retired_work_memory_completion_never_receives_delivery_credit() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let instruction_digest = openlife_core::agent::metadata_safe_text_digest(
+            "read selected Project files and summarize them",
+        )
+        .1;
+        let result_digest = openlife_core::agent::metadata_safe_text_digest(
+            "legacy memory receipt incorrectly used as the final result",
+        )
+        .1;
+        let store = state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await;
+        store
+            .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: "turn-retired-memory-route",
+                instruction_digest: &instruction_digest,
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+                execution_mode: openlife_core::task_runtime::WorkExecutionMode::ScopedAgent,
+            })
+            .unwrap();
+        store
+            .append_completed_observation(
+                &task_id,
+                &run_id,
+                "item:retired-memory-route",
+                "work_memory_suggestion_committed",
+                &result_digest,
+            )
+            .unwrap();
+        let final_item_id = openlife_core::task_runtime::final_result_item_id(&task_id, &run_id);
+        store
+            .complete_general_task(openlife_core::task_runtime::CompleteGeneralTaskInput {
+                task_id: &task_id,
+                run_id: &run_id,
+                final_item_id: &final_item_id,
+                conversation_item_id: "conversation-item-retired-memory-route",
+                result_digest: &result_digest,
+                summary_code: "work_completed",
+                completion_limitations: &[],
+            })
+            .unwrap();
+        drop(store);
+
+        let envelope = get_tasks_view_model_with_state(&state).await.unwrap();
+        let task = envelope
+            .data
+            .unwrap()
+            .items
+            .into_iter()
+            .find(|task| task.canonical_task_id == task_id)
+            .unwrap();
+        assert_eq!(
+            task.lifecycle_status,
+            openlife_core::agent::TaskLifecycleStatus::CompletedNeedsEvidence
+        );
+        assert_eq!(
+            task.terminal_delivery_status,
+            openlife_core::agent::TaskTerminalDeliveryStatus::MissingFinalDeliveryEvidence
+        );
+        assert!(!task.final_delivery_evidence_present);
+        assert_eq!(task.completion_disposition, None);
+        assert_eq!(
+            task.items
+                .iter()
+                .filter(|item| {
+                    item.status == openlife_core::task_runtime::CanonicalTaskItemStatus::Blocked
+                        && item.summary_code == "legacy_work_personal_intelligence_unproven"
+                })
+                .count(),
+            2
+        );
+        assert!(task
+            .pending_blockers
+            .iter()
+            .any(|code| code == "legacy_work_personal_intelligence_unproven"));
+        assert!(task.latest_result_preview.is_some_and(|preview| {
+            preview
+                .preview
+                .is_some_and(|text| text.contains("不能证明原任务已完成"))
+                && preview.final_delivery_ref.is_none()
+        }));
     }
 
     #[tokio::test]

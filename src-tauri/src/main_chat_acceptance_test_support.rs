@@ -27,7 +27,7 @@ pub(crate) fn apply_live_search_eval_env(config: &mut openlife_core::config::App
         // exact selected provider route. Custom gateways cannot inherit the
         // selected credential and therefore fail closed here.
         config.system.search_provider = "auto".into();
-        if !config.search_reuses_selected_provider_credential() {
+        if !test_route_supports_hosted_search(config) {
             config.system.search_provider = "unavailable".into();
         }
     }
@@ -37,6 +37,26 @@ pub(crate) fn apply_live_search_eval_env(config: &mut openlife_core::config::App
     if let Ok(url) = std::env::var("OPENLIFE_LIVE_EVAL_SEARXNG_URL") {
         config.system.searxng_url = url;
     }
+}
+
+fn test_route_supports_hosted_search(config: &openlife_core::config::AppConfig) -> bool {
+    let provider = config.llm.provider.trim().to_ascii_lowercase();
+    let Ok(url) = reqwest::Url::parse(config.llm.openai_base.trim()) else {
+        return false;
+    };
+    let path = url.path().trim_end_matches('/');
+    let official_origin = url.scheme() == "https"
+        && url.port_or_known_default() == Some(443)
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.query().is_none()
+        && url.fragment().is_none();
+    official_origin
+        && match provider.as_str() {
+            "deepseek" => url.host_str() == Some("api.deepseek.com") && matches!(path, "" | "/v1"),
+            "openrouter" => url.host_str() == Some("openrouter.ai") && path == "/api/v1",
+            _ => false,
+        }
 }
 
 pub(crate) async fn configure_live_provider_eval_state_with_local_http_provider(

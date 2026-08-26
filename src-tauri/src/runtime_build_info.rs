@@ -21,6 +21,7 @@ fn product_name_for_profile(profile: &str) -> &'static str {
 pub struct RuntimeBuildInfo {
     pub profile: String,
     pub git_sha: String,
+    pub source_state: String,
     pub build_time: String,
     pub current_exe: String,
     pub binary_kind: String,
@@ -49,6 +50,13 @@ pub fn build_time() -> String {
         .or_else(|| option_env!("OPENLIFE_BUILD_TIMESTAMP").map(str::to_string))
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| "unknown".to_string())
+}
+
+pub fn build_source_state() -> String {
+    option_env!("OPENLIFE_BUILD_SOURCE_STATE")
+        .filter(|value| matches!(*value, "clean" | "dirty"))
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 pub fn current_exe_label() -> String {
@@ -115,6 +123,7 @@ pub async fn collect_runtime_build_info() -> RuntimeBuildInfo {
     RuntimeBuildInfo {
         profile,
         git_sha: build_git_sha(),
+        source_state: build_source_state(),
         build_time: build_time(),
         current_exe: current_exe_label(),
         binary_kind: current_binary_kind(),
@@ -150,5 +159,9 @@ mod tests {
         assert_eq!(product_name_for_profile("release"), "OpenLife");
         assert_eq!(product_name_for_profile("dev"), "OpenLife Dev");
         assert_eq!(product_name_for_profile("qa"), "OpenLife QA");
+        assert!(matches!(
+            build_source_state().as_str(),
+            "clean" | "dirty" | "unknown"
+        ));
     }
 }

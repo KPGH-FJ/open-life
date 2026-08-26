@@ -757,6 +757,9 @@ export function workbenchFixtureDataSource(id: WorkbenchFixtureId): WorkbenchFix
       await applyTaskControl(control);
     },
     async requestArtifactUndo() {},
+    async requestTaskArtifactUndo() {
+      return { failures: [] };
+    },
     async reviseArtifact() {},
     async openArtifactResult() {},
     async exportArtifactResult() {

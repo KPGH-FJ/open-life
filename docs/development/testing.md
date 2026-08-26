@@ -107,6 +107,17 @@ Native review uses the current Tauri bundle and a purpose-specific profile:
 OPENLIFE_CODESIGN_IDENTITY="OpenLife Local Code Signing" \
   scripts/macos-exact-native.zsh
 
+# Build, verify, then recoverably replace one explicit formal install target.
+# Any existing app is moved to a timestamped sibling backup and retained.
+OPENLIFE_CODESIGN_IDENTITY="OpenLife Local Code Signing" \
+OPENLIFE_INSTALL_PATH="/absolute/path/to/OpenLife.app" \
+  scripts/macos-exact-native.zsh --install
+
+# Re-check the installed bundle against the already verified build.
+OPENLIFE_CODESIGN_IDENTITY="OpenLife Local Code Signing" \
+OPENLIFE_INSTALL_PATH="/absolute/path/to/OpenLife.app" \
+  scripts/macos-exact-native.zsh --verify-installed
+
 OPENLIFE_NATIVE_PROFILE=qa \
 OPENLIFE_CODESIGN_IDENTITY="OpenLife Local Code Signing" \
   scripts/macos-exact-native.zsh
@@ -114,8 +125,15 @@ OPENLIFE_CODESIGN_IDENTITY="OpenLife Local Code Signing" \
 
 Release expects `ai.openlife.desktop`; QA expects
 `ai.openlife.desktop.qa`. The verifier checks the selected signing identity,
-bundle identifier, Designated Requirement binding, and strict deep resource
-seal. It never reads secret values.
+bundle identifier, product version, embedded build commit, Designated
+Requirement binding, strict deep resource seal, and executable SHA-256. Formal
+release builds fail closed unless the checkout is a clean commit. QA builds may
+include local changes, but runtime diagnostics must label that source state
+instead of presenting the Git commit alone as exact source identity. Installation
+requires one explicit absolute `.app` target, stages and verifies the copy
+before replacement, retains the previous bundle as a timestamped sibling
+backup, and proves the installed executable hash equals the verified build. It
+never reads secret values or modifies the profile data directory.
 
 Release uses the product Keychain service. Dev and QA use separate identities,
 data directories, and atomic `0600` local profile secret files. A Provider or

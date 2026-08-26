@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
-const CREDENTIAL_BOOTSTRAP_SNAPSHOT_VERSION: &str = "credential_bootstrap_v1";
+const CREDENTIAL_BOOTSTRAP_SNAPSHOT_VERSION: &str = "credential_bootstrap_v2";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +50,8 @@ impl CredentialBootstrapStatus {
 pub struct CredentialPurposeBootstrapState {
     pub purpose: String,
     pub status: CredentialBootstrapStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope_digest: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -69,26 +71,34 @@ impl CredentialBootstrapSnapshot {
             .map(|(purpose, status)| CredentialPurposeBootstrapState {
                 purpose: purpose.into(),
                 status,
+                scope_digest: None,
             })
             .collect::<Vec<_>>();
         purposes.push(CredentialPurposeBootstrapState {
-            purpose: "provider_api_key".into(),
+            purpose: "provider_connections".into(),
             status: CredentialBootstrapStatus::MissingExistingData,
+            scope_digest: None,
         });
         purposes.push(CredentialPurposeBootstrapState {
             purpose: "search_provider_api_key".into(),
             status: CredentialBootstrapStatus::MissingExistingData,
+            scope_digest: None,
         });
         Self::from_purposes(purposes)
     }
 
-    pub(crate) fn with_provider_status(mut self, status: CredentialBootstrapStatus) -> Self {
+    pub(crate) fn with_provider_connections_status(
+        mut self,
+        status: CredentialBootstrapStatus,
+        scope_digest: Option<String>,
+    ) -> Self {
         if let Some(provider) = self
             .purposes
             .iter_mut()
-            .find(|item| item.purpose == "provider_api_key")
+            .find(|item| item.purpose == "provider_connections")
         {
             provider.status = status;
+            provider.scope_digest = scope_digest;
         }
         Self::from_purposes(self.purposes)
     }
@@ -112,6 +122,10 @@ impl CredentialBootstrapSnapshot {
                 material.push_str(&item.purpose);
                 material.push('=');
                 material.push_str(item.status.as_str());
+                if let Some(scope_digest) = item.scope_digest.as_deref() {
+                    material.push('@');
+                    material.push_str(scope_digest);
+                }
                 material
             },
         );
@@ -293,6 +307,11 @@ pub struct AppState {
     /// substituting deterministic keyword planning.
     #[cfg(test)]
     pub work_initial_decision_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
+    /// Controlled output for the independent authenticated Work-goal contract.
+    /// Product builds always ask the selected provider before planning; tests
+    /// may supply the capability floor without relying on keyword routing.
+    #[cfg(test)]
+    pub work_goal_contract_fixture_output: Arc<tokio::sync::Mutex<Option<String>>>,
     /// Controlled typed replanning output for an authenticated Steering item.
     /// Product builds always use the selected provider at the safe checkpoint.
     #[cfg(test)]

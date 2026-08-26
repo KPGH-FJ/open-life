@@ -375,6 +375,13 @@ async fn apply_authorized_suggestion_with_state(
     };
 
     debug_assert!(!PERSONAL_INTELLIGENCE_SUGGESTION_PORT_VERSION.is_empty());
+    // Work does not yet carry an independently verified personal-intelligence
+    // intent capability. A model-selected action and matching sourceSpan prove
+    // provenance only, so an ordinary Task must fail closed before any durable
+    // Memory or LifeModel effect. The explicit Chat lane remains separate.
+    if request.task_id.is_some() {
+        return Err("personal_intelligence_explicit_intent_not_proven".into());
+    }
     let source_digest = openlife_core::agent::metadata_safe_text_digest(request.user_text).1;
     if !request.user_message_proof.is_live()
         || request.user_message_proof.content_digest() != source_digest
@@ -1147,6 +1154,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn source_span_from_an_ordinary_file_request_does_not_prove_memory_intent() {
+        let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
+        let user_text = "读取当前 Project 中的 README.md 并给出摘要。不要修改任何文件。";
+        let (conversation_id, turn_id, proof, epoch) =
+            begin_personal_action(&state, user_text).await;
+
+        let error = apply_authorized_personal_intelligence_suggestion(
+            &state,
+            PersonalIntelligenceSuggestionRequest {
+                conversation_id: &conversation_id,
+                task_id: Some("task:file-read-regression"),
+                run_id: Some(&turn_id),
+                user_text,
+                action: AgentPersonalIntelligenceStep {
+                    action: AgentPersonalIntelligenceAction::Remember,
+                    source_span: Some("README.md".into()),
+                    query: None,
+                    memory_kind: Some(AgentMemoryKind::Fact),
+                    scope: Some(AgentMemoryScope::Personal),
+                    life_model_section: None,
+                    life_model_statement: None,
+                },
+                user_message_proof: &proof,
+                execution_epoch: &epoch,
+            },
+        )
+        .await
+        .expect_err("a sourceSpan proves provenance, not explicit Memory intent");
+
+        assert_eq!(error, "personal_intelligence_explicit_intent_not_proven");
+        assert!(state
+            .memory_lifecycle_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .list_active_records(None, 10)
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
     async fn typed_sensitive_memory_stages_review_without_changing_memory_truth() {
         let state = crate::main_chat_eval_state::build_isolated_main_chat_eval_state();
         let user_text = "将下述信息记作个人资料：身份证号 110101199001011234。";
@@ -1397,8 +1446,8 @@ mod tests {
             &state,
             PersonalIntelligenceSuggestionRequest {
                 conversation_id: &conversation_id,
-                task_id: Some(&uuid::Uuid::new_v4().to_string()),
-                run_id: Some(&uuid::Uuid::new_v4().to_string()),
+                task_id: None,
+                run_id: None,
                 user_text,
                 action: AgentPersonalIntelligenceStep {
                     action: AgentPersonalIntelligenceAction::SuggestLifeModel,

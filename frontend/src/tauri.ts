@@ -20,6 +20,7 @@ export {
   restoreChatSession,
   removeProjectReadRoot,
   selectMainChatSkill,
+  selectConversation,
   setConversationMemoryMode,
   startStreamMessage,
   submitMainChatTaskSteering,
@@ -44,7 +45,6 @@ export {
   revokeToolPermission,
   saveConfig,
   selectArtifactOutputDirectory,
-  testLlmConnection,
 } from "./ipc/settings";
 export {
   acceptProposal,
@@ -85,29 +85,18 @@ export type CloudApiValidationStatus =
   | "scripted_provider_probe"
   | "scripted_dogfood";
 
+export type CloudProviderId =
+  | "deepseek"
+  | "openai"
+  | "openrouter"
+  | "gemini"
+  | "siliconflow"
+  | "moonshot"
+  | "dashscope"
+  | "zhipu"
+  | "custom";
+
 export interface AppConfig {
-  llm: {
-    provider?:
-      | "deepseek"
-      | "openai"
-      | "openrouter"
-      | "gemini"
-      | "siliconflow"
-      | "moonshot"
-      | "dashscope"
-      | "zhipu"
-      | "custom";
-    openai_base: string;
-    // Rust omits the runtime secret when serializing get_config. The field is
-    // present only when the user submits a replacement credential.
-    openai_key?: string;
-    // Non-secret credential-store reference used only to represent presence.
-    openai_key_ref?: string;
-    credential_version?: number;
-    embedding_model: string;
-    chat_model: string;
-    embedding_enabled?: boolean;
-  };
   prefer_local_model: boolean;
   local_model: string;
   system?: {
@@ -138,7 +127,11 @@ export interface ArtifactOutputDirectorySelection {
 }
 
 export interface CredentialRecoveryItem {
-  purpose: "canonical_task_receipts" | "mcp_audit" | "provider_api_key" | "search_provider_api_key";
+  purpose:
+    | "canonical_task_receipts"
+    | "mcp_audit"
+    | "provider_connections"
+    | "search_provider_api_key";
   status:
     | CredentialBootstrapStatus
     | "created"
@@ -425,6 +418,7 @@ export interface SubmitMainChatSteeringResponse {
 export interface RuntimeBuildInfo {
   profile: "dev" | "qa" | "release" | string;
   gitSha: string;
+  sourceState: "clean" | "dirty" | "unknown" | string;
   buildTime: string;
   currentExe: string;
   binaryKind: "debug_binary" | "debug_bundle" | "release_bundle" | "unknown" | string;
@@ -618,9 +612,10 @@ export interface CredentialBootstrapSnapshot {
     purpose:
       | "canonical_task_receipts"
       | "mcp_audit"
-      | "provider_api_key"
+      | "provider_connections"
       | "search_provider_api_key";
     status: CredentialBootstrapStatus;
+    scopeDigest?: string;
   }>;
 }
 
@@ -787,6 +782,7 @@ export type ReviewItemDecisionStatus =
   | "pending"
   | "approved"
   | "rejected"
+  | "cancelled"
   | "edited"
   | "deferred"
   | "unknown";
@@ -1484,7 +1480,7 @@ export type TaskArtifactViewModel = {
   sourceResourceRefs: EvidenceRef[];
   evidenceRefs: EvidenceRef[];
   change: {
-    kind: "create" | "replace" | "unknown";
+    kind: "create" | "replace" | "rename" | "unknown";
     status: CanonicalArtifactStatus;
     targetReference?: string;
     expectedPriorDigest?: string;
@@ -1503,7 +1499,7 @@ export type TaskArtifactViewModel = {
   };
   undo: {
     available: boolean;
-    operation?: "trash_created" | "restore_replaced";
+    operation?: "trash_created" | "restore_replaced" | "restore_moved";
     status?: string;
     proposalRef?: BackendEntityRef;
     reasonCode?: string;
@@ -1699,6 +1695,37 @@ export interface LlmConnectionTestResult {
   provider_invocation_receipt?: ProviderInvocationReceipt;
 }
 
+export interface ProviderConnectionModelViewModel {
+  profileId: string;
+  modelId: string;
+  displayName: string;
+  selected: boolean;
+  validationState: string;
+}
+
+export interface ProviderConnectionViewModel {
+  id: string;
+  providerId: CloudProviderId;
+  displayName: string;
+  endpoint: string;
+  credentialState: "stored" | "missing" | "invalid" | "unavailable" | "not_required";
+  validationState: string;
+  models: ProviderConnectionModelViewModel[];
+}
+
+export interface ProviderConnectionsViewModel {
+  connections: ProviderConnectionViewModel[];
+}
+
+export interface SaveProviderConnectionInput {
+  id?: string;
+  providerId: CloudProviderId;
+  displayName: string;
+  endpoint: string;
+  modelId: string;
+  credential?: string;
+}
+
 export interface ProviderInvocationReceipt {
   request_id: string;
   provider: string;
@@ -1728,6 +1755,8 @@ export interface ChatSession {
 export interface ConversationTurnViewModel {
   turnId: string;
   status: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  taskId?: string | null;
+  runId?: string | null;
   providerProfileId: string;
   providerId: string;
   modelId: string;
@@ -1740,6 +1769,7 @@ export interface ProviderProfileViewModel {
   profileId: string;
   providerId: string;
   modelId: string;
+  displayName?: string;
   endpointClass: string;
   selected: boolean;
   availability: "ready" | "unverified" | "offline" | "stale" | "degraded" | "unconfigured";
@@ -1758,9 +1788,19 @@ export interface ProviderProfileViewModel {
     | "provider_discovery"
     | "explicit_configuration"
     | "unavailable";
+  inputModalities: Array<"text" | "image" | "file" | "audio" | "video">;
+  inputCapabilitySource: "adapter_default" | "provider_discovery" | "explicit_configuration";
   chatCompatibility: "validated" | "reachable_unverified" | "unverified" | "unavailable";
   workCompatibility: "validated" | "unverified" | "observed_contract_failure";
   workCompatibilityReason: string | null;
+  workCompatibilityEvalVersion?: string | null;
+  workCompatibilityEvaluatedAt?: string | null;
+  toolCompatibility?:
+    | "validated"
+    | "provider_declared"
+    | "unverified"
+    | "observed_contract_failure";
+  toolCompatibilityReason?: string | null;
 }
 
 export type ReasoningEffort = "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";

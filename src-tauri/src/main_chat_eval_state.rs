@@ -95,6 +95,7 @@ pub(crate) fn build_isolated_main_chat_eval_state() -> Arc<AppState> {
         credential_bootstrap_snapshot: Default::default(),
         web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         work_initial_decision_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+        work_goal_contract_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         work_steering_replan_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
         work_agent_step_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         work_semantic_verification_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),

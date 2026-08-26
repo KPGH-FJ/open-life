@@ -280,6 +280,13 @@ impl ResourceGateway {
         &self.store
     }
 
+    /// Killable parser boundary shared by imported resources and ephemeral
+    /// Project-file reads. Callers may extract a governed observation through
+    /// this process, but only `ResourceGateway` may commit imported resources.
+    pub fn parser(&self) -> &ResourceParserProcess {
+        &self.parser
+    }
+
     pub async fn import_resources(
         &self,
         operation_id: String,

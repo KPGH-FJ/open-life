@@ -5,7 +5,6 @@ use openlife_core::llm::ChatMessage;
 use std::sync::Arc;
 use tauri::{Emitter, Manager, State};
 
-mod agent_memory_learning;
 pub(crate) mod artifact_materializer;
 pub mod bootstrap;
 mod canonical_chat_runtime;
@@ -69,8 +68,9 @@ use commands::chat::{
     add_project_read_root, archive_chat_session, archive_project, assign_conversation_project,
     bind_project_directory, create_chat_session, create_project_from_directory,
     delete_chat_session, delete_project, get_conversation_view_model, remove_project_read_root,
-    rename_chat_session, restore_chat_session, restore_project, select_new_conversation_project,
-    set_conversation_memory_mode, update_project_name,
+    rename_chat_session, restore_chat_session, restore_project, select_conversation,
+    select_new_conversation_project, select_provider_profile, set_conversation_memory_mode,
+    update_project_name,
 };
 use commands::life_model::{
     confirm_lifemodel_learning_candidate, delete_lifemodel_learning_candidate,
@@ -84,10 +84,12 @@ use commands::memory::{
 };
 use commands::proposal::{
     accept_proposal, postpone_proposal, reject_proposal, request_artifact_undo,
-    rollback_memory_asset,
+    request_task_artifact_undo, rollback_memory_asset,
 };
 use commands::settings::{
-    get_config, recover_required_credential_access, save_config, test_llm_connection,
+    delete_provider_connection, get_config, get_provider_connections,
+    recover_required_credential_access, save_config, save_provider_connection,
+    test_provider_connection,
 };
 use commands::tool_permissions::revoke_tool_permission;
 use life_state_projection::get_life_state_projection;
@@ -751,7 +753,10 @@ pub fn run() {
             get_product_diagnostics_view_model,
             get_tool_permission_view_model,
             get_config,
+            get_provider_connections,
             save_config,
+            save_provider_connection,
+            delete_provider_connection,
             select_artifact_output_directory,
             recover_required_credential_access,
             revoke_tool_permission,
@@ -766,6 +771,7 @@ pub fn run() {
             accept_proposal,
             reject_proposal,
             request_artifact_undo,
+            request_task_artifact_undo,
             postpone_proposal,
             rollback_memory_asset,
             correct_memory,
@@ -783,7 +789,9 @@ pub fn run() {
             detach_resource_from_turn,
             submit_main_chat_task_steering,
             get_conversation_view_model,
-            test_llm_connection,
+            select_conversation,
+            select_provider_profile,
+            test_provider_connection,
             create_chat_session,
             create_project_from_directory,
             bind_project_directory,

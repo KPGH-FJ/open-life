@@ -9,10 +9,9 @@ use openlife_core::network_client::NetworkPolicyDecision;
 use openlife_core::scheduler::ProviderInvocationTerminalProof;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::errors::AppError;
-use crate::storage::app_data_dir;
 
 pub(crate) const PROVIDER_VALIDATION_TTL_HOURS: i64 = 24;
 const PROVIDER_VALIDATION_MAX_CLOCK_SKEW_MINUTES: i64 = 5;
@@ -51,10 +50,34 @@ pub(crate) struct ProviderValidationRecord {
     /// copied into this durable projection.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invocation_receipt: Option<ProviderInvocationReceipt>,
+    /// Versioned Work protocol result derived from the exact response owned by
+    /// the same explicit probe receipt. Connection success and Work
+    /// compatibility remain separate facts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_compatibility: Option<ProviderWorkCompatibilityEvidence>,
     /// Credential-keyed HMAC over every metadata field above. A copied or
     /// hand-edited JSON record is not an independent validation authority.
     #[serde(default)]
     pub authenticity_tag: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ProviderWorkCompatibilityEvidence {
+    pub eval_version: String,
+    pub status: String,
+    pub evaluated_at: String,
+    pub response_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_code: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderWorkCompatibilitySummary {
+    pub status: &'static str,
+    pub reason: Option<String>,
+    pub eval_version: Option<String>,
+    pub evaluated_at: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,10 +112,6 @@ impl ProviderValidationLoad {
             Self::Missing | Self::Corrupt | Self::IoError => None,
         }
     }
-}
-
-pub(crate) fn provider_validation_path() -> PathBuf {
-    app_data_dir().join("provider_validation.json")
 }
 
 pub(crate) fn load_provider_validation_record_from_path(path: &Path) -> ProviderValidationLoad {
@@ -165,6 +184,7 @@ pub(crate) fn failed_provider_validation_record(
         last_error: Some(metadata_safe_validation_error(safe_error.into())),
         validation_source: metadata_safe_label(validation_source.into()),
         invocation_receipt: None,
+        work_compatibility: None,
         authenticity_tag: String::new(),
     };
     sign_provider_validation_record(config, &mut record);
@@ -282,10 +302,56 @@ fn build_provider_validation_record_from_proof(
             .then(|| metadata_safe_validation_error(safe_error.unwrap_or("validation_failed"))),
         validation_source: metadata_safe_label(validation_source.into()),
         invocation_receipt: Some(receipt.clone()),
+        work_compatibility: None,
         authenticity_tag: String::new(),
     };
     sign_provider_validation_record(config, &mut record);
     Ok(record)
+}
+
+/// Bind one exact fixed-suite response to the already authenticated explicit
+/// probe record. The response body is discarded after validation; only its
+/// digest, closed result, eval version, and adapter terminal time persist.
+pub(crate) fn attach_work_compatibility_evaluation(
+    config: &AppConfig,
+    record: &mut ProviderValidationRecord,
+    response: &str,
+) -> Result<(), AppError> {
+    if !provider_validation_record_authenticity_valid(config, record)
+        || record.validated_at.is_none()
+    {
+        return Err(AppError::external(
+            "work compatibility evaluation requires an authenticated completed provider probe",
+        ));
+    }
+    let receipt = record.invocation_receipt.as_ref().ok_or_else(|| {
+        AppError::external("work compatibility evaluation provider receipt is missing")
+    })?;
+    if receipt.status != ProviderInvocationStatus::Completed {
+        return Err(AppError::external(
+            "work compatibility evaluation provider receipt is not completed",
+        ));
+    }
+    let validation =
+        openlife_core::work_orchestration::validate_work_compatibility_eval_response(response);
+    let failure_code = validation
+        .as_ref()
+        .err()
+        .map(|code| metadata_safe_validation_error(code.clone()));
+    record.work_compatibility = Some(ProviderWorkCompatibilityEvidence {
+        eval_version: openlife_core::work_orchestration::WORK_COMPATIBILITY_EVAL_VERSION.into(),
+        status: if validation.is_ok() {
+            "validated"
+        } else {
+            "failed"
+        }
+        .into(),
+        evaluated_at: receipt.finished_at.to_rfc3339(),
+        response_digest: digest_label(response),
+        failure_code,
+    });
+    sign_provider_validation_record(config, record);
+    Ok(())
 }
 
 fn validate_terminal_write_window(
@@ -515,6 +581,48 @@ pub(crate) fn summarize_loaded_provider_validation(
     }
 }
 
+pub(crate) fn summarize_loaded_work_compatibility(
+    config: &AppConfig,
+    load: &ProviderValidationLoad,
+    now: DateTime<Utc>,
+) -> ProviderWorkCompatibilitySummary {
+    let provider = summarize_loaded_provider_validation(config, load, now);
+    if !provider.validated {
+        return ProviderWorkCompatibilitySummary {
+            status: "unverified",
+            reason: provider.last_error,
+            eval_version: None,
+            evaluated_at: None,
+        };
+    }
+    let ProviderValidationLoad::Valid(record) = load else {
+        return ProviderWorkCompatibilitySummary {
+            status: "unverified",
+            reason: Some("work_compatibility_evidence_missing".into()),
+            eval_version: None,
+            evaluated_at: None,
+        };
+    };
+    let Some(evidence) = record.work_compatibility.as_ref() else {
+        return ProviderWorkCompatibilitySummary {
+            status: "unverified",
+            reason: Some("work_compatibility_eval_not_run".into()),
+            eval_version: None,
+            evaluated_at: None,
+        };
+    };
+    ProviderWorkCompatibilitySummary {
+        status: if evidence.status == "validated" {
+            "validated"
+        } else {
+            "observed_contract_failure"
+        },
+        reason: evidence.failure_code.clone(),
+        eval_version: Some(evidence.eval_version.clone()),
+        evaluated_at: Some(evidence.evaluated_at.clone()),
+    }
+}
+
 fn validate_receipt_for_identity(
     config: &AppConfig,
     receipt: &ProviderInvocationReceipt,
@@ -546,6 +654,7 @@ fn provider_validation_auth_material(record: &ProviderValidationRecord) -> Vec<u
         "lastError": record.last_error,
         "validationSource": record.validation_source,
         "invocationReceipt": record.invocation_receipt,
+        "workCompatibility": record.work_compatibility,
     }))
     .expect("provider validation authentication material")
 }
@@ -716,6 +825,34 @@ fn validate_provider_validation_record_semantics(
             return Err("provider validation receipt does not match record identity".into());
         }
         validate_explicit_probe_receipt_semantics(receipt)?;
+    }
+    if let Some(evidence) = &record.work_compatibility {
+        if evidence.eval_version
+            != openlife_core::work_orchestration::WORK_COMPATIBILITY_EVAL_VERSION
+            || !matches!(evidence.status.as_str(), "validated" | "failed")
+            || !is_sha256_digest(&evidence.response_digest)
+            || record.validated_at.is_none()
+            || record.invocation_receipt.is_none()
+        {
+            return Err("provider work compatibility evidence is invalid".into());
+        }
+        let evaluated_at = DateTime::parse_from_rfc3339(&evidence.evaluated_at)
+            .map_err(|_| "provider work compatibility timestamp is invalid".to_string())?
+            .with_timezone(&Utc);
+        let receipt = record.invocation_receipt.as_ref().expect("checked above");
+        if evaluated_at != receipt.finished_at
+            || (evidence.status == "validated" && evidence.failure_code.is_some())
+            || (evidence.status == "failed"
+                && evidence.failure_code.as_deref().is_none_or(str::is_empty))
+            || evidence.failure_code.as_deref().is_some_and(|code| {
+                code.len() > 160
+                    || !code
+                        .chars()
+                        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+            })
+        {
+            return Err("provider work compatibility evidence is inconsistent".into());
+        }
     }
     Ok(())
 }
@@ -1028,6 +1165,37 @@ mod tests {
         assert!(summary.validated);
         assert_eq!(summary.status, "validated");
         assert_eq!(summary.validation_source.as_deref(), Some("manual_test"));
+    }
+
+    #[test]
+    fn fixed_work_eval_is_signed_and_projected_separately_from_reachability() {
+        let config = configured_config();
+        let now = Utc::now();
+        let exact = r#"{"schemaVersion":"openlife.agent-step.v1","step":{"kind":"final_answer","payload":{"content":"ready","evidenceRefs":[],"artifactRefs":[],"sourceBlocks":[]}}}"#;
+        let mut validated = successful_record(&config, now);
+        attach_work_compatibility_evaluation(&config, &mut validated, exact).unwrap();
+        validate_provider_validation_record_semantics(&validated).unwrap();
+        let summary = summarize_loaded_work_compatibility(
+            &config,
+            &ProviderValidationLoad::Valid(Box::new(validated)),
+            now,
+        );
+        assert_eq!(summary.status, "validated");
+        assert_eq!(
+            summary.eval_version.as_deref(),
+            Some(openlife_core::work_orchestration::WORK_COMPATIBILITY_EVAL_VERSION)
+        );
+
+        let mut incompatible = successful_record(&config, now);
+        attach_work_compatibility_evaluation(&config, &mut incompatible, "plain pong").unwrap();
+        assert!(summarize_provider_validation(&config, Some(&incompatible), now).validated);
+        let summary = summarize_loaded_work_compatibility(
+            &config,
+            &ProviderValidationLoad::Valid(Box::new(incompatible)),
+            now,
+        );
+        assert_eq!(summary.status, "observed_contract_failure");
+        assert!(summary.reason.is_some());
     }
 
     #[test]
@@ -1587,6 +1755,7 @@ mod tests {
             last_error: None,
             validation_source: "legacy_manual_test".into(),
             invocation_receipt: None,
+            work_compatibility: None,
             authenticity_tag: String::new(),
         };
 
@@ -1656,6 +1825,7 @@ mod tests {
             last_error: None,
             validation_source: String::new(),
             invocation_receipt: None,
+            work_compatibility: None,
             authenticity_tag: String::new(),
         };
         std::fs::write(&semantic_corrupt, serde_json::to_vec(&empty_shell).unwrap()).unwrap();

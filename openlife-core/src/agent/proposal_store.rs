@@ -452,6 +452,105 @@ impl ProposalStore {
         )? == 1)
     }
 
+    /// Rejects one reviewed Work effect and makes every still-unclaimed sibling
+    /// effect in the same Task/Run non-actionable in the same ProposalStore
+    /// transaction. A rejected multi-effect outcome cannot truthfully retain
+    /// buttons that would dispatch the remainder of the now-blocked Run.
+    pub fn reject_review_and_cancel_active_siblings(
+        &self,
+        proposal: &AgentProposal,
+        expected_status: ProposalStatus,
+    ) -> Result<Option<Vec<String>>> {
+        if proposal.status != ProposalStatus::Rejected || proposal.resolved_at.is_none() {
+            anyhow::bail!("proposal_bundle_rejection_requires_resolved_rejected_status");
+        }
+        let run_id = proposal
+            .run_id
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("proposal_bundle_rejection_run_missing"))?;
+        let source_detail = proposal
+            .source_detail
+            .as_deref()
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("proposal_bundle_rejection_task_missing"))?;
+        if proposal.source != ProposalSource::ChatConversation
+            || proposal.proposal_type != ProposalType::ExternalWriteAction
+        {
+            anyhow::bail!("proposal_bundle_rejection_owner_invalid");
+        }
+
+        let mut conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let dispatching_siblings: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM proposals
+             WHERE id != ?1 AND run_id = ?2 AND source_detail = ?3
+               AND source = 'chat_conversation'
+               AND proposal_type = 'external_write_action'
+               AND status IN ('pending','postponed','edited')
+               AND dispatch_state NOT IN ('unclaimed','failed_before_effect')",
+            params![proposal.id, run_id, source_detail],
+            |row| row.get(0),
+        )?;
+        if dispatching_siblings != 0 {
+            anyhow::bail!("proposal_bundle_sibling_dispatch_already_started");
+        }
+
+        let changed = tx.execute(
+            "UPDATE proposals
+             SET status = 'rejected', resolved_at = ?2
+             WHERE id = ?1 AND status = ?3
+               AND dispatch_state IN ('unclaimed','failed_before_effect')",
+            params![
+                proposal.id,
+                proposal.resolved_at.map(|time| time.to_rfc3339()),
+                expected_status.to_string(),
+            ],
+        )?;
+        if changed != 1 {
+            tx.rollback()?;
+            return Ok(None);
+        }
+
+        let sibling_ids = {
+            let mut statement = tx.prepare(
+                "SELECT id FROM proposals
+                 WHERE id != ?1 AND run_id = ?2 AND source_detail = ?3
+                   AND source = 'chat_conversation'
+                   AND proposal_type = 'external_write_action'
+                   AND status IN ('pending','postponed','edited')
+                   AND dispatch_state IN ('unclaimed','failed_before_effect')
+                 ORDER BY created_at ASC, id ASC",
+            )?;
+            let ids = statement
+                .query_map(params![proposal.id, run_id, source_detail], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            ids
+        };
+        tx.execute(
+            "UPDATE proposals
+             SET status = 'cancelled', resolved_at = ?4
+             WHERE id != ?1 AND run_id = ?2 AND source_detail = ?3
+               AND source = 'chat_conversation'
+               AND proposal_type = 'external_write_action'
+               AND status IN ('pending','postponed','edited')
+               AND dispatch_state IN ('unclaimed','failed_before_effect')",
+            params![
+                proposal.id,
+                run_id,
+                source_detail,
+                proposal.resolved_at.map(|time| time.to_rfc3339()),
+            ],
+        )?;
+        tx.commit()?;
+        Ok(Some(sibling_ids))
+    }
+
     pub fn claim_dispatch(&self, proposal_id: &str) -> Result<Option<String>> {
         let claim_id = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().to_rfc3339();
@@ -823,6 +922,45 @@ impl ProposalStore {
             .map_err(|e| e.into())
     }
 
+    pub fn list_active_review_proposals(&self, limit: i64) -> Result<Vec<AgentProposal>> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        let mut stmt = conn.prepare(
+            "SELECT id, run_id, proposal_type, source, source_detail, base_hash,
+                    affected_path, before_json, after_json, reason, confidence,
+                    risk_level, status, created_at, resolved_at, expires_at
+             FROM proposals
+             WHERE status IN ('pending', 'postponed', 'edited')
+             ORDER BY created_at DESC
+             LIMIT ?1",
+        )?;
+        let proposals = stmt.query_map([limit], Self::row_to_proposal)?;
+        proposals.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn owns_active_review_idempotency_key(
+        &self,
+        proposal_id: &str,
+        review_idempotency_key: &str,
+    ) -> Result<bool> {
+        let conn = self
+            .conn
+            .lock()
+            .map_err(|e| anyhow::anyhow!("mutex poison: {}", e))?;
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM proposals
+                 WHERE id = ?1 AND review_idempotency_key = ?2
+                   AND status IN ('pending', 'postponed', 'edited')",
+                params![proposal_id, review_idempotency_key],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some())
+    }
+
     pub fn list_all_proposals(&self, limit: i64, offset: i64) -> Result<Vec<AgentProposal>> {
         let conn = self
             .conn
@@ -1052,6 +1190,7 @@ impl ProposalStore {
             "pending" => ProposalStatus::Pending,
             "accepted" => ProposalStatus::Accepted,
             "rejected" => ProposalStatus::Rejected,
+            "cancelled" => ProposalStatus::Cancelled,
             "edited" => ProposalStatus::Edited,
             "postponed" => ProposalStatus::Postponed,
             "expired" => ProposalStatus::Expired,
@@ -1216,6 +1355,104 @@ mod tests {
 
         let fetched = store.get_proposal(&proposal.id).unwrap().unwrap();
         assert_eq!(fetched.status, ProposalStatus::Accepted);
+    }
+
+    #[test]
+    fn rejecting_one_work_review_cancels_unclaimed_siblings_atomically() {
+        let store = ProposalStore::new_in_memory().unwrap();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let mut proposals = (0..2)
+            .map(|index| {
+                let mut proposal = AgentProposal::new(
+                    ProposalType::ExternalWriteAction,
+                    &format!("filesystem.bundle-{index}.md"),
+                    serde_json::json!({ "artifact": index }),
+                    "Review one file in a Work Artifact bundle",
+                    0.95,
+                    RiskLevel::High,
+                    ProposalSource::ChatConversation,
+                );
+                proposal.run_id = Some(run_id.clone());
+                proposal.source_detail = Some(task_id.clone());
+                store.create_proposal(&proposal).unwrap();
+                proposal
+            })
+            .collect::<Vec<_>>();
+        let mut unrelated = AgentProposal::new(
+            ProposalType::ToolPermission,
+            "tool.read",
+            serde_json::json!({ "scope": "one" }),
+            "Unrelated proposal in the same Run",
+            0.9,
+            RiskLevel::Medium,
+            ProposalSource::ChatConversation,
+        );
+        unrelated.run_id = Some(run_id);
+        unrelated.source_detail = Some(task_id);
+        store.create_proposal(&unrelated).unwrap();
+
+        proposals[0].reject();
+        let cancelled = store
+            .reject_review_and_cancel_active_siblings(&proposals[0], ProposalStatus::Pending)
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancelled, vec![proposals[1].id.clone()]);
+        assert_eq!(
+            store
+                .get_proposal(&proposals[0].id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ProposalStatus::Rejected
+        );
+        assert_eq!(
+            store
+                .get_proposal(&proposals[1].id)
+                .unwrap()
+                .unwrap()
+                .status,
+            ProposalStatus::Cancelled
+        );
+        assert_eq!(
+            store.get_proposal(&unrelated.id).unwrap().unwrap().status,
+            ProposalStatus::Pending
+        );
+    }
+
+    #[test]
+    fn bundle_rejection_loses_atomically_to_a_sibling_dispatch_claim() {
+        let store = ProposalStore::new_in_memory().unwrap();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let mut proposals = (0..2)
+            .map(|index| {
+                let mut proposal = AgentProposal::new(
+                    ProposalType::ExternalWriteAction,
+                    &format!("filesystem.race-{index}.md"),
+                    serde_json::json!({ "artifact": index }),
+                    "Review one file in a concurrent Work bundle",
+                    0.95,
+                    RiskLevel::High,
+                    ProposalSource::ChatConversation,
+                );
+                proposal.run_id = Some(run_id.clone());
+                proposal.source_detail = Some(task_id.clone());
+                store.create_proposal(&proposal).unwrap();
+                proposal
+            })
+            .collect::<Vec<_>>();
+        store.claim_dispatch(&proposals[1].id).unwrap().unwrap();
+
+        proposals[0].reject();
+        assert!(store
+            .reject_review_and_cancel_active_siblings(&proposals[0], ProposalStatus::Pending)
+            .unwrap_err()
+            .to_string()
+            .contains("proposal_bundle_sibling_dispatch_already_started"));
+        assert!(proposals.iter().all(|proposal| {
+            store.get_proposal(&proposal.id).unwrap().unwrap().status == ProposalStatus::Pending
+        }));
     }
 
     #[test]

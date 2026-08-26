@@ -646,7 +646,10 @@ where
     chat_with_ollama_raw_at_endpoint_with_start_observer(
         &endpoint,
         model,
-        messages,
+        OllamaProviderContent {
+            messages,
+            images: Vec::new(),
+        },
         system_prompt,
         OllamaOutputContract::default(),
         request_id,
@@ -664,130 +667,43 @@ pub(crate) struct OllamaOutputContract {
     pub(crate) reasoning_effort: Option<crate::conversation::ReasoningEffort>,
 }
 
-pub(crate) fn main_chat_work_semantic_verification_json_schema() -> serde_json::Value {
+pub(crate) struct OllamaProviderContent {
+    pub(crate) messages: Vec<ChatMessage>,
+    pub(crate) images: Vec<crate::llm::BoundedProviderImage>,
+}
+
+pub(crate) fn main_chat_work_goal_contract_json_schema() -> serde_json::Value {
     json!({
         "type": "object",
         "properties": {
             "schemaVersion": {
                 "type": "string",
-                "const": "openlife.work-semantic-verification.v1"
+                "const": "openlife.work-goal-contract.v1"
             },
-            "status": {
-                "type": "string",
-                "enum": ["complete", "needs_more_evidence"]
-            },
-            "gaps": {
+            "requiredStepKinds": {
                 "type": "array",
-                "maxItems": 8,
-                "items": { "type": "string" }
-            }
-        },
-        "required": ["schemaVersion", "status", "gaps"],
-        "additionalProperties": false
-    })
-}
-
-pub(crate) fn agent_memory_extraction_json_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "keep": { "type": "boolean" },
-            "confidence": { "type": "number", "minimum": 0.0, "maximum": 1.0 },
-            "source_span": { "type": "string", "maxLength": 320 }
-        },
-        "required": ["keep", "confidence", "source_span"],
-        "additionalProperties": false
-    })
-}
-
-/// Provider-side grammar for the model-authored Work plan. This schema is
-/// intentionally broader than the per-turn Policy decision: it guarantees the
-/// complete typed shape and prevents fixed capabilities from carrying a model
-/// minted target, while `StructuredWorkPlan::validate` still narrows kinds and
-/// exact MCP target ids to the current authorized scope.
-pub(crate) fn main_chat_work_plan_json_schema() -> serde_json::Value {
-    let common_properties = json!({
-        "id": {
-            "type": "string",
-            "pattern": "^[a-z][a-z0-9_]{0,31}$"
-        },
-        "required": { "type": "boolean" },
-        "dependsOn": {
-            "type": "array",
-            "maxItems": 8,
-            "items": { "type": "string" }
-        }
-    });
-    let mut fixed_properties = common_properties.clone();
-    fixed_properties
-        .as_object_mut()
-        .expect("schema object")
-        .insert(
-            "kind".into(),
-            json!({
-                "type": "string",
-                "enum": [
-                    "analyze",
-                    "read_imported_document",
-                    "read_workspace_file",
-                    "web_search",
-                    "web_fetch",
-                    "use_selected_skill",
-                    "draft_artifact",
-                    "verify",
-                    "deliver_result"
-                ]
-            }),
-        );
-    let mut mcp_properties = common_properties;
-    let mcp_properties = mcp_properties.as_object_mut().expect("schema object");
-    mcp_properties.insert(
-        "kind".into(),
-        json!({ "type": "string", "const": "read_mcp" }),
-    );
-    mcp_properties.insert("targetId".into(), json!({ "type": "string" }));
-
-    json!({
-        "type": "object",
-        "properties": {
-            "schemaVersion": {
-                "type": "string",
-                "const": "openlife.work-plan.v3"
-            },
-            "steps": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 8,
+                "maxItems": 6,
+                "uniqueItems": true,
                 "items": {
-                    "oneOf": [
-                        {
-                            "type": "object",
-                            "properties": fixed_properties,
-                            "required": ["id", "kind", "required", "dependsOn"],
-                            "additionalProperties": false
-                        },
-                        {
-                            "type": "object",
-                            "properties": mcp_properties,
-                            "required": [
-                                "id",
-                                "kind",
-                                "required",
-                                "dependsOn",
-                                "targetId"
-                            ],
-                            "additionalProperties": false
-                        }
+                    "type": "string",
+                    "enum": [
+                        "read_imported_document",
+                        "read_workspace_file",
+                        "web_search",
+                        "web_fetch",
+                        "read_mcp",
+                        "draft_artifact"
                     ]
                 }
+            },
+            "artifactTargetMode": {
+                "type": "string",
+                "enum": ["none", "new_file", "replace_existing", "rename_existing"]
             },
             "completion": {
                 "type": "object",
                 "properties": {
-                    "resultKind": {
-                        "type": "string",
-                        "enum": ["answer", "artifact"]
-                    },
+                    "resultKind": { "type": "string", "enum": ["answer", "artifact"] },
                     "requiresVerification": { "type": "boolean" },
                     "requirements": {
                         "type": "array",
@@ -795,12 +711,13 @@ pub(crate) fn main_chat_work_plan_json_schema() -> serde_json::Value {
                         "items": {
                             "type": "object",
                             "properties": {
-                                "id": { "type": "string" },
-                                "description": { "type": "string" },
-                                "evidenceKind": {
+                                "id": {
                                     "type": "string",
-                                    "enum": ["result", "source"]
-                                }
+                                    "pattern": "^[a-z][a-z0-9_]{0,31}$"
+                                },
+                                "description": { "type": "string", "minLength": 1, "maxLength": 320 },
+                                "evidenceKind": { "type": "string", "enum": ["result", "source"] },
+                                "allowTransparentLimitation": { "type": "boolean" }
                             },
                             "required": ["id", "description", "evidenceKind"],
                             "additionalProperties": false
@@ -808,28 +725,11 @@ pub(crate) fn main_chat_work_plan_json_schema() -> serde_json::Value {
                     },
                     "requiresReviewBeforeWrite": { "type": "boolean" }
                 },
-                "required": [
-                    "resultKind",
-                    "requiresVerification",
-                    "requirements",
-                    "requiresReviewBeforeWrite"
-                ],
-                "additionalProperties": false
-            },
-            "sourceConstraints": {
-                "type": "object",
-                "properties": {
-                    "requiredWebDomains": {
-                        "type": "array",
-                        "maxItems": 8,
-                        "items": { "type": "string" }
-                    }
-                },
-                "required": ["requiredWebDomains"],
+                "required": ["resultKind", "requiresVerification", "requirements", "requiresReviewBeforeWrite"],
                 "additionalProperties": false
             }
         },
-        "required": ["schemaVersion", "steps", "completion", "sourceConstraints"],
+        "required": ["schemaVersion", "requiredStepKinds", "artifactTargetMode", "completion"],
         "additionalProperties": false
     })
 }
@@ -845,58 +745,6 @@ fn agent_step_envelope_schema(step: serde_json::Value) -> serde_json::Value {
             "step": step
         },
         "required": ["schemaVersion", "step"],
-        "additionalProperties": false
-    })
-}
-
-fn agent_tool_call_step_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "kind": { "type": "string", "const": "tool_call" },
-            "payload": {
-                "type": "object",
-                "properties": {
-                    "capabilityId": { "type": "string" },
-                    "arguments": { "type": "object" }
-                },
-                "required": ["capabilityId", "arguments"],
-                "additionalProperties": false
-            }
-        },
-        "required": ["kind", "payload"],
-        "additionalProperties": false
-    })
-}
-
-fn agent_tool_calls_step_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "kind": { "type": "string", "const": "tool_calls" },
-            "payload": {
-                "type": "object",
-                "properties": {
-                    "calls": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 4,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "capabilityId": { "type": "string" },
-                                "arguments": { "type": "object" }
-                            },
-                            "required": ["capabilityId", "arguments"],
-                            "additionalProperties": false
-                        }
-                    }
-                },
-                "required": ["calls"],
-                "additionalProperties": false
-            }
-        },
-        "required": ["kind", "payload"],
         "additionalProperties": false
     })
 }
@@ -940,44 +788,6 @@ fn agent_final_answer_step_schema() -> serde_json::Value {
                     }
                 },
                 "required": ["content", "evidenceRefs", "artifactRefs"],
-                "additionalProperties": false
-            }
-        },
-        "required": ["kind", "payload"],
-        "additionalProperties": false
-    })
-}
-
-fn agent_artifact_step_schema() -> serde_json::Value {
-    json!({
-        "type": "object",
-        "properties": {
-            "kind": { "type": "string", "const": "draft_artifact" },
-            "payload": {
-                "type": "object",
-                "properties": {
-                    "artifacts": {
-                        "type": "array",
-                        "minItems": 1,
-                        "maxItems": 5,
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "format": { "type": "string" },
-                                "suggestedName": { "type": "string" },
-                                "content": {},
-                                "sourceBlocks": {
-                                    "type": "array",
-                                    "items": agent_source_block_schema()
-                                }
-                            },
-                            "required": ["format", "suggestedName", "content"],
-                            "additionalProperties": false
-                        }
-                    },
-                    "reviewBeforeWrite": { "type": "boolean" }
-                },
-                "required": ["artifacts"],
                 "additionalProperties": false
             }
         },
@@ -1064,57 +874,6 @@ fn agent_personal_intelligence_step_schemas() -> Vec<serde_json::Value> {
     ]
 }
 
-/// Provider-side grammar for one model-selected tool action. Runtime
-/// validation still narrows `capabilityId` to the exact current capability and
-/// validates the capability-specific argument schema before dispatch.
-pub(crate) fn main_chat_agent_tool_step_json_schema() -> serde_json::Value {
-    agent_step_envelope_schema(agent_tool_call_step_schema())
-}
-
-pub(crate) fn main_chat_agent_artifact_or_tool_step_json_schema() -> serde_json::Value {
-    agent_step_envelope_schema(json!({
-        "oneOf": [
-            agent_tool_call_step_schema(),
-            agent_tool_calls_step_schema(),
-            agent_artifact_step_schema()
-        ]
-    }))
-}
-
-pub(crate) fn main_chat_agent_answer_or_tool_step_json_schema() -> serde_json::Value {
-    agent_step_envelope_schema(json!({
-        "oneOf": [
-            agent_tool_call_step_schema(),
-            agent_tool_calls_step_schema(),
-            agent_final_answer_step_schema()
-        ]
-    }))
-}
-
-pub(crate) fn main_chat_personal_intelligence_step_json_schema() -> serde_json::Value {
-    agent_step_envelope_schema(json!({
-        "oneOf": agent_personal_intelligence_step_schemas()
-    }))
-}
-
-pub(crate) fn main_chat_tool_arguments_json_schema() -> serde_json::Value {
-    json!({ "type": "object" })
-}
-
-pub(crate) fn main_chat_initial_work_decision_json_schema() -> serde_json::Value {
-    let mut direct_steps = vec![
-        agent_final_answer_step_schema(),
-        agent_artifact_step_schema(),
-    ];
-    direct_steps.extend(agent_personal_intelligence_step_schemas());
-    json!({
-        "oneOf": [
-            main_chat_work_plan_json_schema(),
-            agent_step_envelope_schema(json!({ "oneOf": direct_steps }))
-        ]
-    })
-}
-
 /// Provider-side grammar for an ordinary Chat decision. Chat may either
 /// return the user-visible answer or propose one bounded personal-intelligence
 /// action. The runtime still binds any action to the authenticated user Item
@@ -1125,24 +884,10 @@ pub(crate) fn main_chat_conversation_step_json_schema() -> serde_json::Value {
     agent_step_envelope_schema(json!({ "oneOf": steps }))
 }
 
-/// Provider-side grammar for one model-authored Artifact draft. The runtime
-/// still validates the selected format, filename extension, semantic content,
-/// citations, safe path, and Review checkpoint before any file write.
-pub(crate) fn main_chat_agent_artifact_step_json_schema() -> serde_json::Value {
-    agent_step_envelope_schema(agent_artifact_step_schema())
-}
-
-/// Provider-side grammar for the terminal answer of one canonical Agent loop.
-/// Evidence and Artifact references are still checked against runtime-owned
-/// identities after parsing; the model cannot mint completion proof.
-pub(crate) fn main_chat_agent_final_step_json_schema() -> serde_json::Value {
-    agent_step_envelope_schema(agent_final_answer_step_schema())
-}
-
 pub(crate) async fn chat_with_ollama_raw_at_endpoint_with_start_observer<F>(
     endpoint: &str,
     model: &str,
-    messages: Vec<ChatMessage>,
+    content: OllamaProviderContent,
     system_prompt: Option<&str>,
     output_contract: OllamaOutputContract,
     request_id: Option<&str>,
@@ -1152,6 +897,7 @@ where
     F: FnOnce() -> Result<()>,
 {
     validate_prepared_ollama_chat_endpoint(endpoint)?;
+    let OllamaProviderContent { messages, images } = content;
     let mut req_messages: Vec<serde_json::Value> = Vec::new();
     if let Some(sp) = system_prompt {
         req_messages.push(json!({
@@ -1160,11 +906,30 @@ where
         }));
     }
 
-    for msg in messages {
-        req_messages.push(json!({
+    let last_user = (!images.is_empty())
+        .then(|| {
+            messages
+                .iter()
+                .rposition(|message| message.role.eq_ignore_ascii_case("user"))
+        })
+        .flatten();
+    if !images.is_empty() && last_user.is_none() {
+        anyhow::bail!("ollama image input has no user message");
+    }
+    for (index, msg) in messages.into_iter().enumerate() {
+        let mut value = json!({
             "role": msg.role,
             "content": msg.content
-        }));
+        });
+        if Some(index) == last_user {
+            value["images"] = serde_json::Value::Array(
+                images
+                    .iter()
+                    .map(|image| json!(image.base64_bytes()))
+                    .collect(),
+            );
+        }
+        req_messages.push(value);
     }
     if let Some(effort) = output_contract.reasoning_effort {
         let capability = crate::llm::built_in_reasoning_capability("ollama", model)
@@ -1277,7 +1042,10 @@ where
     chat_with_ollama_raw_stream_at_endpoint_with_start_observer(
         &endpoint,
         model,
-        messages,
+        OllamaProviderContent {
+            messages,
+            images: Vec::new(),
+        },
         system_prompt,
         None,
         request_id,
@@ -1291,7 +1059,7 @@ where
 pub(crate) async fn chat_with_ollama_raw_stream_at_endpoint_with_start_observer<F>(
     endpoint: &str,
     model: &str,
-    messages: Vec<ChatMessage>,
+    content: OllamaProviderContent,
     system_prompt: Option<&str>,
     reasoning_effort: Option<crate::conversation::ReasoningEffort>,
     request_id: Option<&str>,
@@ -1301,6 +1069,7 @@ where
     F: FnOnce() -> Result<()>,
 {
     validate_prepared_ollama_chat_endpoint(endpoint)?;
+    let OllamaProviderContent { messages, images } = content;
     let mut req_messages: Vec<serde_json::Value> = Vec::new();
     if let Some(sp) = system_prompt {
         req_messages.push(json!({
@@ -1309,11 +1078,30 @@ where
         }));
     }
 
-    for msg in messages {
-        req_messages.push(json!({
+    let last_user = (!images.is_empty())
+        .then(|| {
+            messages
+                .iter()
+                .rposition(|message| message.role.eq_ignore_ascii_case("user"))
+        })
+        .flatten();
+    if !images.is_empty() && last_user.is_none() {
+        anyhow::bail!("ollama image input has no user message");
+    }
+    for (index, msg) in messages.into_iter().enumerate() {
+        let mut value = json!({
             "role": msg.role,
             "content": msg.content
-        }));
+        });
+        if Some(index) == last_user {
+            value["images"] = serde_json::Value::Array(
+                images
+                    .iter()
+                    .map(|image| json!(image.base64_bytes()))
+                    .collect(),
+            );
+        }
+        req_messages.push(value);
     }
 
     let mut body = json!({
@@ -1628,55 +1416,6 @@ pub fn deterministic_hash_embed_v1(text: &str) -> Vec<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn allowed_step_kinds(schema: &serde_json::Value) -> Vec<&str> {
-        schema["properties"]["step"]["oneOf"]
-            .as_array()
-            .expect("step oneOf")
-            .iter()
-            .map(|step| {
-                step["properties"]["kind"]["const"]
-                    .as_str()
-                    .expect("step kind const")
-            })
-            .collect()
-    }
-
-    #[test]
-    fn dynamic_agent_schemas_allow_one_terminal_kind_plus_tools() {
-        assert_eq!(
-            allowed_step_kinds(&main_chat_agent_artifact_or_tool_step_json_schema()),
-            vec!["tool_call", "tool_calls", "draft_artifact"]
-        );
-        assert_eq!(
-            allowed_step_kinds(&main_chat_agent_answer_or_tool_step_json_schema()),
-            vec!["tool_call", "tool_calls", "final_answer"]
-        );
-    }
-
-    #[test]
-    fn artifact_schema_matches_source_bound_runtime_contract() {
-        let schema = main_chat_agent_artifact_step_json_schema();
-        let payload = &schema["properties"]["step"]["properties"]["payload"];
-        assert!(payload["properties"].get("reviewBeforeWrite").is_some());
-        let artifact = &payload["properties"]["artifacts"]["items"];
-        assert!(artifact["properties"].get("sourceBlocks").is_some());
-    }
-
-    #[test]
-    fn initial_decision_schema_supports_plan_or_direct_step() {
-        let schema = main_chat_initial_work_decision_json_schema();
-        let choices = schema["oneOf"].as_array().expect("top-level oneOf");
-        assert_eq!(choices.len(), 2);
-        assert_eq!(
-            choices[0]["properties"]["schemaVersion"]["const"],
-            "openlife.work-plan.v3"
-        );
-        assert_eq!(
-            choices[1]["properties"]["schemaVersion"]["const"],
-            "openlife.agent-step.v1"
-        );
-    }
 
     #[test]
     fn resolves_llama3_preset_to_installed_llama31_tag() {
@@ -2127,58 +1866,30 @@ mod tests {
     }
 
     #[test]
-    fn semantic_verification_request_uses_its_exact_typed_json_schema() {
-        let body = ollama_chat_request_body(
-            "llama3.1:latest",
-            vec![json!({"role": "user", "content": "verify the requested outcome"})],
-            Some(main_chat_work_semantic_verification_json_schema()),
-            true,
-            None,
-        );
+    fn work_goal_contract_request_uses_a_capability_floor_without_arguments() {
+        let schema = main_chat_work_goal_contract_json_schema();
 
-        assert_eq!(body["format"]["type"], "object");
         assert_eq!(
-            body["format"]["required"],
-            json!(["schemaVersion", "status", "gaps"])
-        );
-        assert_eq!(
-            body["format"]["properties"]["status"]["enum"],
-            json!(["complete", "needs_more_evidence"])
-        );
-        assert_eq!(body["options"]["temperature"], 0.0);
-    }
-
-    #[test]
-    fn work_plan_request_uses_typed_json_schema_without_fixed_targets() {
-        let schema = main_chat_work_plan_json_schema();
-        let body = ollama_chat_request_body(
-            "llama3.1:latest",
-            vec![json!({"role": "user", "content": "plan this work"})],
-            Some(schema),
-            true,
-            None,
-        );
-
-        assert_eq!(body["format"]["type"], "object");
-        assert_eq!(
-            body["format"]["required"],
-            json!(["schemaVersion", "steps", "completion", "sourceConstraints"])
+            schema["properties"]["requiredStepKinds"]["items"]["enum"],
+            json!([
+                "read_imported_document",
+                "read_workspace_file",
+                "web_search",
+                "web_fetch",
+                "read_mcp",
+                "draft_artifact"
+            ])
         );
         assert_eq!(
-            body["format"]["properties"]["sourceConstraints"]["required"],
-            json!(["requiredWebDomains"])
+            schema["properties"]["artifactTargetMode"]["enum"],
+            json!(["none", "new_file", "replace_existing", "rename_existing"])
         );
-        let alternatives = body["format"]["properties"]["steps"]["items"]["oneOf"]
+        assert!(schema["required"]
             .as_array()
-            .expect("step alternatives");
-        assert_eq!(alternatives.len(), 2);
-        assert!(alternatives[0]["properties"].get("targetId").is_none());
-        assert_eq!(alternatives[1]["properties"]["kind"]["const"], "read_mcp");
-        assert_eq!(
-            alternatives[1]["required"],
-            json!(["id", "kind", "required", "dependsOn", "targetId"])
-        );
-        assert_eq!(body["options"]["temperature"], 0.0);
+            .unwrap()
+            .contains(&json!("artifactTargetMode")));
+        assert!(schema.to_string().find("path").is_none());
+        assert!(schema.to_string().find("arguments").is_none());
     }
 
     #[test]
@@ -2288,10 +1999,13 @@ mod tests {
         let mut stream = chat_with_ollama_raw_stream_at_endpoint_with_start_observer(
             &endpoint,
             "qwen-local:latest",
-            vec![ChatMessage {
-                role: "user".into(),
-                content: "test incomplete stream".into(),
-            }],
+            OllamaProviderContent {
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: "test incomplete stream".into(),
+                }],
+                images: Vec::new(),
+            },
             None,
             None,
             None,

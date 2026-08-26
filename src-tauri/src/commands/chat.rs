@@ -13,6 +13,8 @@ use tauri_plugin_dialog::DialogExt;
 pub struct ConversationTurnViewModel {
     pub turn_id: String,
     pub status: openlife_core::conversation::TurnStatus,
+    pub task_id: Option<String>,
+    pub run_id: Option<String>,
     pub provider_profile_id: String,
     pub provider_id: String,
     pub model_id: String,
@@ -130,7 +132,11 @@ pub(crate) async fn get_conversation_view_model_with_state(
                 return Err(AppError::not_found("conversation_not_found"));
             }
         }
-        None => records.first().map(|record| record.id.clone()),
+        None => store
+            .selected_conversation_id()
+            .map_err(AppError::from)?
+            .filter(|selected| records.iter().any(|record| record.id == *selected))
+            .or_else(|| records.first().map(|record| record.id.clone())),
     };
     let conversation_history_counts = all_records
         .iter()
@@ -164,7 +170,7 @@ pub(crate) async fn get_conversation_view_model_with_state(
         .as_ref()
         .map(|conversation| conversation.memory_mode)
         .unwrap_or_default();
-    let (messages, latest_turn) = if let Some(conversation_id) = selected.as_deref() {
+    let (messages, mut latest_turn) = if let Some(conversation_id) = selected.as_deref() {
         let messages = store
             .list_items(conversation_id, 200)
             .map_err(AppError::from)?
@@ -198,6 +204,8 @@ pub(crate) async fn get_conversation_view_model_with_state(
             .map(|turn| ConversationTurnViewModel {
                 turn_id: turn.id,
                 status: turn.status,
+                task_id: None,
+                run_id: None,
                 provider_profile_id: turn.provider.profile_id,
                 provider_id: turn.provider.provider_id,
                 model_id: turn.provider.model_id,
@@ -209,10 +217,34 @@ pub(crate) async fn get_conversation_view_model_with_state(
     } else {
         (Vec::new(), None)
     };
-    let persisted_provider_profile_id = latest_turn
-        .as_ref()
-        .map(|turn| turn.provider_profile_id.clone());
+    let persisted_provider_profile_id = store
+        .selected_provider_profile_id(selected.as_deref())
+        .map_err(AppError::from)?
+        .or_else(|| {
+            latest_turn
+                .as_ref()
+                .map(|turn| turn.provider_profile_id.clone())
+        });
     drop(store);
+    if let (Some(turn), Some(task_store)) = (
+        latest_turn.as_mut(),
+        state.canonical_task_runtime_store.as_ref(),
+    ) {
+        if state
+            .persistence_coordinator
+            .require_trusted_read("CanonicalTaskRuntimeStore")
+            .is_ok()
+        {
+            if let Ok(Some((task_id, run_id))) = task_store
+                .lock()
+                .await
+                .resolve_general_run_by_execution_session(&turn.turn_id)
+            {
+                turn.task_id = Some(task_id);
+                turn.run_id = Some(run_id);
+            }
+        }
+    }
     let messages = project_conversation_attachments(messages, state);
     let conversation_task_reference_counts = if state
         .persistence_coordinator
@@ -522,6 +554,40 @@ pub async fn get_conversation_view_model(
     state: State<'_, Arc<AppState>>,
 ) -> Result<ConversationViewModel, AppError> {
     get_conversation_view_model_with_state(conversation_id.as_deref(), state.inner()).await
+}
+
+#[tauri::command]
+pub async fn select_conversation(
+    conversation_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), AppError> {
+    state
+        .persistence_coordinator
+        .require_effects_for_stores(&["ConversationStore"])
+        .map_err(|error| AppError::db_with_hint(error.to_string(), "canonical_state_unknown"))?;
+    state
+        .conversation_store
+        .as_ref()
+        .ok_or_else(|| AppError::internal("conversation_store_unavailable"))?
+        .lock()
+        .await
+        .set_selected_conversation(&conversation_id)
+        .map_err(AppError::from)
+}
+
+#[tauri::command]
+pub async fn select_provider_profile(
+    conversation_id: Option<String>,
+    profile_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<(), AppError> {
+    crate::provider_registry::persist_provider_profile_selection(
+        conversation_id.as_deref(),
+        &profile_id,
+        state.inner(),
+    )
+    .await
+    .map_err(|error| AppError::internal_with_code(error, "provider_profile_selection_failed"))
 }
 
 #[cfg(test)]
@@ -1477,6 +1543,7 @@ mod tests {
             credential_bootstrap_snapshot: Default::default(),
             web_search_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
             work_initial_decision_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
+            work_goal_contract_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
             work_steering_replan_fixture_output: Arc::new(tokio::sync::Mutex::new(None)),
             work_agent_step_fixture_outputs: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             work_semantic_verification_fixture_outputs: Arc::new(tokio::sync::Mutex::new(
@@ -1672,6 +1739,80 @@ mod tests {
             Some(project_id.as_str())
         );
         assert!(view.projects[0].selected_for_new_conversation);
+    }
+
+    #[tokio::test]
+    async fn latest_work_turn_projects_its_exact_canonical_task_and_run() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let mut state = test_app_state(&temp_dir);
+        Arc::get_mut(&mut state)
+            .unwrap()
+            .canonical_task_runtime_store = Some(Arc::new(tokio::sync::Mutex::new(
+            openlife_core::task_runtime::CanonicalTaskRuntimeStore::new_in_memory().unwrap(),
+        )));
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        let turn_id = uuid::Uuid::new_v4().to_string();
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        create_chat_session_with_state(&conversation_id, "Recover exact Work", &state)
+            .await
+            .unwrap();
+        let provider = openlife_core::conversation::ProviderBinding {
+            profile_id: "provider-profile:test".into(),
+            provider_id: "openai".into(),
+            model_id: "gpt-test".into(),
+            endpoint_class: "cloud".into(),
+            config_generation: "test-generation".into(),
+            reasoning_effort: None,
+        };
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_chat_turn(openlife_core::conversation::BeginChatTurn {
+                turn_id: &turn_id,
+                conversation_id: &conversation_id,
+                user_message: "Run a recoverable Work task",
+                provider: &provider,
+            })
+            .unwrap();
+        let instruction_digest = openlife_core::persistence_outbox::metadata_digest("instruction");
+        state
+            .canonical_task_runtime_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .begin_general_task_run(openlife_core::task_runtime::BeginGeneralTaskRunInput {
+                task_id: &task_id,
+                conversation_id: &conversation_id,
+                run_id: &run_id,
+                execution_session_id: &turn_id,
+                instruction_digest: &instruction_digest,
+                plan_digest: None,
+                project_id: None,
+                project_revision: None,
+                scope_digest: None,
+                execution_mode: openlife_core::task_runtime::WorkExecutionMode::ScopedAgent,
+            })
+            .unwrap();
+        state
+            .conversation_store
+            .as_ref()
+            .unwrap()
+            .lock()
+            .await
+            .fail_chat_turn(&turn_id, "provider_timeout")
+            .unwrap();
+
+        let view = get_conversation_view_model_with_state(Some(&conversation_id), &state)
+            .await
+            .unwrap();
+        let latest = view.latest_turn.expect("latest Work turn");
+        assert_eq!(latest.task_id.as_deref(), Some(task_id.as_str()));
+        assert_eq!(latest.run_id.as_deref(), Some(run_id.as_str()));
     }
 
     #[tokio::test]

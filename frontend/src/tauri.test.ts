@@ -46,22 +46,19 @@ describe("canonical Tauri command arguments", () => {
     expect(redacted).toContain('"redacted":true');
   });
 
-  it("redacts save_config secrets from dev invoke logs", async () => {
+  it("redacts independent Search credentials from save_config dev logs", async () => {
     await saveConfig({
-      llm: {
-        provider: "openai",
-        openai_base: "https://api.openai.com/v1",
-        openai_key: "sk-openai-secret",
-        embedding_model: "text-embedding-3-small",
-        chat_model: "gpt-4o-mini",
-      },
       prefer_local_model: false,
       local_model: "llama3",
+      system: {
+        search_provider: "brave",
+        search_provider_key: "search-secret",
+      },
     });
 
     const redacted = redactedLogForLastInvoke();
-    expect(redacted).not.toContain("sk-openai-secret");
-    expect(redacted).toContain("openai_key");
+    expect(redacted).not.toContain("search-secret");
+    expect(redacted).toContain("search_provider_key");
     expect(redacted).toContain('"redacted":true');
   });
 

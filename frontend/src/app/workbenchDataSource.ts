@@ -16,6 +16,7 @@ import {
   getWorkbenchViewModel,
   openArtifactResult,
   requestArtifactUndo,
+  requestTaskArtifactUndo,
   reviseWorkArtifact,
   resumeWorkTask,
   retryWorkTask,
@@ -50,6 +51,9 @@ export interface WorkbenchDataSource {
   dispatchTaskControl(control: TaskControl): Promise<void>;
   stopRun(taskId: string, runId: string): Promise<void>;
   requestArtifactUndo(artifactId: string): Promise<void>;
+  requestTaskArtifactUndo(taskId: string): Promise<{
+    failures: Array<{ artifactId: string; reasonCode: string }>;
+  }>;
   reviseArtifact(
     taskId: string,
     artifactId: string,
@@ -73,7 +77,7 @@ export function activeScopedTask(snapshot: WorkbenchSnapshot | null): TaskViewMo
   if (!conversationId) return null;
   return (
     scopedTasks(snapshot).find(task =>
-      ["running", "waiting_review", "waiting_permission", "blocked"].includes(task.lifecycleStatus)
+      ["running", "waiting_review", "waiting_permission"].includes(task.lifecycleStatus)
     ) ?? null
   );
 }
@@ -231,6 +235,23 @@ export const tauriWorkbenchDataSource: WorkbenchDataSource = {
     ) {
       throw new Error("artifact_undo_receipt_unverified");
     }
+  },
+  async requestTaskArtifactUndo(taskId) {
+    const receipt = await requestTaskArtifactUndo(taskId);
+    if (
+      receipt.taskId !== taskId ||
+      !["waiting_review", "partial_waiting_review"].includes(receipt.status) ||
+      receipt.proposals.length === 0 ||
+      receipt.proposals.some(
+        proposal =>
+          !proposal.artifactId || !proposal.proposalId || proposal.status !== "waiting_review"
+      ) ||
+      (receipt.status === "waiting_review" && receipt.failures.length > 0) ||
+      (receipt.status === "partial_waiting_review" && receipt.failures.length === 0)
+    ) {
+      throw new Error("task_artifact_undo_receipt_unverified");
+    }
+    return { failures: receipt.failures };
   },
   async reviseArtifact(taskId, artifactId, baseVersion, instruction) {
     const receipt = await reviseWorkArtifact(taskId, artifactId, baseVersion, instruction);

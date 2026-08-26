@@ -36,6 +36,7 @@ pub struct OpenLifeProviderClient {
     runtime_state: Option<Arc<AppState>>,
     reasoning_effort: Option<openlife_core::conversation::ReasoningEffort>,
     reasoning_capability: Option<openlife_core::llm::ProviderReasoningCapability>,
+    input_modalities: Vec<String>,
 }
 
 impl OpenLifeProviderClient {
@@ -51,6 +52,7 @@ impl OpenLifeProviderClient {
             runtime_state: None,
             reasoning_effort: None,
             reasoning_capability: None,
+            input_modalities: vec!["text".into()],
         }
     }
 
@@ -72,6 +74,11 @@ impl OpenLifeProviderClient {
         capability: Option<openlife_core::llm::ProviderReasoningCapability>,
     ) -> Self {
         self.reasoning_capability = capability;
+        self
+    }
+
+    pub(crate) fn with_input_modalities(mut self, input_modalities: Vec<String>) -> Self {
+        self.input_modalities = input_modalities;
         self
     }
 }
@@ -303,6 +310,19 @@ impl MainChatModelClient for OpenLifeProviderClient {
             });
         }
         let requested_stream_provider_tokens = request.stream_provider_tokens;
+        if !request.images.is_empty()
+            && !self
+                .input_modalities
+                .iter()
+                .any(|modality| modality == "image")
+        {
+            return Err(MainChatModelFailure {
+                message: "selected provider/model does not support governed image input".into(),
+                provider_receipt: None,
+                blocker_code: Some("provider_image_input_unsupported".into()),
+                proposal_ids: Vec::new(),
+            });
+        }
         let payload_purpose = request.payload_purpose;
         let provider_tools = request.provider_tools.clone();
         let task_id = request.provider_authorization.task_id.clone();
@@ -447,7 +467,14 @@ impl MainChatModelClient for OpenLifeProviderClient {
             privacy_decision_id,
             selected_context_refs,
             included_context_categories,
-            declared_payload_categories: vec![ProviderPayloadCategory::CurrentUserConversation],
+            declared_payload_categories: if request.images.is_empty() {
+                vec![ProviderPayloadCategory::CurrentUserConversation]
+            } else {
+                vec![
+                    ProviderPayloadCategory::CurrentUserConversation,
+                    ProviderPayloadCategory::GovernedProjectImage,
+                ]
+            },
             policy_provenance_refs: Vec::new(),
             raw_life_model_included: request.raw_life_model_included,
             raw_unbounded_memory_included: request.raw_unbounded_memory_included,
@@ -464,6 +491,7 @@ impl MainChatModelClient for OpenLifeProviderClient {
                 current_user_text,
                 &request.messages,
                 &context_blocks,
+                &request.images,
             )
             .map_err(|error| MainChatModelFailure {
                 message: error.to_string(),
@@ -476,6 +504,7 @@ impl MainChatModelClient for OpenLifeProviderClient {
             .prepare_chat_request_with_authorized_filter(
                 request.messages,
                 context_blocks,
+                request.images,
                 context_manifest,
                 policy_authorization,
                 self.network_policy.clone(),

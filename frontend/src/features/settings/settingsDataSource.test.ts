@@ -3,6 +3,7 @@ import type { AppConfig, LlmConnectionTestResult, ReviewItem } from "@/tauri";
 
 const tauriMocks = vi.hoisted(() => ({
   getConfig: vi.fn(),
+  getProviderConnections: vi.fn(),
   getLifeStateProjection: vi.fn(),
   getProviderPrivacyBoundarySummary: vi.fn(),
   getProductDiagnosticsViewModel: vi.fn(),
@@ -11,8 +12,10 @@ const tauriMocks = vi.hoisted(() => ({
   recoverRequiredCredentialAccess: vi.fn(),
   revokeToolPermission: vi.fn(),
   saveConfig: vi.fn(),
+  saveProviderConnection: vi.fn(),
+  deleteProviderConnection: vi.fn(),
   selectArtifactOutputDirectory: vi.fn(),
-  testLlmConnection: vi.fn(),
+  testProviderConnection: vi.fn(),
 }));
 
 vi.mock("@/tauri", () => ({}));
@@ -20,7 +23,9 @@ vi.mock("@/ipc/review", () => ({
   getReviewCenterViewModel: tauriMocks.getReviewCenterViewModel,
 }));
 vi.mock("@/ipc/settings", () => ({
+  deleteProviderConnection: tauriMocks.deleteProviderConnection,
   getConfig: tauriMocks.getConfig,
+  getProviderConnections: tauriMocks.getProviderConnections,
   getLifeStateProjection: tauriMocks.getLifeStateProjection,
   getProductDiagnosticsViewModel: tauriMocks.getProductDiagnosticsViewModel,
   getProviderPrivacyBoundarySummary: tauriMocks.getProviderPrivacyBoundarySummary,
@@ -28,20 +33,14 @@ vi.mock("@/ipc/settings", () => ({
   recoverRequiredCredentialAccess: tauriMocks.recoverRequiredCredentialAccess,
   revokeToolPermission: tauriMocks.revokeToolPermission,
   saveConfig: tauriMocks.saveConfig,
+  saveProviderConnection: tauriMocks.saveProviderConnection,
   selectArtifactOutputDirectory: tauriMocks.selectArtifactOutputDirectory,
-  testLlmConnection: tauriMocks.testLlmConnection,
+  testProviderConnection: tauriMocks.testProviderConnection,
 }));
 
 import { tauriSettingsDataSource } from "./settingsDataSource";
 
 const config: AppConfig = {
-  llm: {
-    provider: "deepseek",
-    openai_base: "https://api.deepseek.com",
-    openai_key: "***",
-    embedding_model: "text-embedding",
-    chat_model: "deepseek-chat",
-  },
   prefer_local_model: false,
   local_model: "qwen2.5:14b",
 };
@@ -184,21 +183,25 @@ describe("Tauri settings privacy data source", () => {
       id: "review-exact",
       source: { proposalId: "proposal-exact" },
     } as ReviewItem;
-    tauriMocks.testLlmConnection.mockResolvedValue(testResult);
+    tauriMocks.testProviderConnection.mockResolvedValue(testResult);
     tauriMocks.getReviewCenterViewModel.mockResolvedValue({
       data: { items: [other, exact] },
       status: "ready",
     });
 
-    const outcome = await tauriSettingsDataSource.testProviderConnection(config);
+    const outcome = await tauriSettingsDataSource.testSavedProviderConnection?.(
+      "connection-1",
+      "profile-1"
+    );
 
-    expect(outcome.reviewResolution).toBe("resolved");
-    expect(outcome.reviewItem).toBe(exact);
+    expect(outcome?.reviewResolution).toBe("resolved");
+    expect(outcome?.reviewItem).toBe(exact);
+    expect(tauriMocks.testProviderConnection).toHaveBeenCalledWith("connection-1", "profile-1");
     expect(tauriMocks.getReviewCenterViewModel).toHaveBeenCalledTimes(1);
   });
 
   it("does not guess a review target when the exact proposal is missing", async () => {
-    tauriMocks.testLlmConnection.mockResolvedValue({
+    tauriMocks.testProviderConnection.mockResolvedValue({
       ok: false,
       provider: "deepseek",
       message: "consent required",
@@ -210,13 +213,16 @@ describe("Tauri settings privacy data source", () => {
       status: "ready",
     });
 
-    const outcome = await tauriSettingsDataSource.testProviderConnection(config);
+    const outcome = await tauriSettingsDataSource.testSavedProviderConnection?.(
+      "connection-1",
+      "profile-1"
+    );
 
     expect(outcome).toMatchObject({ reviewItem: null, reviewResolution: "missing" });
   });
 
   it("fails closed when more than one ReviewItem references the proposal", async () => {
-    tauriMocks.testLlmConnection.mockResolvedValue({
+    tauriMocks.testProviderConnection.mockResolvedValue({
       ok: false,
       provider: "deepseek",
       message: "consent required",
@@ -233,7 +239,10 @@ describe("Tauri settings privacy data source", () => {
       status: "ready",
     });
 
-    const outcome = await tauriSettingsDataSource.testProviderConnection(config);
+    const outcome = await tauriSettingsDataSource.testSavedProviderConnection?.(
+      "connection-1",
+      "profile-1"
+    );
 
     expect(outcome).toMatchObject({ reviewItem: null, reviewResolution: "ambiguous" });
   });

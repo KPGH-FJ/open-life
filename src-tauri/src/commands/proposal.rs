@@ -159,6 +159,9 @@ pub struct AcceptProposalResponse {
     #[serde(alias = "canonical_task_runtime_projection_status")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub canonical_task_runtime_projection_status: Option<String>,
+    #[serde(alias = "canonical_tool_review_projection_status")]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub canonical_tool_review_projection_status: Option<String>,
     #[serde(alias = "proposal_id")]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub proposal_id: Option<String>,
@@ -254,6 +257,11 @@ fn typed_accept_proposal_response(value: Value) -> Result<AcceptProposalResponse
                 Some(value)
                     if !matches!(value, "confirmed" | "reconciliation_required" | "not_applicable")
             )
+            || matches!(
+                response.canonical_tool_review_projection_status.as_deref(),
+                Some(value)
+                    if !matches!(value, "confirmed" | "reconciliation_required" | "not_applicable")
+            )
         {
             return Err(
                 "accept Proposal confirmed response is missing confirmed effect/projection truth"
@@ -305,6 +313,7 @@ fn typed_accept_proposal_response(value: Value) -> Result<AcceptProposalResponse
         || response.effect_status.is_some()
         || response.proposal_projection_status.is_some()
         || response.canonical_task_runtime_projection_status.is_some()
+        || response.canonical_tool_review_projection_status.is_some()
         || response.memory_gateway.is_some()
         || response.memory_lifecycle.is_some()
         || response.memory_persistence.is_some()
@@ -318,6 +327,30 @@ fn typed_accept_proposal_response(value: Value) -> Result<AcceptProposalResponse
         );
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod accept_response_contract_tests {
+    use super::*;
+
+    #[test]
+    fn confirmed_artifact_response_keeps_canonical_tool_review_projection_truth() {
+        let response = typed_accept_proposal_response(serde_json::json!({
+            "success": true,
+            "proposal_id": "proposal:test",
+            "effect_status": "confirmed",
+            "proposal_projection_status": "confirmed",
+            "canonical_task_runtime_projection_status": "confirmed",
+            "canonical_tool_review_projection_status": "not_applicable",
+            "warnings": []
+        }))
+        .unwrap();
+
+        assert_eq!(
+            response.canonical_tool_review_projection_status.as_deref(),
+            Some("not_applicable")
+        );
+    }
 }
 
 pub(crate) fn canonical_lifemodel_path(path: &str) -> String {
@@ -356,6 +389,9 @@ fn ensure_pending_or_postponed(proposal: &AgentProposal) -> Result<(), String> {
         ProposalStatus::Pending | ProposalStatus::Postponed | ProposalStatus::Edited => Ok(()),
         ProposalStatus::Accepted => Err("该 Proposal 已经被接受，不能重复处理。".to_string()),
         ProposalStatus::Rejected => Err("该 Proposal 已经被拒绝，不能再次处理。".to_string()),
+        ProposalStatus::Cancelled => {
+            Err("该 Proposal 已随同一任务的其他决定一起取消。".to_string())
+        }
         ProposalStatus::Expired => Err("该 Proposal 已经过期，不能再执行。".to_string()),
     }
 }
@@ -438,12 +474,305 @@ fn dispatch_failure_was_definitely_before_effect(operation: &str) -> bool {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ProposalReconciliationReport {
+    pub artifact_undo_checkpoints_repaired: usize,
     pub artifact_effects_reconciled: usize,
     pub ambiguous_action_effects_marked_unknown: usize,
     pub proposal_projections_repaired: usize,
     pub artifact_backlog_may_remain: bool,
     pub action_effect_backlog_may_remain: bool,
     pub projection_backlog_may_remain: bool,
+}
+
+fn required_proposal_after_string<'a>(
+    proposal: &'a AgentProposal,
+    field: &str,
+) -> Result<&'a str, String> {
+    proposal
+        .after
+        .get(field)
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| format!("canonical_artifact_undo_{field}_missing"))
+}
+
+fn expected_artifact_trash_target(source: &str) -> Result<String, String> {
+    let source = std::path::Path::new(source);
+    let parent = source
+        .parent()
+        .ok_or_else(|| "canonical_artifact_undo_trash_parent_missing".to_string())?;
+    let filename = source
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| "canonical_artifact_undo_trash_filename_invalid".to_string())?;
+    let digest = openlife_core::agent::metadata_safe_text_digest(&source.to_string_lossy()).1;
+    let token = digest
+        .strip_prefix("sha256:")
+        .unwrap_or(&digest)
+        .chars()
+        .take(16)
+        .collect::<String>();
+    Ok(parent
+        .join(format!(".openlife-trash-{token}-{filename}"))
+        .to_string_lossy()
+        .into_owned())
+}
+
+async fn bind_orphaned_artifact_undo_checkpoint(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+) -> Result<bool, String> {
+    if proposal.proposal_type != ProposalType::ExternalWriteAction
+        || proposal.after.get("undoOfArtifactId").is_none()
+    {
+        return Ok(false);
+    }
+    let artifact_id = required_proposal_after_string(proposal, "undoOfArtifactId")?;
+    if required_proposal_after_string(proposal, "artifactId")? != artifact_id {
+        return Err("canonical_artifact_undo_identity_mismatch".into());
+    }
+    let version = proposal
+        .after
+        .get("artifactVersion")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "canonical_artifact_undo_artifactVersion_missing".to_string())?;
+    let canonical_store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    if let Some(existing) = canonical_store
+        .lock()
+        .await
+        .load_artifact_undo_version(artifact_id, version)
+        .map_err(|error| error.to_string())?
+    {
+        if existing.proposal_id != proposal.id {
+            return Err("canonical_artifact_undo_identity_conflict".into());
+        }
+        return Ok(false);
+    }
+    let owns_idempotency_key = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(proposal_store_missing)?
+        .lock()
+        .await
+        .owns_active_review_idempotency_key(&proposal.id, &format!("artifact_undo:{artifact_id}"))
+        .map_err(|error| runtime_proposal_store_error(state, error))?;
+    if !owns_idempotency_key {
+        return Err("canonical_artifact_undo_review_idempotency_mismatch".into());
+    }
+    let artifact = canonical_store
+        .lock()
+        .await
+        .load_artifact(artifact_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_artifact_missing".to_string())?;
+    if artifact.current_version != version
+        || artifact.status != openlife_core::task_runtime::CanonicalArtifactStatus::Materialized
+    {
+        return Err("canonical_artifact_undo_source_not_verified".into());
+    }
+    let task_snapshot = canonical_store
+        .lock()
+        .await
+        .load_task_snapshot(&artifact.task_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_artifact_task_missing".to_string())?;
+    let artifact_snapshot = task_snapshot
+        .artifacts
+        .iter()
+        .find(|snapshot| snapshot.artifact.id == artifact_id)
+        .ok_or_else(|| "canonical_artifact_snapshot_missing".to_string())?;
+    let direct_origin = proposal.after.get("undoOriginKind").and_then(Value::as_str)
+        == Some("direct_materialization");
+    let original_proposal_id = artifact_snapshot
+        .review_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.proposal_id.as_str());
+    if direct_origin {
+        if original_proposal_id.is_some()
+            || required_proposal_after_string(proposal, "undoOfDirectArtifactVersion")?
+                != format!("{}:v{}", artifact.id, artifact.current_version)
+            || artifact_snapshot.current_version.expected_target_absent != Some(true)
+            || artifact_snapshot
+                .current_version
+                .expected_target_digest
+                .is_some()
+            || artifact_snapshot.pre_change_snapshot.is_some()
+            || artifact_snapshot
+                .current_version
+                .observed_content_digest
+                .as_deref()
+                != Some(artifact.content_digest.as_str())
+        {
+            return Err("canonical_direct_artifact_undo_origin_invalid".into());
+        }
+    } else if required_proposal_after_string(proposal, "undoOfProposalId")?
+        != original_proposal_id
+            .ok_or_else(|| "canonical_artifact_review_origin_missing".to_string())?
+    {
+        return Err("canonical_artifact_undo_origin_mismatch".into());
+    }
+    if proposal.source_detail.as_deref() != Some(artifact.task_id.as_str())
+        || required_proposal_after_string(proposal, "canonicalTaskId")? != artifact.task_id
+        || proposal.run_id.as_deref()
+            != Some(required_proposal_after_string(proposal, "sourceRunId")?)
+        || proposal
+            .after
+            .get("directWritesExecuted")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || proposal
+            .after
+            .get("externalWritesExecuted")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        return Err("canonical_artifact_undo_origin_mismatch".into());
+    }
+    let source_run_id = task_snapshot
+        .items
+        .iter()
+        .find(|item| item.id == artifact.source_item_id)
+        .map(|item| item.run_id.as_str())
+        .ok_or_else(|| "canonical_artifact_source_item_missing".to_string())?;
+    if required_proposal_after_string(proposal, "artifactDraftItemId")? != artifact.source_item_id
+        || required_proposal_after_string(proposal, "sourceRunId")? != source_run_id
+    {
+        return Err("canonical_artifact_undo_source_item_mismatch".into());
+    }
+    let original_proposal = match original_proposal_id {
+        Some(original_proposal_id) => {
+            let original = get_proposal_with_state(state, original_proposal_id).await?;
+            if original.status != ProposalStatus::Accepted {
+                return Err("canonical_artifact_undo_original_proposal_not_accepted".into());
+            }
+            Some(original)
+        }
+        None if direct_origin => None,
+        None => return Err("canonical_artifact_review_origin_missing".into()),
+    };
+    let original_operation = original_proposal
+        .as_ref()
+        .and_then(|proposal| proposal.after.get("operation"))
+        .and_then(Value::as_str)
+        .unwrap_or("create");
+    let materialized_reference = artifact
+        .materialized_reference
+        .as_deref()
+        .ok_or_else(|| "canonical_artifact_materialized_reference_missing".to_string())?;
+    match required_proposal_after_string(proposal, "operation")? {
+        "trash" => {
+            if original_operation == "move"
+                || original_proposal.as_ref().is_some_and(|proposal| {
+                    !matches!(
+                        reviewed_artifact_target_precondition(&proposal.after),
+                        Ok(ArtifactTargetPrecondition::Absent)
+                    )
+                })
+            {
+                return Err("canonical_artifact_undo_operation_mismatch".into());
+            }
+            let source = required_proposal_after_string(proposal, "source_path")?;
+            let target = required_proposal_after_string(proposal, "target_path")?;
+            let digest = required_proposal_after_string(proposal, "source_digest")?;
+            if source != materialized_reference
+                || target != expected_artifact_trash_target(source)?
+                || digest != artifact.content_digest
+                || required_proposal_after_string(proposal, "contentDigest")? != digest
+                || proposal.affected_path != format!("filesystem.{source}->{target}")
+            {
+                return Err("canonical_artifact_undo_projection_identity_mismatch".into());
+            }
+            canonical_store
+                .lock()
+                .await
+                .bind_artifact_undo(artifact_id, &proposal.id, source, target, digest)
+                .map_err(|error| error.to_string())?;
+        }
+        "restore" => {
+            let original_proposal = original_proposal
+                .as_ref()
+                .ok_or_else(|| "canonical_artifact_undo_operation_mismatch".to_string())?;
+            let source = required_proposal_after_string(proposal, "source_path")?;
+            let target = required_proposal_after_string(proposal, "target_path")?;
+            let digest = required_proposal_after_string(proposal, "source_digest")?;
+            if original_operation != "move"
+                || source != materialized_reference
+                || target != required_proposal_after_string(original_proposal, "source_path")?
+                || digest != artifact.content_digest
+                || required_proposal_after_string(proposal, "contentDigest")? != digest
+                || proposal.affected_path != format!("filesystem.{source}->{target}")
+            {
+                return Err("canonical_artifact_undo_projection_identity_mismatch".into());
+            }
+            canonical_store
+                .lock()
+                .await
+                .bind_artifact_rename_undo(artifact_id, &proposal.id, source, target, digest)
+                .map_err(|error| error.to_string())?;
+        }
+        "restore_snapshot" => {
+            let original_proposal = original_proposal
+                .as_ref()
+                .ok_or_else(|| "canonical_artifact_undo_operation_mismatch".to_string())?;
+            if original_operation == "move"
+                || matches!(
+                    reviewed_artifact_target_precondition(&original_proposal.after)?,
+                    ArtifactTargetPrecondition::Absent
+                )
+            {
+                return Err("canonical_artifact_undo_operation_mismatch".into());
+            }
+            let source = required_proposal_after_string(proposal, "snapshot_path")?;
+            let target = required_proposal_after_string(proposal, "path")?;
+            let restore_digest = required_proposal_after_string(proposal, "restore_digest")?;
+            let expected_target_digest =
+                required_proposal_after_string(proposal, "expected_target_digest")?;
+            if target != materialized_reference
+                || expected_target_digest != artifact.content_digest
+                || required_proposal_after_string(proposal, "contentDigest")? != restore_digest
+                || proposal.affected_path != format!("filesystem.{target}")
+            {
+                return Err("canonical_artifact_undo_projection_identity_mismatch".into());
+            }
+            canonical_store
+                .lock()
+                .await
+                .bind_artifact_replacement_undo(
+                    artifact_id,
+                    &proposal.id,
+                    source,
+                    target,
+                    restore_digest,
+                    expected_target_digest,
+                )
+                .map_err(|error| error.to_string())?;
+        }
+        _ => return Err("canonical_artifact_undo_operation_invalid".into()),
+    }
+    Ok(true)
+}
+
+async fn reconcile_orphaned_artifact_undo_checkpoints_with_state(
+    state: &Arc<AppState>,
+    limit: i64,
+) -> Result<usize, String> {
+    let proposals = state
+        .proposal_store
+        .as_ref()
+        .ok_or_else(proposal_store_missing)?
+        .lock()
+        .await
+        .list_active_review_proposals(limit.clamp(1, 200))
+        .map_err(|error| runtime_proposal_store_error(state, error))?;
+    let mut repaired = 0usize;
+    for proposal in proposals {
+        if bind_orphaned_artifact_undo_checkpoint(state, &proposal).await? {
+            repaired += 1;
+        }
+    }
+    Ok(repaired)
 }
 
 async fn project_confirmed_effect_projection_only(
@@ -609,7 +938,15 @@ async fn reconcile_artifact_effects_with_state(
                     continue;
                 }
             };
-            if target_reference_digest != record.target_reference_digest {
+            let binding_matches = canonical_move_effect_target_digest_matches(
+                state,
+                &proposal,
+                &target_reference_digest,
+                &record.target_reference_digest,
+            )
+            .await
+            .unwrap_or(false);
+            if !binding_matches {
                 persist_artifact_unknown(
                     state,
                     &record.proposal_id,
@@ -943,6 +1280,8 @@ async fn reconcile_durable_proposal_projections_inner(
 ) -> Result<ProposalReconciliationReport, String> {
     require_proposal_reconciliation_admission(state, admission)?;
     let bounded_limit = limit.clamp(1, 200);
+    let artifact_undo_checkpoints_repaired =
+        reconcile_orphaned_artifact_undo_checkpoints_with_state(state, bounded_limit).await?;
     let (orphaned_claims_released, orphaned_claim_backlog_may_remain) =
         if matches!(admission, ProposalReconciliationAdmission::StartupInternal) {
             release_startup_artifact_claims_proven_before_effect(state, bounded_limit).await?
@@ -977,6 +1316,7 @@ async fn reconcile_durable_proposal_projections_inner(
     };
 
     let mut report = ProposalReconciliationReport {
+        artifact_undo_checkpoints_repaired,
         artifact_effects_reconciled,
         ambiguous_action_effects_marked_unknown,
         action_effect_backlog_may_remain,
@@ -1066,9 +1406,16 @@ async fn confirmed_artifact_receipt_from_store(
         let safe_paths =
             crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, proposal)
                 .await?;
-        let (target_reference_digest, observation) =
+        let (move_reference_digest, observation) =
             inspect_artifact_move(source, target, &content_digest, &safe_paths)?;
-        if target_reference_digest != expected_target_reference_digest
+        let expected_effect_digest_matches = canonical_move_effect_target_digest_matches(
+            state,
+            proposal,
+            &move_reference_digest,
+            &expected_target_reference_digest,
+        )
+        .await?;
+        if !expected_effect_digest_matches
             || !matches!(observation, ArtifactFilesystemObservation::Confirmed { .. })
         {
             return Err("confirmed artifact move receipt binding mismatch".into());
@@ -1079,7 +1426,7 @@ async fn confirmed_artifact_receipt_from_store(
         let mut receipt = confirmed_move_receipt_from_paths(
             &proposal.id,
             target,
-            target_reference_digest,
+            move_reference_digest,
             observed,
             byte_size,
             media_type,
@@ -1119,6 +1466,30 @@ async fn confirmed_artifact_receipt_from_store(
     Ok(Some(confirmed_artifact_receipt(&prepared, observed)))
 }
 
+async fn canonical_move_effect_target_digest_matches(
+    state: &Arc<AppState>,
+    proposal: &AgentProposal,
+    move_reference_digest: &str,
+    expected_effect_digest: &str,
+) -> Result<bool, String> {
+    if proposal.after.get("undoOfArtifactId").is_some() {
+        return Ok(move_reference_digest == expected_effect_digest);
+    }
+    let artifact_id = artifact_id_for_proposal(proposal);
+    state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?
+        .lock()
+        .await
+        .load_artifact(&artifact_id)
+        .map_err(|error| error.to_string())
+        .map(|artifact| {
+            artifact
+                .is_some_and(|artifact| artifact.target_reference_digest == expected_effect_digest)
+        })
+}
+
 async fn project_confirmed_canonical_work_artifact(
     state: &Arc<AppState>,
     proposal: &AgentProposal,
@@ -1143,7 +1514,7 @@ async fn project_confirmed_canonical_work_artifact(
         .and_then(Value::as_str)
         .unwrap_or("propose_write");
     if proposal.after.get("undoOfArtifactId").is_some()
-        && matches!(operation, "trash" | "restore_snapshot")
+        && matches!(operation, "trash" | "restore" | "restore_snapshot")
     {
         let store = store.lock().await;
         store
@@ -1861,8 +2232,12 @@ async fn apply_external_write_artifact(
     .await;
     let observed_digest = match commit_result {
         Ok(Ok(digest)) => digest,
-        Ok(Err(failure)) => {
-            let code = failure.code().to_string();
+        Ok(Err(ArtifactFilesystemFailure::FailedBeforeEffect(code))) => {
+            let _ =
+                persist_artifact_failed_before_effect(state, &proposal.id, claim_id, &code).await;
+            return ArtifactApplyOutcome::FailedBeforeEffect(code);
+        }
+        Ok(Err(ArtifactFilesystemFailure::Unknown(code))) => {
             let _ = persist_artifact_unknown(state, &proposal.id, claim_id, &code).await;
             return ArtifactApplyOutcome::Unknown(code);
         }
@@ -1945,11 +2320,32 @@ async fn apply_external_move_artifact(
                 return ArtifactApplyOutcome::FailedBeforeEffect(error);
             }
         };
+    let expected_effect_target_digest = if proposal.after.get("undoOfArtifactId").is_some() {
+        prepared.target_reference_digest.clone()
+    } else {
+        let artifact_id = artifact_id_for_proposal(proposal);
+        match state.canonical_task_runtime_store.as_ref() {
+            Some(store) => match store.lock().await.load_artifact(&artifact_id) {
+                Ok(Some(artifact)) => artifact.target_reference_digest,
+                Ok(None) => {
+                    return ArtifactApplyOutcome::FailedBeforeEffect(
+                        "canonical_artifact_move_owner_missing".into(),
+                    )
+                }
+                Err(error) => return ArtifactApplyOutcome::FailedBeforeEffect(error.to_string()),
+            },
+            None => {
+                return ArtifactApplyOutcome::FailedBeforeEffect(
+                    "canonical_task_runtime_store_unavailable".into(),
+                )
+            }
+        }
+    };
     let prepared_record = match state.canonical_task_runtime_store.as_ref() {
         Some(store) => match store.lock().await.prepare_artifact_effect(
             &proposal.id,
             claim_id,
-            &prepared.target_reference_digest,
+            &expected_effect_target_digest,
             &prepared.content_digest,
             prepared.byte_size,
             &prepared.media_type,
@@ -3044,13 +3440,17 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
                 receipt,
             } => (patch_result, Some(*receipt)),
             ArtifactApplyOutcome::FailedBeforeEffect(error) => {
-                mark_canonical_work_artifact_effect_failure(state, &proposal, &error, false).await;
+                let reason_code = artifact_failure_projection_reason_code(&error, false);
+                mark_canonical_work_artifact_effect_failure(state, &proposal, reason_code, false)
+                    .await;
                 return Err(format!(
                     "Artifact materialization failed before effect: {error}"
                 ));
             }
             ArtifactApplyOutcome::Unknown(error) => {
-                mark_canonical_work_artifact_effect_failure(state, &proposal, &error, true).await;
+                let reason_code = artifact_failure_projection_reason_code(&error, true);
+                mark_canonical_work_artifact_effect_failure(state, &proposal, reason_code, true)
+                    .await;
                 return Err(format!(
                         "Artifact materialization state is unknown; automatic redispatch is forbidden: {error}"
                     ));
@@ -3258,6 +3658,24 @@ pub(crate) async fn accept_proposal_with_state_and_confirmation(
     Ok(response)
 }
 
+fn artifact_failure_projection_reason_code(error: &str, effect_unknown: bool) -> &'static str {
+    for code in [
+        "artifact_target_precondition_changed",
+        "artifact_target_symbolic_link_forbidden",
+        "artifact_target_outside_safe_paths",
+        "artifact_source_digest_changed",
+    ] {
+        if error.contains(code) {
+            return code;
+        }
+    }
+    if effect_unknown {
+        "artifact_effect_unknown"
+    } else {
+        "artifact_materialization_failed_before_effect"
+    }
+}
+
 pub(crate) async fn reject_proposal_with_state(
     proposal_id: String,
     state: &Arc<AppState>,
@@ -3265,6 +3683,20 @@ pub(crate) async fn reject_proposal_with_state(
     let mut proposal = get_proposal_with_state(state, &proposal_id).await?;
     require_proposal_write_for(state, &proposal)?;
     if proposal.status == ProposalStatus::Rejected {
+        if canonical_work_artifact_id(&proposal).is_some()
+            && proposal.after.get("undoOfArtifactId").is_none()
+        {
+            let store = state
+                .proposal_store
+                .as_ref()
+                .ok_or_else(proposal_store_missing)?
+                .lock()
+                .await;
+            store
+                .reject_review_and_cancel_active_siblings(&proposal, ProposalStatus::Rejected)
+                .map_err(|error| runtime_proposal_store_error(state, error))?
+                .ok_or_else(|| "Proposal review compare-and-swap conflict".to_string())?;
+        }
         project_canonical_work_review_rejection(state, &proposal).await?;
         crate::life_model_learning::record_lifemodel_learning_review_rejected_with_state(
             state, &proposal,
@@ -3280,7 +3712,23 @@ pub(crate) async fn reject_proposal_with_state(
     ensure_review_change_precedes_effect_dispatch(state, &proposal_id).await?;
     let expected_status = proposal.status;
     proposal.reject();
-    update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status).await?;
+    if canonical_work_artifact_id(&proposal).is_some()
+        && proposal.after.get("undoOfArtifactId").is_none()
+    {
+        let store = state
+            .proposal_store
+            .as_ref()
+            .ok_or_else(proposal_store_missing)?
+            .lock()
+            .await;
+        store
+            .reject_review_and_cancel_active_siblings(&proposal, expected_status)
+            .map_err(|error| runtime_proposal_store_error(state, error))?
+            .ok_or_else(|| "Proposal review compare-and-swap conflict".to_string())?;
+    } else {
+        update_review_proposal_before_dispatch_with_state(state, &proposal, expected_status)
+            .await?;
+    }
     project_canonical_work_review_rejection(state, &proposal).await?;
     crate::life_model_learning::record_lifemodel_learning_review_rejected_with_state(
         state, &proposal,
@@ -3570,6 +4018,22 @@ pub struct ArtifactUndoProposalResponse {
     pub status: &'static str,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ArtifactUndoProposalFailure {
+    pub artifact_id: String,
+    pub reason_code: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskArtifactUndoProposalResponse {
+    pub task_id: String,
+    pub status: &'static str,
+    pub proposals: Vec<ArtifactUndoProposalResponse>,
+    pub failures: Vec<ArtifactUndoProposalFailure>,
+}
+
 enum PreparedArtifactUndo {
     TrashCreated {
         source: String,
@@ -3582,6 +4046,31 @@ enum PreparedArtifactUndo {
         restore_digest: String,
         expected_target_digest: String,
     },
+    RestoreMoved {
+        source: String,
+        target: String,
+        content_digest: String,
+    },
+}
+
+fn artifact_undo_request_failure_reason_code(error: &str) -> &'static str {
+    match error {
+        "artifact_undo_source_changed" => "artifact_undo_source_changed",
+        "canonical_artifact_pre_change_snapshot_unavailable"
+        | "canonical_artifact_pre_change_snapshot_changed" => {
+            "artifact_undo_original_bytes_unavailable"
+        }
+        "canonical_artifact_undo_unavailable_without_original_bytes" => {
+            "artifact_undo_original_bytes_unavailable"
+        }
+        _ if error.contains("target already exists") => "artifact_undo_target_conflict",
+        _ if error.contains("source digest does not match")
+            || error.contains("Failed to resolve move source") =>
+        {
+            "artifact_undo_source_changed"
+        }
+        _ => "artifact_undo_request_failed",
+    }
 }
 
 #[tauri::command]
@@ -3590,6 +4079,77 @@ pub async fn request_artifact_undo(
     state: State<'_, Arc<AppState>>,
 ) -> Result<ArtifactUndoProposalResponse, String> {
     request_artifact_undo_with_state(artifact_id, state.inner()).await
+}
+
+#[tauri::command]
+pub async fn request_task_artifact_undo(
+    task_id: String,
+    state: State<'_, Arc<AppState>>,
+) -> Result<TaskArtifactUndoProposalResponse, String> {
+    request_task_artifact_undo_with_state(task_id, state.inner()).await
+}
+
+pub(crate) async fn request_task_artifact_undo_with_state(
+    task_id: String,
+    state: &Arc<AppState>,
+) -> Result<TaskArtifactUndoProposalResponse, String> {
+    require_persistence_write(state)?;
+    let canonical_store = state
+        .canonical_task_runtime_store
+        .as_ref()
+        .ok_or_else(|| "canonical_task_runtime_store_unavailable".to_string())?;
+    let snapshot = canonical_store
+        .lock()
+        .await
+        .load_task_snapshot(&task_id)
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "canonical_task_missing".to_string())?;
+    let mut artifact_ids = Vec::new();
+    for artifact in snapshot.artifacts {
+        if artifact.artifact.status
+            != openlife_core::task_runtime::CanonicalArtifactStatus::Materialized
+        {
+            continue;
+        }
+        let undo = canonical_store
+            .lock()
+            .await
+            .load_artifact_undo(&artifact.artifact.id)
+            .map_err(|error| error.to_string())?;
+        if undo.is_none() {
+            artifact_ids.push(artifact.artifact.id);
+        }
+    }
+    if artifact_ids.len() < 2 {
+        return Err(
+            "canonical_task_artifact_batch_undo_requires_multiple_available_artifacts".into(),
+        );
+    }
+
+    let mut proposals = Vec::with_capacity(artifact_ids.len());
+    let mut failures = Vec::new();
+    for artifact_id in artifact_ids {
+        match request_artifact_undo_with_state(artifact_id.clone(), state).await {
+            Ok(proposal) => proposals.push(proposal),
+            Err(error) => failures.push(ArtifactUndoProposalFailure {
+                artifact_id,
+                reason_code: artifact_undo_request_failure_reason_code(&error),
+            }),
+        }
+    }
+    if proposals.is_empty() {
+        return Err("canonical_task_artifact_batch_undo_no_proposals_created".into());
+    }
+    Ok(TaskArtifactUndoProposalResponse {
+        task_id,
+        status: if failures.is_empty() {
+            "waiting_review"
+        } else {
+            "partial_waiting_review"
+        },
+        proposals,
+        failures,
+    })
 }
 
 pub(crate) async fn request_artifact_undo_with_state(
@@ -3614,29 +4174,96 @@ pub(crate) async fn request_artifact_undo_with_state(
         .materialized_reference
         .clone()
         .ok_or_else(|| "canonical_artifact_materialized_reference_missing".to_string())?;
-    let original_proposal_id = canonical_store
+    let task_snapshot = canonical_store
         .lock()
         .await
         .load_task_snapshot(&artifact.task_id)
         .map_err(|error| error.to_string())?
-        .and_then(|snapshot| {
-            snapshot
-                .artifacts
-                .into_iter()
-                .find(|snapshot| snapshot.artifact.id == artifact.id)
-                .and_then(|snapshot| snapshot.review_checkpoint)
-                .map(|checkpoint| checkpoint.proposal_id)
-        })
-        .ok_or_else(|| "canonical_artifact_review_origin_missing".to_string())?;
-    let original_proposal = get_proposal_with_state(state, &original_proposal_id).await?;
-    let original_target_absent = matches!(
-        reviewed_artifact_target_precondition(&original_proposal.after)?,
-        ArtifactTargetPrecondition::Absent
-    );
-    let safe_paths =
-        crate::canonical_work_runtime::artifact_safe_paths_for_proposal(state, &original_proposal)
+        .ok_or_else(|| "canonical_artifact_task_missing".to_string())?;
+    let artifact_snapshot = task_snapshot
+        .artifacts
+        .iter()
+        .find(|snapshot| snapshot.artifact.id == artifact.id)
+        .ok_or_else(|| "canonical_artifact_snapshot_missing".to_string())?;
+    let source_item = task_snapshot
+        .items
+        .iter()
+        .find(|item| item.id == artifact.source_item_id)
+        .ok_or_else(|| "canonical_artifact_source_item_missing".to_string())?;
+    let original_proposal_id = artifact_snapshot
+        .review_checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.proposal_id.clone());
+    let (original_proposal, original_operation, original_target_absent, safe_paths) =
+        if let Some(original_proposal_id) = original_proposal_id.as_deref() {
+            let original_proposal = get_proposal_with_state(state, original_proposal_id).await?;
+            let target_absent = matches!(
+                reviewed_artifact_target_precondition(&original_proposal.after)?,
+                ArtifactTargetPrecondition::Absent
+            );
+            let operation = original_proposal
+                .after
+                .get("operation")
+                .and_then(Value::as_str)
+                .unwrap_or("create")
+                .to_string();
+            let safe_paths = crate::canonical_work_runtime::artifact_safe_paths_for_proposal(
+                state,
+                &original_proposal,
+            )
             .await?;
-    let prepared_undo = if original_target_absent {
+            (
+                Some(original_proposal),
+                operation,
+                target_absent,
+                safe_paths,
+            )
+        } else {
+            if artifact_snapshot.current_version.expected_target_absent != Some(true)
+                || artifact_snapshot
+                    .current_version
+                    .expected_target_digest
+                    .is_some()
+                || artifact_snapshot.pre_change_snapshot.is_some()
+                || artifact_snapshot
+                    .current_version
+                    .observed_content_digest
+                    .as_deref()
+                    != Some(artifact.content_digest.as_str())
+            {
+                return Err("canonical_direct_artifact_undo_origin_invalid".into());
+            }
+            let safe_paths = crate::canonical_work_runtime::artifact_safe_paths_for_task_run(
+                state,
+                &artifact.task_id,
+                &source_item.run_id,
+            )
+            .await?;
+            (None, "create".to_string(), true, safe_paths)
+        };
+    let prepared_undo = if original_operation == "move" {
+        let target = original_proposal
+            .as_ref()
+            .ok_or_else(|| "canonical_artifact_rename_source_missing".to_string())?
+            .after
+            .get("source_path")
+            .and_then(Value::as_str)
+            .filter(|target| !target.trim().is_empty())
+            .ok_or_else(|| "canonical_artifact_rename_source_missing".to_string())?
+            .to_string();
+        crate::artifact_materializer::prepare_artifact_move(
+            "artifact-undo-preview",
+            &source,
+            &target,
+            &artifact.content_digest,
+            &safe_paths,
+        )?;
+        PreparedArtifactUndo::RestoreMoved {
+            source: source.clone(),
+            target,
+            content_digest: artifact.content_digest.clone(),
+        }
+    } else if original_target_absent {
         let target = crate::artifact_materializer::trash_target_for_source(&source, &safe_paths)?;
         crate::artifact_materializer::prepare_artifact_move(
             "artifact-undo-preview",
@@ -3664,6 +4291,11 @@ pub(crate) async fn request_artifact_undo_with_state(
         if artifact_content_digest(&bytes) != pre_change.content_digest {
             return Err("canonical_artifact_pre_change_snapshot_changed".into());
         }
+        if crate::artifact_materializer::capture_artifact_target_precondition(&source, &safe_paths)?
+            != ArtifactTargetPrecondition::ContentDigest(artifact.content_digest.clone())
+        {
+            return Err("artifact_undo_source_changed".into());
+        }
         crate::artifact_materializer::prepare_artifact_materialization_with_precondition_for_artifact_bytes(
             &artifact.id,
             "artifact-undo-preview",
@@ -3680,24 +4312,33 @@ pub(crate) async fn request_artifact_undo_with_state(
             expected_target_digest: artifact.content_digest.clone(),
         }
     };
-    let task_snapshot = canonical_store
-        .lock()
-        .await
-        .load_task_snapshot(&artifact.task_id)
-        .map_err(|error| error.to_string())?
-        .ok_or_else(|| "canonical_artifact_task_missing".to_string())?;
-    let source_item = task_snapshot
-        .items
-        .iter()
-        .find(|item| item.id == artifact.source_item_id)
-        .ok_or_else(|| "canonical_artifact_source_item_missing".to_string())?;
-    let after = match &prepared_undo {
+    let mut after = match &prepared_undo {
         PreparedArtifactUndo::TrashCreated {
             source,
             target,
             content_digest,
         } => serde_json::json!({
             "operation": "trash",
+            "source_path": source,
+            "target_path": target,
+            "source_digest": content_digest,
+            "contentDigest": content_digest,
+            "canonicalTaskId": artifact.task_id,
+            "artifactDraftItemId": artifact.source_item_id,
+            "artifactId": artifact.id,
+            "artifactVersion": artifact.current_version,
+            "undoOfArtifactId": artifact.id,
+            "undoOfProposalId": original_proposal_id,
+            "sourceRunId": source_item.run_id,
+            "directWritesExecuted": false,
+            "externalWritesExecuted": false,
+        }),
+        PreparedArtifactUndo::RestoreMoved {
+            source,
+            target,
+            content_digest,
+        } => serde_json::json!({
+            "operation": "restore",
             "source_path": source,
             "target_path": target,
             "source_digest": content_digest,
@@ -3735,12 +4376,29 @@ pub(crate) async fn request_artifact_undo_with_state(
             "externalWritesExecuted": false,
         }),
     };
+    if original_proposal_id.is_none() {
+        let object = after
+            .as_object_mut()
+            .ok_or_else(|| "canonical_artifact_undo_payload_invalid".to_string())?;
+        object.remove("undoOfProposalId");
+        object.insert(
+            "undoOriginKind".into(),
+            Value::String("direct_materialization".into()),
+        );
+        object.insert(
+            "undoOfDirectArtifactVersion".into(),
+            Value::String(format!("{}:v{}", artifact.id, artifact.current_version)),
+        );
+    }
     let affected_path = match &prepared_undo {
         PreparedArtifactUndo::TrashCreated { source, target, .. } => {
             format!("filesystem.{source}->{target}")
         }
         PreparedArtifactUndo::RestoreReplaced { target, .. } => {
             format!("filesystem.{target}")
+        }
+        PreparedArtifactUndo::RestoreMoved { source, target, .. } => {
+            format!("filesystem.{source}->{target}")
         }
     };
     let mut proposal = AgentProposal::new(
@@ -3795,6 +4453,17 @@ pub(crate) async fn request_artifact_undo_with_state(
             &target,
             &restore_digest,
             &expected_target_digest,
+        ),
+        PreparedArtifactUndo::RestoreMoved {
+            source,
+            target,
+            content_digest,
+        } => canonical_store.lock().await.bind_artifact_rename_undo(
+            &artifact.id,
+            review.proposal_id(),
+            &source,
+            &target,
+            &content_digest,
         ),
     }
     .map_err(|error| error.to_string())?;

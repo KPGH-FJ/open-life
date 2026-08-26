@@ -1,8 +1,7 @@
-import { Check, FolderOpen, RefreshCw, Save, ShieldOff, Unplug, Wifi } from "lucide-react";
+import { Check, FolderOpen, RefreshCw, Save, ShieldOff } from "lucide-react";
 import type { ReviewItem, ToolPermissionPolicy } from "@/tauri";
 import {
   FoundationActionButton,
-  FoundationDialog,
   FoundationNotice,
   FoundationStatusLabel,
   FoundationTextField,
@@ -11,17 +10,15 @@ import {
 import { boundaryPresentation } from "@/shared/evidencePresentation";
 import { productErrorMessage } from "@/shared/productError";
 import {
-  credentialState,
   endpointHost,
   searchCredentialState,
-  searchUsesSelectedProviderCredential,
+  selectedHostedSearchRoute,
   settingsBoundaryLabels,
-  settingsProviderLabels,
-  settingsProviderOptions,
   settingsSearchProviderOptions,
   type SettingsSurfaceId,
 } from "./settingsPresentation";
-import { settingsTestConfirmationTarget, type SettingsController } from "./useSettingsController";
+import type { SettingsController } from "./useSettingsController";
+import { ProviderConnectionsPanel } from "./ProviderConnectionsPanel";
 
 export function SettingsView({
   controller,
@@ -38,9 +35,8 @@ export function SettingsView({
   const boundary = boundaryPresentation(controller.effectiveBoundaryEnvelope);
   const busy =
     controller.loading ||
-    ["testing", "saving", "refreshing_boundary"].includes(controller.state.phase) ||
+    ["saving", "refreshing_boundary"].includes(controller.state.phase) ||
     controller.artifactDirectorySelection.phase === "selecting";
-  const testTarget = settingsTestConfirmationTarget(controller);
 
   if (!controller.snapshot && controller.loading) {
     return (
@@ -76,14 +72,15 @@ export function SettingsView({
     );
   }
 
-  const credential = credentialState(draft);
-  const endpointInvalid = draft.llm.openai_base.trim() && !endpointHost(draft.llm.openai_base);
   const networkEnabled = draft.system?.network_policy?.enabled;
   const networkDefault = draft.system?.network_policy?.default_decision;
-  const reviewItem = controller.lastTestOutcome?.reviewItem ?? null;
   const searchProvider = draft.system?.search_provider ?? "auto";
   const searchCredential = searchCredentialState(draft);
-  const searchReusesModelCredential = searchUsesSelectedProviderCredential(draft);
+  const selectedSearchRoute = selectedHostedSearchRoute(
+    controller.providerConnections,
+    searchProvider
+  );
+  const searchReusesModelCredential = selectedSearchRoute !== null;
   const artifactOutputDirectory = draft.system?.artifact_output_directory;
   const agentMemoryEnabled = draft.system?.agent_memory_enabled ?? true;
   const runtimeProfile = controller.snapshot?.productDiagnostics?.runtimeBuild.profile ?? null;
@@ -132,7 +129,7 @@ export function SettingsView({
           <p>设置命令可能已经返回，但当前没有足够证据显示本地、外传或风险确定态。</p>
         </FoundationNotice>
       )}
-      {controller.state.phase === "failed" && !controller.testPresentation && (
+      {controller.state.phase === "failed" && (
         <FoundationNotice title="设置操作失败" tone="error">
           <p>草稿仍保留；系统产品状态没有因此变为可用。</p>
         </FoundationNotice>
@@ -179,79 +176,20 @@ export function SettingsView({
             />
           </section>
 
-          <section className="ol-settings-section" aria-labelledby="ol-settings-cloud-title">
-            <div className="ol-settings-section-heading">
-              <span>云端或 OpenAI 兼容连接</span>
-              <h2 id="ol-settings-cloud-title">供应商连接</h2>
-            </div>
-            <label className="ol-settings-select-field" htmlFor="ol-settings-provider">
-              <span className="ol-settings-select-field__label">供应商</span>
-              <span className="ol-settings-select-field__description">
-                更改供应商会清除当前草稿中的凭据；页面不会把旧凭据带到新目标。
-              </span>
-              <select
-                id="ol-settings-provider"
-                value={draft.llm.provider ?? ""}
-                onChange={event =>
-                  controller.edit({
-                    field: "provider",
-                    value: event.target.value as NonNullable<typeof draft.llm.provider>,
-                  })
-                }
-              >
-                <option value="" disabled>
-                  选择供应商
-                </option>
-                {settingsProviderOptions.map(option => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <FoundationTextField
-              id="ol-settings-endpoint"
-              label="API 地址"
-              description="必须是完整 HTTP 或 HTTPS 地址；连接测试会明确显示目标主机。"
-              value={draft.llm.openai_base}
-              onChange={event => controller.edit({ field: "endpoint", value: event.target.value })}
-              error={endpointInvalid ? "请输入完整的 HTTP 或 HTTPS 地址。" : undefined}
-              spellCheck={false}
-              autoCapitalize="none"
-            />
-            <FoundationTextField
-              id="ol-settings-chat-model"
-              label="模型"
-              description="测试只验证这一精确模型，不代表其他模型可用。"
-              value={draft.llm.chat_model}
-              onChange={event =>
-                controller.edit({ field: "chat_model", value: event.target.value })
-              }
-              error={!draft.llm.chat_model.trim() ? "请填写要使用的模型。" : undefined}
-              spellCheck={false}
-              autoCapitalize="none"
-            />
-            <FoundationTextField
-              id="ol-settings-api-key"
-              label="API 凭据"
-              description="真实值不会显示、搜索或进入检查器。"
-              type="password"
-              value={credential === "stored" ? "" : (draft.llm.openai_key ?? "")}
-              placeholder={credential === "stored" ? "已保存凭据" : "输入新的 API 凭据"}
-              stateMessage={
-                credential === "stored"
-                  ? "系统返回遮罩凭据；留空仅在同一供应商和地址下按系统规则保留。"
-                  : credential === "entered"
-                    ? "新凭据仅存在于当前草稿；测试不会保存，保存需要单独操作。"
-                    : "当前目标没有可用于测试的凭据。"
-              }
-              onChange={event =>
-                controller.edit({ field: "credential", value: event.target.value })
-              }
-              autoComplete="new-password"
-              spellCheck={false}
-            />
-          </section>
+          <ProviderConnectionsPanel
+            dataSource={controller.providerConnectionDataSource}
+            disabled={
+              controller.protectionState !== "normal" ||
+              controller.providerConnectionDataSource === null
+            }
+            disabledReason={
+              controller.providerConnectionDataSource === null
+                ? "系统没有提供供应商连接生命周期接口；连接修改保持关闭。"
+                : "LifeStateProjection 保护状态未知或正在保护模式中；供应商连接修改保持关闭。"
+            }
+            onOpenReview={onOpenReview}
+            onViewModelChange={controller.setProviderConnections}
+          />
 
           <section className="ol-settings-section" aria-labelledby="ol-settings-search-title">
             <div className="ol-settings-section-heading">
@@ -348,28 +286,7 @@ export function SettingsView({
             )}
           </section>
 
-          <SettingsTestResult
-            controller={controller}
-            reviewItem={reviewItem}
-            onOpenReview={onOpenReview}
-            onOpenInspector={onOpenInspector}
-          />
-
-          <SettingsActions controller={controller} showTest />
-
-          <details className="ol-settings-advanced">
-            <summary>高级配置摘要</summary>
-            <dl>
-              <div>
-                <dt>Embedding</dt>
-                <dd>{draft.llm.embedding_enabled === false ? "关闭" : "由当前配置决定"}</dd>
-              </div>
-              <div>
-                <dt>配置代</dt>
-                <dd>{draft.llm.credential_version ?? "未知"}</dd>
-              </div>
-            </dl>
-          </details>
+          <SettingsActions controller={controller} />
         </fieldset>
       ) : (
         <fieldset className="ol-settings-form" disabled={busy}>
@@ -523,48 +440,6 @@ export function SettingsView({
           <SettingsActions controller={controller} />
         </fieldset>
       )}
-
-      <FoundationDialog
-        open={controller.testConfirmationOpen}
-        title="确认本次外部连接测试"
-        description="这一步只测试连接，不会保存设置。系统网络策略仍可能要求独立审核。"
-        busy={controller.state.phase === "testing"}
-        onClose={controller.cancelTest}
-        footer={
-          <>
-            <FoundationActionButton label="取消" variant="quiet" onClick={controller.cancelTest} />
-            <FoundationActionButton
-              label="确认并测试"
-              variant="primary"
-              icon={<Wifi size={18} strokeWidth={1.75} aria-hidden="true" />}
-              onClick={controller.confirmTest}
-            />
-          </>
-        }
-      >
-        <dl className="ol-settings-confirmation">
-          <div>
-            <dt>供应商</dt>
-            <dd>
-              {draft.llm.provider
-                ? settingsProviderLabels[draft.llm.provider]
-                : testTarget.provider}
-            </dd>
-          </div>
-          <div>
-            <dt>目标主机</dt>
-            <dd>{testTarget.host}</dd>
-          </div>
-          <div>
-            <dt>模型</dt>
-            <dd>{testTarget.model}</dd>
-          </div>
-          <div>
-            <dt>可能结果</dt>
-            <dd>可能发送一次最小连接请求；API 凭据不会显示在确认信息中。</dd>
-          </div>
-        </dl>
-      </FoundationDialog>
     </div>
   );
 }
@@ -729,7 +604,14 @@ function ProductDiagnosticsPanel({ controller }: { controller: SettingsControlle
           </div>
           <div>
             <dt>构建</dt>
-            <dd>{diagnostics.runtimeBuild.gitSha}</dd>
+            <dd>
+              {diagnostics.runtimeBuild.gitSha}
+              {diagnostics.runtimeBuild.sourceState === "dirty"
+                ? " · 包含本地未提交更改"
+                : diagnostics.runtimeBuild.sourceState === "clean"
+                  ? " · 已提交源码"
+                  : " · 源码状态未知"}
+            </dd>
           </div>
           <div>
             <dt>二进制</dt>
@@ -862,9 +744,9 @@ function SafeModeNotice({ controller }: { controller: SettingsController }) {
       <p>
         {active
           ? recoveryEligible
-            ? "系统报告了保护状态；连接测试与设置保存继续关闭。下方只开放系统启动快照明确列出的凭据初始化或访问恢复，且仍需原生确认。"
+            ? "系统报告了保护状态；设置保存继续关闭。下方只开放系统启动快照明确列出的凭据初始化或访问恢复，且仍需原生确认。"
             : "系统报告了保护状态；连接测试与设置保存继续关闭。当前读模型没有提供凭据恢复资格，页面不会从自由文本原因推导并开放系统凭据操作。"
-          : "LifeStateProjection 没有提供可核对的保护状态；连接测试、设置保存和本地确定态全部保持关闭。"}
+          : "LifeStateProjection 没有提供可核对的保护状态；设置保存和本地确定态全部保持关闭。"}
       </p>
     </FoundationNotice>
   );
@@ -885,7 +767,7 @@ function CredentialInitializationPanel({ controller }: { controller: SettingsCon
   return (
     <section className="ol-settings-section" aria-labelledby="ol-settings-credential-title">
       <div className="ol-settings-section-heading">
-        <span>系统启动快照</span>
+        <span>启动凭据状态</span>
         <h2 id="ol-settings-credential-title">
           {accessRecovery ? "凭据访问恢复" : "系统凭据初始化"}
         </h2>
@@ -915,8 +797,8 @@ function CredentialInitializationPanel({ controller }: { controller: SettingsCon
       ) : (
         <p>
           {accessRecovery
-            ? `系统确认有 ${eligibleCount} 类既有凭据需要恢复访问。此操作不创建、不覆盖且不返回密钥。`
-            : `系统确认有 ${eligibleCount} 类系统凭据可以首次初始化。`}
+            ? `系统确认有 ${eligibleCount} 项既有凭据需要恢复访问。此操作不创建、不覆盖且不返回密钥。`
+            : `系统确认有 ${eligibleCount} 项 OpenLife 内部凭据可以首次初始化。`}
           点击后仍需在 macOS 原生系统对话框中确认。
         </p>
       )}
@@ -941,62 +823,8 @@ function CredentialInitializationPanel({ controller }: { controller: SettingsCon
   );
 }
 
-function SettingsTestResult({
-  controller,
-  reviewItem,
-  onOpenReview,
-  onOpenInspector,
-}: {
-  controller: SettingsController;
-  reviewItem: ReviewItem | null;
-  onOpenReview: (item: ReviewItem) => void;
-  onOpenInspector: () => void;
-}) {
-  const result = controller.lastTestOutcome?.result;
-  const presentation = controller.testPresentation;
-  if (!result || !presentation) return null;
-  const hasReviewProposal = Boolean(result.review_proposal_id);
-
-  return (
-    <section className="ol-settings-test-result" aria-labelledby="ol-settings-test-title">
-      <div className="ol-settings-section-heading">
-        <span>只适用于本次请求</span>
-        <h2 id="ol-settings-test-title">连接测试结果</h2>
-      </div>
-      <FoundationStatusLabel
-        label={presentation.label}
-        status={presentation.status}
-        verified={presentation.verified}
-        live
-      />
-      <p>{result.message}</p>
-      <p className="ol-settings-test-result__limit">{presentation.detail}</p>
-      <div className="ol-settings-inline-actions">
-        {hasReviewProposal && (
-          <FoundationActionButton
-            label="查看并决定"
-            variant="secondary"
-            disabled={!reviewItem}
-            disabledReason={
-              reviewItem ? undefined : "当前无法从需处理事项确认对应决定；不会跳转到猜测目标。"
-            }
-            onClick={() => reviewItem && onOpenReview(reviewItem)}
-          />
-        )}
-        <FoundationActionButton label="查看测试依据" variant="quiet" onClick={onOpenInspector} />
-      </div>
-    </section>
-  );
-}
-
-function SettingsActions({
-  controller,
-  showTest = false,
-}: {
-  controller: SettingsController;
-  showTest?: boolean;
-}) {
-  const { test, save } = controller.actions;
+function SettingsActions({ controller }: { controller: SettingsController }) {
+  const { save } = controller.actions;
   const canRetryBoundary =
     controller.state.phase === "unknown" &&
     controller.state.failureStage === "boundary_refresh" &&
@@ -1005,7 +833,7 @@ function SettingsActions({
     <section className="ol-settings-actions" aria-label="设置动作">
       <div>
         <span>明确操作</span>
-        <p>测试与保存互不替代；保存后必须重新读取模型传输边界。</p>
+        <p>这里只保存本地模型、搜索与隐私偏好；供应商连接在上方独立保存和测试。</p>
       </div>
       <div className="ol-settings-actions__buttons">
         {canRetryBoundary && (
@@ -1014,20 +842,6 @@ function SettingsActions({
             variant="secondary"
             icon={<RefreshCw size={18} strokeWidth={1.75} aria-hidden="true" />}
             onClick={controller.retryBoundaryRefresh}
-          />
-        )}
-        {showTest && (
-          <FoundationActionButton
-            label={test.label}
-            icon={<Unplug size={18} strokeWidth={1.75} aria-hidden="true" />}
-            loading={controller.state.phase === "testing"}
-            loadingLabel="正在测试"
-            disabled={!test.enabled}
-            disabledReason={test.disabledReason}
-            data-action-id={test.id}
-            data-action-kind={test.kind}
-            data-target-ref={test.targetRef}
-            onClick={controller.requestTest}
           />
         )}
         <FoundationActionButton

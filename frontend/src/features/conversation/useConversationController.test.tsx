@@ -1,6 +1,11 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import type { ChatSession, ConversationViewModel, StreamMessageDonePayload } from "@/tauri";
+import type {
+  ChatSession,
+  ConversationViewModel,
+  ProviderProfileViewModel,
+  StreamMessageDonePayload,
+} from "@/tauri";
 import type { ChatMessage } from "@/types";
 import type { ConversationDataSource } from "./conversationDataSource";
 import { useConversationController } from "./useConversationController";
@@ -20,6 +25,35 @@ function turnResult(status: StreamMessageDonePayload["status"]): StreamMessageDo
     status,
     blockers: status === "blocked" ? ["permission_required"] : [],
   } as StreamMessageDonePayload;
+}
+
+function providerProfile(
+  profileId: string,
+  modelId: string,
+  selected: boolean
+): ProviderProfileViewModel {
+  return {
+    profileId,
+    providerId: "ollama",
+    modelId,
+    endpointClass: "local",
+    selected,
+    availability: "ready",
+    unavailableReason: null,
+    sizeBytes: 4_000_000_000,
+    protocol: "ollama_chat",
+    structuredOutputContract: "json_schema_requested_locally_validated",
+    reasoningControl: "provider_default_only",
+    supportedReasoningEfforts: [],
+    defaultReasoningEffort: null,
+    reasoningMandatory: false,
+    reasoningCapabilitySource: "unavailable",
+    inputModalities: ["text"],
+    inputCapabilitySource: "adapter_default",
+    chatCompatibility: "reachable_unverified",
+    workCompatibility: "unverified",
+    workCompatibilityReason: null,
+  };
 }
 
 type ConversationTestSource = ConversationDataSource & {
@@ -70,6 +104,7 @@ function source(overrides: Partial<ConversationTestSource> = {}) {
     listSessions,
     loadHistory,
     createSession: vi.fn().mockResolvedValue(undefined),
+    selectProviderProfile: vi.fn().mockResolvedValue(undefined),
     renameSession: vi.fn().mockResolvedValue(undefined),
     deleteSession: vi.fn().mockResolvedValue(undefined),
     pickResources: vi.fn(async (importOperationId: string, turnOperationId: string) => ({
@@ -344,6 +379,65 @@ describe("conversation controller", () => {
     expect(onAfterTurn).toHaveBeenCalledTimes(1);
   });
 
+  it("restores the exact canonical Task and Run after a started Work stream fails", async () => {
+    const initialSource = source();
+    const initial = await initialSource.loadConversation("conversation-1");
+    const failed = {
+      ...initial,
+      latestTurn: {
+        turnId: "turn-failed-work",
+        status: "failed" as const,
+        taskId: "task-failed-work",
+        runId: "run-failed-work",
+        providerProfileId: "provider-profile:test",
+        providerId: "openai",
+        modelId: "gpt-test",
+        endpointClass: "cloud",
+        errorCode: "provider_timeout",
+      },
+    };
+    const streamTurn = vi.fn(
+      async (
+        sessionId,
+        _messages,
+        options,
+        events: Parameters<ConversationDataSource["streamTurn"]>[3]
+      ) => {
+        events.onStart({
+          session_id: sessionId,
+          operation_id: options.operationId,
+          conversation_id: sessionId,
+          task_id: "task-failed-work",
+          run_id: "run-failed-work",
+          turn_id: "turn-failed-work",
+        });
+        throw new Error("provider_timeout");
+      }
+    );
+    const dataSource = source({
+      loadConversation: vi.fn().mockResolvedValueOnce(initial).mockResolvedValue(failed),
+      streamTurn,
+    });
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => {
+      result.current.setMode("work");
+      result.current.setDraft("继续完成这个任务");
+    });
+
+    await act(async () => result.current.send());
+
+    expect(result.current.turnState).toMatchObject({
+      phase: "resolved",
+      status: "failed",
+      taskId: "task-failed-work",
+      runId: "run-failed-work",
+      blockers: ["provider_timeout"],
+    });
+  });
+
   it("fails closed when an attachment turn returns a foreign terminal identity", async () => {
     const dataSource = source({
       streamTurn: vi.fn().mockResolvedValue({
@@ -561,7 +655,9 @@ describe("conversation controller", () => {
   });
 
   it("does not override an explicit conversation choice with task recovery preference", async () => {
+    const selectConversation = vi.fn().mockResolvedValue(undefined);
     const dataSource = source({
+      selectConversation,
       listSessions: vi.fn().mockResolvedValue([
         {
           session_id: "conversation-2",
@@ -591,6 +687,7 @@ describe("conversation controller", () => {
     await act(async () => result.current.reload());
     act(() => result.current.selectSession("conversation-1"));
     await waitFor(() => expect(result.current.selectedSessionId).toBe("conversation-1"));
+    expect(selectConversation).toHaveBeenCalledWith("conversation-1");
 
     rerender({ preferredSessionId: "conversation-2" });
 
@@ -740,9 +837,9 @@ describe("conversation controller", () => {
     );
     await act(async () => result.current.reload());
 
-    act(() => {
-      expect(result.current.selectProviderProfile(profiles[0].profileId)).toBe(false);
-      expect(result.current.selectProviderProfile(profiles[1].profileId)).toBe(true);
+    await act(async () => {
+      expect(await result.current.selectProviderProfile(profiles[0].profileId)).toBe(false);
+      expect(await result.current.selectProviderProfile(profiles[1].profileId)).toBe(true);
       result.current.setDraft("只回复：本地模型绑定成功");
     });
     await act(async () => result.current.send());
@@ -751,6 +848,10 @@ describe("conversation controller", () => {
       providerProfileId: profiles[1].profileId,
       mode: "chat",
     });
+    expect(dataSource.selectProviderProfile).toHaveBeenCalledWith(
+      "conversation-1",
+      profiles[1].profileId
+    );
     expect(announce).toHaveBeenCalledWith("这个模型当前不可用，未改变本轮模型。");
     expect(announce).toHaveBeenCalledWith("本轮将使用 ollama · llama3:latest。");
   });
@@ -778,6 +879,8 @@ describe("conversation controller", () => {
       defaultReasoningEffort: null,
       reasoningMandatory: false,
       reasoningCapabilitySource: "unavailable" as const,
+      inputModalities: ["text"] as Array<"text">,
+      inputCapabilitySource: "adapter_default" as const,
       chatCompatibility: "reachable_unverified" as const,
       workCompatibility: "unverified" as const,
       workCompatibilityReason: null,
@@ -1460,6 +1563,7 @@ describe("conversation controller", () => {
     expect(assignProject).toHaveBeenCalledWith("conversation-1", "project-1");
     expect(result.current.projects).toEqual([project]);
     expect(result.current.selectedProjectId).toBe("project-1");
+    expect(result.current.mode).toBe("work");
   });
 
   it("keeps a newly selected Project for the first conversation turn", async () => {
@@ -1471,6 +1575,8 @@ describe("conversation controller", () => {
       createdAt: "2026-08-14T00:00:00Z",
       updatedAt: "2026-08-14T00:00:00Z",
     };
+    const originalProfile = providerProfile("profile-original", "llama3:latest", true);
+    const draftProfile = providerProfile("profile-draft", "llama3.1:latest", false);
     const empty = {
       status: "empty" as const,
       conversations: [],
@@ -1482,26 +1588,60 @@ describe("conversation controller", () => {
       messages: [],
       latestTurn: null,
       providerStatus: "ready" as const,
-      providerProfiles: [],
-      selectedProviderProfileId: null,
+      providerProfiles: [originalProfile, draftProfile],
+      selectedProviderProfileId: originalProfile.profileId,
       providerErrorCode: null,
       workStatus: "available" as const,
     };
     const loadConversation = vi
       .fn()
       .mockResolvedValueOnce(empty)
-      .mockResolvedValueOnce({ ...empty, projects: [project] });
+      .mockResolvedValueOnce({
+        ...empty,
+        status: "ready" as const,
+        conversations: [
+          {
+            session_id: "older-project-conversation",
+            title: "旧 Project 对话",
+            created_at: "2026-08-13T00:00:00Z",
+            updated_at: "2026-08-13T00:01:00Z",
+          },
+        ],
+        projects: [project],
+        selectedProjectId: project.id,
+        selectedConversationId: "older-project-conversation",
+        messages: [
+          {
+            role: "user" as const,
+            content: "旧对话不应覆盖新草稿",
+            created_at: "2026-08-13T00:00:00Z",
+          },
+        ],
+      });
     const createProject = vi.fn().mockResolvedValue({ cancelled: false, project });
     const dataSource = source({ loadConversation, createProject });
+    const announce = vi.fn();
     const { result } = renderHook(() =>
-      useConversationController(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+      useConversationController(dataSource, announce, vi.fn().mockResolvedValue(undefined))
     );
     await act(async () => result.current.reload());
+    await act(async () =>
+      expect(await result.current.selectProviderProfile(draftProfile.profileId)).toBe(true)
+    );
+    await act(async () => expect(await result.current.setMemoryMode("off")).toBe(true));
 
     await act(async () => expect(await result.current.createProject("")).toBe(true));
 
     expect(createProject).toHaveBeenCalledWith(expect.any(String), undefined);
     expect(result.current.selectedProjectId).toBe(project.id);
+    expect(result.current.selectedSessionId).toBeNull();
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.mode).toBe("work");
+    expect(result.current.provider.selectedProfileId).toBe(draftProfile.profileId);
+    expect(result.current.memoryMode).toBe("off");
+    expect(announce).toHaveBeenLastCalledWith(
+      "Project 文件夹已选择；新的 Work 对话会在首次发送时创建。"
+    );
   });
 
   it("treats closing the native Project picker as cancellation, not failure", async () => {
@@ -1517,6 +1657,90 @@ describe("conversation controller", () => {
 
     expect(result.current.sessionMutation).toEqual({ phase: "idle" });
     expect(announce).toHaveBeenLastCalledWith("已取消选择 Project 文件夹。");
+  });
+
+  it("keeps a new-conversation draft selected after rebinding its Project folder", async () => {
+    const project = {
+      id: "project-rebound-draft",
+      name: "Draft Project",
+      workspaceRoot: "/tmp/original-project-folder",
+      additionalReadRoots: [],
+      revision: 1,
+      status: "active" as const,
+      createdAt: "2026-08-24T00:00:00Z",
+      updatedAt: "2026-08-24T00:00:00Z",
+      activeConversationCount: 1,
+      totalConversationCount: 1,
+      taskRunReferenceCount: 0,
+      selectedForNewConversation: true,
+      allowedControls: ["update"] as ("update" | "archive")[],
+      blockerCodes: [],
+    };
+    const canonical = (workspaceRoot: string): ConversationViewModel => ({
+      status: "ready",
+      conversations: [
+        {
+          session_id: "older-project-conversation",
+          title: "旧 Project 对话",
+          created_at: "2026-08-24T00:00:00Z",
+          updated_at: "2026-08-24T00:01:00Z",
+        },
+      ],
+      projects: [
+        { ...project, workspaceRoot, revision: workspaceRoot === project.workspaceRoot ? 1 : 2 },
+      ],
+      selectedProjectId: project.id,
+      selectedConversationId: "older-project-conversation",
+      globalMemoryEnabled: true,
+      selectedMemoryMode: "use_and_learn",
+      messages: existingMessages.map((message, index) => ({
+        ...message,
+        turnId: `rebound-turn-${index + 1}`,
+        attachmentsStatus:
+          message.role === "user" ? ("ready" as const) : ("not_applicable" as const),
+        attachments: [],
+      })),
+      latestTurn: null,
+      providerStatus: "ready",
+      providerProfiles: [],
+      selectedProviderProfileId: null,
+      providerErrorCode: null,
+      workStatus: "available",
+    });
+    const reboundProject = {
+      ...project,
+      workspaceRoot: "/tmp/rebound-project-folder",
+      revision: 2,
+    };
+    const loadConversation = vi
+      .fn()
+      .mockResolvedValueOnce(canonical(project.workspaceRoot))
+      .mockResolvedValueOnce(canonical(reboundProject.workspaceRoot));
+    const bindProjectDirectory = vi.fn().mockResolvedValue({
+      cancelled: false,
+      project: reboundProject,
+    });
+    const dataSource = source({ loadConversation, bindProjectDirectory });
+    const { result } = renderHook(() =>
+      useConversationController(dataSource, vi.fn(), vi.fn().mockResolvedValue(undefined))
+    );
+    await act(async () => result.current.reload());
+    act(() => result.current.startNewConversation());
+    act(() => result.current.setDraft("读取新文件夹中的嵌套文件"));
+
+    await act(async () =>
+      expect(await result.current.bindProjectDirectory(project.id, project.revision)).toBe(true)
+    );
+
+    expect(bindProjectDirectory).toHaveBeenCalledWith(project.id, project.revision);
+    expect(result.current.selectedSessionId).toBeNull();
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.draft).toBe("读取新文件夹中的嵌套文件");
+    expect(result.current.selectedProjectId).toBe(project.id);
+    expect(result.current.projects[0]).toMatchObject({
+      workspaceRoot: reboundProject.workspaceRoot,
+      revision: 2,
+    });
   });
 
   it("accepts a Project lifecycle mutation only after the canonical view confirms it", async () => {

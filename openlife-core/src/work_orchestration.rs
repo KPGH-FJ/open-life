@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 pub const WORK_PLAN_SCHEMA_VERSION: &str = "openlife.work-plan.v3";
+pub const WORK_COMPATIBILITY_EVAL_VERSION: &str = "openlife.work-compatibility-eval.v1";
 pub const MAX_WORK_PLAN_STEPS: usize = 8;
 pub const MAX_WORK_COMPLETION_REQUIREMENTS: usize = 8;
 pub const AGENT_STEP_SCHEMA_VERSION: &str = "openlife.agent-step.v1";
@@ -15,6 +16,39 @@ pub const MAX_AGENT_STEP_ARGUMENT_BYTES: usize = 64 * 1024;
 pub const MAX_AGENT_STEP_TEXT_CHARS: usize = 64 * 1024;
 pub const MAX_AGENT_STEP_ARTIFACTS: usize = 5;
 pub const MAX_AGENT_STEP_TOOL_CALLS: usize = 4;
+
+/// Fixed, source-independent challenge used only by the explicit Settings
+/// provider validation flow. It exercises the same strict AgentStep envelope
+/// consumed by Work without granting tools, paths, sources, or effects.
+pub fn work_compatibility_eval_user_message() -> &'static str {
+    "OpenLife Work compatibility evaluation v1. Return exactly this JSON object and no prose: {\"schemaVersion\":\"openlife.agent-step.v1\",\"step\":{\"kind\":\"final_answer\",\"payload\":{\"content\":\"ready\",\"evidenceRefs\":[],\"artifactRefs\":[],\"sourceBlocks\":[]}}}"
+}
+
+pub fn validate_work_compatibility_eval_response(raw: &str) -> Result<(), String> {
+    let empty = HashSet::new();
+    let context = AgentStepValidationContext {
+        allowed_capability_ids: &empty,
+        allowed_artifact_formats: &empty,
+        available_evidence_refs: &empty,
+        available_artifact_refs: &empty,
+    };
+    let envelope = AgentStepEnvelope::parse_and_validate(raw, &context)?;
+    match envelope.step {
+        AgentStep::FinalAnswer(AgentFinalAnswerStep {
+            content,
+            evidence_refs,
+            artifact_refs,
+            source_blocks,
+        }) if content == "ready"
+            && evidence_refs.is_empty()
+            && artifact_refs.is_empty()
+            && source_blocks.is_empty() =>
+        {
+            Ok(())
+        }
+        _ => Err("work_compatibility_eval_response_invalid".into()),
+    }
+}
 
 /// Provider-facing contract for the terminal model decision in canonical
 /// Work. The model proposes content; the runtime still owns evidence,
@@ -1732,6 +1766,30 @@ impl WorkItemExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn versioned_work_compatibility_eval_accepts_only_the_exact_agent_step() {
+        let exact = r#"{"schemaVersion":"openlife.agent-step.v1","step":{"kind":"final_answer","payload":{"content":"ready","evidenceRefs":[],"artifactRefs":[],"sourceBlocks":[]}}}"#;
+        assert_eq!(
+            WORK_COMPATIBILITY_EVAL_VERSION,
+            "openlife.work-compatibility-eval.v1"
+        );
+        assert!(work_compatibility_eval_user_message().contains(exact));
+        validate_work_compatibility_eval_response(exact).unwrap();
+
+        assert!(validate_work_compatibility_eval_response("ready").is_err());
+        assert!(validate_work_compatibility_eval_response(
+            r#"{"schemaVersion":"openlife.agent-step.v1","step":{"kind":"final_answer","payload":{"content":"ready","evidenceRefs":[],"artifactRefs":[],"sourceBlocks":[],"permission":"all"}}}"#
+        )
+        .is_err());
+        assert_eq!(
+            validate_work_compatibility_eval_response(
+                r#"{"schemaVersion":"openlife.agent-step.v1","step":{"kind":"final_answer","payload":{"content":"almost ready","evidenceRefs":[],"artifactRefs":[],"sourceBlocks":[]}}}"#
+            )
+            .unwrap_err(),
+            "work_compatibility_eval_response_invalid"
+        );
+    }
 
     fn allowed() -> HashSet<WorkPlanStepKind> {
         [

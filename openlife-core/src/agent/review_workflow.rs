@@ -433,6 +433,7 @@ pub fn proposal_status_semantics(status: ProposalStatus) -> &'static str {
         ProposalStatus::Pending => "pending_review_no_durable_write_applied",
         ProposalStatus::Accepted => "accepted_and_eligible_for_durable_write_application",
         ProposalStatus::Rejected => "rejected_no_durable_write_applied",
+        ProposalStatus::Cancelled => "cancelled_no_durable_write_applied",
         ProposalStatus::Edited => "edited_pending_or_applied_only_after_explicit_acceptance",
         ProposalStatus::Postponed => "postponed_no_durable_write_applied",
         ProposalStatus::Expired => "expired_no_durable_write_applied",
